@@ -13,10 +13,6 @@ Running the server if you have nix package manager installed:
 
     nix develop -c sh -c '$start_primal_server'
 
-Running the server if you have docker installed:
-
-    docker run -it --rm -v `pwd`:`pwd` -w `pwd` -p 8801:8801 -e PRIMALSERVER_HOST=0.0.0.0 nixos/nix nix --extra-experimental-features 'nix-command flakes' develop -c sh -c '$start_primal_server' 
-
 To connect to postgres:
 
     run(`$(ENV["connect_to_pg"])`)
