@@ -1,0 +1,66 @@
+{
+    "feeds": [
+        {
+            "name": "Trending 24h",
+            "hex": "global;trending"
+        },
+        {
+            "name": "Most-zapped 4h",
+            "hex": "global;mostzapped4h"
+        },
+        {
+            "name": "Nostr Highlights",
+            "hex": "9a500dccc084a138330a1d1b2be0d5e86394624325d25084d3eca164e7ea698a"
+        },
+        {
+            "name": "#art",
+            "hex": "search;#art"
+        },
+        {
+            "name": "#foodstr",
+            "hex": "search;#foodstr"
+        },
+        {
+            "name": "#nostrasia",
+            "hex": "search;#nostrasia"
+        },
+        {
+            "name": "#photography",
+            "hex": "search;#photography"
+        },
+        {
+            "name": "#nature",
+            "hex": "search;#nature"
+        }
+    ],
+    "notifications": {
+        "NEW_USER_FOLLOWED_YOU": true,
+        "USER_UNFOLLOWED_YOU": true,
+        "YOUR_POST_WAS_ZAPPED": true,
+        "YOUR_POST_WAS_LIKED": true,
+        "YOUR_POST_WAS_REPOSTED": true,
+        "YOUR_POST_WAS_REPLIED_TO": true,
+        "YOU_WERE_MENTIONED_IN_POST": true,
+        "YOUR_POST_WAS_MENTIONED_IN_POST": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_LIKED": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO": true,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED": true,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED": true,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED": true,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO": true
+    },
+
+    "defaultZapAmount": 42,
+    "zapOptions": [
+      21,
+      420,
+      1000,
+      69420,
+      100000,
+      1000000
+    ],
+
+    "theme": "sunset"
+}

@@ -1,0 +1,3 @@
+[submodule "primal-caching-service"]
+	path = primal-caching-service
+	url = git@github.com:PrimalHQ/primal-caching-service.git

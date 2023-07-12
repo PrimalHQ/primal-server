@@ -1,0 +1,2 @@
+" map <leader>M   mmggewve"xy`m:call search('^function', 'b')0V%"zy`m:call writefile([getreg('x', 1, 1)[0].".eval(:("]+getreg('z', 1, 1)+["))"], $HOME."/tmp/tt.jl"):silent :!./primal-cluster-eval.sh $HOME/tmp/tt.jl"):redraw!
+map <leader>M   mmggewve"xy`m:call search('^function', 'b')0V%"zy`m:call writefile([getreg('x', 1, 1)[0].".eval(:("]+getreg('z', 1, 1)+["))"], $HOME."/tmp/tt.jl"):silent :!tmux send-keys -t=g:tmux_target $'cluster_include()\n':redraw!
