@@ -15,7 +15,7 @@ Running the server if you have nix package manager installed:
 
 To connect to postgres:
 
-    run(`$(ENV["connect_to_pg"])`)
+    run(`$(ENV["connect_to_postgres"])`)
 
 To safely stop the server process:
 

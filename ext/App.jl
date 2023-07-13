@@ -250,6 +250,7 @@ function scored_content(
                 append!(posts, map(Tuple, r))
             end
         else
+            field_ = field
             push!(where_exprs, "author_pubkey = ?")
             q_wheres = wheres()
             @threads for pk in pubkeys
@@ -362,7 +363,7 @@ function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dic
     e.created_at > time() - 300 || error("event is too old")
     e.created_at < time() + 300 || error("event from the future")
     Nostr.verify(e) || error("verification failed")
-    est.auto_fetch_user_metadata && DB.fetch_user_metadata(est, e.pubkey)
+    est.auto_fetch_missing_events && DB.fetch_user_metadata(est, e.pubkey)
     try
         body(e)
     finally
