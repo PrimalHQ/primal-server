@@ -9,17 +9,25 @@ Primal Server includes membership, discovery and media caching services for Nost
 
 ### Usage
 
-Running the server if you have nix package manager installed:
+Start postgres in the background:
+
+    nix develop -c sh -c '$start_postgres'
+
+Running the server:
 
     nix develop -c sh -c '$start_primal_server'
 
-To connect to postgres:
+To connect to postgres from REPL:
 
     run(`$(ENV["connect_to_postgres"])`)
 
 To safely stop the server process:
 
     Fetching.stop(); close(cache_storage); exit()
+
+To stop postgres:
+
+    nix develop -c sh -c '$stop_postgres'
 
 ### API requests
 
