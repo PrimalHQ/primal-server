@@ -28,6 +28,7 @@ mkShell {
           echo pgurl: $pgurl
           export PRIMALSERVER_RELAYS='few-relays.txt'
           export PRIMALSERVER_PGCONNSTR="$pgurl"
+          export PRIMALSERVER_AUTO_FETCH_USER_METADATA="1"
           export LD_LIBRARY_PATH=".:$(pwd)/primal-caching-service:$LD_LIBRARY_PATH"
           julia --project -t8 -L pkg.jl -L load.jl -L start.jl
   '';
@@ -35,6 +36,7 @@ mkShell {
   stop_postgres = pkgs.writeShellScript "stop_postgres.sh" ''
           set -ex
           pg_ctl -w -D $(pwd)/primal-caching-service/var/pg/1*.* stop || true
+          rm -fv pgurl
   '';
 
   connect_to_pg = pkgs.writeShellScript "connect_to_pg.sh" ''

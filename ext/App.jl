@@ -362,6 +362,7 @@ function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dic
     e.created_at > time() - 300 || error("event is too old")
     e.created_at < time() + 300 || error("event from the future")
     Nostr.verify(e) || error("verification failed")
+    est.auto_fetch_user_metadata && DB.fetch_user_metadata(est, e.pubkey)
     try
         body(e)
     finally
