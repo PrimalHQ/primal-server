@@ -393,6 +393,8 @@ end
 short_urls_lock = ReentrantLock()
 short_urls_chars = ['A':'Z'..., 'a':'z'...]
 
+URL_SHORTENING_ROOT_URL = Ref("https://m.primal.net")
+
 function url_shortening_handler(req::HTTP.Request)
     catch_exception(:url_shortening_handler, req) do
         lock(short_urls_lock) do
@@ -418,7 +420,7 @@ function url_shortening_handler(req::HTTP.Request)
             else
                 spath, ext = r[1]
             end
-            res = "https://m.primal.net/$spath$ext"
+            res = "$(URL_SHORTENING_ROOT_URL[])/$spath$ext"
             HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/text"]), res)
         end
     end

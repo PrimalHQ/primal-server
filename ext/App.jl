@@ -730,10 +730,12 @@ end
 periodic_hashtag_whitelist = Utils.Throttle(; period=5.0, t=0.0)
 hashtag_whitelist = Set{String}()
 
+HASHTAG_WHITELIST = Ref("hashtag-whitelist.txt")
+
 function update_hashtag_whitelist()
     periodic_hashtag_whitelist() do
         empty!(hashtag_whitelist)
-        for s in readlines("/mnt/ppr1/home/pr/var/github/content-moderation/hashtag-whitelist.txt")
+        isfile(HASHTAG_WHITELIST[]) && for s in readlines(HASHTAG_WHITELIST[])
             startswith(s, "-----") && break
             ht = split(s)[1][30:end]
             push!(hashtag_whitelist, ht)
@@ -802,6 +804,10 @@ end
 
 @cached 600 trending_images_4h(est::DB.CacheStorage) = trending_images(est; created_after=trunc(Int, time()-4*3600), limit=500)
 
+UPLOADS_DIR = Ref("uploads")
+MEDIA_URL_ROOT = Ref("https://media.primal.net/uploads")
+URL_SHORTENING_SERVICE = Ref("http://127.0.0.1:14001/url-shortening?u=")
+
 function upload(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
@@ -814,10 +820,9 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     contents = e.content
     data = Base64.base64decode(contents[findfirst(',', contents)+1:end])
     key = (; type="member_upload", pubkey=e.pubkey, sha256=bytes2hex(SHA.sha256(data)))
-    (mi, lnk) = Media.media_import((_)->data, key; media_path="/mnt/ppr1/var/www/cdn/uploads")
+    (mi, lnk) = Media.media_import((_)->data, key; media_path=UPLOADS_DIR)
     _, ext = splitext(lnk)
-    media_url_root = "https://media.primal.net/uploads"
-    url = "$(media_url_root)/$(mi.subdir)/$(mi.h)$(ext)"
+    url = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
 
     wh = Media.parse_image_dimensions(data)
     width, height = isnothing(wh) ? (0, 0) : wh
@@ -835,7 +840,7 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
                width, height, 0.0)
     end
 
-    surl = String(HTTP.get("https://primal.net/url-shortening?u=$(URIs.escapeuri(url))").body)
+    surl = String(HTTP.get("$(URL_SHORTENING_SERVICE[])$(URIs.escapeuri(url))").body)
 
     [(; kind=Int(UPLOADED), content=surl)]
 end
