@@ -58,9 +58,14 @@ Base.@kwdef struct CacheStorageExt
 
     # app_settings = ShardedSqliteDict{Nostr.PubKeyId, Nostr.Event}("$(commons.directory)/db/app_settings"; commons.dbargs...)
     app_settings = PQDict{Nostr.PubKeyId, Nostr.Event}("app_settings", pqconnstr;
-                                                       init_extra_columns=", accessed_at int8",
-                                                       init_extra_indexes=["create index if not exists app_settings_accessed_at on app_settings (accessed_at desc)"],
-                                                      )
+                                                       init_extra_columns=", accessed_at int8, created_at int8, event_id bytea",
+                                                       init_extra_indexes=["create index if not exists app_settings_accessed_at on app_settings (accessed_at desc)"])
+
+    app_settings_event_id = PQDict{Nostr.PubKeyId, Nostr.EventId}("app_settings_event_id", pqconnstr;
+                                                                  init_extra_columns=", created_at int8, accessed_at int8",
+                                                                  init_extra_indexes=["create index if not exists app_settings_event_id_created_at  on app_settings_event_id (created_at desc)",
+                                                                                      "create index if not exists app_settings_event_id_accessed_at on app_settings_event_id (accessed_at desc)",
+                                                                                     ])
  
     app_settings_log = PQDict{Nostr.PubKeyId, Nostr.Event}("app_settings_log", pqconnstr;
                                                            init_queries=["create table if not exists app_settings_log (
@@ -267,7 +272,7 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
     exe(est.ext[].event_contents, @sql("insert into kv_fts (event_id, content) values (?1, ?2)"), 
         e.id, e.content)
 
-    for_mentiones(est, e) do tag
+    for_mentiones(est, e; pubkeys_in_content=false) do tag
         if tag.fields[1] == "p" 
             if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
                 event_hook(est, e.id, (:notifications_cb, YOU_WERE_MENTIONED_IN_POST, pk))
@@ -429,7 +434,7 @@ function notifications_cb(est::CacheStorage, e::Nostr.Event, notif_type, args...
                          ]
         e0 = est.events[conv(Nostr.EventId, args[1])]
         e0_pubkey = notif_type == POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED ? zap_sender(e0) : e0.pubkey
-        for_mentiones(est, e) do tag
+        for_mentiones(est, e; pubkeys_in_content=false) do tag
             if tag.fields[1] == "p" 
                 if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
                     notification(est, pk, e0.created_at, notif_type,

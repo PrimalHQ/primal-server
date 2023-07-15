@@ -377,6 +377,9 @@ end
 function set_app_settings(est::DB.CacheStorage; settings_event::Dict)
     app_settings(est, settings_event) do e
         est.ext[].app_settings[e.pubkey] = e
+        DB.exe(est.ext[].app_settings, 
+               DB.@sql("update app_settings set created_at = ?2, event_id = ?3 where key = ?1"),
+               e.pubkey, e.created_at, e.id)
         parse_notification_settings(est, e)
         [e]
     end
@@ -845,4 +848,43 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
 
     [(; kind=Int(UPLOADED), content=surl)]
 end
-    
+
+settings_mute_lists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, TMuteList}}() |> ThreadSafe
+
+function ext_user_mute_lists(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    if pubkey in est.ext[].app_settings 
+        r = DB.exec(est.ext[].app_settings, 
+                                     DB.@sql("select event_id from app_settings 
+                                             where key = ?1 limit 1"), (pubkey,))[1][1]
+        ismissing(r) && return []
+        seid = Nostr.EventId(r)
+
+        eml = get(settings_mute_lists, pubkey, nothing)
+        !isnothing(eml) && eml[1] == seid && return eml[2]
+
+        e = est.ext[].app_settings[pubkey]
+        d = JSON.parse(e.content)
+
+        pks = TMuteList()
+        for s in get(d, "muteLists", [])
+            push!(pks, Nostr.PubKeyId(s))
+        end
+
+        settings_mute_lists[pubkey] = (seid, pks)
+        pks
+    else
+        []
+    end
+end
+
+function ext_user_mute_lists_key(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    if pubkey in est.ext[].app_settings
+        r = DB.exec(est.ext[].app_settings, 
+                    DB.@sql("select event_id from app_settings 
+                            where key = ?1 limit 1"), (pubkey,))[1][1]
+        ismissing(r) ? [] : r
+    else
+        []
+    end
+end
+
