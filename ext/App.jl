@@ -27,16 +27,11 @@ union!(exposed_functions, Set([
                      :user_profile_scored_content,
                      :search,
                      :relays,
-                     # :register_user,
-                     # :register_user_by_event_as_evidence,
                      :get_notifications,
                      :set_notifications_seen,
                      :get_notifications_seen,
-                     # :clear_notification_counts,
                      :user_search,
                      :feed_directive,
-                     # :save_app_state,
-                     # :load_app_state,
                      :trending_hashtags,
                          :trending_hashtags_4h,
                          :trending_hashtags_7d,
@@ -52,7 +47,7 @@ USER_SCORES=10_000_108
 RELAYS=10_000_109
 NOTIFICATION=10_000_110
 NOTIFICATIONS_SEEN_UNTIL=10_000_111
-NOTIFICATIONS_SUMMARY=10_000_112 # TBD
+NOTIFICATIONS_SUMMARY=10_000_112
 MEDIA_MAPPING=10_000_114
 HASHTAGS=10_000_116
 MEDIA_METADATA=10_000_119
@@ -320,7 +315,7 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0)
     wheres() = isempty(where_exprs) ? "" : "where " * join(where_exprs, " and ")
 
     push!(where_exprs, "$since <= created_at")
-    # push!(where_exprs, "created_at <= $(trunc(Int, time()))") # future events are ignore during import
+    # push!(where_exprs, "created_at <= $(trunc(Int, time()))") # future events are ignored during import
 
     pubkeys = [] |> ThreadSafe
     q_wheres = wheres()
@@ -696,14 +691,6 @@ function feed_directive(est::DB.CacheStorage; directive::String, kwargs...)
     funcall in exposed_functions || error("unsupported request $(funcall)")
     eval(funcall)(est; args...)
 end
-
-# app_states = DB.PQDict{String, String}("app_states", Main.cache_storage.ext[].pqconnstr)
-
-# function save_app_state(est::DB.CacheStorage; app_state::Dict)
-# end
-
-# function load_app_state(est::DB.CacheStorage; app_state_id::String)
-# end
 
 function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId)
     Filterlist.is_blocked(est, eid)

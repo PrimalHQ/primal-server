@@ -56,7 +56,6 @@ Base.@kwdef struct CacheStorageExt
                                       "create index if not exists kv_times_referenced on kv (times_referenced desc)",
                                      ])
 
-    # app_settings = ShardedSqliteDict{Nostr.PubKeyId, Nostr.Event}("$(commons.directory)/db/app_settings"; commons.dbargs...)
     app_settings = PQDict{Nostr.PubKeyId, Nostr.Event}("app_settings", pqconnstr;
                                                        init_extra_columns=", accessed_at int8, created_at int8, event_id bytea",
                                                        init_extra_indexes=["create index if not exists app_settings_accessed_at on app_settings (accessed_at desc)"])
