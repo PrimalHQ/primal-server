@@ -23,6 +23,7 @@ union!(exposed_functions, Set([
                      :contact_list,
                      :set_app_settings,
                      :get_app_settings,
+                     :get_app_settings_2,
                      :get_default_app_settings,
                      :user_profile_scored_content,
                      :search,
@@ -194,6 +195,7 @@ function scored_content(
         offset::Int=0,
         group_by_pubkey::Bool=false,
         user_pubkey=nothing,
+        time_exceeded=()->false,
     )
     MAX_LIMIT = 1000
     limit <= MAX_LIMIT || error("limit too big")
@@ -227,6 +229,7 @@ function scored_content(
 
     n = limit
     while true
+        time_exceeded() && break
         n > MAX_LIMIT && break
 
         empty!(posts)
@@ -249,6 +252,7 @@ function scored_content(
             push!(where_exprs, "author_pubkey = ?")
             q_wheres = wheres()
             @threads for pk in pubkeys
+                time_exceeded() && break
                 append!(posts, map(Tuple, DB.exe(est.event_stats_by_pubkey, "select event_id, $field_ from kv $q_wheres order by $field_ desc limit ? offset ?", pk, n, offset)))
             end
         end
@@ -382,10 +386,24 @@ end
     
 function get_app_settings(est::DB.CacheStorage; event_from_user::Dict)
     app_settings(est, event_from_user) do e
-        if e.pubkey in est.ext[].app_settings 
+        if e.pubkey in est.ext[].app_settings
             [est.ext[].app_settings[e.pubkey]]
         else
-            get_default_app_settings(est; client=event_from_user["tags"][1][2])
+            ee = get_default_app_settings(est; client=event_from_user["tags"][1][2])[1]
+            ee = (; ee..., id=join(["00" for _ in 1:32]), pubkey=join(["00" for _ in 1:32]), sig=join(["00" for _ in 1:64]), created_at=trunc(Int, time()))
+            ee = Nostr.Event(JSON.parse(JSON.json(ee)))
+            est.ext[].app_settings[e.pubkey] = ee
+            [ee]
+        end
+    end
+end
+
+function get_app_settings_2(est::DB.CacheStorage; event_from_user::Dict)
+    app_settings(est, event_from_user) do e
+        if e.pubkey in est.ext[].app_settings
+            [est.ext[].app_settings[e.pubkey]]
+        else
+            []
         end
     end
 end
