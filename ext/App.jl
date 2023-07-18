@@ -413,7 +413,7 @@ DEFAULT_SETTINGS_FILE = Ref("default-settings.json")
 function get_default_app_settings(est::DB.CacheStorage; client::String="Primal-Web App")
     [(; kind=Int(PRIMAL_SETTINGS), 
       tags=[["d", client]],
-      content=JSON.json(try JSON.parse(read(DEFAULT_SETTINGS_FILE, String))
+      content=JSON.json(try JSON.parse(read(DEFAULT_SETTINGS_FILE[], String))
                         catch _; (;) end))]
 end
 
