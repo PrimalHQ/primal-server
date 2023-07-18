@@ -134,7 +134,7 @@ function content_refs_resolved(e::Nostr.Event)
                 startswith(r, prefix) || return r
                 if !isnothing(local pk = Nostr.bech32_decode(r[7:end]))
                     try
-                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[Nostr.PubKeyId(pk)]].content)
+                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
                         return "@"*mdtitle(c)
                     catch _ end
                 end
@@ -174,12 +174,12 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         return (; title, description, image, url, twitter_card)
     end
 
-    if !isnothing(local m = match(r"^/profile/(npub.*)", path))
-        pk = Nostr.bech32_decode(m[1])
+    if !isnothing(local m = match(r"^/(profile|p)/(npub.*)", path))
+        pk = Nostr.bech32_decode(m[2])
         return mdpubkey(pk)
 
-    elseif !isnothing(local m = match(r"^/thread/(note.*)", path))
-        eid = Nostr.bech32_decode(m[1])
+    elseif !isnothing(local m = match(r"^/(thread|e)/(note.*)", path))
+        eid = Nostr.bech32_decode(m[2])
         if eid in cache_storage.events
             e = cache_storage.events[eid]
             url = "https://$(host)/thread/$(m[1])"
@@ -224,7 +224,7 @@ NOSTR_JSON_FILE = Ref("nostr.json")
 function get_nostr_json()
     nostr_json_reading() do
         # nostr_json[] = JSON.parse(read("$(APP_ROOT[])/.well-known/nostr.json", String))["names"]
-        nostr_json[] = JSON.parse(read(NOSTR_JSON_FILE, String))["names"]
+        nostr_json[] = JSON.parse(read(NOSTR_JSON_FILE[], String))["names"]
     end
     nostr_json[]
 end
