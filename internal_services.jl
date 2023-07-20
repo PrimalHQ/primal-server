@@ -182,7 +182,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         eid = Nostr.bech32_decode(m[2])
         if eid in cache_storage.events
             e = cache_storage.events[eid]
-            url = "https://$(host)/thread/$(m[1])"
+            url = "https://$(host)/e/$(m[2])"
             description = replace(content_refs_resolved(e), re_url => "")
             if e.pubkey in cache_storage.meta_data
                 c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)

@@ -20,7 +20,6 @@ union!(exposed_functions, Set([
                          :explore_global_mostzapped_4h,
                      :scored_users,
                          :scored_users_24h,
-                     :contact_list,
                      :set_app_settings,
                      :get_app_settings,
                      :get_app_settings_2,
@@ -654,15 +653,13 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     end
 
     res = []
-    append!(res, collect(values(res_meta_data)))
-    ext_user_infos(est, res, res_meta_data)
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
     res
 end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data)
-    push!(res, (; kind=Int(USER_SCORES),
-                content=JSON.json(Dict([(Nostr.hex(e.pubkey), get(est.pubkey_followers_cnt, e.pubkey, 0))
-                                        for e in collect(res_meta_data)]))))
     for md in res_meta_data
         push!(res, md)
         union!(res, ext_event_response(est, md))
@@ -829,7 +826,7 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     contents = e.content
     data = Base64.base64decode(contents[findfirst(',', contents)+1:end])
     key = (; type="member_upload", pubkey=e.pubkey, sha256=bytes2hex(SHA.sha256(data)))
-    (mi, lnk) = Media.media_import((_)->data, key; media_path=UPLOADS_DIR)
+    (mi, lnk) = Media.media_import((_)->data, key; media_path=UPLOADS_DIR[])
     _, ext = splitext(lnk)
     url = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
 
