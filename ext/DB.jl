@@ -214,7 +214,7 @@ function ext_complete(est::CacheStorage)
 end
 
 function ext_preimport_check(est::CacheStorage, e::Nostr.Event)
-    !(Filterlist.is_blocked(est, e.id) || Filterlist.is_blocked(est, e.pubkey))
+    !(e.pubkey in Filterlist.import_pubkey_blocked)
 end
 
 function ext_preimport(est::CacheStorage, e::Nostr.Event)

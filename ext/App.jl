@@ -266,7 +266,10 @@ function scored_content(
             local eid = Nostr.EventId(eid)
             local pk = DB.exe(est.event_stats, DB.@sql("select event_id, author_pubkey from kv where event_id = ?"), 
                               eid)[1][2] |> Nostr.PubKeyId
-            if !(eid in Filterlist.analytics_event_blocked) && !(pk in Filterlist.analytics_pubkey_blocked) && get(est.pubkey_followers_cnt, pk, 0) >= 5 && !(eid in est.deleted_events)
+            if  !(pk in Filterlist.import_pubkey_blocked) && 
+                !(pk in Filterlist.analytics_pubkey_blocked) && 
+                !(eid in Filterlist.analytics_event_blocked) && 
+                get(est.pubkey_followers_cnt, pk, 0) >= 5 && !(eid in est.deleted_events)
                 push!(posts_filtered, (eid, v))
             end
         end
