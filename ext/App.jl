@@ -39,6 +39,8 @@ union!(exposed_functions, Set([
                      :trending_images,
                          :trending_images_4h,
                      :upload,
+                     :report_user,
+                     :report_note,
                     ]))
 
 EXPLORE_LEGEND_COUNTS=10_000_102
@@ -357,11 +359,8 @@ end
 
 function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dict)
     DB.PG_DISABLE[] && return []
-    e = Nostr.Event(event_from_user)
+    e = parse_event_from_user(event_from_user)
     e.kind == Int(APP_SETTINGS) || error("invalid event kind")
-    e.created_at > time() - 300 || error("event is too old")
-    e.created_at < time() + 300 || error("event from the future")
-    Nostr.verify(e) || error("verification failed")
     est.auto_fetch_missing_events && DB.fetch_user_metadata(est, e.pubkey)
     try
         body(e)
@@ -583,10 +582,8 @@ function set_notifications_seen(
     )
     replicated || replicate_request(:set_notifications_seen; event_from_user)
 
-    e = Nostr.Event(event_from_user)
-    e.created_at > time() - 300 || error("event is too old")
-    e.created_at < time() + 300 || error("event is the future")
-    Nostr.verify(e) || error("verification failed")
+    e = parse_event_from_user(event_from_user)
+
     est.ext[].notifications.pubkey_notifications_seen[e.pubkey] = e.created_at
 
     DB.exe(est.ext[].notifications.pubkey_notification_cnts,
@@ -826,11 +823,8 @@ URL_SHORTENING_SERVICE = Ref("http://127.0.0.1:14001/url-shortening?u=")
 function upload(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
-    e = Nostr.Event(event_from_user)
+    e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD) || error("invalid event kind")
-    e.created_at > time() - 300 || error("event is too old")
-    e.created_at < time() + 300 || error("event from the future")
-    Nostr.verify(e) || error("verification failed")
 
     contents = e.content
     data = Base64.base64decode(contents[findfirst(',', contents)+1:end])
@@ -858,6 +852,29 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     surl = String(HTTP.get("$(URL_SHORTENING_SERVICE[])$(URIs.escapeuri(url))").body)
 
     [(; kind=Int(UPLOADED), content=surl)]
+end
+
+REPORTED_PUBKEY = 1
+REPORTED_EVENT  = 2
+
+function report_id(est::DB.CacheStorage; event_from_user::Dict, id::Union{Nostr.PubKeyId, Nostr.EventId})
+    DB.PG_DISABLE[] && return []
+    e = parse_event_from_user(event_from_user)
+    type = id isa Nostr.PubKeyId ? REPORTED_PUBKEY : REPORTED_EVENT
+    DB.exec(est.dyn[:reported], 
+            DB.@sql("insert into reported values (?1, ?2, ?3, ?4) on conflict do nothing"),
+            (e.pubkey, type, id, trunc(Int, time())))
+    []
+end
+
+function report_user(est::DB.CacheStorage; event_from_user::Dict, pubkey)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    report_id(est; event_from_user, id=pubkey)
+end
+
+function report_note(est::DB.CacheStorage; event_from_user::Dict, event_id)
+    event_id = cast(event_id, Nostr.EventId)
+    report_id(est; event_from_user, id=event_id)
 end
 
 settings_mute_lists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, TMuteList}}() |> ThreadSafe

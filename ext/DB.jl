@@ -193,6 +193,19 @@ function ext_init(est::CacheStorage)
             DB.exe(est.ext[].notifications.pubkey_notification_cnts, "update kv set type$nt = type$nt + 1 where pubkey = ?1", notif.pubkey)
         end
     end
+##
+    est.dyn[:reported] = PQDict{Nostr.PubKeyId, Bool}("reported", est.ext[].pqconnstr;
+                                                      init_queries=["create table if not exists reported (
+                                                                    pubkey bytea not null,
+                                                                    type int8 not null,
+                                                                    id bytea not null,
+                                                                    created_at int8 not null,
+                                                                    primary key (pubkey, type, id)
+                                                                    )",
+                                                                    "create index if not exists reported_pubkey on reported (pubkey asc)",
+                                                                    "create index if not exists reported_created_at on reported (created_at desc)",
+                                                                   ])
+##
 end
 
 function ext_complete(est::CacheStorage)
