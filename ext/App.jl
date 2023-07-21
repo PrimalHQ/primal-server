@@ -24,6 +24,7 @@ union!(exposed_functions, Set([
                      :get_app_settings,
                      :get_app_settings_2,
                      :get_default_app_settings,
+                     :get_default_relays,
                      :user_profile_scored_content,
                      :search,
                      :relays,
@@ -53,6 +54,7 @@ HASHTAGS=10_000_116
 MEDIA_METADATA=10_000_119
 UPLOAD=10_000_120
 UPLOADED=10_000_121
+DEFAULT_RELAYS=10_000_124
 APP_STATE=10_000_999
 
 # ------------------------------------------------------ #
@@ -413,6 +415,14 @@ function get_default_app_settings(est::DB.CacheStorage; client::String="Primal-W
     [(; kind=Int(PRIMAL_SETTINGS), 
       tags=[["d", client]],
       content=JSON.json(try JSON.parse(read(DEFAULT_SETTINGS_FILE[], String))
+                        catch _; (;) end))]
+end
+
+DEFAULT_RELAYS_FILE = Ref("default-relays.json")
+
+function get_default_relays(est::DB.CacheStorage)
+    [(; kind=Int(DEFAULT_RELAYS), 
+      content=JSON.json(try JSON.parse(read(DEFAULT_RELAYS_FILE[], String))
                         catch _; (;) end))]
 end
 
