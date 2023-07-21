@@ -41,6 +41,7 @@ union!(exposed_functions, Set([
                      :upload,
                      :report_user,
                      :report_note,
+                     :get_filterlist,
                     ]))
 
 EXPLORE_LEGEND_COUNTS=10_000_102
@@ -57,6 +58,7 @@ MEDIA_METADATA=10_000_119
 UPLOAD=10_000_120
 UPLOADED=10_000_121
 DEFAULT_RELAYS=10_000_124
+FILTERLIST=10_000_125
 
 # ------------------------------------------------------ #
 
@@ -264,7 +266,7 @@ function scored_content(
             local eid = Nostr.EventId(eid)
             local pk = DB.exe(est.event_stats, DB.@sql("select event_id, author_pubkey from kv where event_id = ?"), 
                               eid)[1][2] |> Nostr.PubKeyId
-            if !Filterlist.is_blocked(est, eid) && !Filterlist.is_blocked(est, pk) && get(est.pubkey_followers_cnt, pk, 0) >= 5 && !(eid in est.deleted_events)
+            if !(eid in Filterlist.analytics_event_blocked) && !(pk in Filterlist.analytics_pubkey_blocked) && get(est.pubkey_followers_cnt, pk, 0) >= 5 && !(eid in est.deleted_events)
                 push!(posts_filtered, (eid, v))
             end
         end
@@ -337,7 +339,7 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0)
 
     pubkeys_filtered = []
     for (pk, v) in pubkeys.wrapped
-        if !Filterlist.is_blocked(est, pk) && get(est.pubkey_followers_cnt, pk, 0) >= 5
+        if !(pk in Filterlist.analytics_pubkey_blocked) && get(est.pubkey_followers_cnt, pk, 0) >= 5
             push!(pubkeys_filtered, (pk, v))
         end
     end
@@ -447,7 +449,7 @@ function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5)
     res = Set() |> ThreadSafe
 
     for eid in eids
-        (Filterlist.is_blocked(est, eid) || eid in est.deleted_events) && continue
+        (eid in Filterlist.access_event_blocked || eid in est.deleted_events) && continue
         e = est.events[eid]
         push!(res, e)
         union!(res, event_stats(est, eid))
@@ -714,11 +716,11 @@ function feed_directive(est::DB.CacheStorage; directive::String, kwargs...)
 end
 
 function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId)
-    Filterlist.is_blocked(est, eid)
+    eid in Filterlist.access_event_blocked
 end
 
 function ext_is_hidden(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
-    Filterlist.is_blocked(est, pubkey)
+    pubkey in Filterlist.access_pubkey_blocked
 end
 
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event)
@@ -875,6 +877,17 @@ end
 function report_note(est::DB.CacheStorage; event_from_user::Dict, event_id)
     event_id = cast(event_id, Nostr.EventId)
     report_id(est; event_from_user, id=event_id)
+end
+
+function get_filterlist(est::DB.CacheStorage)
+    [(; 
+      kind=Int(FILTERLIST), 
+      content=JSON.json((; 
+                         access_pubkey_blocked    = collect(Filterlist.access_pubkey_blocked),
+                         analytics_pubkey_blocked = collect(Filterlist.analytics_pubkey_blocked),
+                         access_event_blocked     = collect(Filterlist.access_event_blocked),
+                         analytics_event_blocked  = collect(Filterlist.analytics_event_blocked),
+                        )))]
 end
 
 settings_mute_lists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, TMuteList}}() |> ThreadSafe
