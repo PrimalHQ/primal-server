@@ -885,12 +885,7 @@ end
 function get_filterlist(est::DB.CacheStorage)
     [(; 
       kind=Int(FILTERLIST), 
-      content=JSON.json((; 
-                         access_pubkey_blocked    = collect(Filterlist.access_pubkey_blocked),
-                         analytics_pubkey_blocked = collect(Filterlist.analytics_pubkey_blocked),
-                         access_event_blocked     = collect(Filterlist.access_event_blocked),
-                         analytics_event_blocked  = collect(Filterlist.analytics_event_blocked),
-                        )))]
+      content=JSON.json(Filterlist.get_dict()))]
 end
 
 settings_mute_lists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, TMuteList}}() |> ThreadSafe

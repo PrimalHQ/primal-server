@@ -62,6 +62,8 @@ function start(cache_storage, pqconnstr)
     HTTP.register!(router[], "/url-shortening", url_shortening_handler)
     HTTP.register!(router[], "/url-lookup/*", url_lookup_handler)
 
+    HTTP.register!(router[], "/spam", spam_handler)
+
     short_urls[] = DB.PQDict{Int, String}("short_urls", pqconnstr,
                                           init_queries=["create table if not exists short_urls (
                                                         idx int8 not null,
@@ -437,6 +439,14 @@ function url_lookup_handler(req::HTTP.Request)
             url = r[1][1]
             HTTP.Response(302, HTTP.Headers(["Location"=>url]))
         end
+    end
+end
+
+function spam_handler(req::HTTP.Request)
+    catch_exception(:spam_handler, req) do
+        host = Dict(req.headers)["Host"]
+        res = Main.Filterlist.get_dict()
+        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json(res, 2))
     end
 end
 
