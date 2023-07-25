@@ -11,6 +11,7 @@ for fn in [
            "pushgateway_exporter.jl",
            "filterlist.jl",
            "media.jl",
+           "spam_detection.jl",
            "firehose_client.jl",
            "firehose_server.jl",
            "cache_server_sync.jl",

@@ -7,6 +7,7 @@ periodic_pushgw = Throttle(; period=15.0)
 periodic_notification_counts = Throttle(; period=1.0)
 
 Media() = Main.eval(:(Media))
+SpamDetection() = Main.eval(:(SpamDetection))
 
 function ext_periodic()
     periodic_notification_counts() do
@@ -29,6 +30,7 @@ function ext_periodic()
                                 (Media().tasks_per_period, :media_tasks_per_second, :rate),
                                 (Media().max_download_duration, :media_max_download_duration, :nonrate),
                                 (Media().downloads_per_period, :media_downloads_per_second, :rate),
+                                (SpamDetection().max_msg_duration, :spam_max_msg_duration, :nonrate),
                                ]
             lock(ref) do ref
                 PushGatewayExporter.set!("cache_$(name)", 
