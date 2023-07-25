@@ -722,8 +722,17 @@ function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId)
     eid in Filterlist.access_event_blocked
 end
 
+periodic_unblocked_pubkeys = Utils.Throttle(; period=5.0, t=0.0)
+DEFAULT_UNBLOCKED_PUBKEYS_FILE = Ref("unblocked-pubkeys.json")
+
 function ext_is_hidden(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
-    pubkey in Filterlist.access_pubkey_blocked
+    periodic_unblocked_pubkeys() do
+        copy!(Filterlist.access_pubkey_unblocked,
+              Set(try [Nostr.PubKeyId(pk) for (pk, _) in JSON.parse(read(DEFAULT_UNBLOCKED_PUBKEYS_FILE[], String))]
+                  catch _; [] end))
+    end
+
+    pubkey in Filterlist.access_pubkey_blocked && !(pubkey in Filterlist.access_pubkey_unblocked)
 end
 
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event)

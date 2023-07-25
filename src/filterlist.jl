@@ -11,6 +11,9 @@ analytics_pubkey_blocked = Set{Nostr.PubKeyId}() |> ThreadSafe
 access_event_blocked    = Set{Nostr.EventId}() |> ThreadSafe
 analytics_event_blocked = Set{Nostr.EventId}() |> ThreadSafe
 
+access_pubkey_unblocked    = Set{Nostr.PubKeyId}() |> ThreadSafe
+analytics_pubkey_unblocked = Set{Nostr.PubKeyId}() |> ThreadSafe
+
 function get_dict()
     d = Dict()
     for n in names(@__MODULE__; all=true)
