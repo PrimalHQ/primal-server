@@ -856,6 +856,13 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
 
     surl = String(HTTP.get("$(URL_SHORTENING_SERVICE[])$(URIs.escapeuri(url))").body)
 
+    if splitext(surl)[2] in [".jpg", ".png", ".gif"]
+        r = Media.media_variants(est, surl, Media.all_variants; sync=true, proxy=nothing)
+        @sync for ((size, anim), media_url) in r
+            @async begin HTTP.get(Media.cdn_url(surl, size, anim); readtimeout=15, connect_timeout=5).body; nothing; end
+        end
+    end
+
     [(; kind=Int(UPLOADED), content=surl)]
 end
 
