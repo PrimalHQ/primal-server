@@ -266,10 +266,12 @@ function scored_content(
             local eid = Nostr.EventId(eid)
             local pk = DB.exe(est.event_stats, DB.@sql("select event_id, author_pubkey from kv where event_id = ?"), 
                               eid)[1][2] |> Nostr.PubKeyId
-            if  !(pk in Filterlist.import_pubkey_blocked) && 
+            if  pk in Filterlist.access_pubkey_unblocked ||
+                !(pk in Filterlist.import_pubkey_blocked) && 
                 !(pk in Filterlist.analytics_pubkey_blocked) && 
                 !(eid in Filterlist.analytics_event_blocked) && 
-                get(est.pubkey_followers_cnt, pk, 0) >= 5 && !(eid in est.deleted_events)
+                !(eid in est.deleted_events) &&
+                get(est.pubkey_followers_cnt, pk, 0) >= 5
                 push!(posts_filtered, (eid, v))
             end
         end
@@ -342,7 +344,9 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0)
 
     pubkeys_filtered = []
     for (pk, v) in pubkeys.wrapped
-        if !(pk in Filterlist.analytics_pubkey_blocked) && get(est.pubkey_followers_cnt, pk, 0) >= 5
+        if  pk in Filterlist.access_pubkey_unblocked || 
+            !(pk in Filterlist.analytics_pubkey_blocked) && 
+            get(est.pubkey_followers_cnt, pk, 0) >= 5
             push!(pubkeys_filtered, (pk, v))
         end
     end
@@ -532,11 +536,14 @@ function get_notifications(
     pks = Set{Nostr.PubKeyId}()
     eids = Set{Nostr.EventId}()
 
-    for (_, created_at, type, arg1, arg2, arg3, arg4) in
-        DB.exe(est.ext[].notifications.pubkey_notifications, DB.@sql("select * from kv 
-                                                                where pubkey = ? and created_at >= ? and created_at <= ?
-                                                                order by created_at desc limit ? offset ?"),
+    for r in
+        DB.exe(est.ext[].notifications.pubkey_notifications, 
+               DB.@sql("select * from kv 
+                       where pubkey = ? and created_at >= ? and created_at <= ?
+                       order by created_at desc limit ? offset ?"),
                pubkey, since, until, limit, offset)
+
+        (_, created_at, type, arg1, arg2, arg3, arg4) = r
 
         notif_d = DB.notif2namedtuple((pubkey, created_at, DB.NotificationType(type),
                                        arg1, arg2, arg3, arg4))
@@ -548,19 +555,41 @@ function get_notifications(
         #     end
         # end
 
-        push!(res, (; kind=Int(NOTIFICATION), content=JSON.json(notif_d)))
+        is_blocked = false
 
         for arg in collect(values(notif_d))
             if arg isa Nostr.PubKeyId
                 pk = arg
-                push!(pks, pk)
-                if !haskey(res_meta_data, pk) && pk in est.meta_data
-                    res_meta_data[pk] = est.events[est.meta_data[pk]]
+                if ext_is_hidden(est, pk)
+                    is_blocked = true
+                else
+                    push!(pks, pk)
+                    if !haskey(res_meta_data, pk) && pk in est.meta_data
+                        res_meta_data[pk] = est.events[est.meta_data[pk]]
+                    end
                 end
             elseif arg isa Nostr.EventId
                 eid = arg
-                push!(eids, eid)
+                if ext_is_hidden(est, eid)
+                    is_blocked = true
+                else
+                    push!(eids, eid)
+                end
             end
+        end
+
+        if !is_blocked
+            push!(res, (; kind=Int(NOTIFICATION), content=JSON.json(notif_d)))
+        else
+            args = [a for a in r[4:end] if !ismissing(a)]
+            wheres = join(["arg$i = ?" for (i, a) in enumerate(args)], " and ")
+            wheres = isempty(wheres) ? "" : ("and " * wheres)
+            DB.exe(est.ext[].notifications.pubkey_notifications, 
+                   "delete from kv where pubkey = ? and created_at = ? and type = ? $wheres",
+                   pubkey, created_at, type, args...)
+            DB.exe(est.ext[].notifications.pubkey_notification_cnts,
+                   "update kv set type$(type) = type$(type) - 1 where pubkey = ?1",
+                   pubkey)
         end
     end
 

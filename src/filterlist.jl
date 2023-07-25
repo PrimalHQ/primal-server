@@ -17,7 +17,9 @@ analytics_pubkey_unblocked = Set{Nostr.PubKeyId}() |> ThreadSafe
 function get_dict()
     d = Dict()
     for n in names(@__MODULE__; all=true)
-        if !startswith(string(n), '#') && endswith(string(n), "_blocked") && (occursin("_pubkey_", string(n)) || occursin("_event_", string(n)))
+        if  !startswith(string(n), '#') && 
+            (endswith(string(n), "_blocked") || endswith(string(n), "_unblocked")) && 
+            (occursin("_pubkey_", string(n)) || occursin("_event_", string(n)))
             d[n] = lock(getproperty(@__MODULE__, n)) do v; copy(v); end
         end
     end
