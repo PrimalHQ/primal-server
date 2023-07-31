@@ -33,6 +33,7 @@ function start()
                      try
                          sock[] = connect(HOST[], PORT[])
                          @debug "connected to firehose server"
+                         println(sock[], "STREAM-NEW-EVENTS")
                          try
                              while running[]
                                  try

@@ -198,6 +198,14 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         end
         return (; title, description, image, url, twitter_card)
 
+    elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
+        return (; 
+                title="Download Primal apps and source code", 
+                description="Unleash the power of Nostr",
+                image=("https://primal.net/public/primal-download-thumbnail.png", :from_origin),
+                url="https://primal.net/downloads",
+                twitter_card = "summary_large_image")
+
     elseif !isnothing(local m = match(r"^/(.*)", path))
         name = m[1]
         nj = get_nostr_json()
@@ -205,6 +213,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
             pk = Nostr.PubKeyId(nj[name])
             return mdpubkey(pk)
         end
+
     end
 
     return nothing
@@ -274,7 +283,11 @@ function preview_handler(req::HTTP.Request)
             if !isnothing(local mels = get_meta_elements(host, req.target))
                 for (k, v) in pairs(mels)
                     if k == :image && !isempty(v)
-                        v = "https://primal.net/media-cache?u=$(URIs.escapeuri(v))"
+                        if v isa Tuple
+                            v = v[1]
+                        else
+                            v = "https://primal.net/media-cache?u=$(URIs.escapeuri(v))"
+                        end
                     end
                     v = strip(v)
                     if !isempty(v)
@@ -298,7 +311,9 @@ function preview_handler(req::HTTP.Request)
             push!(exceptions, (:preview_handler, time(), ex, req))
             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         end
-        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/html"]), dochtml)
+        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/html",
+                                         "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+                                        ]), dochtml)
     end
 end
 
