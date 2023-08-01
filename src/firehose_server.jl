@@ -19,6 +19,7 @@ const cleanup_task = Ref{Any}(nothing)
 const latest_sent_messages = ThreadSafe(CircularBuffer(50))
 
 const connections = ThreadSafe(TCPSocket[])
+const stream_conns = ThreadSafe(TCPSocket[])
 
 const latest_received_messages = ThreadSafe(CircularBuffer(50))
 const latest_exceptions = ThreadSafe(CircularBuffer(50))
@@ -98,22 +99,29 @@ function start_reader_task(sock)
                          s = readline(sock)
                          isempty(s) && break
                          push!(latest_received_messages, s)
-                         lock(message_processors) do mprocs
-                             for mproc in values(mprocs)
-                                 r = try
-                                     Base.invokelatest(mproc, s)
-                                 catch ex
-                                     PRINT_EXCEPTIONS[] && Utils.print_exceptions()
-                                     push!(latest_exceptions, (s, mproc, ex))
-                                     ["ERROR", string(typeof(ex))]
+                         if s == "STREAM-NEW-EVENTS"
+                             push!(stream_conns, sock)
+                         else
+                             lock(message_processors) do mprocs
+                                 for mproc in values(mprocs)
+                                     r = try
+                                         Base.invokelatest(mproc, s)
+                                     catch ex
+                                         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+                                         push!(latest_exceptions, (s, mproc, ex))
+                                         ["ERROR", string(typeof(ex))]
+                                     end
+                                     try println(sock, JSON.json(r)) catch _ end
                                  end
-                                 try println(sock, JSON.json(r)) catch _ end
                              end
                          end
                      end
                      try close(sock) catch _ end
                      lock(connections) do conns
                          filter!(s->s !== sock, conns)
+                     end
+                     lock(stream_conns) do stream_conns
+                         filter!(s->s !== sock, stream_conns)
                      end
                  end)
 end
@@ -126,6 +134,7 @@ function broadcast(msgs::Vector{String}) # it's better to use broadcast_via_chan
     end
     lock(connections) do conns
         for sock in conns
+            sock in stream_conns || continue
             try
                 for msg in msgs
                     println(sock, msg)
