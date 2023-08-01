@@ -526,7 +526,9 @@ function get_notifications(
         limit::Int=1000, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
     )
-    limit <= 1000 || error("limit too big")
+    # limit <= 1000 || error("limit too big")
+    limit = min(limit, 1000) # iOS app was requesting limit=~13000
+
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
