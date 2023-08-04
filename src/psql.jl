@@ -48,7 +48,10 @@ sqltype(::Type{PQDict{K, V}}, ::Type{Symbol}) where {K, V} = "varchar(500)"
 sqltype(::Type{PQDict{K, V}}, ::Type{Nostr.EventId}) where {K, V} = "bytea"
 sqltype(::Type{PQDict{K, V}}, ::Type{Nostr.PubKeyId}) where {K, V} = "bytea"
 sqltype(::Type{PQDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = "text"
+sqltype(::Type{PQDict{K, V}}, ::Type{Dates.DateTime}) where {K, V} = "timestamp"
+sqltype(::Type{PQDict{K, V}}, ::Type{Base.UUID}) where {K, V} = "uuid"
 
+db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Missing}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Nothing}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Bool}) where {K, V} = DBConversionFuncs(x->Int(x), x->Bool(x))
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Int}) where {K, V} = DBConversionFuncs(identity, identity)
@@ -58,8 +61,15 @@ db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Symbol}) where {K, V} = DBConve
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Nostr.EventId}) where {K, V} = DBConversionFuncs(eid->collect(eid.hash), eid->Nostr.EventId(eid))
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Nostr.PubKeyId}) where {K, V} = DBConversionFuncs(pk->collect(pk.pk), pk->Nostr.PubKeyId(pk))
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = DBConversionFuncs(JSON.json, e->Nostr.Event(JSON.parse(e)))
+db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Dates.DateTime}) where {K, V} = DBConversionFuncs(identity, identity)
+db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Dict{String, Any}}) where {K, V} = DBConversionFuncs(JSON.json, s->JSON.parse(s))
+db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Vector{Any}}) where {K, V} = DBConversionFuncs(JSON.json, s->JSON.parse(s))
+db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Base.UUID}) where {K, V} = DBConversionFuncs(string, s->Base.UUID(s))
 
 LibPQ.string_parameter(v::Vector{UInt8}) = string("\\x", bytes2hex(v))
+
+LibPQ.LIBPQ_TYPE_MAP.type_map[LibPQ.oid(:uuid)] = Base.UUID
+LibPQ.LIBPQ_CONVERSIONS.func_map[(LibPQ.oid(:uuid), Base.UUID)] = x->Base.UUID(LibPQ.string_view(x))
 
 function Base.setindex!(ssd::PQDict{K, V}, v::V, k::K)::V where {K, V}
     exe(ssd.dbconns[shard(ssd, k)],
