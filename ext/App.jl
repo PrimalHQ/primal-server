@@ -58,7 +58,7 @@ MEDIA_METADATA=10_000_119
 UPLOAD=10_000_120
 UPLOADED=10_000_121
 DEFAULT_RELAYS=10_000_124
-FILTERLIST=10_000_125
+FILTERLIST=10_000_126
 
 # ------------------------------------------------------ #
 
@@ -763,7 +763,7 @@ function ext_is_hidden(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
                   catch _; [] end))
     end
 
-    pubkey in Filterlist.access_pubkey_blocked && !(pubkey in Filterlist.access_pubkey_unblocked)
+    (pubkey in Filterlist.access_pubkey_blocked || pubkey in Filterlist.import_pubkey_blocked) && !(pubkey in Filterlist.access_pubkey_unblocked)
 end
 
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event)
