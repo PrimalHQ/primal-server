@@ -98,6 +98,9 @@ function on_message(msg::String)
                     realtime_spam_note_cnt[] = 0
 
                     produce_spamlist()
+
+                    PushGatewayExporter.set!("cache_spam_latest_spamlist_length", length(latest_spamlist))
+                    PushGatewayExporter.set!("cache_spam_latest_realtime_spam_note_cnt", latest_realtime_spam_note_cnt[])
                 end
             end
         end

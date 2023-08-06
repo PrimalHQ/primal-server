@@ -31,6 +31,7 @@ function ext_periodic()
                                 (Media().max_download_duration, :media_max_download_duration, :nonrate),
                                 (Media().downloads_per_period, :media_downloads_per_second, :rate),
                                 (SpamDetection().max_msg_duration, :spam_max_msg_duration, :nonrate),
+                                (SpamDetection().max_spammer_follower_cnt, :max_spammer_follower_cnt, :nonrate),
                                ]
             lock(ref) do ref
                 PushGatewayExporter.set!("cache_$(name)", 
