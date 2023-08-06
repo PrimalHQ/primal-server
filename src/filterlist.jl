@@ -1,6 +1,8 @@
 module Filterlist
 
-using ..Utils: ThreadSafe
+import JSON
+
+using ..Utils: ThreadSafe, Throttle
 import ..Nostr
 
 import_pubkey_blocked = Set{Nostr.PubKeyId}() |> ThreadSafe
@@ -34,6 +36,25 @@ function load(d::Dict)
             copy!(s, v)
         end
     end
+end
+
+function is_hidden(eid::Nostr.EventId)
+    eid in access_event_blocked
+end
+
+periodic_unblocked_pubkeys = Throttle(; period=5.0, t=0.0)
+DEFAULT_UNBLOCKED_PUBKEYS_FILE = Ref("unblocked-pubkeys.json")
+
+function is_hidden(pubkey::Nostr.PubKeyId)
+    periodic_unblocked_pubkeys() do
+        if isfile(DEFAULT_UNBLOCKED_PUBKEYS_FILE[])
+            copy!(access_pubkey_unblocked,
+                  Set(try [Nostr.PubKeyId(pk) for (pk, _) in JSON.parse(read(DEFAULT_UNBLOCKED_PUBKEYS_FILE[], String))]
+                      catch _; [] end))
+        end
+    end
+
+    (pubkey in access_pubkey_blocked || pubkey in import_pubkey_blocked) && !(pubkey in access_pubkey_unblocked)
 end
 
 end
