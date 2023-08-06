@@ -59,7 +59,8 @@ function on_message(msg::String)
 
                 get(Main.cache_storage.pubkey_followers_cnt, e.pubkey, 0) < FOLLOWER_CNT_THRESHOLD[] || return
 
-                ewords = Set(split(e.content))
+                s = replace(e.content, r"[:;/.,?!'\n，]"=>' ')
+                ewords = Set(split(s))
                 if length(ewords) >= MIN_NOTE_SIZE[]
                     for (cwords, cvec) in latest_clusters
                         if length(cvec) >= CLUSTER_SIZE_THRESHOLD[] && is_spam(ewords, cwords)
