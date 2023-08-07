@@ -18,6 +18,9 @@ FOLLOWER_CNT_THRESHOLD = Ref(50)
 spamlist_processors = SortedDict{Symbol, Function}() |> ThreadSafe
 spamlist_processors_errors = CircularBuffer(200) |> ThreadSafe
 
+spamevent_processors = SortedDict{Symbol, Function}() |> ThreadSafe
+spamevent_processors_errors = CircularBuffer(200) |> ThreadSafe
+
 import_lock = ReentrantLock()
 
 events = Dict{Nostr.EventId, Nostr.Event}()
@@ -45,13 +48,14 @@ function is_spam(ewords, cwords)
     length(intersect(ewords, cwords)) / length(cwords) > 0.90       # content of note is similar enough
 end
 
-function on_message(msg::String)
+function on_message(msg::String)::Bool
+    notspam = Ref(true)
     try
         tdur = @elapsed begin
             lock(import_lock) do
                 e = try DB.event_from_msg(JSON.parse(msg)) catch _ end
                 e isa Nostr.Event || return
-                (e.created_at < time()+300) || return 
+                (e.created_at < time()+300) || return
                 e.kind == Int(Nostr.TEXT_NOTE) || return
                 haskey(events, e.id) && return
                 events[e.id] = e
@@ -65,11 +69,21 @@ function on_message(msg::String)
                     for (cwords, cvec) in latest_clusters
                         if length(cvec) >= CLUSTER_SIZE_THRESHOLD[] && is_spam(ewords, cwords)
                             realtime_spam_note_cnt[] += 1
+                            notspam[] = false
                             push!(realtime_spamlist, e.pubkey)
                             push!(realtime_spamlist_diff, e.pubkey)
                             realtime_spamlist_periodic() do
-                                # process_spamlist(realtime_spamlist_diff)
+                                process_spamlist(realtime_spamlist_diff)
                                 empty!(realtime_spamlist_diff)
+                            end
+                            lock(spamevent_processors) do mprocs
+                                for processor in values(mprocs)
+                                    try Base.invokelatest(processor, e)
+                                    catch ex
+                                        push!(spamevent_processors_errors, (e, ex))
+                                        #rethrow()
+                                    end
+                                end
                             end
                             break
                         end
@@ -112,6 +126,7 @@ function on_message(msg::String)
         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         rethrow()
     end
+    notspam[]
 end
 
 function produce_spamlist()

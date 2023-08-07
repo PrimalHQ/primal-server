@@ -1,6 +1,7 @@
 module Filterlist
 
 import JSON
+using DataStructures: OrderedSet
 
 using ..Utils: ThreadSafe, Throttle
 import ..Nostr
@@ -15,6 +16,8 @@ analytics_event_blocked = Set{Nostr.EventId}() |> ThreadSafe
 
 access_pubkey_unblocked    = Set{Nostr.PubKeyId}() |> ThreadSafe
 analytics_pubkey_unblocked = Set{Nostr.PubKeyId}() |> ThreadSafe
+
+access_event_blocked_spam = OrderedSet{Nostr.EventId}() |> ThreadSafe
 
 function get_dict()
     d = Dict()
@@ -39,7 +42,7 @@ function load(d::Dict)
 end
 
 function is_hidden(eid::Nostr.EventId)
-    eid in access_event_blocked
+    eid in access_event_blocked || eid in access_event_blocked_spam
 end
 
 periodic_unblocked_pubkeys = Throttle(; period=5.0, t=0.0)

@@ -341,6 +341,10 @@ function ext_pubkey_zap(est::CacheStorage, e::Nostr.Event, zapped_pk, amount_sat
     exe(est.ext[].pubkey_zapped, @sql("update kv set zaps = zaps + 1, satszapped = satszapped + ?2 where pubkey = ?1"), zapped_pk, amount_sats)
 end
 
+function ext_is_hidden(est::CacheStorage, eid::Nostr.EventId)
+    eid in Filterlist.access_event_blocked_spam
+end
+
 # TODO refactor event scoring to use scheduled_hooks to expire scores
 function score_event_cb(est::CacheStorage, e::Nostr.Event, scored_at, increment)
     exe(est.event_stats          , @sql("update kv set score = score + ?2 where event_id = ?1"), e.id, increment)
@@ -379,6 +383,10 @@ function notification(
 
     for a in args
         a isa Nostr.PubKeyId && a == pubkey && return
+        if a isa Nostr.EventId && ext_is_hidden(est, a)
+           push!(Main.stuff, (:hidden, a, callargs))
+           return
+       end
     end
 
     catch_exception(est, :notification_settings, callargs) do
