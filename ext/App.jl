@@ -25,6 +25,7 @@ union!(exposed_functions, Set([
                      :get_app_settings_2,
                      :get_default_app_settings,
                      :get_default_relays,
+                     :get_recommended_users,
                      :user_profile_scored_content,
                      :search,
                      :relays,
@@ -59,6 +60,7 @@ UPLOAD=10_000_120
 UPLOADED=10_000_121
 DEFAULT_RELAYS=10_000_124
 FILTERLIST=10_000_126
+RECOMMENDED_USERS=10_000_200
 
 # ------------------------------------------------------ #
 
@@ -430,6 +432,14 @@ DEFAULT_RELAYS_FILE = Ref("default-relays.json")
 function get_default_relays(est::DB.CacheStorage)
     [(; kind=Int(DEFAULT_RELAYS), 
       content=JSON.json(try JSON.parse(read(DEFAULT_RELAYS_FILE[], String))
+                        catch _; (;) end))]
+end
+
+RECOMMENDED_USERS_FILE = Ref("recommended-users.json")
+
+function get_recommended_users(est::DB.CacheStorage)
+    [(; kind=Int(RECOMMENDED_USERS), 
+      content=JSON.json(try JSON.parse(read(RECOMMENDED_USERS_FILE[], String))
                         catch _; (;) end))]
 end
 
