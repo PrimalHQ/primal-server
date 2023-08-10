@@ -542,6 +542,8 @@ function get_notifications(
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
+    mute_list = isnothing(user_pubkey) ? Set() : compile_mute_list(est, user_pubkey)
+
     res = []
     res_meta_data = Dict()
 
@@ -572,7 +574,7 @@ function get_notifications(
         for arg in collect(values(notif_d))
             if arg isa Nostr.PubKeyId
                 pk = arg
-                if ext_is_hidden(est, pk)
+                if ext_is_hidden(est, pk) || pk in mute_list
                     is_blocked = true
                 else
                     push!(pks, pk)
@@ -592,16 +594,16 @@ function get_notifications(
 
         if !is_blocked
             push!(res, (; kind=Int(NOTIFICATION), content=JSON.json(notif_d)))
-        else
-            args = [a for a in r[4:end] if !ismissing(a)]
-            wheres = join(["arg$i = ?" for (i, a) in enumerate(args)], " and ")
-            wheres = isempty(wheres) ? "" : ("and " * wheres)
-            DB.exe(est.ext[].notifications.pubkey_notifications, 
-                   "delete from kv where pubkey = ? and created_at = ? and type = ? $wheres",
-                   pubkey, created_at, type, args...)
-            DB.exe(est.ext[].notifications.pubkey_notification_cnts,
-                   "update kv set type$(type) = type$(type) - 1 where pubkey = ?1",
-                   pubkey)
+        # else
+        #     args = [a for a in r[4:end] if !ismissing(a)]
+        #     wheres = join(["arg$i = ?" for (i, a) in enumerate(args)], " and ")
+        #     wheres = isempty(wheres) ? "" : ("and " * wheres)
+        #     DB.exe(est.ext[].notifications.pubkey_notifications, 
+        #            "delete from kv where pubkey = ? and created_at = ? and type = ? $wheres",
+        #            pubkey, created_at, type, args...)
+        #     DB.exe(est.ext[].notifications.pubkey_notification_cnts,
+        #            "update kv set type$(type) = type$(type) - 1 where pubkey = ?1",
+        #            pubkey)
         end
     end
 
