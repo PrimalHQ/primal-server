@@ -438,9 +438,24 @@ end
 RECOMMENDED_USERS_FILE = Ref("recommended-users.json")
 
 function get_recommended_users(est::DB.CacheStorage)
-    [(; kind=Int(RECOMMENDED_USERS), 
-      content=JSON.json(try JSON.parse(read(RECOMMENDED_USERS_FILE[], String))
-                        catch _; (;) end))]
+    isfile(RECOMMENDED_USERS_FILE[]) || return []
+
+    res_meta_data = Set()
+    for (pk, _) in JSON.parse(read(RECOMMENDED_USERS_FILE[], String))
+        pk = Nostr.PubKeyId(pk)
+        if pk in est.meta_data
+            eid = est.meta_data[pk]
+            if eid in est.events
+                push!(res_meta_data, est.events[eid])
+            end
+        end
+    end
+
+    res = []
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
+    res
 end
 
 function parse_notification_settings(est::DB.CacheStorage, e::Nostr.Event)
