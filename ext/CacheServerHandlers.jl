@@ -59,50 +59,32 @@ end
 
 function broadcast_notification(notif)
     content = JSON.json(notif)
-    for conn in collect(values(conns))
-        for (subid, filters) in lock(conn) do conn; conn.subs; end
-            for filt in filters
-                try
-                    if haskey(filt, "cache")
-                        filt = filt["cache"]
-                        if length(filt) >= 2 && filt[1] == "notifications"
-                            pk = Nostr.PubKeyId(filt[2]["pubkey"])
-                            if pk == notif.pubkey
-                                d = (; kind=Int(App().NOTIFICATION), content)
-                                @async send(conn, JSON.json(["EVENT", subid, d]))
-                                @goto next
-                            end
-                        end
-                    end
-                catch ex
-                    push!(exceptions, (:notifications, filt, ex))
+    with_broadcast(:broadcast_notification) do conn, subid, filt
+        if haskey(filt, "cache")
+            filt = filt["cache"]
+            if length(filt) >= 2 && filt[1] == "notifications"
+                pk = Nostr.PubKeyId(filt[2]["pubkey"])
+                if pk == notif.pubkey
+                    d = (; kind=Int(App().NOTIFICATION), content)
+                    @async send(conn, JSON.json(["EVENT", subid, d]))
+                    return true
                 end
             end
-            @label next
         end
     end
 end
 
 function broadcast_notification_counts()
-    for conn in collect(values(conns))
-        for (subid, filters) in lock(conn) do conn; conn.subs; end
-            for filt in filters
-                try
-                    if haskey(filt, "cache")
-                        filt = filt["cache"]
-                        if length(filt) >= 2 && filt[1] == "notification_counts"
-                            pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
-                            for d in Base.invokelatest(App().get_notification_counts, est(); pubkey)
-                                @async send(conn, JSON.json(["EVENT", subid, d]))
-                            end
-                            @goto next
-                        end
-                    end
-                catch ex
-                    push!(exceptions, (:notification_counts, filt, ex))
+    with_broadcast(:broadcast_notification_counts) do conn, subid, filt
+        if haskey(filt, "cache")
+            filt = filt["cache"]
+            if length(filt) >= 2 && filt[1] == "notification_counts"
+                pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
+                for d in Base.invokelatest(App().get_notification_counts, est(); pubkey)
+                    @async send(conn, JSON.json(["EVENT", subid, d]))
                 end
+                return true
             end
-            @label next
         end
     end
 end

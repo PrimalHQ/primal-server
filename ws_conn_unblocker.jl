@@ -28,10 +28,9 @@ function monitor_conns()
     while running[]
         s = Set()
         for c in collect(CacheServerHandlers.conns)
-            if !isnothing(c.second.lock.locked_by)
+            if !isnothing(c.second.ws.lock.locked_by)
                 ws = c.first
                 push!(s, ws)
-
             end
         end
         for ws in keys(locked)
