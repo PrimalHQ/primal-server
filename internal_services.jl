@@ -64,6 +64,8 @@ function start(cache_storage, pqconnstr)
 
     HTTP.register!(router[], "/spam", spam_handler)
 
+    HTTP.register!(router[], "/api", api_handler)
+
     short_urls[] = DB.PQDict{Int, String}("short_urls", pqconnstr,
                                           init_queries=["create table if not exists short_urls (
                                                         idx int8 not null,
@@ -462,6 +464,25 @@ function spam_handler(req::HTTP.Request)
         host = Dict(req.headers)["Host"]
         res = Main.Filterlist.get_dict()
         HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json(res, 2))
+    end
+end
+
+function api_handler(req::HTTP.Request)
+    catch_exception(:api_handler, req) do
+        host = Dict(req.headers)["Host"]
+        filt = JSON.parse(String(req.body))
+        funcall = Symbol(filt[1])
+        @assert funcall in Main.App.exposed_functions
+        kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
+        res = Ref{Any}(nothing)
+        try
+            Main.CacheServerHandlers.app_funcall(funcall, kwargs, function(r); res[] = r; end)
+        catch ex
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+            ex isa TaskFailedException && (ex = ex.task.result)
+            res[] = (; error=(ex isa ErrorException ? ex.msg : "error"))
+        end
+        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json(res[]))
     end
 end
 
