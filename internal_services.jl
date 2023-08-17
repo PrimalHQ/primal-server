@@ -394,18 +394,7 @@ function link_preview_handler(req::HTTP.Request)
         path, query = split(req.target, '?')
         args = NamedTuple([Symbol(k)=>v for (k, v) in [split(s, '=') for s in split(query, '&')]])
         url = string(URIs.unescapeuri(args.u))
-        doc = EzXML.parsehtml(HTTP.get(url; readtimeout=4, connect_timeout=4, 
-                                       headers=Media.downloader_headers).body)
-        title = image = description = ""
-        for e in findall("/html/head/meta", doc)
-            (haskey(e, "property") && haskey(e, "content")) || continue
-            prop = e["property"]
-            if     prop == "og:title"; title = e["content"]
-            elseif prop == "og:image"; image = e["content"]
-            elseif prop == "og:description"; description = e["content"]
-            end
-        end
-        r = (; title, image, description)
+        r = Media.fetch_resource_metadata(url)
         HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json(r))
     end
 end

@@ -114,6 +114,35 @@ Base.@kwdef struct CacheStorageExt
                                                  "create index if not exists event_media_url      on event_media (url asc)",
                                                 ])
 
+    preview = SqliteDict(String, Int, "$(commons.directory)/db/preview"; commons.dbargs...,
+                         table="preview", keycolumn="url", valuecolumn="imported_at",
+                         init_queries=["create table if not exists preview (
+                                       url text not null,
+                                       imported_at integer not null,
+                                       download_duration number not null,
+                                       mimetype text not null,
+                                       category text,
+                                       category_confidence number,
+                                       md_title text,
+                                       md_description text,
+                                       md_image text,
+                                       icon_url text
+                                       )",
+                                       "create index if not exists preview_url on preview (url asc)",
+                                       "create index if not exists preview_imported_at on preview (imported_at desc)",
+                                       "create index if not exists preview_category on preview (category asc)",
+                                      ])
+
+    event_preview = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/db/event_preview"; commons.dbargs...,
+                                     table="event_preview", keycolumn="event_id", valuecolumn="url",
+                                     init_queries=["create table if not exists event_preview (
+                                                   event_id blob not null,
+                                                   url text not null
+                                                   )",
+                                                   "create index if not exists event_preview_event_id on event_preview (event_id asc)",
+                                                   "create index if not exists event_preview_url      on event_preview (url asc)",
+                                                  ])
+
     event_hashtags = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/db/event_hashtags"; commons.dbargs...,
                                       table="event_hashtags", keycolumn="event_id", valuecolumn="hashtag",
                                       init_queries=["create table if not exists event_hashtags (
@@ -278,7 +307,9 @@ function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)
 end
 
 DOWNLOAD_MEDIA = Ref(false)
+DOWNLOAD_PREVIEWS = Ref(false)
 image_exts = [".png", ".gif", ".jpg", ".jpeg", ".webp"]
+video_exts = [".mp4", ".mov"]
 
 function ext_text_note(est::CacheStorage, e::Nostr.Event)
     exe(est.ext[].event_contents, @sql("insert into kv_fts (event_id, content) values (?1, ?2)"), 
@@ -300,6 +331,8 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
         _, ext = splitext(lowercase(url))
         if ext in image_exts
             DOWNLOAD_MEDIA[] && import_media_async(est, e.id, url, [(:original, true), (:large, true)])
+        elseif !(ext in video_exts)
+            DOWNLOAD_PREVIEWS[] && import_preview_async(est, e.id, url)
         end
     end
 
@@ -607,5 +640,42 @@ end
 
 function import_media_async(est::CacheStorage, eid::Nostr.EventId, url::String, variant_specs::Vector)
     tsk = @task import_media(est, eid, url, variant_specs)
+    Media.media_queue(tsk)
+end
+
+import_preview_lock = ReentrantLock()
+function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
+    try
+        catch_exception(est, :import_preview, eid, url) do
+            if isempty(exe(est.ext[].preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
+                dldur = @elapsed (r = begin
+                                      r = Media.fetch_resource_metadata(url)
+                                      # @show (url, r)
+                                      !isempty(r.image) && try import_media(est, eid, r.image) catch _ end
+                                      !isempty(r.icon_url) && try import_media(est, eid, r.icon_url, [(:original, true)]) catch _ end
+                                      r
+                                  end)
+                lock(import_preview_lock) do
+                    if isempty(exe(est.ext[].preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
+                        category = ""
+                        exe(est.ext[].preview, @sql("insert into preview values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
+                            url, trunc(Int, time()), dldur, r.mimetype, category, 1.0,
+                            r.title, r.description, r.image, r.icon_url)
+                        if isempty(exe(est.ext[].event_preview, @sql("select 1 from event_preview where event_id = ?1 and url = ?2"), eid, url))
+                            exe(est.ext[].event_preview, @sql("insert into event_preview values (?1, ?2)"),
+                                eid, url)
+                        end
+                        @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
+                    end
+                end
+            end
+        end
+    finally
+        Media.update_media_queue_executor_taskcnt(-1)
+    end
+end
+
+function import_preview_async(est::CacheStorage, eid::Nostr.EventId, url::String)
+    tsk = @task import_preview(est, eid, url)
     Media.media_queue(tsk)
 end

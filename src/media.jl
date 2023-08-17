@@ -6,6 +6,7 @@ import URIs
 import Dates
 using DataStructures: CircularBuffer
 import HTTP
+import EzXML
 
 import ..Utils
 using ..Utils: ThreadSafe
@@ -29,7 +30,7 @@ media_resolutions = Dict([
     :medium=>(400, 400),
     :large=>(1000, 1000),
 ])
-
+##
 mimetype_ext = Dict([
     "image/jpeg" => ".jpg",
     "image/png" => ".png",
@@ -41,8 +42,9 @@ mimetype_ext = Dict([
     "video/webp" => ".webp",
     "video/quicktime"  => ".mov",
     "video/x-matroska" => ".mkv",
+    "image/vnd.microsoft.icon" => ".ico",
 ])
-
+##
 downloader_headers = ["User-Agent"=>"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"]
 
 function download(est::DB.CacheStorage, url::String; proxy=MEDIA_PROXY[])::Vector{UInt8}
@@ -299,6 +301,44 @@ end
 
 function cdn_url(url, size, animated)
     "https://primal.b-cdn.net/media-cache?s=$(string(size)[1])&a=$(Int(animated))&u=$(URIs.escapeuri(url))"
+end
+
+function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
+    resp = HTTP.get(url; 
+                    readtimeout=15, connect_timeout=15, 
+                    headers=downloader_headers, proxy)
+    doc = try EzXML.parsehtml(String(resp.body)) catch _ error("error parsing html") end
+    mimetype = string(get(Dict(resp.headers), "Content-Type", ""))
+    title = image = description = ""
+    for e in findall("/html/head/meta", doc)
+        if haskey(e, "property") && haskey(e, "content")
+            prop = e["property"]
+            if     prop == "og:title"; title = e["content"]
+            elseif prop == "og:image"; image = e["content"]
+            elseif prop == "og:description"; description = e["content"]
+            elseif prop == "twitter:title"; title = e["content"]
+            elseif prop == "twitter:description"; description = e["content"]
+            elseif prop == "twitter:image:src"; image = e["content"]
+            end
+        elseif haskey(e, "name") && haskey(e, "content")
+            if e["name"] == "description"; description = e["content"]; end
+        end
+    end
+    icon_url = ""
+    for e in findall("/html/head/link", doc)
+        # @show string(e)
+        if haskey(e, "rel") && haskey(e, "href")
+            (e["rel"] == "icon" || e["rel"] == "shortcut icon") || continue
+            u = URIs.parse_uri(url)
+            icon_url = try
+                string(URIs.parse_uri(e["href"]))
+            catch _
+                string(URIs.URI(; scheme=u.scheme, host=u.host, port=u.port, path=URIs.normpath(u.path*e["href"])))
+            end
+            break
+        end
+    end
+    (; mimetype, title, image, description, icon_url)
 end
 
 end

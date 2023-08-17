@@ -60,6 +60,7 @@ UPLOAD=10_000_120
 UPLOADED=10_000_121
 DEFAULT_RELAYS=10_000_124
 FILTERLIST=10_000_126
+LINK_METADATA=10_000_128
 RECOMMENDED_USERS=10_000_200
 
 # ------------------------------------------------------ #
@@ -780,7 +781,7 @@ ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId) = Filterlist.is_hidden(e
 ext_is_hidden(est::DB.CacheStorage, pubkey::Nostr.PubKeyId) = Filterlist.is_hidden(pubkey)
 
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event)
-    event_media_response(est, e.id)
+    [event_media_response(est, e.id); event_preview_response(est, e.id)]
 end
 
 function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
@@ -795,6 +796,17 @@ function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
         push!(resources, (; url, variants, (isnothing(root_mt) ? [] : [:mt=>root_mt])...))
     end
     isempty(resources) ? [] : [(; kind=Int(MEDIA_METADATA), content=JSON.json((; event_id=eid, resources)))]
+end
+
+function event_preview_response(est::DB.CacheStorage, eid::Nostr.EventId)
+    resources = []
+    for (url,) in DB.exe(est.ext[].event_preview, DB.@sql("select url from event_preview where event_id = ?1"), eid)
+        for (mimetype, md_title, md_description, md_image, icon_url) in 
+            DB.exec(est.ext[].preview, DB.@sql("select mimetype, md_title, md_description, md_image, icon_url from preview where url = ?1"), (url,))
+            push!(resources, (; url, mimetype, md_title, md_description, md_image, icon_url))
+        end
+    end
+    isempty(resources) ? [] : [(; kind=Int(LINK_METADATA), content=JSON.json((; event_id=eid, resources)))]
 end
 
 periodic_hashtag_whitelist = Utils.Throttle(; period=5.0, t=0.0)
