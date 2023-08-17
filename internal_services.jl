@@ -457,10 +457,19 @@ function spam_handler(req::HTTP.Request)
     end
 end
 
+api_headers = HTTP.Headers(["Content-Type"=>"application/json",
+                            "Access-Control-Allow-Origin"=>"*",
+                            "Access-Control-Allow-Methods"=>"*",
+                            "Access-Control-Allow-Headers"=>"*"
+                           ])
+
 function api_handler(req::HTTP.Request)
     catch_exception(:api_handler, req) do
+        req.method == "OPTIONS" && return HTTP.Response(200, api_headers, "ok")
+        body = String(req.body)
+        # @show req.method req.target body
         host = Dict(req.headers)["Host"]
-        filt = JSON.parse(String(req.body))
+        filt = JSON.parse(body)
         funcall = Symbol(filt[1])
         @assert funcall in Main.App.exposed_functions
         kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
@@ -472,7 +481,7 @@ function api_handler(req::HTTP.Request)
             ex isa TaskFailedException && (ex = ex.task.result)
             res[] = (; error=(ex isa ErrorException ? ex.msg : "error"))
         end
-        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json(res[]))
+        HTTP.Response(200, api_headers, JSON.json(res[]))
     end
 end
 
