@@ -651,8 +651,8 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
                 dldur = @elapsed (r = begin
                                       r = Media.fetch_resource_metadata(url)
                                       # @show (url, r)
-                                      !isempty(r.image) && try import_media(est, eid, r.image) catch _ end
-                                      !isempty(r.icon_url) && try import_media(est, eid, r.icon_url, [(:original, true)]) catch _ end
+                                      isempty(r.image) || try import_media(est, eid, r.image, Media.all_variants) catch _ end
+                                      isempty(r.icon_url) || try import_media(est, eid, r.icon_url, [(:original, true)]) catch _ end
                                       r
                                   end)
                 lock(import_preview_lock) do
