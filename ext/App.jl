@@ -45,6 +45,11 @@ union!(exposed_functions, Set([
                      :get_filterlist,
                     ]))
 
+union!(exposed_async_functions, Set([
+                                     :notifications, 
+                                     :notification_counts, 
+                                    ]))
+
 EXPLORE_LEGEND_COUNTS=10_000_102
 PRIMAL_SETTINGS=10_000_103
 APP_SETTINGS=30_078
