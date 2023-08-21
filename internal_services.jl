@@ -295,6 +295,8 @@ function preview_handler(req::HTTP.Request)
                     v = strip(v)
                     if !isempty(v)
                         index_elems[k]["content"] = v
+                    else
+                        delete!(index_elems[k], "content")
                     end
                 end
 
