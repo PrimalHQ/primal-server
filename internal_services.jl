@@ -179,12 +179,14 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         return (; title, description, image, url, twitter_card)
     end
 
-    if !isnothing(local m = match(r"^/(profile|p)/(npub.*)", path))
-        pk = Bech32.nip19_decode_wo_tlv(m[2])
+    if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
+        pk = string(m[2])
+        pk = startswith(pk, "npub") ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
         return mdpubkey(pk)
 
-    elseif !isnothing(local m = match(r"^/(thread|e)/(note.*)", path))
-        eid = Bech32.nip19_decode_wo_tlv(m[2])
+    elseif !isnothing(local m = match(r"^/(thread|e)/(.*)", path))
+        eid = string(m[2])
+        eid = startswith(eid, "note") ? Bech32.nip19_decode_wo_tlv(eid) : Nostr.EventId(eid)
         if eid in cache_storage.events
             e = cache_storage.events[eid]
             url = "https://$(host)/e/$(m[2])"
