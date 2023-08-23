@@ -43,6 +43,7 @@ union!(exposed_functions, Set([
                      :report_user,
                      :report_note,
                      :get_filterlist,
+                     :check_filterlist,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -66,6 +67,7 @@ UPLOADED=10_000_121
 DEFAULT_RELAYS=10_000_124
 FILTERLIST=10_000_126
 LINK_METADATA=10_000_128
+FILTERLISTED=10_000_130
 RECOMMENDED_USERS=10_000_200
 
 # ------------------------------------------------------ #
@@ -963,6 +965,14 @@ function get_filterlist(est::DB.CacheStorage)
     [(; 
       kind=Int(FILTERLIST), 
       content=JSON.json(Filterlist.get_dict()))]
+end
+
+function check_filterlist(est::DB.CacheStorage; pubkeys)
+    pubkeys = Set([cast(pk, Nostr.PubKeyId) for pk in pubkeys])
+    res = (; pubkeys=[pk for pk in pubkeys if ext_is_hidden(est, pk)])
+    [(; 
+      kind=Int(FILTERLISTED), 
+      content=JSON.json(res))]
 end
 
 settings_mute_lists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, TMuteList}}() |> ThreadSafe
