@@ -429,7 +429,6 @@ function notification(
     pubkey in est.ext[].app_settings || return
 
     callargs = (; pubkey, notif_created_at, notif_type, args)
-    # try notif_type == NEW_USER_FOLLOWED_YOU && push!(Main.stuff, callargs) catch _ end
 
     for a in args
         a isa Nostr.PubKeyId && a == pubkey && return
@@ -619,7 +618,6 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
     try
         catch_exception(est, :import_media, eid, url) do
             dldur = @elapsed (r = Media.media_variants(est, url, variant_specs; sync=true))
-            # isnothing(r) && @show (:failed, url)
             isnothing(r) && return
             if isempty(exe(est.ext[].event_media, @sql("select 1 from event_media where event_id = ?1 and url = ?2"), eid, url))
                 exe(est.ext[].event_media, @sql("insert into event_media values (?1, ?2)"),
@@ -682,7 +680,6 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
                             exe(est.ext[].event_preview, @sql("insert into event_preview values (?1, ?2)"),
                                 eid, url)
                         end
-                        @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
                     end
                 end
             end
