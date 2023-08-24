@@ -235,6 +235,15 @@ function ext_init(est::CacheStorage)
                                                                     "create index if not exists reported_created_at on reported (created_at desc)",
                                                                    ])
 ##
+    est.dyn[:event_zapped] = DB.ShardedSqliteSet(Nostr.EventId, "$(est.commons.directory)/db/event_zapped"; est.commons.dbargs...,
+                                                 table="event_zapped",
+                                                 init_queries=["create table if not exists event_zapped (
+                                                               event_id blob not null,
+                                                               zap_sender blob not null
+                                                               )",
+                                                               "create index if not exists event_zapped_event_id_zap_sender on event_zapped (event_id asc, zap_sender asc)",
+                                                              ])
+##
 end
 
 function ext_complete(est::CacheStorage)
@@ -362,8 +371,16 @@ function ext_repost(est::CacheStorage, e::Nostr.Event, eid)
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED, "make_event_hooks", e.id))
 end
 
+ext_zap_lock = ReentrantLock()
 function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
-    event_hook(est, parent_eid, (:score_event_cb, e.created_at, 20))
+    lock(ext_zap_lock) do
+        if isempty(exe(est.dyn[:event_zapped], @sql("select 1 from event_zapped where event_id = ?1 and zap_sender = ?2 limit 1"),
+                       parent_eid, zap_sender(e)))
+            exe(est.dyn[:event_zapped], @sql("insert into event_zapped values (?1, ?2)"),
+                parent_eid, zap_sender(e))
+            event_hook(est, parent_eid, (:score_event_cb, e.created_at, 20))
+        end
+    end
     event_hook(est, parent_eid, (:event_stats_cb, :satszapped, amount_sats))
     event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, e.id, amount_sats))
