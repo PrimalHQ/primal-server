@@ -399,7 +399,7 @@ function link_preview_handler(req::HTTP.Request)
         args = NamedTuple([Symbol(k)=>v for (k, v) in [split(s, '=') for s in split(query, '&')]])
         url = string(URIs.unescapeuri(args.u))
         r = Media.fetch_resource_metadata(url)
-        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json(r))
+        HTTP.Response(200, api_headers, JSON.json(r))
     end
 end
 

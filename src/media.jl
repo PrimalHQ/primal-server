@@ -7,6 +7,7 @@ import Dates
 using DataStructures: CircularBuffer
 import HTTP
 import EzXML
+import Gumbo, Cascadia
 
 import ..Utils
 using ..Utils: ThreadSafe
@@ -306,11 +307,21 @@ end
 function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
     resp = HTTP.get(url; 
                     readtimeout=15, connect_timeout=15, 
-                    headers=downloader_headers, proxy)
-    doc = try EzXML.parsehtml(String(resp.body)) catch _ error("error parsing html") end
+                    headers=["User-Agent"=>"WhatsApp/2"], proxy)
+
+    doc = try 
+        d = copy(collect(resp.body))
+        doc = Gumbo.parsehtml(String(d))
+    catch ex
+        # @show string(ex)[1:200]
+        # Utils.print_exceptions()
+        error("error parsing html")
+    end
+
     mimetype = string(get(Dict(resp.headers), "Content-Type", ""))
     title = image = description = ""
-    for e in findall("/html/head/meta", doc)
+    for ee in eachmatch(Cascadia.Selector("html > head > meta"), doc.root)
+        e = ee.attributes
         if haskey(e, "property") && haskey(e, "content")
             prop = e["property"]
             if     prop == "og:title"; title = e["content"]
@@ -325,7 +336,8 @@ function fetch_resource_metadata(url; proxy=MEDIA_PROXY[])
         end
     end
     icon_url = ""
-    for e in findall("/html/head/link", doc)
+    for ee in eachmatch(Cascadia.Selector("html > head > link"), doc.root)
+        e = ee.attributes
         # @show string(e)
         if haskey(e, "rel") && haskey(e, "href")
             (e["rel"] == "icon" || e["rel"] == "shortcut icon") || continue
@@ -333,7 +345,11 @@ function fetch_resource_metadata(url; proxy=MEDIA_PROXY[])
             icon_url = try
                 string(URIs.parse_uri(e["href"]))
             catch _
-                string(URIs.URI(; scheme=u.scheme, host=u.host, port=u.port, path=URIs.normpath(u.path*e["href"])))
+                try
+                    string(URIs.URI(; scheme=u.scheme, host=u.host, port=u.port, path=URIs.normpath(u.path*e["href"])))
+                catch _
+                    ""
+                end
             end
             break
         end

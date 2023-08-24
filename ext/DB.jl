@@ -665,9 +665,18 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
             if isempty(exe(est.ext[].preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
                 dldur = @elapsed (r = begin
                                       r = Media.fetch_resource_metadata(url)
-                                      # @show (url, r)
-                                      isempty(r.image) || try import_media(est, eid, r.image, Media.all_variants) catch _ end
-                                      isempty(r.icon_url) || try import_media(est, eid, r.icon_url, [(:original, true)]) catch _ end
+                                      if !isempty(r.image)
+                                          try 
+                                              import_media(est, eid, r.image, Media.all_variants) 
+                                              @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
+                                          catch _ end
+                                      end
+                                      if !isempty(r.icon_url)
+                                          try
+                                              import_media(est, eid, r.icon_url, [(:original, true)]) 
+                                              @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
+                                          catch _ end
+                                      end
                                       r
                                   end)
                 lock(import_preview_lock) do
