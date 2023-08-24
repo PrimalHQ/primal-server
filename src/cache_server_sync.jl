@@ -23,7 +23,7 @@ function start()
     running[] = true
     tsk[] = errormonitor(@async while running[]
                              try
-                                 last_duration[] = @elapsed pull_media(SRC[], MYSELF[])
+                                 last_duration[] = @elapsed Base.invokelatest(pull_media, SRC[], MYSELF[])
                                  last_t[] = time()
                              catch _
                                  PRINT_EXCEPTIONS[] && Utils.print_exceptions()
