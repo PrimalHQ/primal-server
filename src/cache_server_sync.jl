@@ -53,10 +53,18 @@ function pull_media(src, dst)
     for (tbl, tblname, ty) in [
                                (:(Main.cache_storage.ext[].media), "media", Nothing),
                                (:(Main.cache_storage.ext[].event_media), "event_media", Nostr.EventId),
+                               (:(Main.cache_storage.ext[].preview), "preview", Nothing),
+                               (:(Main.cache_storage.ext[].event_preview), "event_preview", Nothing),
                               ]
         q = "select max(rowid) from $tblname"
         mr1 = rex_(dst, :(DB.exec($tbl, $q)[1][1]))
         mr2 = rex_(src, :(DB.exec($tbl, $q)[1][1]))
+
+        # @show (mr1, mr2)
+
+        ismissing(mr1 == mr2) && continue
+        ismissing(mr2) && continue
+        ismissing(mr1) && (mr1 = 0)
 
         n = 2000
         for i in mr1+1:n:mr2
