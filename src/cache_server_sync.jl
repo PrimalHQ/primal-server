@@ -62,9 +62,9 @@ function pull_media(src, dst)
 
         # @show (mr1, mr2)
 
-        ismissing(mr1 == mr2) && continue
         ismissing(mr2) && continue
         ismissing(mr1) && (mr1 = 0)
+        mr1 == mr2 && continue
 
         n = 2000
         for i in mr1+1:n:mr2
