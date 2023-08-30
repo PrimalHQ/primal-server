@@ -150,10 +150,28 @@ end
 function mdtitle(c::Dict)
     for k in ["displayName", "display_name", "name", "username"]
         if haskey(c, k) && !isnothing(c[k]) && !isempty(c[k])
-            return c[k]
+            return strip(c[k])
         end
     end
     ""
+end
+
+function mdpubkey(cache_storage, pk)
+    title = description = image = ""
+    url = nothing
+    if pk in cache_storage.meta_data
+        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
+        if c isa Dict
+            addr = try strip(c["nip05"]) catch _ "" end
+            if !isnothing(addr) && endswith(addr, "@primal.net")
+                url = "https://primal.net/$(split(addr, '@')[1])"
+            end
+            try title = mdtitle(c) catch _ end
+            description = try replace(c["about"], re_url=>"") catch _ "" end
+            image = try c["picture"] catch _ "" end
+        end
+    end
+    return (; title, description, image, (isnothing(url) ? (;) : (; url))...)
 end
 
 function get_meta_elements(host::AbstractString, path::AbstractString)
@@ -162,27 +180,12 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
     title = description = image = url = ""
     twitter_card = "summary"
 
-    function mdpubkey(pk)
-        if pk in cache_storage.meta_data
-            c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
-            fallback_url = "https://$(host)$(path)"
-            url = if haskey(c, "nip05")
-                addr = c["nip05"]
-                (!isnothing(addr) && endswith(addr, "@primal.net")) ? "https://primal.net/$(split(addr, '@')[1])" : fallback_url
-            else
-                fallback_url
-            end
-            title = mdtitle(c)
-            description = replace(get(c, "about", ""), re_url=>"")
-            image = get(c, "picture", "")
-        end
-        return (; title, description, image, url, twitter_card)
-    end
+    mdpubkey_(pk) = (; url="https://$host$path", twitter_card, mdpubkey(cache_storage, pk, host, path)...)
 
     if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
         pk = string(m[2])
         pk = startswith(pk, "npub") ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
-        return mdpubkey(pk)
+        return mdpubkey_(pk)
 
     elseif !isnothing(local m = match(r"^/(thread|e)/(.*)", path))
         eid = string(m[2])
@@ -216,7 +219,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         nj = get_nostr_json()
         if haskey(nj, name)
             pk = Nostr.PubKeyId(nj[name])
-            return mdpubkey(pk)
+            return mdpubkey_(pk)
         end
 
     end

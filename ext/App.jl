@@ -45,6 +45,7 @@ union!(exposed_functions, Set([
                      :get_filterlist,
                      :check_filterlist,
                      :zaps_feed,
+                     :user_zaps,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -84,9 +85,9 @@ function run_periodics(est::DB.CacheStorage; use_threads=true)
             throttle() do
                 MetricsLogger.log(r->(; desc, periodic=nameof(f))) do
                     if use_threads
-                        fetch(Threads.@spawn f(est))
+                        fetch(Threads.@spawn Base.invokelatest(f, est))
                     else
-                        f(est)
+                        Base.invokelatest(f, est)
                     end
                 end
             end
@@ -98,7 +99,7 @@ end
 
 function start_periodics(est::DB.CacheStorage)
     periodics_task[] = errormonitor(@async while !isnothing(periodics_task[])
-                                        run_periodics(est)
+                                        Base.invokelatest(run_periodics, est)
                                         sleep(1)
                                     end)
     nothing
@@ -240,7 +241,7 @@ function scored_content(
     timeframe == :mostzapped && push!(where_exprs, "$field > 0")
 
     posts = [] |> ThreadSafe
-    posts_filtered = Tuple{Nostr.EventId, Int}[]
+    posts_filtered = Tuple{Nostr.EventId, Float64}[]
 
     n = limit
     while true
@@ -282,6 +283,7 @@ function scored_content(
                 !(pk in Filterlist.analytics_pubkey_blocked) && 
                 !(eid in Filterlist.analytics_event_blocked) && 
                 !(eid in est.deleted_events) &&
+                !is_hidden(est, user_pubkey, :trending, pk) &&
                 get(est.pubkey_followers_cnt, pk, 0) >= 5
                 push!(posts_filtered, (eid, v))
             end
@@ -300,9 +302,9 @@ function scored_content(
     vcat(res, range(posts, field))
 end
 
-@cached 60 explore_global_trending_24h(est::DB.CacheStorage) = explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true)
+explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing) = explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
 
-@cached 60 explore_global_mostzapped_4h(est::DB.CacheStorage) = explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true)
+explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing) = explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
 
 function explore(
         est::DB.CacheStorage;
@@ -327,11 +329,13 @@ function explore(
     end
 end
 
-@cached 60 scored_users_24h(est::DB.CacheStorage) = scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600))
+scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing) = scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey)
 
-function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0)
+function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0, user_pubkey=nothing)
     limit <= 1000 || error("limit too big")
     since >= time()-7*24*3600 || error("since too old")
+
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     field = :score24h
 
@@ -357,6 +361,7 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0)
     for (pk, v) in pubkeys.wrapped
         if  pk in Filterlist.access_pubkey_unblocked || 
             !(pk in Filterlist.analytics_pubkey_blocked) && 
+            !is_hidden(est, user_pubkey, :trending, pk) &&
             get(est.pubkey_followers_cnt, pk, 0) >= 5
             push!(pubkeys_filtered, (pk, v))
         end
@@ -479,8 +484,9 @@ function parse_notification_settings(est::DB.CacheStorage, e::Nostr.Event)
     end
 end
 
-function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5)
+function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5, user_pubkey=nothing)
     pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     eids = [Nostr.EventId(eid) 
             for (eid,) in DB.exe(est.event_stats_by_pubkey,
@@ -490,7 +496,7 @@ function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5)
     res = Set() |> ThreadSafe
 
     for eid in eids
-        (eid in Filterlist.access_event_blocked || eid in est.deleted_events) && continue
+        (eid in Filterlist.access_event_blocked || eid in est.deleted_events || is_hidden(est, user_pubkey, :trending, eid)) && continue
         e = est.events[eid]
         push!(res, e)
         union!(res, event_stats(est, eid))
@@ -566,8 +572,6 @@ function get_notifications(
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    mute_list = isnothing(user_pubkey) ? Set() : compile_mute_list(est, user_pubkey)
-
     res = []
     res_meta_data = Dict()
 
@@ -598,7 +602,7 @@ function get_notifications(
         for arg in collect(values(notif_d))
             if arg isa Nostr.PubKeyId
                 pk = arg
-                if ext_is_hidden(est, pk) || pk in mute_list
+                if is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk)
                     is_blocked = true
                 else
                     push!(pks, pk)
@@ -608,7 +612,7 @@ function get_notifications(
                 end
             elseif arg isa Nostr.EventId
                 eid = arg
-                if ext_is_hidden(est, eid)
+                if is_hidden(est, user_pubkey, :content, eid) || ext_is_hidden(est, eid)
                     is_blocked = true
                 else
                     push!(eids, eid)
@@ -787,6 +791,61 @@ end
 
 ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId) = Filterlist.is_hidden(eid)
 ext_is_hidden(est::DB.CacheStorage, pubkey::Nostr.PubKeyId) = Filterlist.is_hidden(pubkey)
+
+parsed_nsfw_mutelist = Dict{Nostr.EventId, Set{Nostr.PubKeyId}}()
+
+ALGOS_USER = Ref{Any}(nothing)
+
+function is_hidden_on_primal_nsfw(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+    isnothing(ALGOS_USER[]) && return false
+    cmr = compile_content_moderation_rules(est, user_pubkey)
+    if ALGOS_USER[].pk in est.mute_list
+        eid = est.mute_list[ALGOS_USER[].pk]
+        if pubkey in get!(parsed_nsfw_mutelist, eid) do
+                pks = Set{Nostr.PubKeyId}()
+                for tag in est.events[eid].tags
+                    if length(tag.fields) >= 2 && tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                        push!(pks, pk)
+                    end
+                end
+                pks
+            end
+            if haskey(cmr.groups, :primal_spam)
+                scopes = cmr.groups[:primal_spam].scopes
+                return (isempty(scopes) ? true : scope in scopes)
+            else
+                return false
+            end
+        end
+    end
+    false
+end
+
+function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+    isnothing(user_pubkey) && return false
+    cmr = compile_content_moderation_rules(est, user_pubkey)
+    if haskey(cmr.groups, :primal_spam) && pubkey in Filterlist.access_pubkey_blocked_spam
+        scopes = cmr.groups[:primal_spam].scopes
+        return (isempty(scopes) ? true : scope in scopes)
+    end
+    haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
+    false
+end
+
+function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId)
+    eid in est.events && ext_is_hidden_by_group(est, user_pubkey, scope, est.events[eid].pubkey) && return true
+    isnothing(user_pubkey) && return false
+    cmr = compile_content_moderation_rules(est, user_pubkey)
+    # if haskey(cmr.groups, :primal_nsfw)
+    #     scopes = cmr.groups[:primal_nsfw].scopes
+    #     for (url,) in DB.exe(est.ext[].event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
+    #         for (category, category_confidence) in DB.exec(est.ext[].media, DB.@sql("select category, category_confidence from media where url = ?1 limit 1"), (url,))
+    #             category == "nsfw" && category_confidence >= 0.8 && return (isempty(scopes) ? true : scope in scopes)
+    #         end
+    #     end
+    # end
+    false
+end
 
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event)
     [event_media_response(est, e.id); event_preview_response(est, e.id)]
@@ -976,29 +1035,7 @@ function check_filterlist(est::DB.CacheStorage; pubkeys)
       content=JSON.json(res))]
 end
 
-function zaps_feed(
-        est::DB.CacheStorage;
-        pubkeys,
-        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
-        kinds=nothing,
-        time_exceeded=()->false,
-    )
-    limit <= 1000 || error("limit too big")
-    pubkeys = [cast(pubkey, Nostr.PubKeyId) for pubkey in pubkeys]
-
-    pks = collect(union(pubkeys, [follows(est, pubkey) for pubkey in pubkeys]...))
-
-    zaps = [] |> ThreadSafe
-    @threads for p in pks
-        time_exceeded() && break
-        append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
-                                                                   where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
-                                                                   order by created_at desc limit ? offset ?"),
-                                         (p, p, since, until, limit, offset))))
-    end
-
-    zaps = sort(zaps.wrapped, by=z->-z[2])[1:min(limit, length(zaps))]
-
+function response_messages_for_zaps(est, zaps; kinds=nothing)
     res_meta_data = Dict()
     res = []
     for (zap_receipt_id, created_at, event_id, sender, receiver, amount_sats) in zaps
@@ -1010,10 +1047,10 @@ function zaps_feed(
             end
         end
         zap_receipt_id = Nostr.EventId(zap_receipt_id)
-        push!(res, est.events[zap_receipt_id])
+        zap_receipt_id in est.events && push!(res, est.events[zap_receipt_id])
         if !ismissing(event_id)
             event_id = Nostr.EventId(event_id)
-            push!(res, est.events[event_id])
+            event_id in est.events && push!(res, est.events[event_id])
         end
         push!(res, (; kind=Int(ZAP_EVENT), content=JSON.json((; 
                                                               event_id, 
@@ -1038,42 +1075,119 @@ function zaps_feed(
     res_
 end
 
-settings_mute_lists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, TMuteList}}() |> ThreadSafe
+function zaps_feed(
+        est::DB.CacheStorage;
+        pubkeys,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        kinds=nothing,
+        time_exceeded=()->false,
+    )
+    limit <= 1000 || error("limit too big")
+    pubkeys = [cast(pubkey, Nostr.PubKeyId) for pubkey in pubkeys]
 
-function ext_user_mute_lists(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    # pks = collect(union(pubkeys, [follows(est, pubkey) for pubkey in pubkeys]...))
+    pks = pubkeys
+
+    zaps = [] |> ThreadSafe
+    @threads for p in pks
+        time_exceeded() && break
+        append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                                   where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
+                                                                   order by created_at desc limit ? offset ?"),
+                                         (p, p, since, until, limit, offset))))
+    end
+
+    zaps = sort(zaps.wrapped, by=z->-z[2])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps; kinds)
+end
+
+function user_zaps(
+        est::DB.CacheStorage;
+        sender=nothing, receiver=nothing,
+        kinds=nothing,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+    )
+    limit <= 1000 || error("limit too big")
+    sender = castmaybe(sender, Nostr.PubKeyId)
+    receiver = castmaybe(receiver, Nostr.PubKeyId)
+
+    zaps = if !isnothing(sender)
+        map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                     where sender = ? and created_at >= ? and created_at <= ?
+                                                     order by created_at desc limit ? offset ?"),
+                           (sender, since, until, limit, offset)))
+    elseif !isnothing(receiver)
+        map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                     where receiver = ? and created_at >= ? and created_at <= ?
+                                                     order by created_at desc limit ? offset ?"),
+                           (receiver, since, until, limit, offset)))
+    else
+        error("either sender or receiver argument has to be specified")
+    end
+
+    zaps = sort(zaps, by=z->-z[2])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps; kinds)
+end
+
+parsed_settings = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, Any}}() |> ThreadSafe
+
+function ext_user_get_settings(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     if pubkey in est.ext[].app_settings 
-        r = DB.exec(est.ext[].app_settings, 
-                                     DB.@sql("select event_id from app_settings 
-                                             where key = ?1 limit 1"), (pubkey,))[1][1]
-        ismissing(r) && return []
+        r = DB.exec(est.ext[].app_settings, DB.@sql("select event_id from app_settings 
+                                                    where key = ?1 limit 1"), (pubkey,))[1][1]
+        ismissing(r) && return
         seid = Nostr.EventId(r)
 
-        eml = get(settings_mute_lists, pubkey, nothing)
+        eml = get(parsed_settings, pubkey, nothing)
         !isnothing(eml) && eml[1] == seid && return eml[2]
 
         e = est.ext[].app_settings[pubkey]
         d = JSON.parse(e.content)
 
-        pks = TMuteList()
-        for s in get(d, "muteLists", [])
-            push!(pks, Nostr.PubKeyId(s))
+        res = (;
+               id=e.id,
+               apply_content_moderation=get(d, "applyContentModeration", true),
+               content_moderation=get(d, "contentModeration", []),
+              )
+        parsed_settings[pubkey] = (seid, res)
+    else
+        res = (; apply_content_moderation=false)
+    end
+    res
+end
+
+function broadcast_event_to_relays(e::Nostr.Event; relays=sort(JSON.parse(read(DEFAULT_RELAYS_FILE[], String))))
+    res = []
+    for url in relays
+        # print("sending to $url: ")
+        try
+            r = Ref("")
+            HTTP.WebSockets.open(url; suppress_close_error=true, retry=false, connect_timeout=15, timeout=15, proxy=Media.MEDIA_PROXY[]) do ws
+                HTTP.WebSockets.send(ws, JSON.json(["EVENT", e]))
+                r[] = HTTP.WebSockets.receive(ws)
+            end
+            # println(r[])
+            push!(res, r[])
+        catch ex
+            # println(typeof(ex))
         end
-
-        settings_mute_lists[pubkey] = (seid, pks)
-        pks
-    else
-        []
     end
 end
 
-function ext_user_mute_lists_key(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
-    if pubkey in est.ext[].app_settings
-        r = DB.exec(est.ext[].app_settings, 
-                    DB.@sql("select event_id from app_settings 
-                            where key = ?1 limit 1"), (pubkey,))[1][1]
-        ismissing(r) ? [] : r
-    else
-        []
-    end
+function broadcast_spam_list_to_relays()
+    e = Nostr.Event(ALGOS_USER[].sk, ALGOS_USER[].pk, trunc(Int, time()), 30000, 
+                    [Nostr.TagAny(["d", "spam_list"]); 
+                     [Nostr.TagAny(["p", Nostr.hex(dpk)])
+                      for dpk in collect(Filterlist.access_pubkey_blocked_spam)]],
+                    "")
+    broadcast_event_to_relays(e)
+    e
 end
-
+##
+register_cache_function(:broadcast_spam_list,
+                        function(est)
+                            broadcast_spam_list_to_relays()
+                        end, 600)
+##

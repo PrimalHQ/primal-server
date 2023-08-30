@@ -17,7 +17,8 @@ analytics_event_blocked = Set{Nostr.EventId}() |> ThreadSafe
 access_pubkey_unblocked    = Set{Nostr.PubKeyId}() |> ThreadSafe
 analytics_pubkey_unblocked = Set{Nostr.PubKeyId}() |> ThreadSafe
 
-access_event_blocked_spam = OrderedSet{Nostr.EventId}() |> ThreadSafe
+access_pubkey_blocked_spam = OrderedSet{Nostr.PubKeyId}() |> ThreadSafe
+access_event_blocked_spam  = OrderedSet{Nostr.EventId}() |> ThreadSafe
 
 function get_dict()
     d = Dict()

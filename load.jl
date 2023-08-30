@@ -12,6 +12,7 @@ for fn in [
            "filterlist.jl",
            "media.jl",
            "spam_detection.jl",
+           "trust_rank.jl",
            "firehose_client.jl",
            "firehose_server.jl",
            "cache_server_sync.jl",

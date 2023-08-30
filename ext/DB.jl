@@ -1,6 +1,7 @@
 #module DB
 
 import ..Filterlist
+import ..TrustRank
 
 union!(stat_names, Set([
                         :scoresexpired,
@@ -373,6 +374,7 @@ end
 
 ext_zap_lock = ReentrantLock()
 function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
+    valid_zap = isempty(TrustRank.pubkey_rank) || get(TrustRank.pubkey_rank, e.pubkey, 0.0) > 0.0
     lock(ext_zap_lock) do
         if isempty(exe(est.dyn[:event_zapped], @sql("select 1 from event_zapped where event_id = ?1 and zap_sender = ?2 limit 1"),
                        parent_eid, zap_sender(e)))
@@ -381,10 +383,12 @@ function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
             event_hook(est, parent_eid, (:score_event_cb, e.created_at, 20))
         end
     end
-    event_hook(est, parent_eid, (:event_stats_cb, :satszapped, amount_sats))
-    event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats))
-    event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, e.id, amount_sats))
-    event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED, "make_event_hooks", e.id, amount_sats))
+    if valid_zap
+        event_hook(est, parent_eid, (:event_stats_cb, :satszapped, amount_sats))
+        event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats))
+        event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, e.id, amount_sats))
+        event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED, "make_event_hooks", e.id, amount_sats))
+    end
 end
 
 function ext_pubkey_zap(est::CacheStorage, e::Nostr.Event, zapped_pk, amount_sats)
@@ -397,6 +401,9 @@ end
 
 # TODO refactor event scoring to use scheduled_hooks to expire scores
 function score_event_cb(est::CacheStorage, e::Nostr.Event, scored_at, increment)
+    tr = isempty(TrustRank.pubkey_rank) ? 1.0 : get(TrustRank.pubkey_rank, e.pubkey, 0.0)
+    increment *= tr
+
     exe(est.event_stats          , @sql("update kv set score = score + ?2 where event_id = ?1"), e.id, increment)
     exe(est.event_stats_by_pubkey, @sql("update kv set score = score + ?3 where event_id = ?2"), e.pubkey, e.id, increment)
 
