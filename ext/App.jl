@@ -303,24 +303,30 @@ end
 
 analytics_cache = Dict() |> ThreadSafe
 
-function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
-    lock(analytics_cache) do analytics_cache
-        get!(analytics_cache, (:explore_global_trending_24h, user_pubkey)) do
-            explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
+function with_analytics_cache(body::Function, key)
+    if haskey(analytics_cache, key)
+        lock(analytics_cache) do analytics_cache
+            get!(analytics_cache, key) do
+                body()
+            end
         end
+    else
+        analytics_cache[key] = body()
+    end
+end
+
+function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
+    with_analytics_cache((:explore_global_trending_24h, user_pubkey)) do
+        explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
     end
 end
 # @cached 600 explore_global_trending_24h(est::DB.CacheStorage) = explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey=nothing)
 
 function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
-    lock(analytics_cache) do analytics_cache
-        get!(analytics_cache, (:explore_global_mostzapped_4h, user_pubkey)) do
-            explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
-        end
+    with_analytics_cache((:explore_global_mostzapped_4h, user_pubkey)) do
+        explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
     end
-    # explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
 end
-
 # @cached 600 explore_global_mostzapped_4h(est::DB.CacheStorage) = explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey=nothing)
 
 function explore(
@@ -347,10 +353,8 @@ function explore(
 end
 
 function scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing)
-    lock(analytics_cache) do analytics_cache
-        get!(analytics_cache, (:scored_users_24h, user_pubkey)) do
-            scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey)
-        end
+    with_analytics_cache((:scored_users_24h, user_pubkey)) do
+        scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey)
     end
 end
 # @cached 600 scored_users_24h(est::DB.CacheStorage) = scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey=nothing)
