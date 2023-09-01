@@ -402,7 +402,7 @@ end
 # TODO refactor event scoring to use scheduled_hooks to expire scores
 function score_event_cb(est::CacheStorage, e::Nostr.Event, scored_at, increment)
     tr = isempty(TrustRank.pubkey_rank) ? 1.0 : get(TrustRank.pubkey_rank, e.pubkey, 0.0)
-    increment *= tr
+    increment = trunc(Int, 1e10*tr*increment)
 
     exe(est.event_stats          , @sql("update kv set score = score + ?2 where event_id = ?1"), e.id, increment)
     exe(est.event_stats_by_pubkey, @sql("update kv set score = score + ?3 where event_id = ?2"), e.pubkey, e.id, increment)
