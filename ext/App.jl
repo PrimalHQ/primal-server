@@ -849,8 +849,8 @@ function is_hidden_on_primal_nsfw(est::DB.CacheStorage, user_pubkey, scope::Symb
                 end
                 pks
             end
-            if haskey(cmr.groups, :primal_spam)
-                scopes = cmr.groups[:primal_spam].scopes
+            if haskey(cmr.groups, :primal_nsfw)
+                scopes = cmr.groups[:primal_nsfw].scopes
                 return (isempty(scopes) ? true : scope in scopes)
             else
                 return false
