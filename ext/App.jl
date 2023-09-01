@@ -44,8 +44,6 @@ union!(exposed_functions, Set([
                      :report_note,
                      :get_filterlist,
                      :check_filterlist,
-                     :zaps_feed,
-                     :user_zaps,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -140,7 +138,8 @@ function register_cache_function(funcname, f, period)
 end
 
 function cached_functions_report()
-    for (k, cf) in collect(cached_functions)
+    # for (k, cf) in collect(cached_functions)
+    for (k, cf) in cached_functions.wrapped
         @printf "%30s  period: %7.3f(s)  age: %7.3f(s)  exetime: %7.3f(s)\n" k cf.period time()-cf.updated_at[] cf.execution_time[]
     end
 end
@@ -302,9 +301,27 @@ function scored_content(
     vcat(res, range(posts, field))
 end
 
-explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing) = explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
+analytics_cache = Dict() |> ThreadSafe
 
-explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing) = explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
+function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
+    lock(analytics_cache) do analytics_cache
+        get!(analytics_cache, (:explore_global_trending_24h, user_pubkey)) do
+            explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
+        end
+    end
+end
+# @cached 600 explore_global_trending_24h(est::DB.CacheStorage) = explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey=nothing)
+
+function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
+    lock(analytics_cache) do analytics_cache
+        get!(analytics_cache, (:explore_global_mostzapped_4h, user_pubkey)) do
+            explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
+        end
+    end
+    # explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
+end
+
+# @cached 600 explore_global_mostzapped_4h(est::DB.CacheStorage) = explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey=nothing)
 
 function explore(
         est::DB.CacheStorage;
@@ -329,7 +346,14 @@ function explore(
     end
 end
 
-scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing) = scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey)
+function scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing)
+    lock(analytics_cache) do analytics_cache
+        get!(analytics_cache, (:scored_users_24h, user_pubkey)) do
+            scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey)
+        end
+    end
+end
+# @cached 600 scored_users_24h(est::DB.CacheStorage) = scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey=nothing)
 
 function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0, user_pubkey=nothing)
     limit <= 1000 || error("limit too big")
@@ -485,6 +509,7 @@ function parse_notification_settings(est::DB.CacheStorage, e::Nostr.Event)
 end
 
 function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5, user_pubkey=nothing)
+    limit = min(100, limit)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
@@ -541,6 +566,7 @@ function search(
         limit::Int=20, since::Union{Nothing,Int}=0, until::Union{Nothing,Int}=nothing, 
         user_pubkey=nothing,
     )
+    limit = min(100, limit)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     isempty(query) && error("query is empty")
     query[1] != '!' && (query = transform_search_query(query))
@@ -689,6 +715,7 @@ function get_notification_counts(est::DB.CacheStorage; pubkey)
 end
 
 function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey::Any=nothing)
+    limit = min(100, limit)
     limit <= 1000 || error("limit too big")
     
     q = "^" * repr(query) * "*"
@@ -828,7 +855,10 @@ function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol
         scopes = cmr.groups[:primal_spam].scopes
         return (isempty(scopes) ? true : scope in scopes)
     end
-    haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
+    if haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
+        scopes = cmr.groups[:primal_nsfw].scopes
+        return (isempty(scopes) ? true : scope in scopes)
+    end
     false
 end
 
@@ -1035,102 +1065,6 @@ function check_filterlist(est::DB.CacheStorage; pubkeys)
       content=JSON.json(res))]
 end
 
-function response_messages_for_zaps(est, zaps; kinds=nothing)
-    res_meta_data = Dict()
-    res = []
-    for (zap_receipt_id, created_at, event_id, sender, receiver, amount_sats) in zaps
-        for pk in [sender, receiver]
-            (isnothing(pk) || ismissing(pk)) && continue
-            pk = Nostr.PubKeyId(pk)
-            if !haskey(res_meta_data, pk) && pk in est.meta_data
-                res_meta_data[pk] = est.events[est.meta_data[pk]]
-            end
-        end
-        zap_receipt_id = Nostr.EventId(zap_receipt_id)
-        zap_receipt_id in est.events && push!(res, est.events[zap_receipt_id])
-        if !ismissing(event_id)
-            event_id = Nostr.EventId(event_id)
-            event_id in est.events && push!(res, est.events[event_id])
-        end
-        push!(res, (; kind=Int(ZAP_EVENT), content=JSON.json((; 
-                                                              event_id, 
-                                                              created_at, 
-                                                              sender=castmaybe(sender, Nostr.PubKeyId),
-                                                              receiver=castmaybe(receiver, Nostr.PubKeyId),
-                                                              amount_sats,
-                                                              zap_receipt_id))))
-    end
-
-    res_meta_data = collect(values(res_meta_data))
-    append!(res, res_meta_data)
-    append!(res, user_scores(est, res_meta_data))
-    ext_user_infos(est, res, res_meta_data)
-
-    res_ = []
-    for e in [collect(OrderedSet(res)); range(zaps, :created_at)]
-        if isnothing(kinds) || (hasproperty(e, :kind) && getproperty(e, :kind) in kinds)
-            push!(res_, e)
-        end
-    end
-    res_
-end
-
-function zaps_feed(
-        est::DB.CacheStorage;
-        pubkeys,
-        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
-        kinds=nothing,
-        time_exceeded=()->false,
-    )
-    limit <= 1000 || error("limit too big")
-    pubkeys = [cast(pubkey, Nostr.PubKeyId) for pubkey in pubkeys]
-
-    # pks = collect(union(pubkeys, [follows(est, pubkey) for pubkey in pubkeys]...))
-    pks = pubkeys
-
-    zaps = [] |> ThreadSafe
-    @threads for p in pks
-        time_exceeded() && break
-        append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
-                                                                   where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
-                                                                   order by created_at desc limit ? offset ?"),
-                                         (p, p, since, until, limit, offset))))
-    end
-
-    zaps = sort(zaps.wrapped, by=z->-z[2])[1:min(limit, length(zaps))]
-
-    response_messages_for_zaps(est, zaps; kinds)
-end
-
-function user_zaps(
-        est::DB.CacheStorage;
-        sender=nothing, receiver=nothing,
-        kinds=nothing,
-        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
-    )
-    limit <= 1000 || error("limit too big")
-    sender = castmaybe(sender, Nostr.PubKeyId)
-    receiver = castmaybe(receiver, Nostr.PubKeyId)
-
-    zaps = if !isnothing(sender)
-        map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
-                                                     where sender = ? and created_at >= ? and created_at <= ?
-                                                     order by created_at desc limit ? offset ?"),
-                           (sender, since, until, limit, offset)))
-    elseif !isnothing(receiver)
-        map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
-                                                     where receiver = ? and created_at >= ? and created_at <= ?
-                                                     order by created_at desc limit ? offset ?"),
-                           (receiver, since, until, limit, offset)))
-    else
-        error("either sender or receiver argument has to be specified")
-    end
-
-    zaps = sort(zaps, by=z->-z[2])[1:min(limit, length(zaps))]
-
-    response_messages_for_zaps(est, zaps; kinds)
-end
-
 parsed_settings = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, Any}}() |> ThreadSafe
 
 function ext_user_get_settings(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
@@ -1156,6 +1090,16 @@ function ext_user_get_settings(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
         res = (; apply_content_moderation=false)
     end
     res
+end
+
+function ext_invalidate_cached_content_moderation(est::DB.CacheStorage, user_pubkey::Union{Nothing,Nostr.PubKeyId})
+    for k in [
+              :explore_global_trending_24h,
+              :explore_global_mostzapped_4h,
+              :scored_users_24h,
+             ]
+        delete!(analytics_cache, (k, isnothing(user_pubkey) ? nothing : Nostr.hex(user_pubkey)))
+    end
 end
 
 function broadcast_event_to_relays(e::Nostr.Event; relays=sort(JSON.parse(read(DEFAULT_RELAYS_FILE[], String))))
@@ -1186,8 +1130,14 @@ function broadcast_spam_list_to_relays()
     e
 end
 ##
+BROADCAST_SPAM_LIST = Ref(false)
 register_cache_function(:broadcast_spam_list,
                         function(est)
-                            broadcast_spam_list_to_relays()
+                            BROADCAST_SPAM_LIST[] && @async broadcast_spam_list_to_relays()
+                        end, 600)
+register_cache_function(:empty_analytics_cache,
+                        function(est)
+                            empty!(analytics_cache)
+                            # ext_invalidate_cached_content_moderation(est, nothing)
                         end, 600)
 ##
