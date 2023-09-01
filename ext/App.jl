@@ -212,6 +212,11 @@ function scored_content(
         user_pubkey=nothing,
         time_exceeded=()->false,
     )
+    limit = min(50, limit)
+    created_after = max(trunc(Int, time()-24*3600), created_after)
+    if !isnothing(since); since = max(max(1, since), created_after); end
+    # desc = timeframe == :latest ? string((; timeframe, lenpks=length(pubkeys), created_after, limit, since, until, user_pubkey)) : nothing
+
     MAX_LIMIT = 1000
     limit <= MAX_LIMIT || error("limit too big")
     timeframe = Symbol(timeframe)
@@ -341,11 +346,14 @@ function explore(
     if     scope == :global
         scored_content(est; timeframe, user_pubkey, kwargs...)
     elseif scope == :network
+        isnothing(user_pubkey) && return []
         scored_content(est; timeframe, user_pubkey, kwargs...)
         # scored_content(est; timeframe, pubkeys=outer_network(est, user_pubkey), user_pubkey, kwargs...)
     elseif scope == :tribe
+        isnothing(user_pubkey) && return []
         scored_content(est; timeframe, pubkeys=inner_network(est, user_pubkey), user_pubkey, kwargs...)
     elseif scope == :follows
+        isnothing(user_pubkey) && return []
         scored_content(est; timeframe, pubkeys=follows(est, user_pubkey), user_pubkey, kwargs...)
     else
         []
