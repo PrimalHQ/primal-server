@@ -439,7 +439,8 @@ function notification(
 
     for a in args
         a isa Nostr.PubKeyId && a == pubkey && return
-        if a isa Nostr.EventId && ext_is_hidden(est, a)
+        if a isa Nostr.EventId && (ext_is_hidden(est, a) ||
+                                   try Base.invokelatest(Main.eval(:(App.is_hidden)), pubkey, :content, est.events[a].pubkey) catch _ false end)
            # push!(Main.stuff, (:hidden, a, callargs))
            return
        end
