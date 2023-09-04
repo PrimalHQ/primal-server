@@ -1114,31 +1114,33 @@ function ext_invalidate_cached_content_moderation(est::DB.CacheStorage, user_pub
     end
 end
 
-function broadcast_event_to_relays(e::Nostr.Event; relays=sort(JSON.parse(read(DEFAULT_RELAYS_FILE[], String))))
+function broadcast_event_to_relays(e::Nostr.Event; relays=sort(JSON.parse(read(DEFAULT_RELAYS_FILE[], String))), verbose=false)
     res = []
     for url in relays
-        # print("sending to $url: ")
+        verbose && print("sending to $url: ")
         try
             r = Ref("")
-            HTTP.WebSockets.open(url; suppress_close_error=true, retry=false, connect_timeout=15, timeout=15, proxy=Media.MEDIA_PROXY[]) do ws
+            HTTP.WebSockets.open(url; suppress_close_error=true, retry=false, connect_timeout=15, timeout=15, readtimeout=15, proxy=Media.MEDIA_PROXY[]) do ws
+                verbose && print("[connected] ")
                 HTTP.WebSockets.send(ws, JSON.json(["EVENT", e]))
+                verbose && print("[sent] ")
                 r[] = HTTP.WebSockets.receive(ws)
             end
-            # println(r[])
+            verbose && println(r[])
             push!(res, r[])
         catch ex
-            # println(typeof(ex))
+            verbose && println(typeof(ex))
         end
     end
 end
 
-function broadcast_spam_list_to_relays()
+function broadcast_spam_list_to_relays(; verbose=false)
     e = Nostr.Event(ALGOS_USER[].sk, ALGOS_USER[].pk, trunc(Int, time()), 30000, 
                     [Nostr.TagAny(["d", "spam_list"]); 
                      [Nostr.TagAny(["p", Nostr.hex(dpk)])
                       for dpk in collect(Filterlist.access_pubkey_blocked_spam)]],
                     "")
-    broadcast_event_to_relays(e)
+    broadcast_event_to_relays(e; verbose)
     e
 end
 ##
