@@ -341,7 +341,9 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
         _, ext = splitext(lowercase(url))
         if ext in image_exts
             DOWNLOAD_MEDIA[] && import_media_async(est, e.id, url, [(:original, true), (:large, true)])
-        elseif !(ext in video_exts)
+        elseif ext in video_exts
+            DOWNLOAD_MEDIA[] && import_media_async(est, e.id, url, [(:original, true)])
+        else
             DOWNLOAD_PREVIEWS[] && import_preview_async(est, e.id, url)
         end
     end
@@ -633,11 +635,14 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
             end
             for ((size, anim), media_url) in r
                 if isempty(exe(est.ext[].media, @sql("select 1 from media where url = ?1 and size = ?2 and animated = ?3 limit 1"), url, size, anim))
-                    fn = abspath(Media.MEDIA_PATH[] * "/..") * URIs.parse_uri(media_url).path
-                    m = try
-                        match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file -b $fn`; stdin=devnull), String))
-                    catch _
-                        nothing
+                    fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(media_url).path)
+                    _, ext = splitext(lowercase(url))
+                    m = if ext in image_exts
+                        try match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file -b $fn`; stdin=devnull), String))
+                        catch _ nothing end
+                    elseif ext in video_exts
+                        try match(r"([0-9]+)x([0-9]+)", read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 $fn`; stdin=devnull), String))
+                        catch _ nothing end
                     end
                     # @show (url, dldur, stat(fn).size, fn, m)
                     if !isnothing(m)
