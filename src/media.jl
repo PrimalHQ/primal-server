@@ -304,7 +304,60 @@ function cdn_url(url, size, animated)
     "https://primal.b-cdn.net/media-cache?s=$(string(size)[1])&a=$(Int(animated))&u=$(URIs.escapeuri(url))"
 end
 
+import Distributed
+execute_distributed_lock = ReentrantLock()
+function execute_distributed(body::Function; timeout=10, includes=[])
+    lock(execute_distributed_lock) do
+        ws = [pid for pid in Distributed.procs() if pid != 1]
+        pid = if isempty(ws)
+            newpid, = Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
+            Main.eval(quote
+                          Distributed.remotecall_fetch(function(includes)
+                                             for fn in includes
+                                                 Main.include(fn)
+                                             end
+                                         end, $newpid, $includes)
+                      end)
+            newpid
+        else
+            rand(ws)
+        end
+        r = Ref{Any}(nothing)
+        @sync begin
+            @async begin
+                tstart = time()
+                while isnothing(r[]) && (time() - tstart < timeout); sleep(0.1); end
+                if isnothing(r[])
+                    kill(Distributed.worker_from_id(pid).config.process, 15)
+                    Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
+                end
+            end
+            try
+                r[] = Distributed.remotecall_fetch(body, pid)
+            catch ex
+                r[] = ex
+                # println(ex)
+            end
+        end
+        r[]
+    end
+end
+
 function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
+    includes = []
+    fn = "fetch-web-page-meta-data.jl"
+    for d in [".", "primal-server"]
+        isfile("$d/$fn") && push!(includes, "$d/$fn")
+    end
+    @assert length(includes) == 1
+    r = Main.eval(:(Media.execute_distributed(; includes=$includes) do
+        fetch_meta_data($url, $proxy)
+    end))
+    # @show (url, r)
+    r isa NamedTuple ? r : (; mimetype="", title="", image="", description="", icon_url="")
+end
+
+function _fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
     resp = HTTP.get(url; 
                     readtimeout=15, connect_timeout=15, 
                     headers=["User-Agent"=>"WhatsApp/2"], proxy)
