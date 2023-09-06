@@ -306,18 +306,14 @@ end
 
 import Distributed
 execute_distributed_lock = ReentrantLock()
-function execute_distributed(body::Function; timeout=10, includes=[])
+function execute_distributed(expr; timeout=20, includes=[])
     lock(execute_distributed_lock) do
         ws = [pid for pid in Distributed.procs() if pid != 1]
         pid = if isempty(ws)
             newpid, = Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
-            Main.eval(quote
-                          Distributed.remotecall_fetch(function(includes)
-                                             for fn in includes
-                                                 Main.include(fn)
-                                             end
-                                         end, $newpid, $includes)
-                      end)
+            for fn in includes
+                Distributed.remotecall_eval(Main, newpid, quote; include($fn); nothing; end)
+            end
             newpid
         else
             rand(ws)
@@ -329,11 +325,10 @@ function execute_distributed(body::Function; timeout=10, includes=[])
                 while isnothing(r[]) && (time() - tstart < timeout); sleep(0.1); end
                 if isnothing(r[])
                     kill(Distributed.worker_from_id(pid).config.process, 15)
-                    Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
                 end
             end
             try
-                r[] = Distributed.remotecall_fetch(body, pid)
+                r[] = Distributed.remotecall_eval(Main, pid, expr)
             catch ex
                 r[] = ex
                 # println(ex)
@@ -350,10 +345,9 @@ function fetch_resource_metadata(url; proxy=MEDIA_PROXY[])
         isfile("$d/$fn") && push!(includes, "$d/$fn")
     end
     @assert length(includes) == 1
-    r = Main.eval(:(Media.execute_distributed(; includes=$includes) do
-        fetch_meta_data($url, $proxy)
-    end))
+    r = execute_distributed(:(fetch_meta_data($url, $proxy)); includes)
     # @show (url, r)
+    # r isa Exception && println((url, r))
     r isa NamedTuple ? r : (; mimetype="", title="", image="", description="", icon_url="")
 end
 
