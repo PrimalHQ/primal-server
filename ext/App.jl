@@ -532,12 +532,7 @@ function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5,
                                           order by score desc limit ?"), pubkey, limit)]
     res = Set() |> ThreadSafe
 
-    for eid in eids
-        (eid in Filterlist.access_event_blocked || eid in est.deleted_events || is_hidden(est, user_pubkey, :trending, eid)) && continue
-        e = est.events[eid]
-        push!(res, e)
-        union!(res, event_stats(est, eid))
-    end
+    union!(res, response_messages_for_posts(est, eids; user_pubkey))
 
     pubkey in est.meta_data && push!(res, est.events[est.meta_data[pubkey]])
 
