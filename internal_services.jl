@@ -180,7 +180,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
     title = description = image = url = ""
     twitter_card = "summary"
 
-    mdpubkey_(pk) = (; url="https://$host$path", twitter_card, mdpubkey(cache_storage, pk, host, path)...)
+    mdpubkey_(pk) = (; url="https://$host$path", twitter_card, mdpubkey(cache_storage, pk)...)
 
     if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
         pk = string(m[2])
