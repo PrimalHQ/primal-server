@@ -78,12 +78,19 @@ function broadcast_notification_counts()
     with_broadcast(:broadcast_notification_counts) do conn, subid, filt
         if haskey(filt, "cache")
             filt = filt["cache"]
-            if length(filt) >= 2 && filt[1] == "notification_counts"
-                pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
-                for d in Base.invokelatest(App().get_notification_counts, est(); pubkey)
-                    @async send(conn, JSON.json(["EVENT", subid, d]))
+            if length(filt) >= 2
+                for (funcall, f) in [
+                                     ("notification_counts", App().get_notification_counts),
+                                     ("notification_counts_2", App().get_notification_counts_2),
+                                    ]
+                    if filt[1] == funcall
+                        pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
+                        for d in Base.invokelatest(f, est(); pubkey)
+                            @async send(conn, JSON.json(["EVENT", subid, d]))
+                        end
+                        return true
+                    end
                 end
-                return true
             end
         end
     end

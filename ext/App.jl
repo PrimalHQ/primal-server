@@ -49,6 +49,7 @@ union!(exposed_functions, Set([
 union!(exposed_async_functions, Set([
                                      :notifications, 
                                      :notification_counts, 
+                                     :notification_counts_2, 
                                     ]))
 
 EXPLORE_LEGEND_COUNTS=10_000_102
@@ -69,6 +70,7 @@ FILTERLIST=10_000_126
 LINK_METADATA=10_000_128
 FILTERLISTED=10_000_130
 RECOMMENDED_USERS=10_000_200
+NOTIFICATIONS_SUMMARY_2=10_000_132
 
 # ------------------------------------------------------ #
 
@@ -717,6 +719,15 @@ function get_notification_counts(est::DB.CacheStorage; pubkey)
     [(; kind=Int(NOTIFICATIONS_SUMMARY), pubkey=Nostr.PubKeyId(pk),
       [Symbol(string(Int(i)))=>cnt
        for (i, cnt) in zip(instances(DB.NotificationType), cnts)]...)
+     for (pk, cnts...) in DB.exe(est.ext[].notifications.pubkey_notification_cnts,
+                                 "select * from kv where pubkey = ?1", pubkey)]
+end
+
+function get_notification_counts_2(est::DB.CacheStorage; pubkey)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    [(; kind=Int(NOTIFICATIONS_SUMMARY_2), pubkey=Nostr.PubKeyId(pk),
+      content=JSON.json(Dict([Symbol(string(Int(i)))=>cnt
+                              for (i, cnt) in zip(instances(DB.NotificationType), cnts)])))
      for (pk, cnts...) in DB.exe(est.ext[].notifications.pubkey_notification_cnts,
                                  "select * from kv where pubkey = ?1", pubkey)]
 end
