@@ -70,7 +70,7 @@ function pull_media(src, dst)
         for i in mr1+1:n:mr2
             yield()
             r = i:min(i+n-1, mr2)
-            progress[] = (r.start, mr2)
+            progress[] = (tblname, r.start, mr2)
             q = "select * from $tblname where rowid >= $(r.start) and rowid <= $(r.stop)"
             for row in rex_(src, :(DB.exec($tbl, $q)))
                 qi = "insert into $tblname values ($(join(['?' for _ in 1:length(row)], ',')))"
