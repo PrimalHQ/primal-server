@@ -867,7 +867,6 @@ function is_hidden_on_primal_nsfw(est::DB.CacheStorage, user_pubkey, scope::Symb
 end
 
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
-    isnothing(user_pubkey) && return false
     cmr = compile_content_moderation_rules(est, user_pubkey)
     if haskey(cmr.groups, :primal_spam) && pubkey in Filterlist.access_pubkey_blocked_spam
         scopes = cmr.groups[:primal_spam].scopes
@@ -882,7 +881,6 @@ end
 
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId)
     eid in est.events && ext_is_hidden_by_group(est, user_pubkey, scope, est.events[eid].pubkey) && return true
-    isnothing(user_pubkey) && return false
     cmr = compile_content_moderation_rules(est, user_pubkey)
     # if haskey(cmr.groups, :primal_nsfw)
     #     scopes = cmr.groups[:primal_nsfw].scopes
@@ -1084,28 +1082,37 @@ function check_filterlist(est::DB.CacheStorage; pubkeys)
 end
 
 parsed_settings = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, Any}}() |> ThreadSafe
+parsed_default_settings = Ref{Any}(nothing)
+periodic_parsed_default_settings = Utils.Throttle(; period=15.0, t=0.0)
 
-function ext_user_get_settings(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
-    if pubkey in est.ext[].app_settings 
+function ext_user_get_settings(est::DB.CacheStorage, pubkey)
+    periodic_parsed_default_settings() do
+        s = read(DEFAULT_SETTINGS_FILE[], String)
+        d = JSON.parse(s)
+        d["id"] = Nostr.EventId(SHA.sha256(s))
+        parsed_default_settings[] = d
+    end
+    res = parsed_default_settings[]
+
+    if !isnothing(pubkey) && pubkey in est.ext[].app_settings 
         r = DB.exec(est.ext[].app_settings, DB.@sql("select event_id from app_settings 
                                                     where key = ?1 limit 1"), (pubkey,))[1][1]
-        ismissing(r) && return
-        seid = Nostr.EventId(r)
+        if !ismissing(r)
+            seid = Nostr.EventId(r)
 
-        eml = get(parsed_settings, pubkey, nothing)
-        !isnothing(eml) && eml[1] == seid && return eml[2]
+            eml = get(parsed_settings, pubkey, nothing)
+            !isnothing(eml) && eml[1] == seid && return eml[2]
 
-        e = est.ext[].app_settings[pubkey]
-        d = JSON.parse(e.content)
+            e = est.ext[].app_settings[pubkey]
+            d = JSON.parse(e.content)
+            d["id"] = e.id
 
-        res = (;
-               id=e.id,
-               apply_content_moderation=get(d, "applyContentModeration", true),
-               content_moderation=get(d, "contentModeration", []),
-              )
-        parsed_settings[pubkey] = (seid, res)
-    else
-        res = (; apply_content_moderation=false)
+            for (k, v) in d
+                res[k] = v
+            end
+
+            parsed_settings[pubkey] = (seid, res)
+        end
     end
     res
 end
