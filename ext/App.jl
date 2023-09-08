@@ -625,12 +625,12 @@ function get_notifications(
         notif_d = DB.notif2namedtuple((pubkey, created_at, DB.NotificationType(type),
                                        arg1, arg2, arg3, arg4))
 
-        # if notif_d.type == DB.USER_UNFOLLOWED_YOU
-        #     if !isempty(DB.exe(est.pubkey_followers, DB.@sql("select 1 from kv where pubkey = ? and follower_pubkey = ? limit 1"),
-        #                        pubkey, notif_d.follower))
-        #         continue
-        #     end
-        # end
+        if notif_d.type == DB.USER_UNFOLLOWED_YOU
+            if !isempty(DB.exe(est.pubkey_followers, DB.@sql("select 1 from kv where pubkey = ? and follower_pubkey = ? limit 1"),
+                               pubkey, notif_d.follower))
+                continue
+            end
+        end
 
         is_blocked = false
 
