@@ -310,7 +310,7 @@ function ext_user_unfollowed(est::CacheStorage, e::Nostr.Event, follow_pubkey)
 end
 
 function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)
-    event_hook(est, eid, (:score_event_cb, e.created_at, 1))
+    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, 1))
     event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED, "make_event_hooks", e.id))
@@ -361,14 +361,14 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
 end
 
 function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
-    event_hook(est, parent_eid, (:score_event_cb, e.created_at, 10))
+    event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, 10))
     event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_REPLIED_TO, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO, e.id, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO, "make_event_hooks", e.id, e.id))
 end
 
 function ext_repost(est::CacheStorage, e::Nostr.Event, eid)
-    event_hook(est, eid, (:score_event_cb, e.created_at, 3))
+    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, 3))
     event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED, "make_event_hooks", e.id))
@@ -382,7 +382,7 @@ function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
                        parent_eid, zap_sender(e)))
             exe(est.dyn[:event_zapped], @sql("insert into event_zapped values (?1, ?2)"),
                 parent_eid, zap_sender(e))
-            event_hook(est, parent_eid, (:score_event_cb, e.created_at, 20))
+            event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, 5))
         end
     end
     if valid_zap
@@ -402,9 +402,19 @@ function ext_is_hidden(est::CacheStorage, eid::Nostr.EventId)
 end
 
 # TODO refactor event scoring to use scheduled_hooks to expire scores
-function score_event_cb(est::CacheStorage, e::Nostr.Event, scored_at, increment)
-    tr = isempty(TrustRank.pubkey_rank) ? 1.0 : get(TrustRank.pubkey_rank, e.pubkey, 0.0)
-    increment = trunc(Int, 1e10*tr*increment)
+function score_event_cb(est::CacheStorage, e::Nostr.Event, initiator, scored_at, increment)
+    initiator = Nostr.PubKeyId(initiator)
+
+    increment_ = increment
+
+    # tr = isempty(TrustRank.pubkey_rank) ? 1.0 : get(TrustRank.pubkey_rank, initiator, 0.0)
+    tr = if isempty(TrustRank.pubkey_rank) 
+        1.0 
+    else
+        get(TrustRank.pubkey_rank, initiator, 0.0) > TrustRank.humaness_threshold[] ? 1.0 : 0.0
+    end
+
+    increment = trunc(Int, 1e10*tr*increment/91)
 
     exe(est.event_stats          , @sql("update kv set score = score + ?2 where event_id = ?1"), e.id, increment)
     exe(est.event_stats_by_pubkey, @sql("update kv set score = score + ?3 where event_id = ?2"), e.pubkey, e.id, increment)
