@@ -708,11 +708,13 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
                         exe(est.ext[].preview, @sql("insert into preview values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
                             url, trunc(Int, time()), dldur, r.mimetype, category, 1.0,
                             r.title, r.description, r.image, r.icon_url)
-                        if isempty(exe(est.ext[].event_preview, @sql("select 1 from event_preview where event_id = ?1 and url = ?2"), eid, url))
-                            exe(est.ext[].event_preview, @sql("insert into event_preview values (?1, ?2)"),
-                                eid, url)
-                        end
                     end
+                end
+            end
+            if !isempty(exe(est.ext[].preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
+                if isempty(exe(est.ext[].event_preview, @sql("select 1 from event_preview where event_id = ?1 and url = ?2"), eid, url))
+                    exe(est.ext[].event_preview, @sql("insert into event_preview values (?1, ?2)"),
+                        eid, url)
                 end
             end
         end
