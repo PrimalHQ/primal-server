@@ -636,37 +636,42 @@ function media_url(url, size, anim)
     "$(MEDIA_SERVER[])/media-cache?s=$(size)&a=$(anim)&u=$(URIs.escapeuri(url))"
 end
 
+import_media_lock = ReentrantLock()
 function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, variant_specs::Vector)
     try
         catch_exception(est, :import_media, eid, url) do
             dldur = @elapsed (r = Media.media_variants(est, url, variant_specs; sync=true))
             isnothing(r) && return
-            if isempty(exe(est.ext[].event_media, @sql("select 1 from event_media where event_id = ?1 and url = ?2"), eid, url))
-                exe(est.ext[].event_media, @sql("insert into event_media values (?1, ?2)"),
-                    eid, url)
+            lock(import_media_lock) do
+                if isempty(exe(est.ext[].event_media, @sql("select 1 from event_media where event_id = ?1 and url = ?2"), eid, url))
+                    exe(est.ext[].event_media, @sql("insert into event_media values (?1, ?2)"),
+                        eid, url)
+                end
             end
             for ((size, anim), media_url) in r
-                if isempty(exe(est.ext[].media, @sql("select 1 from media where url = ?1 and size = ?2 and animated = ?3 limit 1"), url, size, anim))
-                    fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(media_url).path)
-                    _, ext = splitext(lowercase(url))
-                    m = if ext in image_exts
-                        try match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file -b $fn`; stdin=devnull), String))
-                        catch _ nothing end
-                    elseif ext in video_exts
-                        try match(r"([0-9]+)x([0-9]+)", read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 $fn`; stdin=devnull), String))
-                        catch _ nothing end
-                    end
-                    # @show (url, dldur, stat(fn).size, fn, m)
-                    if !isnothing(m)
-                        width, height = isnothing(m) ? (0, 0) : (parse(Int, m[1]), parse(Int, m[2]))
-                        mimetype = try
-                            String(chomp(read(pipeline(`file -b --mime-type $fn`; stdin=devnull), String)))
-                        catch _
-                            "application/octet-stream"
+                lock(import_media_lock) do
+                    if isempty(exe(est.ext[].media, @sql("select 1 from media where url = ?1 and size = ?2 and animated = ?3 limit 1"), url, size, anim))
+                        fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(media_url).path)
+                        _, ext = splitext(lowercase(url))
+                        m = if ext in image_exts
+                            try match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file -b $fn`; stdin=devnull), String))
+                            catch _ nothing end
+                        elseif ext in video_exts
+                            try match(r"([0-9]+)x([0-9]+)", read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 $fn`; stdin=devnull), String))
+                            catch _ nothing end
                         end
-                        category = ""
-                        exe(est.ext[].media, @sql("insert into media values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
-                            url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, 1.0)
+                        # @show (url, dldur, stat(fn).size, fn, m)
+                        if !isnothing(m)
+                            width, height = isnothing(m) ? (0, 0) : (parse(Int, m[1]), parse(Int, m[2]))
+                            mimetype = try
+                                String(chomp(read(pipeline(`file -b --mime-type $fn`; stdin=devnull), String)))
+                            catch _
+                                "application/octet-stream"
+                            end
+                            category = ""
+                            exe(est.ext[].media, @sql("insert into media values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
+                                url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, 1.0)
+                        end
                     end
                     @async begin HTTP.get(Media.cdn_url(url, size, anim); readtimeout=15, connect_timeout=5).body; nothing; end
                     # @async begin @show (HTTP.get((@show Media.cdn_url(url, size, anim)); readtimeout=15, connect_timeout=5).body |> length); nothing; end
