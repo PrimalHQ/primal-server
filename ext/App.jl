@@ -675,8 +675,8 @@ function get_notifications(
     for pk in pks
         push!(res, (;
                     kind=Int(USER_PROFILE),
-                    pubkey=pk,
                     content=JSON.json((;
+                                       pubkey=pk,
                                        followers_count=get(est.pubkey_followers_cnt, pk, 0),
                                       ))))
     end
