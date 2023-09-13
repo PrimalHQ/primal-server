@@ -30,6 +30,7 @@ function ext_periodic()
                                 (Media().tasks_per_period, :media_tasks_per_second, :rate),
                                 (Media().max_download_duration, :media_max_download_duration, :nonrate),
                                 (Media().downloads_per_period, :media_downloads_per_second, :rate),
+                                (Media().execute_distributed_active_slots, :media_execute_distributed_active_slots, :nonrate),
                                 (SpamDetection().max_msg_duration, :spam_max_msg_duration, :nonrate),
                                 (SpamDetection().max_spammer_follower_cnt, :max_spammer_follower_cnt, :nonrate),
                                ]

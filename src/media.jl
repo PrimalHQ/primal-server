@@ -306,36 +306,75 @@ end
 
 import Distributed
 execute_distributed_lock = ReentrantLock()
+execute_distributed_slots = [(Ref{Any}(nothing), Ref(false)) for _ in 1:20]
+execute_distributed_active = Ref(true)
+execute_distributed_active_slots = Ref(0) |> ThreadSafe
 function execute_distributed(expr; timeout=20, includes=[])
+    function update_active_slots()
+        execute_distributed_active_slots[] = count([s[] for (p, s) in execute_distributed_slots])
+    end
+
     lock(execute_distributed_lock) do
-        ws = [pid for pid in Distributed.procs() if pid != 1]
-        pid = if isempty(ws)
-            newpid, = Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
-            for fn in includes
-                Distributed.remotecall_eval(Main, newpid, quote; include($fn); nothing; end)
+        for (p, _) in execute_distributed_slots
+            if isnothing(p[])
+                newpid, = Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
+                for fn in includes
+                    Distributed.remotecall_eval(Main, newpid, quote; include($fn); nothing; end)
+                end
+                p[] = newpid
             end
-            newpid
-        else
-            rand(ws)
         end
-        r = Ref{Any}(nothing)
-        @sync begin
-            @async begin
-                tstart = time()
-                while isnothing(r[]) && (time() - tstart < timeout); sleep(0.1); end
-                if isnothing(r[])
-                    kill(Distributed.worker_from_id(pid).config.process, 15)
+    end
+
+    slot = Ref{Any}(nothing)
+    while execute_distributed_active[] && isnothing(slot[])
+        lock(execute_distributed_lock) do
+            for (i, (p, s)) in enumerate(execute_distributed_slots)
+                if !s[]
+                    slot[] = (p, s)
+                    s[] = true
+                    break
                 end
             end
-            try
-                r[] = Distributed.remotecall_eval(Main, pid, expr)
-            catch ex
-                r[] = ex
-                # println(ex)
+        end
+        sleep(1)
+    end
+    execute_distributed_active[] || return
+
+    update_active_slots()
+
+    pid = slot[][1][]
+
+    r = Ref{Any}(nothing)
+    restart = Ref(false)
+
+    @sync begin
+        @async begin
+            tstart = time()
+            while isnothing(r[]) && (time() - tstart < timeout); sleep(0.1); end
+            if isnothing(r[])
+                restart[] = true
             end
         end
-        r[]
+        try
+            r[] = Distributed.remotecall_eval(Main, pid, expr)
+        catch ex
+            r[] = ex
+            # println(ex)
+        end
     end
+
+    lock(execute_distributed_lock) do
+        if restart[]
+            kill(Distributed.worker_from_id(pid).config.process, 15)
+            slot[][1][] = nothing
+        end
+        slot[][2][] = false
+    end
+
+    update_active_slots()
+
+    r[]
 end
 
 function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
@@ -349,59 +388,6 @@ function fetch_resource_metadata(url; proxy=MEDIA_PROXY[])
     # @show (url, r)
     # r isa Exception && println((url, r))
     r isa NamedTuple ? r : (; mimetype="", title="", image="", description="", icon_url="")
-end
-
-function _fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
-    resp = HTTP.get(url; 
-                    readtimeout=15, connect_timeout=15, 
-                    headers=["User-Agent"=>"WhatsApp/2"], proxy)
-
-    doc = try 
-        d = copy(collect(resp.body))
-        doc = Gumbo.parsehtml(String(d))
-    catch ex
-        # @show string(ex)[1:200]
-        # Utils.print_exceptions()
-        error("error parsing html")
-    end
-
-    mimetype = string(get(Dict(resp.headers), "Content-Type", ""))
-    title = image = description = ""
-    for ee in eachmatch(Cascadia.Selector("html > head > meta"), doc.root)
-        e = ee.attributes
-        if haskey(e, "property") && haskey(e, "content")
-            prop = e["property"]
-            if     prop == "og:title"; title = e["content"]
-            elseif prop == "og:image"; image = e["content"]
-            elseif prop == "og:description"; description = e["content"]
-            elseif prop == "twitter:title"; title = e["content"]
-            elseif prop == "twitter:description"; description = e["content"]
-            elseif prop == "twitter:image:src"; image = e["content"]
-            end
-        elseif haskey(e, "name") && haskey(e, "content")
-            if e["name"] == "description"; description = e["content"]; end
-        end
-    end
-    icon_url = ""
-    for ee in eachmatch(Cascadia.Selector("html > head > link"), doc.root)
-        e = ee.attributes
-        # @show string(e)
-        if haskey(e, "rel") && haskey(e, "href")
-            (e["rel"] == "icon" || e["rel"] == "shortcut icon") || continue
-            u = URIs.parse_uri(url)
-            icon_url = try
-                string(URIs.parse_uri(e["href"]))
-            catch _
-                try
-                    string(URIs.URI(; scheme=u.scheme, host=u.host, port=u.port, path=URIs.normpath(u.path*e["href"])))
-                catch _
-                    ""
-                end
-            end
-            break
-        end
-    end
-    (; mimetype, title, image, description, icon_url)
 end
 
 end
