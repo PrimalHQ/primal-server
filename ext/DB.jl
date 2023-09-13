@@ -696,12 +696,12 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
                                               @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
                                           catch _ end
                                       end
-                                      if !isempty(r.icon_url)
-                                          try
-                                              import_media(est, eid, r.icon_url, [(:original, true)]) 
-                                              @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
-                                          catch _ end
-                                      end
+                                      # if !isempty(r.icon_url)
+                                      #     try
+                                      #         import_media(est, eid, r.icon_url, [(:original, true)]) 
+                                      #         @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
+                                      #     catch _ end
+                                      # end
                                       r
                                   end)
                 lock(import_preview_lock) do
