@@ -378,16 +378,16 @@ end
 
 ext_zap_lock = ReentrantLock()
 function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
-    valid_zap = isempty(TrustRank.pubkey_rank) || get(TrustRank.pubkey_rank, e.pubkey, 0.0) > 0.0
+    sender = zap_sender(e)
     lock(ext_zap_lock) do
         if isempty(exe(est.dyn[:event_zapped], @sql("select 1 from event_zapped where event_id = ?1 and zap_sender = ?2 limit 1"),
-                       parent_eid, zap_sender(e)))
+                       parent_eid, sender))
             exe(est.dyn[:event_zapped], @sql("insert into event_zapped values (?1, ?2)"),
-                parent_eid, zap_sender(e))
-            event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, 5))
+                parent_eid, sender)
+            event_hook(est, parent_eid, (:score_event_cb, sender, e.created_at, 5))
         end
     end
-    if valid_zap
+    if ext_is_human(est, sender)
         event_hook(est, parent_eid, (:event_stats_cb, :satszapped, amount_sats))
         event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats))
         event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, e.id, amount_sats))
@@ -396,11 +396,17 @@ function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
 end
 
 function ext_pubkey_zap(est::CacheStorage, e::Nostr.Event, zapped_pk, amount_sats)
-    exe(est.ext[].pubkey_zapped, @sql("update kv set zaps = zaps + 1, satszapped = satszapped + ?2 where pubkey = ?1"), zapped_pk, amount_sats)
+    if ext_is_human(est, zap_sender(e))
+        exe(est.ext[].pubkey_zapped, @sql("update kv set zaps = zaps + 1, satszapped = satszapped + ?2 where pubkey = ?1"), zapped_pk, amount_sats)
+    end
 end
 
 function ext_is_hidden(est::CacheStorage, eid::Nostr.EventId)
     eid in Filterlist.access_event_blocked_spam
+end
+
+function ext_is_human(est::CacheStorage, pubkey::Nostr.PubKeyId)
+    isempty(TrustRank.pubkey_rank) || get(TrustRank.pubkey_rank, pubkey, 0.0) > TrustRank.humaness_threshold[]
 end
 
 # TODO refactor event scoring to use scheduled_hooks to expire scores
@@ -408,15 +414,9 @@ function score_event_cb(est::CacheStorage, e::Nostr.Event, initiator, scored_at,
     initiator = Nostr.PubKeyId(initiator)
 
     increment_ = increment
+    increment = ext_is_human(est, initiator) ? trunc(Int, 1e10*increment/91) : 0
 
-    # tr = isempty(TrustRank.pubkey_rank) ? 1.0 : get(TrustRank.pubkey_rank, initiator, 0.0)
-    tr = if isempty(TrustRank.pubkey_rank) 
-        1.0 
-    else
-        get(TrustRank.pubkey_rank, initiator, 0.0) > TrustRank.humaness_threshold[] ? 1.0 : 0.0
-    end
-
-    increment = trunc(Int, 1e10*tr*increment/91)
+    # push!(Main.stuff, (:score_event_cb, (; eid=e.id, initiator, scored_at, increment_, increment)))
 
     exe(est.event_stats          , @sql("update kv set score = score + ?2 where event_id = ?1"), e.id, increment)
     exe(est.event_stats_by_pubkey, @sql("update kv set score = score + ?3 where event_id = ?2"), e.pubkey, e.id, increment)
