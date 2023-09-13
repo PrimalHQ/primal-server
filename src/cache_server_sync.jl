@@ -60,7 +60,7 @@ function pull_media(src, dst)
         mr1 = rex_(dst, :(DB.exec($tbl, $q)[1][1]))
         mr2 = rex_(src, :(DB.exec($tbl, $q)[1][1]))
 
-        # @show (mr1, mr2)
+        # @show (tblname, mr1, mr2)
 
         ismissing(mr2) && continue
         ismissing(mr1) && (mr1 = 0)

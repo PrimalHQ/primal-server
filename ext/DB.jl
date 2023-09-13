@@ -460,6 +460,14 @@ function notification(
        end
     end
 
+    # if notif_type == USER_UNFOLLOWED_YOU
+    #     local follower = args[1]
+    #     if !isempty(exe(est.pubkey_followers, @sql("select 1 from kv where pubkey = ? and follower_pubkey = ? limit 1"),
+    #                     pubkey, follower))
+    #         return
+    #     end
+    # end
+
     catch_exception(est, :notification_settings, callargs) do
         if !isempty(local r = DB.exe(est.ext[].notification_settings, 
                                      @sql("select enabled from notification_settings where pubkey = ?1 and type = ?2 limit 1"),
