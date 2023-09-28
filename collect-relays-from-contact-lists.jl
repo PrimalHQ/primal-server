@@ -14,7 +14,7 @@ end
 errs
 ##
 running=Utils.PressEnterToStop()
-@time open("primal-caching-service/relays-mined-from-contact-lists.txt", "w+") do f
+@time open("relays-mined-from-contact-lists.txt", "w+") do f
     r = Set() |> Utils.ThreadSafe
     i = Ref(0) |> Utils.ThreadSafe
     tstart = time()
