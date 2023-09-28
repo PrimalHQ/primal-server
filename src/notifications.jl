@@ -24,7 +24,7 @@ JSON.lower(type::NotificationType) = Int(type)
 
 sqltype(::Type{ShardedSqliteDict{K, V}}, ::Type{NotificationType}) where {K, V} = "int8"
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{NotificationType}) where {K, V} = DBConversionFuncs(x->Int(x), x->NotificationType(x))
-
+##
 notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           USER_UNFOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
 
@@ -33,8 +33,8 @@ notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           YOUR_POST_WAS_REPOSTED=>((:your_post, Nostr.EventId), (:who_reposted_it, Nostr.PubKeyId)),
                           YOUR_POST_WAS_REPLIED_TO=>((:your_post, Nostr.EventId), (:who_replied_to_it, Nostr.PubKeyId), (:reply, Nostr.EventId)),
 
-                          YOU_WERE_MENTIONED_IN_POST=>((:you_were_mentioned_in, Nostr.EventId),),
-                          YOUR_POST_WAS_MENTIONED_IN_POST=>((:your_post, Nostr.EventId), (:your_post_were_mentioned_in, Nostr.EventId)),
+                          YOU_WERE_MENTIONED_IN_POST=>((:you_were_mentioned_in, Nostr.EventId), (:you_were_mentioned_by, Nostr.EventId)),
+                          YOUR_POST_WAS_MENTIONED_IN_POST=>((:your_post, Nostr.EventId), (:your_post_were_mentioned_in, Nostr.EventId), (:your_post_was_mentioned_by, Nostr.PubKeyId)),
 
                           POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED=>((:post_you_were_mentioned_in, Nostr.EventId), (:who_zapped_it, Nostr.PubKeyId), (:satszapped, Int)),
                           POST_YOU_WERE_MENTIONED_IN_WAS_LIKED=>((:post_you_were_mentioned_in, Nostr.EventId), (:who_liked_it, Nostr.PubKeyId)),
@@ -45,7 +45,7 @@ notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_liked_it, Nostr.PubKeyId)),
                           POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_reposed_it, Nostr.PubKeyId)),
                           POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_replied_to_it, Nostr.PubKeyId), (:reply, Nostr.EventId))])
-
+##
 Base.@kwdef struct Notifications
     directory::String
     pqconnstr::String

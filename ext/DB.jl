@@ -519,12 +519,12 @@ function notifications_cb(est::CacheStorage, e::Nostr.Event, notif_type, args...
     elseif notif_type == YOU_WERE_MENTIONED_IN_POST
         you = conv(Nostr.PubKeyId, args[1])
         notification(est, you, e.created_at, notif_type,
-                     #= their_post =# e.id)
+                     #= their_post =# e.id, #= mentioned_by =# e.pubkey)
 
     elseif notif_type == YOUR_POST_WAS_MENTIONED_IN_POST
         e0 = est.events[conv(Nostr.EventId, args[1])]
         notification(est, e.pubkey, e.created_at, notif_type,
-                     #= your_post =# e.id, #= their_post =# e0.id)
+                     #= your_post =# e.id, #= their_post =# e0.id, #= mentioned_by =# e0.pubkey)
 
     elseif notif_type in [POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED,
                           POST_YOU_WERE_MENTIONED_IN_WAS_LIKED,

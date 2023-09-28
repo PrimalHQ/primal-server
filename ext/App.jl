@@ -247,7 +247,7 @@ function scored_content(
     timeframe == :mostzapped && push!(where_exprs, "$field > 0")
 
     posts = [] |> ThreadSafe
-    posts_filtered = Tuple{Nostr.EventId, Float64}[]
+    posts_filtered = Tuple{Nostr.EventId, Int}[]
 
     n = limit
     while true
