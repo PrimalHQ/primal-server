@@ -323,7 +323,7 @@ function ext_user_unfollowed(est::CacheStorage, e::Nostr.Event, follow_pubkey)
 end
 
 function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)
-    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :reaction, 1))
+    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :like, 1))
     event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED, "make_event_hooks", e.id))
