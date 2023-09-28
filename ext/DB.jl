@@ -473,6 +473,7 @@ function notification(
        end
     end
 
+    notif_type == USER_UNFOLLOWED_YOU && return
     # if notif_type == USER_UNFOLLOWED_YOU
     #     local follower = args[1]
     #     if !isempty(exe(est.pubkey_followers, @sql("select 1 from kv where pubkey = ? and follower_pubkey = ? limit 1"),
