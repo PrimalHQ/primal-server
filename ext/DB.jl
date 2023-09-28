@@ -245,6 +245,19 @@ function ext_init(est::CacheStorage)
                                                                "create index if not exists event_zapped_event_id_zap_sender on event_zapped (event_id asc, zap_sender asc)",
                                                               ])
 ##
+    est.dyn[:stuff] = DB.SqliteDict(String, Int, "$(est.commons.directory)/db/stuff"; est.commons.dbargs...,
+                                    table="stuff",
+                                    init_queries=["create table if not exists stuff (
+                                                  data text not null,
+                                                  created_at integer not null
+                                                  )",
+                                                  "create index if not exists stuff_created_at on stuff (created_at desc)",
+                                                 ])
+##
+end
+
+function insert_stuff(est::CacheStorage, data)
+    DB.exec(est.dyn[:stuff], @sql("insert into stuff values (?1, ?2)"), (JSON.json(data), trunc(Int, time())))
 end
 
 function ext_complete(est::CacheStorage)
