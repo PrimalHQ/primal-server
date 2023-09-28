@@ -323,7 +323,7 @@ function ext_user_unfollowed(est::CacheStorage, e::Nostr.Event, follow_pubkey)
 end
 
 function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)
-    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, 1))
+    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :reaction, 1))
     event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED, "make_event_hooks", e.id))
@@ -376,14 +376,14 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
 end
 
 function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
-    event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, 10))
+    event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, :reply, 10))
     event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_REPLIED_TO, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO, e.id, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO, "make_event_hooks", e.id, e.id))
 end
 
 function ext_repost(est::CacheStorage, e::Nostr.Event, eid)
-    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, 3))
+    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 3))
     event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED, "make_event_hooks", e.id))
@@ -392,14 +392,7 @@ end
 ext_zap_lock = ReentrantLock()
 function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
     sender = zap_sender(e)
-    lock(ext_zap_lock) do
-        if isempty(exe(est.dyn[:event_zapped], @sql("select 1 from event_zapped where event_id = ?1 and zap_sender = ?2 limit 1"),
-                       parent_eid, sender))
-            exe(est.dyn[:event_zapped], @sql("insert into event_zapped values (?1, ?2)"),
-                parent_eid, sender)
-            event_hook(est, parent_eid, (:score_event_cb, sender, e.created_at, 5))
-        end
-    end
+    event_hook(est, parent_eid, (:score_event_cb, sender, e.created_at, :zap, 5))
     if ext_is_human(est, sender)
         event_hook(est, parent_eid, (:event_stats_cb, :satszapped, amount_sats))
         event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats))
@@ -423,13 +416,32 @@ function ext_is_human(est::CacheStorage, pubkey::Nostr.PubKeyId)
 end
 
 # TODO refactor event scoring to use scheduled_hooks to expire scores
-function score_event_cb(est::CacheStorage, e::Nostr.Event, initiator, scored_at, increment)
+function score_event_cb(est::CacheStorage, e::Nostr.Event, initiator, scored_at, action, increment)
     initiator = Nostr.PubKeyId(initiator)
+    action = Symbol(action)
 
     increment_ = increment
     increment = ext_is_human(est, initiator) ? trunc(Int, 1e10*increment/91) : 0
 
-    # push!(Main.stuff, (:score_event_cb, (; eid=e.id, initiator, scored_at, increment_, increment)))
+    ref_kind = 
+    if     action == :like; Int(Nostr.REACTION)
+    elseif action == :reply; Int(Nostr.TEXT_NOTE)
+    elseif action == :repost; Int(Nostr.REPOST)
+    elseif action == :zap; Int(Nostr.ZAP_RECEIPT)
+    else; error("unsupported action $(action)")
+    end
+    if exe(est.event_pubkey_action_refs, @sql("select count(1) from kv where event_id = ?1 and ref_pubkey = ?2 and ref_kind = ?3"),
+           e.id, initiator, ref_kind)[1][1] > 1
+        # @show (:uniquepkcheck_failed, e.id, initiator, ref_kind, action)
+        increment = 0
+    else
+        # @show (:uniquepkcheck_ok, e.id, initiator, ref_kind, action)
+    end
+
+    # push!(Main.stuff, (:score_event_cb, (; eid=e.id, initiator, scored_at, action, increment_, increment)))
+    insert_stuff(est, (:score_event_cb, (; eid=e.id, initiator, scored_at, action, increment_, increment)))
+
+    increment > 0 || return
 
     exe(est.event_stats          , @sql("update kv set score = score + ?2 where event_id = ?1"), e.id, increment)
     exe(est.event_stats_by_pubkey, @sql("update kv set score = score + ?3 where event_id = ?2"), e.pubkey, e.id, increment)
