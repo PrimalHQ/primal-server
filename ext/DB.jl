@@ -451,7 +451,7 @@ function score_event_cb(est::CacheStorage, e::Nostr.Event, initiator, scored_at,
     end
 
     # push!(Main.stuff, (:score_event_cb, (; eid=e.id, initiator, scored_at, action, increment_, increment)))
-    insert_stuff(est, (:score_event_cb, (; eid=e.id, initiator, scored_at, action, increment_, increment)))
+    # insert_stuff(est, (:score_event_cb, (; eid=e.id, initiator, scored_at, action, increment_, increment)))
 
     increment > 0 || return
 
