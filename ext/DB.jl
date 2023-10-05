@@ -291,7 +291,11 @@ function ext_preimport(est::CacheStorage, e::Nostr.Event)
 end
 
 function ext_pubkey(est::CacheStorage, e::Nostr.Event)
-    exe(est.ext[].pubkey_zapped, @sql("insert or ignore into kv (pubkey, zaps, satszapped) values (?1, ?2, ?3)"), e.pubkey, 0, 0)
+    ext_pubkey(est, e.pubkey)
+end
+
+function ext_pubkey(est::CacheStorage, pubkey::Nostr.PubKeyId)
+    exe(est.ext[].pubkey_zapped, @sql("insert or ignore into kv (pubkey, zaps, satszapped) values (?1, ?2, ?3)"), pubkey, 0, 0)
 end
 
 function ext_metadata_changed(est::CacheStorage, e::Nostr.Event)
@@ -398,7 +402,15 @@ function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
         event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats))
         event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, e.id, amount_sats))
         event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED, "make_event_hooks", e.id, amount_sats))
+        import_zap_receipt(est, e, parent_eid, amount_sats)
     end
+end
+
+function import_zap_receipt(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
+    sender = zap_sender(e)
+    receiver = zap_receiver(e)
+    exe(est.zap_receipts, @sql("insert into zap_receipts (zap_receipt_id, created_at, sender, receiver, amount_sats, event_id) values (?1, ?2, ?3, ?4, ?5, ?6)"),
+        e.id, e.created_at, sender, receiver, amount_sats, parent_eid)
 end
 
 function ext_pubkey_zap(est::CacheStorage, e::Nostr.Event, zapped_pk, amount_sats)

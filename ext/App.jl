@@ -1168,3 +1168,16 @@ register_cache_function(:empty_analytics_cache,
                             # ext_invalidate_cached_content_moderation(est, nothing)
                         end, 600)
 ##
+
+function ext_user_profile(est::DB.CacheStorage, pubkey)
+    if !isempty(local r = DB.exe(est.ext[].pubkey_zapped, DB.@sql("select zaps, satszapped from kv where pubkey = ?1"), pubkey))
+        total_zap_count, total_satszapped = r[1]
+    else
+        total_zap_count = total_satszapped = 0
+    end
+    (;
+     total_zap_count,
+     total_satszapped,
+    )
+end
+
