@@ -21,6 +21,7 @@ exceptions = CircularBuffer(200)
 est = Ref{Any}(nothing)
 
 short_urls = Ref{Any}(nothing)
+verified_users = Ref{Any}(nothing)
 
 function catch_exception(body::Function, handler::Symbol, args...)
     try
@@ -78,6 +79,13 @@ function start(cache_storage, pqconnstr)
                                                         "create index if not exists short_urls_url on short_urls (url asc)",
                                                         "create index if not exists short_urls_path on short_urls (path asc)",
                                                        ])
+
+    verified_users[] = DB.PQDict{String, Int}("verified_users", pqconnstr,
+                                              init_queries=["create table if not exists verified_users (name varchar(200) not null, pubkey bytea not null)",
+                                                            "create index if not exists verified_users_pubkey on verified_users (pubkey asc)",
+                                                            "create index if not exists verified_users_name on verified_users (name asc)",
+                                                           ])
+    nothing
 end
 
 function stop()
@@ -86,6 +94,8 @@ function stop()
     server[] = nothing
     close(short_urls[])
     short_urls[] = nothing
+    close(verified_users[])
+    verified_users[] = nothing
 end
 
 function collect_metadata(pubkeys)
@@ -215,11 +225,9 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                 twitter_card = "summary_large_image")
 
     elseif !isnothing(local m = match(r"^/(.*)", path))
-        name = m[1]
-        nj = get_nostr_json()
-        if haskey(nj, name)
-            pk = Nostr.PubKeyId(nj[name])
-            return mdpubkey_(pk)
+        name = string(m[1])
+        if !isempty(local pks = nostr_json_query_by_name(name))
+            return mdpubkey_(pks[1])
         end
 
     end
@@ -234,18 +242,31 @@ index_elems = Dict{Symbol, EzXML.Node}()
 # index_defaults = Dict{Symbol, String}()
 index_lock = ReentrantLock()
 
-nostr_json_reading = Utils.Throttle(; period=5.0, t=0)
-nostr_json = Ref(Dict{String, String}())
+# nostr_json_reading = Utils.Throttle(; period=5.0, t=0)
+# nostr_json = Ref(Dict{String, String}())
 
 APP_ROOT = Ref("www")
-NOSTR_JSON_FILE = Ref("nostr.json")
+# NOSTR_JSON_FILE = Ref("nostr.json")
 
-function get_nostr_json()
-    nostr_json_reading() do
-        # nostr_json[] = JSON.parse(read("$(APP_ROOT[])/.well-known/nostr.json", String))["names"]
-        nostr_json[] = JSON.parse(read(NOSTR_JSON_FILE[], String))["names"]
+# function get_nostr_json()
+#     nostr_json_reading() do
+#         # nostr_json[] = JSON.parse(read("$(APP_ROOT[])/.well-known/nostr.json", String))["names"]
+#         nostr_json[] = JSON.parse(read(NOSTR_JSON_FILE[], String))["names"]
+#         # nostr_json[] = Dict([name=>Nostr.hex(Nostr.PubKeyId(pk)) for (name, pk) in DB.rows(verified_users[])])
+#     end
+#     nostr_json[]
+# end
+
+nostr_json_query_lock = ReentrantLock()
+function nostr_json_query_by_name(name::String)
+    lock(nostr_json_query_lock) do 
+        [Nostr.PubKeyId(pk) for (pk,) in DB.exec(verified_users[], DB.@sql("select pubkey from verified_users where name = ?1"), (name,))]
     end
-    nostr_json[]
+end
+function nostr_json_query_by_pubkey(pubkey::Nostr.PubKeyId)
+    lock(nostr_json_query_lock) do 
+        [name for (name,) in DB.exec(verified_users[], DB.@sql("select name from verified_users where pubkey = ?1"), (pubkey,))]
+    end
 end
 
 function preview_handler(req::HTTP.Request)
@@ -332,11 +353,11 @@ function nostr_json_handler(req::HTTP.Request)
         host = Dict(req.headers)["Host"]
         path = req.target
         uri = HTTP.URI("https://$(host)$(path)")
-        nj = get_nostr_json()
+        nj = Dict()
         if !isnothing(local m = match(r"^name=(.*)", uri.query))
-            name = m[1]
-            if haskey(nj, name)
-                nj = Dict([name=>nj[name]])
+            name = string(m[1])
+            if !isempty(local pks = nostr_json_query_by_name(name))
+                nj = Dict([name=>pks[1]])
             end
         end
         HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json((; names=nj), 2))
