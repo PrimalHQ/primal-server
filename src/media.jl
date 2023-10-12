@@ -377,6 +377,20 @@ function execute_distributed(expr; timeout=20, includes=[])
     r[]
 end
 
+function execute_distributed_kill_all()
+    lock(execute_distributed_lock) do
+        for (p, s) in Media.execute_distributed_slots
+            println("killing process $(p[])")
+            try kill(Distributed.worker_from_id(p[]).config.process, 15) catch _ end
+            s[] = false
+        end
+    end
+    for p in Distributed.workers()
+        println("killing process $(p)")
+        try kill(Distributed.worker_from_id(p).config.process, 15) catch _ end
+    end
+end
+
 function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
     includes = []
     fn = "fetch-web-page-meta-data.jl"
