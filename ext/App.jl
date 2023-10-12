@@ -600,6 +600,7 @@ function get_notifications(
         pubkey,
         limit::Int=1000, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
+        type=nothing,
     )
     # limit <= 1000 || error("limit too big")
     limit = min(limit, 1000) # iOS app was requesting limit=~13000
@@ -613,13 +614,21 @@ function get_notifications(
     pks = Set{Nostr.PubKeyId}()
     eids = Set{Nostr.EventId}()
 
-    for r in
+    rs = if isnothing(type)
         DB.exe(est.ext[].notifications.pubkey_notifications, 
                DB.@sql("select * from kv 
                        where pubkey = ? and created_at >= ? and created_at <= ?
                        order by created_at desc limit ? offset ?"),
                pubkey, since, until, limit, offset)
-
+    else
+        DB.exe(est.ext[].notifications.pubkey_notifications, 
+               DB.@sql("select * from kv 
+                       where pubkey = ? and created_at >= ? and created_at <= ?
+                       and type = ?
+                       order by created_at desc limit ? offset ?"),
+               pubkey, since, until, type, limit, offset)
+    end
+    for r in rs
         (_, created_at, type, arg1, arg2, arg3, arg4) = r
 
         notif_d = DB.notif2namedtuple((pubkey, created_at, DB.NotificationType(type),
