@@ -18,7 +18,11 @@ access_pubkey_unblocked    = Set{Nostr.PubKeyId}() |> ThreadSafe
 analytics_pubkey_unblocked = Set{Nostr.PubKeyId}() |> ThreadSafe
 
 access_pubkey_blocked_spam = OrderedSet{Nostr.PubKeyId}() |> ThreadSafe
+access_pubkey_unblocked_spam = Set{Nostr.PubKeyId}() |> ThreadSafe
 access_event_blocked_spam  = OrderedSet{Nostr.EventId}() |> ThreadSafe
+
+access_pubkey_blocked_nsfw = Set{Nostr.PubKeyId}() |> ThreadSafe
+access_pubkey_unblocked_nsfw = Set{Nostr.PubKeyId}() |> ThreadSafe
 
 function get_dict()
     d = Dict()

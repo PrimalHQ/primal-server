@@ -880,11 +880,12 @@ end
 
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
     cmr = compile_content_moderation_rules(est, user_pubkey)
-    if haskey(cmr.groups, :primal_spam) && pubkey in Filterlist.access_pubkey_blocked_spam
+    if haskey(cmr.groups, :primal_spam) && pubkey in Filterlist.access_pubkey_blocked_spam && !(pubkey in Filterlist.access_pubkey_unblocked_spam)
         scopes = cmr.groups[:primal_spam].scopes
         return (isempty(scopes) ? true : scope in scopes)
     end
-    if haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
+    # if haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
+    if haskey(cmr.groups, :primal_nsfw) && pubkey in Filterlist.access_pubkey_blocked_nsfw && !(pubkey in Filterlist.access_pubkey_unblocked_nsfw)
         scopes = cmr.groups[:primal_nsfw].scopes
         return (isempty(scopes) ? true : scope in scopes)
     end
@@ -1191,5 +1192,28 @@ function ext_user_profile(est::DB.CacheStorage, pubkey)
      total_zap_count,
      total_satszapped,
     )
+end
+
+lists = Ref{Any}(nothing)
+function start(pqconnstr)
+    lists[] = DB.PQDict{String, Int}("lists", pqconnstr,
+                                     init_queries=["create table if not exists lists (list varchar(200) not null, pubkey bytea not null, added_at int not null)",
+                                                   "create index if not exists lists_list on lists (list asc)",
+                                                   "create index if not exists lists_pubkey on lists (pubkey asc)",
+                                                   "create index if not exists lists_added_at on lists (added_at desc)",
+                                                  ])
+end
+function get_list(list)
+    [Nostr.PubKeyId(pk) for (pk,) in DB.exec(lists[], "select pubkey from lists where list = ?1", (list,))]
+end
+function load_lists()
+    for (list, coll) in [
+                         ("spam_allow", Filterlist.access_pubkey_unblocked_spam),
+                         ("spam_block", Filterlist.access_pubkey_blocked_spam),
+                         ("nsfw_allow", Filterlist.access_pubkey_unblocked_nsfw),
+                         ("nsfw_block", Filterlist.access_pubkey_blocked_nsfw),
+                        ]
+        union!(coll, get_list(list))
+    end
 end
 
