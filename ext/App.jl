@@ -1243,4 +1243,7 @@ function load_lists()
         union!(coll, get_list(list))
     end
 end
+function remove_from_list(list::String, pk::Nostr.PubKeyId)
+    DB.exec(lists[], "delete from lists where list = ?1 and pubkey = ?2", (list, pk))
+end
 
