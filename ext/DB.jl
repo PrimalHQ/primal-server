@@ -367,15 +367,18 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
         end
     end
 
-    for_hashtags(est, e) do hashtag
-        exe(est.ext[].event_hashtags, @sql("insert into event_hashtags values (?1, ?2, ?3)"),
-            e.id, hashtag, e.created_at)
-        if isempty(exec(est.ext[].hashtags, @sql("select 1 from hashtags where hashtag = ?1 limit 1"), (hashtag,)))
-            exec(est.ext[].hashtags, @sql("insert into hashtags values (?1, ?2)"), (hashtag, 0))
+    if ext_is_human(est, e.pubkey)
+        for_hashtags(est, e) do hashtag
+            hashtag = lowercase(hashtag)
+            exe(est.ext[].event_hashtags, @sql("insert into event_hashtags values (?1, ?2, ?3)"),
+                e.id, hashtag, e.created_at)
+            if isempty(exec(est.ext[].hashtags, @sql("select 1 from hashtags where hashtag = ?1 limit 1"), (hashtag,)))
+                exec(est.ext[].hashtags, @sql("insert into hashtags values (?1, ?2)"), (hashtag, 0))
+            end
+            d_score = +1
+            exec(est.ext[].hashtags, @sql("update hashtags set score = score + ?2 where hashtag = ?1"), (hashtag, d_score))
+            schedule_hook(est, trunc(Int, time()+4*3600), (:expire_hashtag_score_cb, hashtag, d_score))
         end
-        d_score = +1
-        exec(est.ext[].hashtags, @sql("update hashtags set score = score + ?2 where hashtag = ?1"), (hashtag, d_score))
-        schedule_hook(est, trunc(Int, time()+4*3600), (:expire_hashtag_score_cb, hashtag, d_score))
     end
 end
 

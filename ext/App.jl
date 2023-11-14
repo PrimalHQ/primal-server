@@ -953,34 +953,43 @@ function event_preview_response(est::DB.CacheStorage, eid::Nostr.EventId)
     isempty(resources) ? [] : [(; kind=Int(LINK_METADATA), content=JSON.json((; event_id=eid, resources)))]
 end
 
-periodic_hashtag_whitelist = Utils.Throttle(; period=5.0, t=0.0)
+periodic_hashtag_lists = Utils.Throttle(; period=5.0, t=0.0)
 hashtag_whitelist = Set{String}()
+hashtag_filterlist = Set{String}()
 
 HASHTAG_WHITELIST = Ref("hashtag-whitelist.txt")
+HASHTAG_FILTERLIST = Ref("hashtag-filterlist.txt")
 
-function update_hashtag_whitelist()
-    periodic_hashtag_whitelist() do
+function update_hashtag_lists()
+    periodic_hashtag_lists() do
         empty!(hashtag_whitelist)
         isfile(HASHTAG_WHITELIST[]) && for s in readlines(HASHTAG_WHITELIST[])
             startswith(s, "-----") && break
             ht = split(s)[1][30:end]
             push!(hashtag_whitelist, ht)
         end
+
+        empty!(hashtag_filterlist)
+        isfile(HASHTAG_FILTERLIST[]) && for s in readlines(HASHTAG_FILTERLIST[])
+            isempty(s) || push!(hashtag_filterlist, s)
+        end
     end
 end
 
-function trending_hashtags(est::DB.CacheStorage; created_after::Int=trunc(Int, time()-7*24*3600))
+function trending_hashtags(est::DB.CacheStorage; created_after::Int=trunc(Int, time()-7*24*3600), curated=true)
+    # limit = min(500, limit)
     # res = []
     # for (ht, cnt) in DB.exec(est.ext[].event_hashtags, DB.@sql("select lower(hashtag), count(1) as cnt from event_hashtags where created_at >= ?1 group by lower(hashtag) order by cnt desc"), (created_after,))
     #     ht in hashtag_whitelist && push!(res, (ht, cnt))
     # end
-    update_hashtag_whitelist()
+    update_hashtag_lists()
     hts = Accumulator{String, Float32}()
     eid2pk = Dict{Nostr.EventId, Nostr.PubKeyId}()
     eid2followers = Dict{Nostr.PubKeyId, Int}()
     for (i, (eid, ht)) in enumerate(DB.exec(est.ext[].event_hashtags, DB.@sql("select event_id, hashtag from event_hashtags where created_at >= ?1 order by created_at asc"), (created_after,)))
         yield()
-        ht in hashtag_whitelist || continue
+        curated && (ht in hashtag_whitelist || continue)
+        # curated && (ht in hashtag_filterlist && continue)
         eid = Nostr.EventId(eid)
         pk = get!(eid2pk, eid) do; est.events[eid].pubkey end
         nposts = get!(eid2followers, pk) do; DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ?1"), pk)[1][1] end
@@ -991,11 +1000,11 @@ function trending_hashtags(est::DB.CacheStorage; created_after::Int=trunc(Int, t
     [(; kind=Int(HASHTAGS), content=JSON.json(res))]
 end
 
-@cached 600  trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
-@cached 3600 trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-7*24*3600))
+@cached 600 trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
+@cached 600 trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
 
 function trending_images(est::DB.CacheStorage; created_after::Int=trunc(Int, time()-4*3600), limit=20)
-    update_hashtag_whitelist()
+    update_hashtag_lists()
     res = []
     stats = Dict()
     eids = Set()
