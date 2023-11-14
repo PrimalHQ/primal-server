@@ -26,6 +26,7 @@ union!(exposed_functions, Set([
                      :get_default_app_settings,
                      :get_default_relays,
                      :get_recommended_users,
+                     :get_suggested_users,
                      :user_profile_scored_content,
                      :search,
                      :relays,
@@ -71,6 +72,7 @@ LINK_METADATA=10_000_128
 FILTERLISTED=10_000_130
 RECOMMENDED_USERS=10_000_200
 NOTIFICATIONS_SUMMARY_2=10_000_132
+SUGGESTED_USERS=10_000_134
 
 # ------------------------------------------------------ #
 
@@ -504,6 +506,35 @@ function get_recommended_users(est::DB.CacheStorage)
     end
 
     res = []
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
+    res
+end
+
+SUGGESTED_USERS_FILE = Ref("suggested-accounts.json")
+
+function get_suggested_users(est::DB.CacheStorage)
+    isfile(SUGGESTED_USERS_FILE[]) || return []
+
+    res_meta_data = Set()
+    r = []
+    for (group, users) in JSON.parse(read(SUGGESTED_USERS_FILE[], String))
+        g = (; group, members=[])
+        push!(r, g)
+        for (pubkey, name) in users
+            push!(g.members, ((; pubkey, name)))
+            pk = Nostr.PubKeyId(pubkey)
+            if pk in est.meta_data
+                eid = est.meta_data[pk]
+                if eid in est.events
+                    push!(res_meta_data, est.events[eid])
+                end
+            end
+        end
+    end
+
+    res = Any[(; kind=SUGGESTED_USERS, content=JSON.json(r))]
     res_meta_data = collect(values(res_meta_data))
     append!(res, res_meta_data)
     append!(res, user_scores(est, res_meta_data))
