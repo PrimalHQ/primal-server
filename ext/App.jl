@@ -41,6 +41,7 @@ union!(exposed_functions, Set([
                      :trending_images,
                          :trending_images_4h,
                      :upload,
+                     :upload_chunk,
                      :report_user,
                      :report_note,
                      :get_filterlist,
@@ -73,6 +74,7 @@ FILTERLISTED=10_000_130
 RECOMMENDED_USERS=10_000_200
 NOTIFICATIONS_SUMMARY_2=10_000_132
 SUGGESTED_USERS=10_000_134
+UPLOAD_CHUNK=10_000_135
 
 # ------------------------------------------------------ #
 
@@ -1081,16 +1083,10 @@ end
 UPLOADS_DIR = Ref("uploads")
 MEDIA_URL_ROOT = Ref("https://media.primal.net/uploads")
 URL_SHORTENING_SERVICE = Ref("http://127.0.0.1:14001/url-shortening?u=")
+MEDIA_UPLOAD_PATH = Ref("/mnt/ppr1/var/www/cdn/incoming")
 
-function upload(est::DB.CacheStorage; event_from_user::Dict)
-    DB.PG_DISABLE[] && return []
-
-    e = parse_event_from_user(event_from_user)
-    e.kind == Int(UPLOAD) || error("invalid event kind")
-
-    contents = e.content
-    data = Base64.base64decode(contents[findfirst(',', contents)+1:end])
-    key = (; type="member_upload", pubkey=e.pubkey, sha256=bytes2hex(SHA.sha256(data)))
+function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
+    key = (; type="member_upload", pubkey, sha256=bytes2hex(SHA.sha256(data)))
     (mi, lnk) = Media.media_import((_)->data, key; media_path=UPLOADS_DIR[])
     _, ext = splitext(lnk)
     url = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
@@ -1099,9 +1095,9 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     width, height = isnothing(wh) ? (0, 0) : wh
     mimetype = Media.parse_image_mimetype(data)
 
-    if isempty(DB.exe(est.ext[].media_uploads, DB.@sql("select 1 from media_uploads where pubkey = ?1 and key = ?2 limit 1"), e.pubkey, JSON.json(key)))
+    if isempty(DB.exe(est.ext[].media_uploads, DB.@sql("select 1 from media_uploads where pubkey = ?1 and key = ?2 limit 1"), pubkey, JSON.json(key)))
         DB.exe(est.ext[].media_uploads, DB.@sql("insert into media_uploads values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"), 
-               e.pubkey,
+               pubkey,
                key.type, JSON.json(key),
                trunc(Int, time()),
                string(URIs.parse_uri(url).path),
@@ -1111,7 +1107,8 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
                width, height, 0.0)
     end
 
-    surl = String(HTTP.get("$(URL_SHORTENING_SERVICE[])$(URIs.escapeuri(url))").body)
+    # surl = String(HTTP.get("$(URL_SHORTENING_SERVICE[])$(URIs.escapeuri(url))").body)
+    surl = Main.InternalServices.url_shortening(url)
 
     if splitext(surl)[2] in [".jpg", ".png", ".gif"]
         r = Media.media_variants(est, surl, Media.all_variants; sync=true, proxy=nothing)
@@ -1121,6 +1118,45 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     end
 
     [(; kind=Int(UPLOADED), content=surl)]
+end
+
+function upload(est::DB.CacheStorage; event_from_user::Dict)
+    DB.PG_DISABLE[] && return []
+
+    e = parse_event_from_user(event_from_user)
+    e.kind == Int(UPLOAD) || error("invalid event kind")
+
+    contents = e.content
+    data = Base64.base64decode(contents[findfirst(',', contents)+1:end])
+
+    import_upload(est, e.pubkey, data)
+end
+
+function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
+    DB.PG_DISABLE[] && return []
+
+    e = parse_event_from_user(event_from_user)
+    e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
+
+    c = JSON.parse(e.content)
+    ulid = Base.UUID(c["upload_id"])
+
+    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))-$(ulid)"
+    chunklen = 0
+    open(fn, "a+") do f
+        seek(f, c["offset"])
+        data = Base64.base64decode(contents[findfirst(',', c["data"])+1:end])
+        write(f, data)
+        chunklen = length(data)
+    end
+    if c["file_length"] == c["offset"] + chunklen
+        data = read(fn)
+        res = import_upload(est; data)
+        #rm(fn)
+        res
+    else
+        []
+    end
 end
 
 REPORTED_PUBKEY = 1

@@ -432,6 +432,28 @@ short_urls_chars = ['A':'Z'..., 'a':'z'...]
 
 URL_SHORTENING_ROOT_URL = Ref("https://m.primal.net")
 
+function url_shortening(url)
+    r = DB.exec(short_urls[], DB.@sql("select path, ext from short_urls where url = ?1 limit 1"), (url,))
+    if isempty(r)
+        maxidx = DB.exec(short_urls[], DB.@sql("select max(idx) from short_urls"))[1][1]
+        ismissing(maxidx) && (maxidx = 0)
+        idx = maxidx + 1
+        i = 1000000+idx
+        cs = []
+        while i > 0
+            push!(cs, short_urls_chars[i % length(short_urls_chars) + 1])
+            i = i ÷ length(short_urls_chars)
+        end
+        u = URIs.parse_uri(url)
+        ext = lowercase(splitext(u.path)[end])
+        spath = join(reverse(cs))
+        DB.exec(short_urls[], DB.@sql("insert into short_urls values (?1, ?2, ?3, ?4)"), (idx, url, spath, ext))
+    else
+        spath, ext = r[1]
+    end
+    "$(URL_SHORTENING_ROOT_URL[])/$spath$ext"
+end
+
 function url_shortening_handler(req::HTTP.Request)
     catch_exception(:url_shortening_handler, req) do
         lock(short_urls_lock) do
@@ -439,25 +461,7 @@ function url_shortening_handler(req::HTTP.Request)
             path, query = split(req.target, '?')
             args = NamedTuple([Symbol(k)=>v for (k, v) in [split(s, '=') for s in split(query, '&')]])
             url = string(URIs.unescapeuri(args.u))
-            r = DB.exec(short_urls[], DB.@sql("select path, ext from short_urls where url = ?1 limit 1"), (url,))
-            if isempty(r)
-                maxidx = DB.exec(short_urls[], DB.@sql("select max(idx) from short_urls"))[1][1]
-                ismissing(maxidx) && (maxidx = 0)
-                idx = maxidx + 1
-                i = 1000000+idx
-                cs = []
-                while i > 0
-                    push!(cs, short_urls_chars[i % length(short_urls_chars) + 1])
-                    i = i ÷ length(short_urls_chars)
-                end
-                u = URIs.parse_uri(url)
-                ext = lowercase(splitext(u.path)[end])
-                spath = join(reverse(cs))
-                DB.exec(short_urls[], DB.@sql("insert into short_urls values (?1, ?2, ?3, ?4)"), (idx, url, spath, ext))
-            else
-                spath, ext = r[1]
-            end
-            res = "$(URL_SHORTENING_ROOT_URL[])/$spath$ext"
+            res = url_shortening(url)
             HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/text"]), res)
         end
     end
