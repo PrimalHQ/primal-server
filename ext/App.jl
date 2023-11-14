@@ -600,13 +600,27 @@ function get_notifications(
         pubkey,
         limit::Int=1000, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
-        type=nothing,
+        type=nothing, type_group=nothing,
     )
     # limit <= 1000 || error("limit too big")
     limit = min(limit, 1000) # iOS app was requesting limit=~13000
 
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    type_group = castmaybe(type_group, Symbol)
+
+    if     type_group == :all; nothing
+    elseif type_group == :zaps; type = [
+                                        DB.YOUR_POST_WAS_ZAPPED,
+                                       ]
+    elseif type_group == :replies; type = [
+                                           DB.YOUR_POST_WAS_REPLIED_TO,
+                                          ]
+    elseif type_group == :mentions; type = [
+                                            DB.YOU_WERE_MENTIONED_IN_POST,
+                                            DB.YOUR_POST_WAS_MENTIONED_IN_POST,
+                                           ]
+    end
 
     res = []
     res_meta_data = Dict()
@@ -621,12 +635,16 @@ function get_notifications(
                        order by created_at desc limit ? offset ?"),
                pubkey, since, until, limit, offset)
     else
+        if !(type isa Vector)
+            type = [type]
+        end
+        type = join([Int(t) for t in type], ",")
         DB.exe(est.ext[].notifications.pubkey_notifications, 
-               DB.@sql("select * from kv 
-                       where pubkey = ? and created_at >= ? and created_at <= ?
-                       and type = ?
-                       order by created_at desc limit ? offset ?"),
-               pubkey, since, until, type, limit, offset)
+               "select * from kv 
+               where pubkey = ? and created_at >= ? and created_at <= ?
+               and type in ($type)
+               order by created_at desc limit ? offset ?",
+               pubkey, since, until, limit, offset)
     end
     for r in rs
         (_, created_at, type, arg1, arg2, arg3, arg4) = r
