@@ -1,3 +1,5 @@
+#module DB
+
 import LibPQ
 struct LibPQConn <: DBConn
     dbs::Vector{LibPQ.Connection} # one DB connection per thread
@@ -9,6 +11,11 @@ exe(conn::LibPQ.Connection, query, args...) = map(collect, LibPQ.execute(conn, r
 # exe(conn::ThreadSafe{LibPQConn}, args...) = exe(conn.wrapped, args...)
 exe(conn::ThreadSafe{LibPQConn}, args...) = lock(conn) do conn; exe(conn, args...); end
 exe(conn::LibPQConn, args...) = exe(conn.dbs[Threads.threadid()], args...)
+
+exd(conn::LibPQ.Connection, query, args...) = [NamedTuple(zip(propertynames(row), collect(row))) 
+                                               for row in LibPQ.execute(conn, replace(query, "?"=>"\$"), args...)]
+exd(conn::ThreadSafe{LibPQConn}, args...) = lock(conn) do conn; exd(conn, args...); end
+exd(conn::LibPQConn, args...) = exd(conn.dbs[Threads.threadid()], args...)
 
 struct PQDict{K, V} <: ShardedDBDict{K, V}
     table::String
@@ -67,6 +74,7 @@ db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Vector{Any}}) where {K, V} = DB
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Base.UUID}) where {K, V} = DBConversionFuncs(string, s->Base.UUID(s))
 
 LibPQ.string_parameter(v::Vector{UInt8}) = string("\\x", bytes2hex(v))
+LibPQ.string_parameter(v::Tuple) = string("(", join(v, ","), ")")
 
 LibPQ.LIBPQ_TYPE_MAP.type_map[LibPQ.oid(:uuid)] = Base.UUID
 LibPQ.LIBPQ_CONVERSIONS.func_map[(LibPQ.oid(:uuid), Base.UUID)] = x->Base.UUID(LibPQ.string_view(x))
@@ -80,4 +88,9 @@ function Base.setindex!(ssd::PQDict{K, V}, v::V, k::K)::V where {K, V}
               "),
         (ssd.keyfuncs.to_sql(k), ssd.valuefuncs.to_sql(v)))
     v
+end
+
+function exd(ssd::PQDict{K, V}, query_rest::String, args...)::Vector where {K, V}
+    @assert length(ssd.dbconns) == 1
+    exd(ssd.dbconns[1], "select * from $(ssd.table) $query_rest", db_args_mapped(typeof(ssd), args))
 end
