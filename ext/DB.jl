@@ -737,14 +737,14 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
                                     if !isnothing(local d = try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull)) catch _ end)
                                         (mi, lnk) = Media.media_import((_)->d, (; url, type=:video_thumbnail))
                                         thumbnail_media_url = Media.make_media_url(mi, ".png")
-                                        @show thumb_fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(thumbnail_media_url).path)
+                                        thumb_fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(thumbnail_media_url).path)
                                         if isempty(exe(est.dyn[:video_thumbnails], @sql("select 1 from video_thumbnails where video_url = ?1 limit 1"), url))
                                             exe(est.dyn[:video_thumbnails], @sql("insert into video_thumbnails values (?1, ?2)"),
                                                 url, thumbnail_media_url)
                                         end
                                         Media.media_queue(@task import_media(est, eid, thumbnail_media_url, Media.all_variants))
                                         category, category_prob = Media.image_category(thumb_fn)
-                                        @show (:video, (; url, fn, thumb_fn, thumbnail_media_url, eid, category, category_prob))
+                                        # @show (:video, (; url, fn, thumb_fn, thumbnail_media_url, eid, category, category_prob))
                                     end
                                 catch _
                                     Utils.print_exceptions()
