@@ -264,6 +264,17 @@ function ext_init(est::CacheStorage)
                                                 "create index if not exists video_thumbnails_thumbnail_url on video_thumbnails (thumbnail_url asc)",
                                                ])
 ##
+    est.dyn[:event_attributes] = DB.ShardedSqliteSet(Nostr.EventId, "$(est.commons.directory)/db/event_attributes"; est.commons.dbargs...,
+                                                 table="event_attributes",
+                                                 init_queries=["create table if not exists event_attributes (
+                                                               event_id blob not null,
+                                                               key text not null,
+                                                               value int not null
+                                                               )",
+                                                               "create index if not exists event_attributes_event_id on event_attributes (event_id asc)",
+                                                               "create index if not exists event_attributes_key_value on event_attributes (key asc, value desc)",
+                                                              ])
+##
 end
 
 function insert_stuff(est::CacheStorage, data)

@@ -18,6 +18,7 @@ union!(exposed_functions, Set([
                      :explore,
                          :explore_global_trending_24h,
                          :explore_global_mostzapped_4h,
+                     :scored,
                      :scored_users,
                          :scored_users_24h,
                      :set_app_settings,
@@ -326,19 +327,25 @@ function with_analytics_cache(body::Function, key)
     end
 end
 
+function explore_global_trending(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    with_analytics_cache((:explore_global_trending, user_pubkey, (; hours))) do
+        explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
+    end
+end
 function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
-    with_analytics_cache((:explore_global_trending_24h, user_pubkey)) do
-        explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
-    end
+    explore_global_trending(est, 24; user_pubkey)
 end
-# @cached 600 explore_global_trending_24h(est::DB.CacheStorage) = explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey=nothing)
 
-function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
-    with_analytics_cache((:explore_global_mostzapped_4h, user_pubkey)) do
-        explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
+function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    with_analytics_cache((:explore_global_mostzapped, user_pubkey, (; hours))) do
+        explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
     end
 end
-# @cached 600 explore_global_mostzapped_4h(est::DB.CacheStorage) = explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey=nothing)
+function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
+    explore_global_mostzapped(est, 4; user_pubkey)
+end
 
 function explore(
         est::DB.CacheStorage;
@@ -366,12 +373,28 @@ function explore(
     end
 end
 
-function scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing)
-    with_analytics_cache((:scored_users_24h, user_pubkey)) do
-        scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey)
+function scored_users(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    with_analytics_cache((:scored_users, user_pubkey, (; hours))) do
+        scored_users(est; limit=6*4, since=trunc(Int, time()-hours*3600), user_pubkey)
     end
 end
-# @cached 600 scored_users_24h(est::DB.CacheStorage) = scored_users(est; limit=6*4, since=trunc(Int, time()-24*3600), user_pubkey=nothing)
+function scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing)
+    scored_users(est, 24; user_pubkey)
+end
+
+function scored(est::DB.CacheStorage; selector, user_pubkey=nothing)
+    if     selector == "trending_24h"; explore_global_trending(est, 24; user_pubkey)
+    elseif selector == "trending_12h"; explore_global_trending(est, 12; user_pubkey)
+    elseif selector == "trending_4h";  explore_global_trending(est, 4; user_pubkey)
+    elseif selector == "trending_1h";  explore_global_trending(est, 1; user_pubkey)
+    elseif selector == "mostzapped_24h"; explore_global_mostzapped(est, 24; user_pubkey)
+    elseif selector == "mostzapped_12h"; explore_global_mostzapped(est, 12; user_pubkey)
+    elseif selector == "mostzapped_4h";  explore_global_mostzapped(est, 4; user_pubkey)
+    elseif selector == "mostzapped_1h";  explore_global_mostzapped(est, 1; user_pubkey)
+    else; []
+    end
+end
 
 function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0, user_pubkey=nothing)
     limit <= 1000 || error("limit too big")
@@ -605,21 +628,39 @@ end
 function search(
         est::DB.CacheStorage; 
         query::String, 
-        limit::Int=20, since::Union{Nothing,Int}=0, until::Union{Nothing,Int}=nothing, 
+        limit::Int=20, since::Union{Nothing,Int}=0, until::Union{Nothing,Int}=nothing, offset::Int=0,
         user_pubkey=nothing,
     )
     limit = min(100, limit)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     isempty(query) && error("query is empty")
-    query[1] != '!' && (query = transform_search_query(query))
-    if isnothing(until)
-        until = DB.exec(est.ext[].event_contents, DB.@sql("select rowid from kv_fts order by rowid desc limit 1"))[1][1]
+    if startswith(query, "feed: ")
+        feed_id = split(query, ' ')[2]
+        with_analytics_cache((Symbol("search_feed_$(feed_id)"), user_pubkey)) do
+            if     feed_id == "trending_24h"; explore(est; timeframe=:popular, scope=:global, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "trending_12h"; explore(est; timeframe=:popular, scope=:global, created_after=trunc(Int, time()-12*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "trending_4h";  explore(est; timeframe=:popular, scope=:global, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "trending_1h";  explore(est; timeframe=:popular, scope=:global, created_after=trunc(Int, time()-1*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "mostzapped_24h"; explore(est; timeframe=:mostzapped, scope=:global, created_after=trunc(Int, time()-24*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "mostzapped_12h"; explore(est; timeframe=:mostzapped, scope=:global, created_after=trunc(Int, time()-12*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "mostzapped_4h";  explore(est; timeframe=:mostzapped, scope=:global, created_after=trunc(Int, time()-4*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "mostzapped_1h";  explore(est; timeframe=:mostzapped, scope=:global, created_after=trunc(Int, time()-1*3600), group_by_pubkey=true, user_pubkey)
+            elseif feed_id == "media_sfw";  media_feed(est; category="sfw",  limit, since, until, offset, user_pubkey)
+            elseif feed_id == "media_nsfw"; media_feed(est; category="nsfw", limit, since, until, offset, user_pubkey)
+            else; error("unknown feed id")
+            end
+        end
+    else
+        query[1] != '!' && (query = transform_search_query(query))
+        if isnothing(until)
+            until = DB.exec(est.ext[].event_contents, DB.@sql("select rowid from kv_fts order by rowid desc limit 1"))[1][1]
+        end
+        res = DB.exec(est.ext[].event_contents, DB.@sql("select event_id, rowid from kv_fts where rowid >= ?1 and rowid <= ?2 and content match ?3 order by rowid desc limit ?4 offset ?5"),
+                      (since, until, query, limit, offset))
+        res = sort(res; by=r->-r[2])
+        eids = [Nostr.EventId(eid) for (eid, _) in res]
+        vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
     end
-    res = DB.exec(est.ext[].event_contents, DB.@sql("select event_id, rowid from kv_fts where rowid >= ?1 and rowid <= ?2 and content match ?3 order by rowid desc limit ?4"),
-                  (since, until, query, limit))
-    res = sort(res; by=r->-r[2])
-    eids = [Nostr.EventId(eid) for (eid, _) in res]
-    vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
 end
 
 function relays(est::DB.CacheStorage; limit::Int=20)
@@ -1078,6 +1119,28 @@ function trending_images(est::DB.CacheStorage; created_after::Int=trunc(Int, tim
     [[e for (e, _) in res]..., [stats[eid] for eid in eids if haskey(stats, eid)]...]
 end
 
+function media_feed(est::DB.CacheStorage; category="", since=0, until=nothing, limit=20, offset=0, user_pubkey=nothing)
+    limit <= 1000 || error("limit too big")
+    isnothing(until) && (until = 1<<60)
+    posts = []
+    for (eid, url, rowid) in DB.exec(est.ext[].event_media, DB.@sql("select event_id, url, rowid from event_media
+                                                                    where rowid >= ? and rowid <= ?
+                                                                    order by rowid desc limit ? offset ?"),
+                                     (since, until, limit, offset))
+        eid = Nostr.EventId(eid)
+        for (cat, cat_prob) in DB.exec(est.ext[].media, DB.@sql("select category, category_confidence from media where url = ? limit 1"), (url,))
+            cat == category && push!(posts, (eid, rowid))
+            break
+        end
+    end
+    posts = first(sort(posts, by=p->-p[2]), limit)
+
+    eids = [eid for (eid, _) in posts]
+    res = response_messages_for_posts(est, eids; user_pubkey)
+
+    vcat(res, range(posts, :rowid))
+end
+
 @cached 600 trending_images_4h(est::DB.CacheStorage) = trending_images(est; created_after=trunc(Int, time()-4*3600), limit=500)
 
 UPLOADS_DIR = Ref("uploads")
@@ -1233,12 +1296,12 @@ function ext_user_get_settings(est::DB.CacheStorage, pubkey)
 end
 
 function ext_invalidate_cached_content_moderation(est::DB.CacheStorage, user_pubkey::Union{Nothing,Nostr.PubKeyId})
-    for k in [
-              :explore_global_trending_24h,
-              :explore_global_mostzapped_4h,
-              :scored_users_24h,
-             ]
-        delete!(analytics_cache, (k, isnothing(user_pubkey) ? nothing : Nostr.hex(user_pubkey)))
+    lock(analytics_cache) do analytics_cache
+        for (k, pk) in collect(keys(analytics_cache))
+            if pk == user_pubkey
+                delete!(analytics_cache, (k, pk))
+            end
+        end
     end
 end
 
