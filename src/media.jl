@@ -13,6 +13,8 @@ import ..Utils
 using ..Utils: ThreadSafe
 import ..DB
 
+PRINT_EXCEPTIONS = Ref(false)
+
 MEDIA_PATH = Ref("/mnt/ppr1/var/www/cdn/cache")
 MEDIA_URL_ROOT = Ref("https://media.primal.net/cache")
 # MEDIA_TMP_DIR  = Ref("/tmp/primalmedia")
@@ -92,6 +94,8 @@ all_variants = [(size, animated)
                 for size in [:original, :small, :medium, :large]
                 for animated in [true, false]]
 
+make_media_url(mi::MediaImport, ext::String) = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
+
 function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector=all_variants; key=(;), proxy=MEDIA_PROXY[], sync=false)
     lock(sync ? ReentrantLock() : media_variants_lock) do
         variants = Dict{Tuple{Symbol, Bool}, String}()
@@ -134,14 +138,12 @@ function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector
 
         ext == ".bin" && return nothing
 
-        make_url(mi::MediaImport) = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
-
         original_mi = mi
 
         variant_missing = false
         for (size, animated) in variant_specs
             if size == :original
-                variants[(size, animated)] = make_url(original_mi)
+                variants[(size, animated)] = make_media_url(original_mi, ext)
                 continue
             end
             convopts = []
@@ -200,7 +202,7 @@ function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector
                 variant_missing = true
             end
             @label cont2
-            variants[(size, animated)] = make_url(mi)
+            variants[(size, animated)] = make_media_url(mi, ext)
         end
         variant_missing && return nothing
 
@@ -303,36 +305,50 @@ end
 function cdn_url(url, size, animated)
     "https://primal.b-cdn.net/media-cache?s=$(string(size)[1])&a=$(Int(animated))&u=$(URIs.escapeuri(url))"
 end
-
+##
 import Distributed
+mutable struct DistSlot
+    proc::Union{Nothing,Int}
+    active::Bool
+    activations::Int
+end
 execute_distributed_lock = ReentrantLock()
-execute_distributed_slots = [(Ref{Any}(nothing), Ref(false)) for _ in 1:20]
+execute_distributed_slots = [DistSlot(nothing, false, 0) for _ in 1:20]
 execute_distributed_active = Ref(true)
 execute_distributed_active_slots = Ref(0) |> ThreadSafe
+EXECUTE_DISTRIBUTED_MAX_ACTIVATIONS = Ref(200)
 function execute_distributed(expr; timeout=20, includes=[])
+    @show expr
     function update_active_slots()
-        execute_distributed_active_slots[] = count([s[] for (p, s) in execute_distributed_slots])
+        execute_distributed_active_slots[] = count([s.active for s in execute_distributed_slots])
     end
 
     lock(execute_distributed_lock) do
-        for (p, _) in execute_distributed_slots
-            if isnothing(p[])
+        for s in execute_distributed_slots
+            if s.activations >= EXECUTE_DISTRIBUTED_MAX_ACTIVATIONS[]
+                kill(Distributed.worker_from_id(s.proc).config.process, 15)
+                s.proc = nothing
+                s.active = false
+                s.activations = 0
+            end
+            if isnothing(s.proc)
                 newpid, = Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
                 for fn in includes
                     Distributed.remotecall_eval(Main, newpid, quote; include($fn); nothing; end)
                 end
-                p[] = newpid
+                s.proc = newpid
             end
         end
     end
 
-    slot = Ref{Any}(nothing)
-    while execute_distributed_active[] && isnothing(slot[])
+    slot = nothing
+    while execute_distributed_active[] && isnothing(slot)
         lock(execute_distributed_lock) do
-            for (i, (p, s)) in enumerate(execute_distributed_slots)
-                if !s[]
-                    slot[] = (p, s)
-                    s[] = true
+            for (i, s) in enumerate(execute_distributed_slots)
+                if !s.active
+                    slot = s
+                    s.active = true
+                    s.activations += 1
                     break
                 end
             end
@@ -343,7 +359,7 @@ function execute_distributed(expr; timeout=20, includes=[])
 
     update_active_slots()
 
-    pid = slot[][1][]
+    pid = slot.proc
 
     r = Ref{Any}(nothing)
     restart = Ref(false)
@@ -367,9 +383,10 @@ function execute_distributed(expr; timeout=20, includes=[])
     lock(execute_distributed_lock) do
         if restart[]
             kill(Distributed.worker_from_id(pid).config.process, 15)
-            slot[][1][] = nothing
+            slot.proc = nothing
+            slot.activations = 0
         end
-        slot[][2][] = false
+        slot.active = false
     end
 
     update_active_slots()
@@ -390,8 +407,9 @@ function execute_distributed_kill_all()
         try kill(Distributed.worker_from_id(p).config.process, 15) catch _ end
     end
 end
+##
 
-function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
+function fetch_resource_metadata_(url; proxy=MEDIA_PROXY[]) 
     includes = []
     fn = "fetch-web-page-meta-data.jl"
     for d in [".", "primal-server"]
@@ -402,6 +420,36 @@ function fetch_resource_metadata(url; proxy=MEDIA_PROXY[])
     # @show (url, r)
     # r isa Exception && println((url, r))
     r isa NamedTuple ? r : (; mimetype="", title="", image="", description="", icon_url="")
+end
+
+import Conda
+function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
+    proxy = isnothing(proxy) ? "null" : proxy
+    r = try
+        NamedTuple([Symbol(k)=>v for (k, v) in JSON.parse(read(pipeline(`nice timeout 10 $(Conda.ROOTENV)/bin/python primal-server/link-preview.py $url $proxy`, stderr=devnull), String))])
+    catch _
+        (; mimetype="", title="", image="", description="", icon_url="")
+    end
+    # @show (:fetch_resource_metadata, url, r)
+    r
+end
+
+function image_category(img_path)
+    try
+        fn = "/home/pr"*img_path
+        r = JSON.parse(String(HTTP.request("POST", "http://192.168.15.1:5000/classify";
+                                           headers=["Content-Type"=>"application/json"],
+                                           body=JSON.json([fn]), retry=false).body))[1]
+        sfw_prob = r["drawings"] + r["neutral"]
+        if sfw_prob >= 0.7
+            (:sfw, sfw_prob)
+        else
+            (:nsfw, 1-sfw_prob)
+        end
+    catch _
+        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        ("", 1.0)
+    end
 end
 
 end

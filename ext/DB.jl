@@ -254,6 +254,16 @@ function ext_init(est::CacheStorage)
                                                   "create index if not exists stuff_created_at on stuff (created_at desc)",
                                                  ])
 ##
+    est.dyn[:video_thumbnails] = DB.SqliteDict(String, Int, "$(est.commons.directory)/db/video_thumbnails"; est.commons.dbargs...,
+                                  table="video_thumbnails", keycolumn="url", valuecolumn="imported_at",
+                                  init_queries=["create table if not exists video_thumbnails (
+                                                video_url text not null,
+                                                thumbnail_url text not null
+                                                )",
+                                                "create index if not exists video_thumbnails_video_url on video_thumbnails (video_url asc)",
+                                                "create index if not exists video_thumbnails_thumbnail_url on video_thumbnails (thumbnail_url asc)",
+                                               ])
+##
 end
 
 function insert_stuff(est::CacheStorage, data)
@@ -310,7 +320,7 @@ function ext_metadata_changed(est::CacheStorage, e::Nostr.Event)
                 if !isempty(url)
                     _, ext = splitext(lowercase(url))
                     if ext in image_exts
-                        DOWNLOAD_MEDIA[] && import_media_async(est, e.id, url, Media.all_variants)
+                        DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, Media.all_variants))
                     end
                 end
             end
@@ -358,11 +368,11 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
         for_urls(est, e) do url
             _, ext = splitext(lowercase(url))
             if ext in image_exts
-                DOWNLOAD_MEDIA[] && import_media_async(est, e.id, url, [(:original, true), (:large, true)])
+                DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true), (:large, true)]))
             elseif ext in video_exts
-                DOWNLOAD_MEDIA[] && import_media_async(est, e.id, url, [(:original, true)])
+                DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true)]))
             else
-                DOWNLOAD_PREVIEWS[] && import_preview_async(est, e.id, url)
+                DOWNLOAD_PREVIEWS[] && Media.media_queue(@task import_preview(est, e.id, url))
             end
         end
     end
@@ -717,9 +727,32 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
                             catch _
                                 "application/octet-stream"
                             end
-                            category = ""
+
+                            category, category_prob = "", 1.0
+                            if ext in image_exts
+                                category, category_prob = Media.image_category(fn)
+                            elseif ext in video_exts
+                                # @show (:video, url, fn)
+                                try
+                                    if !isnothing(local d = try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull)) catch _ end)
+                                        (mi, lnk) = Media.media_import((_)->d, (; url, type=:video_thumbnail))
+                                        thumbnail_media_url = Media.make_media_url(mi, ".png")
+                                        @show thumb_fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(thumbnail_media_url).path)
+                                        if isempty(exe(est.dyn[:video_thumbnails], @sql("select 1 from video_thumbnails where video_url = ?1 limit 1"), url))
+                                            exe(est.dyn[:video_thumbnails], @sql("insert into video_thumbnails values (?1, ?2)"),
+                                                url, thumbnail_media_url)
+                                        end
+                                        Media.media_queue(@task import_media(est, eid, thumbnail_media_url, Media.all_variants))
+                                        category, category_prob = Media.image_category(thumb_fn)
+                                        @show (:video, (; url, fn, thumb_fn, thumbnail_media_url, eid, category, category_prob))
+                                    end
+                                catch _
+                                    Utils.print_exceptions()
+                                end
+                            end
+
                             exe(est.ext[].media, @sql("insert into media values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
-                                url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, 1.0)
+                                url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob)
                         end
                     end
                     @async begin HTTP.get(Media.cdn_url(url, size, anim); readtimeout=15, connect_timeout=5).body; nothing; end
@@ -732,18 +765,16 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
     end
 end
 
-function import_media_async(est::CacheStorage, eid::Nostr.EventId, url::String, variant_specs::Vector)
-    tsk = @task import_media(est, eid, url, variant_specs)
-    Media.media_queue(tsk)
-end
-
 import_preview_lock = ReentrantLock()
 function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
     try
         catch_exception(est, :import_preview, eid, url) do
+            # @show (:import_preview, url)
             if isempty(exe(est.ext[].preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
+                # @show (:import_preview, :download, url)
                 dldur = @elapsed (r = begin
                                       r = Media.fetch_resource_metadata(url)
+                                      # @show (url, r)
                                       if !isempty(r.image)
                                           try 
                                               import_media(est, eid, r.image, Media.all_variants) 
@@ -759,8 +790,10 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
                                       r
                                   end)
                 lock(import_preview_lock) do
+                    # @show (:import_preview, :check, url)
                     if isempty(exe(est.ext[].preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
                         category = ""
+                        @show (:import_preview, :insert, url)
                         exe(est.ext[].preview, @sql("insert into preview values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
                             url, trunc(Int, time()), dldur, r.mimetype, category, 1.0,
                             r.title, r.description, r.image, r.icon_url)
@@ -781,7 +814,4 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
     end
 end
 
-function import_preview_async(est::CacheStorage, eid::Nostr.EventId, url::String)
-    tsk = @task import_preview(est, eid, url)
-    Media.media_queue(tsk)
-end
+
