@@ -423,9 +423,7 @@ function fetch_resource_metadata_(url; proxy=MEDIA_PROXY[])
 end
 
 import Conda
-Conda.add("beautifulsoup4")
-Conda.add("requests")
-Conda.add("html5lib")
+Conda.add(["beautifulsoup4", "requests", "html5lib"])
 function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
     proxy = isnothing(proxy) ? "null" : proxy
     r = try
