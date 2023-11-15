@@ -50,12 +50,15 @@ function rex_(srvnode, expr)
 end
 
 function pull_media(src, dst)
-    for (tbl, tblname, ty) in [
-                               (:(Main.cache_storage.ext[].media), "media", Nothing),
-                               (:(Main.cache_storage.ext[].event_media), "event_media", Nostr.EventId),
-                               (:(Main.cache_storage.ext[].preview), "preview", Nothing),
-                               (:(Main.cache_storage.ext[].event_preview), "event_preview", Nothing),
-                              ]
+    for (tbl, ty) in [
+                      (:(Main.cache_storage.ext[].media), Nothing),
+                      (:(Main.cache_storage.ext[].event_media), Nostr.EventId),
+                      (:(Main.cache_storage.ext[].preview), Nothing),
+                      (:(Main.cache_storage.ext[].event_preview), Nothing),
+                      (:(Main.cache_storage.dyn[:video_thumbnails]), Nothing),
+                     ]
+        tblname = rex_(dst, :(($tbl).table))
+
         q = "select max(rowid) from $tblname"
         mr1 = rex_(dst, :(DB.exec($tbl, $q)[1][1]))
         mr2 = rex_(src, :(DB.exec($tbl, $q)[1][1]))

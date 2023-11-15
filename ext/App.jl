@@ -931,6 +931,7 @@ end
 function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
     resources = []
     root_mt = nothing
+    thumbnails = Dict()
     for (url,) in DB.exe(est.ext[].event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
         variants = []
         for (s, a, w, h, mt) in DB.exec(est.ext[].media, DB.@sql("select size, animated, width, height, mimetype from media where url = ?1"), (url,))
@@ -938,8 +939,15 @@ function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
             root_mt = mt
         end
         push!(resources, (; url, variants, (isnothing(root_mt) ? [] : [:mt=>root_mt])...))
+        for (thumbnail_url,) in DB.exec(est.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1"), (url,))
+            thumbnails[url] = thumbnail_url
+        end
     end
-    isempty(resources) ? [] : [(; kind=Int(MEDIA_METADATA), content=JSON.json((; event_id=eid, resources)))]
+    res = Dict()
+    if !isempty(resources); res[:resources] = resources; end
+    if !isempty(thumbnails); res[:thumbnails] = thumbnails; end
+    if !isempty(res); res[:event_id] = eid; end
+    isempty(res) ? [] : [(; kind=Int(MEDIA_METADATA), content=JSON.json(res))]
 end
 
 function event_preview_response(est::DB.CacheStorage, eid::Nostr.EventId)
