@@ -222,6 +222,8 @@ tr_sorted = sort(collect(zip(keys(users), tr)); by=t->-t[2])
 ##
 serialize("../tr_sorted.jls", tr_sorted)
 ####
+if 1==0
+##
 user_profiles = Dict()
 ##
 running = Utils.PressEnterToStop()
@@ -291,3 +293,5 @@ th = tr_sorted[100000][2]
 end
 lud16_domains = sort(collect(lud16_domains); by=r->-r[2])
 ##
+end
+####
