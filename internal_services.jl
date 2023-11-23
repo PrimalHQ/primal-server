@@ -33,7 +33,7 @@ function catch_exception(body::Function, handler::Symbol, args...)
     end
 end
 
-function start(cache_storage, pqconnstr)
+function start(cache_storage, pqconnstr; setup_handlers=true)
     @assert isnothing(server[])
 
     est[] = cache_storage
@@ -41,32 +41,34 @@ function start(cache_storage, pqconnstr)
     router[] = HTTP.Router()
     server[] = HTTP.serve!(router[], "0.0.0.0", PORT[])
 
-    HTTP.register!(router[], "POST", "/collect_metadata", function (req::HTTP.Request)
-        pubkeys = JSON.parse(String(req.body))
-        res = try
-            collect_metadata(pubkeys)
-        catch ex
-            ["ERROR", string(ex)]
+    if setup_handlers
+        HTTP.register!(router[], "POST", "/collect_metadata", function (req::HTTP.Request)
+                           pubkeys = JSON.parse(String(req.body))
+                           res = try
+                               collect_metadata(pubkeys)
+                           catch ex
+                               ["ERROR", string(ex)]
+                           end
+                           return HTTP.Response(200, JSON.json(res))
+                       end)
+
+        HTTP.register!(router[], "/.well-known/nostr.json", nostr_json_handler)
+
+        for path in ["/**", "/"]
+            HTTP.register!(router[], path, preview_handler)
         end
-        return HTTP.Response(200, JSON.json(res))
-    end)
 
-    HTTP.register!(router[], "/.well-known/nostr.json", nostr_json_handler)
+        HTTP.register!(router[], "/media-cache", media_cache_handler)
 
-    for path in ["/**", "/"]
-        HTTP.register!(router[], path, preview_handler)
+        HTTP.register!(router[], "/link-preview", link_preview_handler)
+
+        HTTP.register!(router[], "/url-shortening", url_shortening_handler)
+        HTTP.register!(router[], "/url-lookup/*", url_lookup_handler)
+
+        HTTP.register!(router[], "/spam", spam_handler)
+
+        HTTP.register!(router[], "/api", api_handler)
     end
-
-    HTTP.register!(router[], "/media-cache", media_cache_handler)
-
-    HTTP.register!(router[], "/link-preview", link_preview_handler)
-
-    HTTP.register!(router[], "/url-shortening", url_shortening_handler)
-    HTTP.register!(router[], "/url-lookup/*", url_lookup_handler)
-
-    HTTP.register!(router[], "/spam", spam_handler)
-
-    HTTP.register!(router[], "/api", api_handler)
 
     short_urls[] = DB.PQDict{Int, String}("short_urls", pqconnstr,
                                           init_queries=["create table if not exists short_urls (
