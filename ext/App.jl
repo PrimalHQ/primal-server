@@ -330,7 +330,7 @@ end
 function explore_global_trending(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     with_analytics_cache((:explore_global_trending, user_pubkey, (; hours))) do
-        explore(est; timeframe="trending", scope="global", limit=12, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
+        explore(est; timeframe="trending", scope="global", limit=100, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
     end
 end
 function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
@@ -340,7 +340,7 @@ end
 function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     with_analytics_cache((:explore_global_mostzapped, user_pubkey, (; hours))) do
-        explore(est; timeframe="mostzapped", scope="global", limit=12, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
+        explore(est; timeframe="mostzapped", scope="global", limit=100, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
     end
 end
 function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
