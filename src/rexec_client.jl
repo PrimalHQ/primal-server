@@ -23,10 +23,10 @@ function rexe(sock, expr)
     end
 end
 
-function rex(srvidx, nodeidx, expr)
+function rex(srvidx, nodeidx, expr; container=7)
     rsock = Ref{Any}(nothing)
     try
-        rsock[] = Sockets.connect("192.168.$(10+srvidx).7", 12000+nodeidx)
+        rsock[] = Sockets.connect("192.168.$(10+srvidx).$(container)", 12000+nodeidx)
         rexe(rsock[], expr)
     catch _
         println("EXC: $srvidx $nodeidx $(string(expr))")
