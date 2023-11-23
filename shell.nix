@@ -49,6 +49,7 @@ mkShell {
 
   shellHook = ''
     export LD_LIBRARY_PATH=${secp256k1}/lib:.
+    export NIX_LD=${glibc}/lib/ld-linux-x86-64.so.2
     cd primal-caching-service
     make
     cd ..
