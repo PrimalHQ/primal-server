@@ -7,13 +7,39 @@ struct LibPQConn <: DBConn
     LibPQConn(dbs) = new(dbs)
 end
 
-exe(conn::LibPQ.Connection, query, args...) = map(collect, LibPQ.execute(conn, replace(query, "?"=>"\$"), args...))
+exe_replacing_args(conn::LibPQ.Connection, query, args...) = LibPQ.execute(conn, replace(query, "?"=>"\$"), args...)
+function exe(conn::LibPQ.Connection, query, args...) 
+    r = try
+        exe_replacing_args(conn, query, args...)
+    catch ex
+        if ex isa LibPQ.Errors.UnknownError
+            try
+                LibPQ.reset!(conn)
+            catch ex2
+                @warn "conn reset failed"
+                rethrow(ex2)
+            end
+            try
+                exe_replacing_args(conn, query, args...)
+            catch ex3
+                @warn "second exe_replacing_args invocation failed"
+                rethrow(ex3)
+            end
+        elseif ex isa LibPQ.Errors.PostgreSQLException
+            try exe(conn, "abort") catch _ end
+            rethrow(ex)
+        else
+            rethrow(ex)
+        end
+    end
+    map(collect, r)
+end
 # exe(conn::ThreadSafe{LibPQConn}, args...) = exe(conn.wrapped, args...)
 exe(conn::ThreadSafe{LibPQConn}, args...) = lock(conn) do conn; exe(conn, args...); end
 exe(conn::LibPQConn, args...) = exe(conn.dbs[Threads.threadid()], args...)
 
 exd(conn::LibPQ.Connection, query, args...) = [NamedTuple(zip(propertynames(row), collect(row))) 
-                                               for row in LibPQ.execute(conn, replace(query, "?"=>"\$"), args...)]
+                                               for row in exe_replacing_args(conn, query, args...)]
 exd(conn::ThreadSafe{LibPQConn}, args...) = lock(conn) do conn; exd(conn, args...); end
 exd(conn::LibPQConn, args...) = exd(conn.dbs[Threads.threadid()], args...)
 
