@@ -675,6 +675,7 @@ function get_notifications(
         limit::Int=1000, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
         type=nothing, type_group=nothing,
+        time_exceeded=()->false,
     )
     # limit <= 1000 || error("limit too big")
     limit = min(limit, 1000) # iOS app was requesting limit=~13000
@@ -782,7 +783,7 @@ function get_notifications(
                                       ))))
     end
 
-    append!(res, response_messages_for_posts(est, collect(eids); res_meta_data, user_pubkey))
+    append!(res, response_messages_for_posts(est, collect(eids); res_meta_data, user_pubkey, time_exceeded))
 
     res
 end
