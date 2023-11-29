@@ -1264,16 +1264,19 @@ parsed_settings = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, Any}}() |> ThreadSaf
 parsed_default_settings = Ref{Any}(nothing)
 periodic_parsed_default_settings = Utils.Throttle(; period=15.0, t=0.0)
 
+user_has_app_settings = Dict()
+
 function ext_user_get_settings(est::DB.CacheStorage, pubkey)
     periodic_parsed_default_settings() do
         s = read(DEFAULT_SETTINGS_FILE[], String)
         d = JSON.parse(s)
         d["id"] = Nostr.EventId(SHA.sha256(s))
         parsed_default_settings[] = d
+        empty!(user_has_app_settings)
     end
     res = parsed_default_settings[]
 
-    if !isnothing(pubkey) && pubkey in est.ext[].app_settings 
+    if !isnothing(pubkey) && get!(user_has_app_settings, pubkey) do; pubkey in est.ext[].app_settings; end
         r = DB.exec(est.ext[].app_settings, DB.@sql("select event_id from app_settings 
                                                     where key = ?1 limit 1"), (pubkey,))[1][1]
         if !ismissing(r)

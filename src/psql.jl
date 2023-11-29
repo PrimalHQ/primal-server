@@ -8,6 +8,7 @@ struct LibPQConn <: DBConn
 end
 
 exe_replacing_args(conn::LibPQ.Connection, query, args...) = LibPQ.execute(conn, replace(query, "?"=>"\$"), args...)
+
 function exe(conn::LibPQ.Connection, query, args...) 
     r = try
         exe_replacing_args(conn, query, args...)
@@ -34,6 +35,7 @@ function exe(conn::LibPQ.Connection, query, args...)
     end
     map(collect, r)
 end
+
 # exe(conn::ThreadSafe{LibPQConn}, args...) = exe(conn.wrapped, args...)
 exe(conn::ThreadSafe{LibPQConn}, args...) = lock(conn) do conn; exe(conn, args...); end
 exe(conn::LibPQConn, args...) = exe(conn.dbs[Threads.threadid()], args...)
