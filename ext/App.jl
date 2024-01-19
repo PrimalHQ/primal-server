@@ -1284,7 +1284,7 @@ function ext_user_get_settings(est::DB.CacheStorage, pubkey)
     end
     res = parsed_default_settings[]
 
-    if !isnothing(pubkey) && get!(user_has_app_settings, pubkey) do; pubkey in est.ext[].app_settings; end
+    if !isnothing(pubkey) && lock(user_has_app_settings) do user_has_app_settings; get!(user_has_app_settings, pubkey) do; pubkey in est.ext[].app_settings; end; end
         r = DB.exec(est.ext[].app_settings, DB.@sql("select event_id from app_settings 
                                                     where key = ?1 limit 1"), (pubkey,))[1][1]
         if !ismissing(r)
