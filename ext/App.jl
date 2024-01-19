@@ -846,7 +846,9 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
 
     res = Dict()
 
-    if isnothing(pubkey)
+    if !isnothing(local pk = try Nostr.bech32_decode(query) catch _ nothing end)
+        res[pk] = est.pubkey_followers_cnt[pk]
+    elseif isnothing(pubkey)
         for (pk,) in DB.exec(est.pubkey_followers,
                              DB.@sql("select pubkey from user_search where
                                      name match ? or username match ? or display_name match ? or displayName match ? or nip05 match ?
