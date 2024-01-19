@@ -211,9 +211,14 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                 title = mdtitle(c)
                 image = get(c, "picture", "")
             end
-            if !isempty(local image_links = get_image_links(e.content))
-                image = image_links[1]
+            media_urls = DB.exec(cache_storage.ext[].event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
+            if !isempty(media_urls)
                 twitter_card = "summary_large_image"
+                image = media_urls[1][1]
+                thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
+                if !isempty(thumbnails)
+                    image = (thumbnails[1][1],)
+                end
             end
         end
         return (; title, description, image, url, twitter_card)
