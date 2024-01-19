@@ -68,6 +68,8 @@ function start(cache_storage, pqconnstr; setup_handlers=true)
         HTTP.register!(router[], "/spam", spam_handler)
 
         HTTP.register!(router[], "/api", api_handler)
+
+        HTTP.register!(router[], "/api/suggestions", suggestions_handler)
     end
 
     short_urls[] = DB.PQDict{Int, String}("short_urls", pqconnstr,
@@ -521,6 +523,33 @@ function api_handler(req::HTTP.Request)
             res[] = (; error=(ex isa ErrorException ? ex.msg : "error"))
         end
         HTTP.Response(200, api_headers, JSON.json(res[]))
+    end
+end
+
+function suggestions_handler(req::HTTP.Request)
+    catch_exception(:suggestions_handler, req) do
+        req.method == "OPTIONS" && return HTTP.Response(200, api_headers, "ok")
+        body = String(req.body)
+        # @show req.method req.target body
+        host = Dict(req.headers)["Host"]
+        d = JSON.parse(read(Main.App.SUGGESTED_USERS_FILE[], String))
+        mds = Dict{Nostr.PubKeyId, Nostr.Event}()
+        for (_, ms) in d
+            for (pubkey, name) in ms
+                pubkey = Nostr.PubKeyId(pubkey)
+                if !haskey(mds, pubkey) && pubkey in est[].meta_data
+                    eid = est[].meta_data[pubkey]
+                    if eid in est[].events
+                        mds[pubkey] = est[].events[eid]
+                    end
+                end
+            end
+        end
+        res = (; 
+               metadata=Dict([Nostr.hex(pk)=>md for (pk, md) in mds]), 
+               suggestions=[(; group, members=[(; name, pubkey) for (pubkey, name) in ms])
+                            for (group, ms) in d])
+        HTTP.Response(200, api_headers, JSON.json(res))
     end
 end
 
