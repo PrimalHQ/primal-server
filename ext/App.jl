@@ -679,6 +679,7 @@ function get_notifications(
     )
     # limit <= 1000 || error("limit too big")
     limit = min(limit, 1000) # iOS app was requesting limit=~13000
+    limit = min(limit, 100)
 
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
@@ -695,6 +696,9 @@ function get_notifications(
                                             DB.YOU_WERE_MENTIONED_IN_POST,
                                             DB.YOUR_POST_WAS_MENTIONED_IN_POST,
                                            ]
+    elseif type_group == :reposts; type = [
+                                           DB.YOUR_POST_WAS_REPOSTED,
+                                          ]
     end
 
     res = []
