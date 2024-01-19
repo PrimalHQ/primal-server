@@ -1266,7 +1266,7 @@ parsed_settings = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, Any}}() |> ThreadSaf
 parsed_default_settings = Ref{Any}(nothing)
 periodic_parsed_default_settings = Utils.Throttle(; period=15.0, t=0.0)
 
-user_has_app_settings = Dict()
+user_has_app_settings = Dict() |> ThreadSafe
 
 function ext_user_get_settings(est::DB.CacheStorage, pubkey)
     periodic_parsed_default_settings() do
