@@ -506,10 +506,10 @@ function api_handler(req::HTTP.Request)
         filt = JSON.parse(body)
         funcall = Symbol(filt[1])
         @assert funcall in Main.App.exposed_functions
-        kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
+        kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
         res = Ref{Any}(nothing)
         try
-            Main.CacheServerHandlers.app_funcall(funcall, kwargs, function(r); res[] = r; end)
+            Base.invokelatest(Main.CacheServerHandlers.app_funcall, funcall, kwargs, function(r); res[] = r; end)
         catch ex
             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
             ex isa TaskFailedException && (ex = ex.task.result)
