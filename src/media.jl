@@ -41,6 +41,7 @@ mimetype_ext = Dict([
     "image/webp" => ".webp",
     "image/svg+xml" => ".svg",
     "video/mp4" => ".mp4",
+    "video/x-m4v" => ".mp4",
     "video/mov" => ".mov",
     "video/webp" => ".webp",
     "video/quicktime"  => ".mov",
@@ -49,6 +50,11 @@ mimetype_ext = Dict([
 ])
 ##
 downloader_headers = ["User-Agent"=>"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"]
+
+function clean_url(url::String)
+    u = URIs.parse_uri(url)
+    string(URIs.URI(; [p=>getproperty(u, p) for p in propertynames(u) if !(p in [:fragment, :uri])]...))
+end
 
 function download(est::DB.CacheStorage, url::String; proxy=MEDIA_PROXY[])::Vector{UInt8}
     try
@@ -109,7 +115,7 @@ function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector
                     tsk = @task task_wrapper(est, k, max_download_duration, downloads_per_period) do
                         try
                             push!(media_variants_log, (Dates.now(), k))
-                            data = download(est, url; proxy)
+                            data = download(est, clean_url(url); proxy)
                             media_import((_)->data, k)
                             media_variants(est, url, variant_specs; key, proxy, sync)
                         finally
@@ -451,6 +457,18 @@ function image_category(img_path)
         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         ("", 1.0)
     end
+end
+
+function strip_metadata(data::Vector{UInt8})
+    read(pipeline(`exiftool -all= -`, stdin=IOBuffer(data), stderr=devnull))
+end
+
+function is_image_rotated(fn::String)
+    for s in readlines(pipeline(`exiftool -t $fn`, stderr=devnull))
+        k, v = split(s, '\t')
+        k == "Orientation" && v == "Rotate 90 CW" && return true
+    end
+    false
 end
 
 end

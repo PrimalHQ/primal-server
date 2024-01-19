@@ -1009,8 +1009,8 @@ function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
     thumbnails = Dict()
     for (url,) in DB.exe(est.ext[].event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
         variants = []
-        for (s, a, w, h, mt) in DB.exec(est.ext[].media, DB.@sql("select size, animated, width, height, mimetype from media where url = ?1"), (url,))
-            push!(variants, (; s=s[1], a, w, h, mt, media_url=Media.cdn_url(url, s, a)))
+        for (s, a, w, h, mt, dur) in DB.exec(est.ext[].media, DB.@sql("select size, animated, width, height, mimetype, duration from media where url = ?1"), (url,))
+            push!(variants, (; s=s[1], a, w, h, mt, dur, media_url=Media.cdn_url(url, s, a)))
             root_mt = mt
         end
         push!(resources, (; url, variants, (isnothing(root_mt) ? [] : [:mt=>root_mt])...))
@@ -1150,6 +1150,8 @@ URL_SHORTENING_SERVICE = Ref("http://127.0.0.1:14001/url-shortening?u=")
 MEDIA_UPLOAD_PATH = Ref("/mnt/ppr1/var/www/cdn/incoming")
 
 function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
+    data = Media.strip_metadata(data)
+
     key = (; type="member_upload", pubkey, sha256=bytes2hex(SHA.sha256(data)))
     (mi, lnk) = Media.media_import((_)->data, key; media_path=UPLOADS_DIR[])
     _, ext = splitext(lnk)

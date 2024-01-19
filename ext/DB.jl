@@ -96,7 +96,8 @@ Base.@kwdef struct CacheStorageExt
                                         height integer not null,
                                         mimetype text not null,
                                         category text not null,
-                                        category_confidence number not null
+                                        category_confidence number not null,
+                                        duration number not null default 0.0
                                      )",
                                      "create index if not exists media_url on media (url asc)",
                                      "create index if not exists media_media_url on media (media_url asc)",
@@ -177,8 +178,7 @@ Base.@kwdef struct CacheStorageExt
                                                                       category varchar(100) not null, 
                                                                       category_confidence real not null, 
                                                                       width int8 not null, 
-                                                                      height int8 not null, 
-                                                                      duration real not null
+                                                                      height int8 not null 
                                                                       )",
                                                                       "create index if not exists media_uploads_pubkey on media_uploads (pubkey asc)",
                                                                       "create index if not exists media_uploads_created_at on media_uploads (created_at desc)",
@@ -330,7 +330,7 @@ function ext_metadata_changed(est::CacheStorage, e::Nostr.Event)
                 url = d[a]
                 if !isempty(url)
                     _, ext = splitext(lowercase(url))
-                    if ext in image_exts
+                    if any((startswith(ext, ext2) for ext2 in image_exts))
                         DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, Media.all_variants))
                     end
                 end
@@ -378,9 +378,9 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
     if get(TrustRank.pubkey_rank, e.pubkey, 0.0) > TrustRank.external_resources_threshold[]
         for_urls(est, e) do url
             _, ext = splitext(lowercase(url))
-            if ext in image_exts
+            if any((startswith(ext, ext2) for ext2 in image_exts))
                 DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true), (:large, true)]))
-            elseif ext in video_exts
+            elseif any((startswith(ext, ext2) for ext2 in video_exts))
                 DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true)]))
             else
                 DOWNLOAD_PREVIEWS[] && Media.media_queue(@task import_preview(est, e.id, url))
@@ -710,6 +710,7 @@ import_media_lock = ReentrantLock()
 function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, variant_specs::Vector)
     try
         catch_exception(est, :import_media, eid, url) do
+            push!(Main.stuff, (:import_media, :entry, (; eid, url)))
             dldur = @elapsed (r = Media.media_variants(est, url, variant_specs; sync=true))
             isnothing(r) && return
             lock(import_media_lock) do
@@ -722,28 +723,36 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
                 lock(import_media_lock) do
                     if isempty(exe(est.ext[].media, @sql("select 1 from media where url = ?1 and size = ?2 and animated = ?3 limit 1"), url, size, anim))
                         fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(media_url).path)
-                        _, ext = splitext(lowercase(url))
-                        m = if ext in image_exts
+                        mimetype = try
+                            String(chomp(read(pipeline(`file -b --mime-type $fn`; stdin=devnull), String)))
+                        catch _
+                            "application/octet-stream"
+                        end
+                        ftype = split(mimetype, '/')[1]
+                        m = if ftype == "image"
                             try match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file -b $fn`; stdin=devnull), String))
                             catch _ nothing end
-                        elseif ext in video_exts
-                            try match(r"([0-9]+)x([0-9]+)", read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 $fn`; stdin=devnull), String))
+                        elseif ftype == "video"
+                            try match(r"([0-9]+)x([0-9]+)x([0-9.]+)", read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of csv=s=x:p=0 $fn`; stdin=devnull), String))
                             catch _ nothing end
+                        else
+                            nothing
                         end
                         # @show (:import_media, url, dldur, stat(fn).size, fn, m)
                         if !isnothing(m)
-                            width, height = isnothing(m) ? (0, 0) : (parse(Int, m[1]), parse(Int, m[2]))
-                            mimetype = try
-                                String(chomp(read(pipeline(`file -b --mime-type $fn`; stdin=devnull), String)))
-                            catch _
-                                "application/octet-stream"
-                            end
+                            width, height = parse(Int, m[1]), parse(Int, m[2])
+                            duration = try parse(Float64, m[3]) catch _ 0.0 end
+
+                            # duration > 0 && @show (; eid, url, duration)
 
                             category, category_prob = "", 1.0
                             try
-                                if ext in image_exts
+                                if ftype == "image"
                                     category, category_prob = Media.image_category(fn)
-                                elseif ext in video_exts
+                                    if Media.is_image_rotated(fn)
+                                        width, height = height, width
+                                    end
+                                elseif ftype == "video"
                                     # @show (:video, url, fn)
                                     if !isnothing(local d = try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull)) catch _ end)
                                         (mi, lnk) = Media.media_import((_)->d, (; url, type=:video_thumbnail))
@@ -762,8 +771,8 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
                                 Utils.print_exceptions()
                             end
 
-                            exe(est.ext[].media, @sql("insert into media values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
-                                url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob)
+                            exe(est.ext[].media, @sql("insert into media values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+                                url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob, duration)
                             push!(Main.stuff, (:import_media, :insert, (; eid, url)))
                         end
                     end
@@ -781,14 +790,15 @@ import_preview_lock = ReentrantLock()
 function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
     try
         catch_exception(est, :import_preview, eid, url) do
-            # @show (:import_preview, url)
+            push!(Main.stuff, (:import_preview, :entry, (; eid, url, link="https://primal.net/e/$(Nostr.hex(eid))")))
+            # @show (:import_preview, url, "https://primal.net/e/$(Nostr.hex(eid))")
             if isempty(exe(est.ext[].preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
                 # @show (:import_preview, :download, url)
                 dldur = @elapsed (r = begin
                                       r = Media.fetch_resource_metadata(url)
                                       # @show (url, r)
                                       if !isempty(r.image)
-                                          push!(Main.stuff, (:import_preview, :image, (; eid, url, r.image)))
+                                          push!(Main.stuff, @show (:import_preview, :image, (; eid, url, r.image)))
                                           try 
                                               import_media(est, eid, r.image, Media.all_variants) 
                                               @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
