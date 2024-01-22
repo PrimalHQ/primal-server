@@ -4,7 +4,7 @@ with pkgs;
 
 mkShell {
   buildInputs = [
-    julia_18
+    julia
     secp256k1
     gcc
     postgresql
