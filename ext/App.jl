@@ -43,6 +43,7 @@ union!(exposed_functions, Set([
                          :trending_images_4h,
                      :upload,
                      :upload_chunk,
+                     :upload_cancel,
                      :report_user,
                      :report_note,
                      :get_filterlist,
@@ -1153,7 +1154,7 @@ end
 UPLOADS_DIR = Ref("uploads")
 MEDIA_URL_ROOT = Ref("https://media.primal.net/uploads")
 URL_SHORTENING_SERVICE = Ref("http://127.0.0.1:14001/url-shortening?u=")
-MEDIA_UPLOAD_PATH = Ref("/mnt/ppr1/var/www/cdn/incoming")
+MEDIA_UPLOAD_PATH = Ref("incoming")
 
 function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
     data = Media.strip_metadata(data)
@@ -1204,6 +1205,8 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     import_upload(est, e.pubkey, data)
 end
 
+UPLOAD_ID_REGEXP = r"^[0-9a-zA-Z_\-]+$"
+
 function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
@@ -1212,6 +1215,7 @@ function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
 
     c = JSON.parse(e.content)
     ulid = Base.UUID(c["upload_id"])
+    !isnothing(match(UPLOAD_ID_REGEXP, ulid)) || error("invalid upload_id")
 
     fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))-$(ulid)"
     chunklen = 0
@@ -1224,11 +1228,26 @@ function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
     if c["file_length"] == c["offset"] + chunklen
         data = read(fn)
         res = import_upload(est; data)
-        #rm(fn)
+        rm(fn)
         res
     else
         []
     end
+end
+
+function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
+    DB.PG_DISABLE[] && return []
+
+    e = parse_event_from_user(event_from_user)
+    e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
+
+    c = JSON.parse(e.content)
+    ulid = Base.UUID(c["upload_id"])
+    !isnothing(match(UPLOAD_ID_REGEXP, ulid)) || error("invalid upload_id")
+
+    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))-$(ulid)"
+    rm(fn)
+    []
 end
 
 REPORTED_PUBKEY = 1
