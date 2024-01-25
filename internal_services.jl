@@ -228,8 +228,8 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
     elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
         return (; 
                 title="Download Primal apps and source code", 
-                description="Unleash the power of Nostr",
-                image=("https://primal.net/public/primal-download-thumbnail.png", :from_origin),
+                description="",
+                image="",
                 url="https://primal.net/downloads",
                 twitter_card = "summary_large_image")
 
