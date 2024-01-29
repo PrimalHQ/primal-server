@@ -43,6 +43,7 @@ union!(exposed_functions, Set([
                          :trending_images_4h,
                      :upload,
                      :upload_chunk,
+                     :upload_complete,
                      :upload_cancel,
                      :report_user,
                      :report_note,
@@ -1193,6 +1194,8 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
     [(; kind=Int(UPLOADED), content=surl)]
 end
 
+UPLOAD_MAX_SIZE = Ref(100*1024*1024)
+
 function upload(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
@@ -1202,12 +1205,39 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     contents = e.content
     data = Base64.base64decode(contents[findfirst(',', contents)+1:end])
 
+    length(data) > UPLOAD_MAX_SIZE[] && error("upload is too large")
+
     import_upload(est, e.pubkey, data)
 end
 
-UPLOAD_ID_REGEXP = r"^[0-9a-zA-Z_\-]+$"
-
 function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
+    DB.PG_DISABLE[] && return []
+
+    # push!(Main.stuff, (:upload_chunk, event_from_user))
+
+    e = parse_event_from_user(event_from_user)
+    e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
+
+    c = JSON.parse(e.content)
+    ulid = Base.UUID(c["upload_id"])
+
+    c["file_length"] > UPLOAD_MAX_SIZE[] && error("upload size too large")
+
+    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
+    # @show (; t=Dates.now(), fn, offset=c["offset"], file_length=c["file_length"])
+    
+    data = Base64.base64decode(c["data"][findfirst(',', c["data"])+1:end])
+    c["offset"] + length(data) > UPLOAD_MAX_SIZE[] && error("upload size too large")
+
+    open(fn, "a+") do f
+        seek(f, c["offset"])
+        write(f, data)
+    end
+
+    []
+end
+
+function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
     e = parse_event_from_user(event_from_user)
@@ -1215,24 +1245,13 @@ function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
 
     c = JSON.parse(e.content)
     ulid = Base.UUID(c["upload_id"])
-    !isnothing(match(UPLOAD_ID_REGEXP, ulid)) || error("invalid upload_id")
 
-    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))-$(ulid)"
-    chunklen = 0
-    open(fn, "a+") do f
-        seek(f, c["offset"])
-        data = Base64.base64decode(contents[findfirst(',', c["data"])+1:end])
-        write(f, data)
-        chunklen = length(data)
-    end
-    if c["file_length"] == c["offset"] + chunklen
-        data = read(fn)
-        res = import_upload(est; data)
-        rm(fn)
-        res
-    else
-        []
-    end
+    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
+
+    data = read(fn)
+    @show res = import_upload(est, e.pubkey, data)
+    rm(fn)
+    res
 end
 
 function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
@@ -1243,9 +1262,8 @@ function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
 
     c = JSON.parse(e.content)
     ulid = Base.UUID(c["upload_id"])
-    !isnothing(match(UPLOAD_ID_REGEXP, ulid)) || error("invalid upload_id")
 
-    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))-$(ulid)"
+    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
     rm(fn)
     []
 end
