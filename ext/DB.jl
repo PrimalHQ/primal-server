@@ -798,7 +798,7 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
                                       r = Media.fetch_resource_metadata(url)
                                       # @show (url, r)
                                       if !isempty(r.image)
-                                          push!(Main.stuff, @show (:import_preview, :image, (; eid, url, r.image)))
+                                          # push!(Main.stuff, @show (:import_preview, :image, (; eid, url, r.image)))
                                           try 
                                               import_media(est, eid, r.image, Media.all_variants) 
                                               @async begin HTTP.get(Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
