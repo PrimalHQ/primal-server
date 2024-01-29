@@ -459,12 +459,23 @@ function image_category(img_path)
     end
 end
 
+EXIFTOOL_RO_BINDS = []
+
+function exiftool(args; stdin=devnull)
+    exiftool_path = readlink(strip(read(`which exiftool`, String)))
+    pipeline(Cmd(["bwrap", "--new-session", "--die-with-parent", "--unshare-net", 
+                  "--ro-bind", "/nix", "/nix", 
+                  Iterators.flatten([["--ro-bind", p, p] for p in EXIFTOOL_RO_BINDS])...,
+                  exiftool_path, args...]);
+             stdin, stderr=devnull)
+end
+
 function strip_metadata(data::Vector{UInt8})
-    read(pipeline(`exiftool -all= -`, stdin=IOBuffer(data), stderr=devnull))
+    read(exiftool(["-ignoreMinorErrors", "-all=", "-"]; stdin=IOBuffer(data)))
 end
 
 function is_image_rotated(fn::String)
-    for s in readlines(pipeline(`exiftool -t $fn`, stderr=devnull))
+    for s in readlines(pipeline(exiftool(["-t", fn])))
         k, v = split(s, '\t')
         k == "Orientation" && v == "Rotate 90 CW" && return true
     end
