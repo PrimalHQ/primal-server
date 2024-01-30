@@ -98,6 +98,7 @@ db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Nostr.PubKeyId}) where {K, V} =
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = DBConversionFuncs(JSON.json, e->Nostr.Event(JSON.parse(e)))
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Dates.DateTime}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Dict{String, Any}}) where {K, V} = DBConversionFuncs(JSON.json, s->JSON.parse(s))
+db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Vector{UInt8}}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Vector{Any}}) where {K, V} = DBConversionFuncs(JSON.json, s->JSON.parse(s))
 db_conversion_funcs(::Type{PQDict{K, V}}, ::Type{Base.UUID}) where {K, V} = DBConversionFuncs(string, s->Base.UUID(s))
 
