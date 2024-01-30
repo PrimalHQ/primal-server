@@ -466,6 +466,18 @@ end
     
 function set_app_settings(est::DB.CacheStorage; settings_event::Dict)
     app_settings(est, settings_event) do e
+        if e.pubkey in est.ext[].app_settings
+            ee = est.ext[].app_settings[e.pubkey]
+            d1 = JSON.parse(ee.content)
+            d2 = JSON.parse(e.content)
+            d3 = copy(d2)
+            for (k, v) in d1
+                haskey(d2, k) || (d2[k] = v)
+            end
+            if d2 != d3
+                e = Nostr.Event(e.id, e.pubkey, e.created_at, e.kind, e.tags, JSON.json(d2), e.sig)
+            end
+        end
         est.ext[].app_settings[e.pubkey] = e
         DB.exe(est.ext[].app_settings, 
                DB.@sql("update app_settings set created_at = ?2, event_id = ?3 where key = ?1"),
