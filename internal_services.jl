@@ -23,6 +23,7 @@ est = Ref{Any}(nothing)
 short_urls = Ref{Any}(nothing)
 verified_users = Ref{Any}(nothing)
 memberships = Ref{Any}(nothing)
+membership_tiers = Ref{Any}(nothing)
 membership_products = Ref{Any}(nothing)
 
 function catch_exception(body::Function, handler::Symbol, args...)
@@ -91,7 +92,6 @@ function start(cache_storage, pqconnstr; setup_handlers=true)
                                                             "create index if not exists verified_users_pubkey on verified_users (pubkey asc)",
                                                             "create index if not exists verified_users_name on verified_users (name asc)",
                                                            ])
-    ##
     memberships[] = DB.PQDict{String, Int}("memberships", pqconnstr,
                                            init_queries=["create table if not exists memberships (
                                                          pubkey bytea,
@@ -102,6 +102,13 @@ function start(cache_storage, pqconnstr; setup_handlers=true)
                                                          )",
                                                          "create index if not exists memberships_pubkey on memberships (pubkey asc)",
                                                         ])
+    membership_tiers[] = DB.PQDict{String, Int}("membership_tiers", pqconnstr,
+                                                init_queries=["create table if not exists membership_tiers (
+                                                              tier varchar(300) not null,
+                                                              max_storage int8
+                                                              )",
+                                                              "create index if not exists membership_tiers_tier on membership_tiers (tier asc)",
+                                                             ])
     membership_products[] = DB.PQDict{String, Int}("membership_products", pqconnstr,
                                                    init_queries=["create table if not exists membership_products (
                                                                  product_id varchar(100) not null,
@@ -112,7 +119,6 @@ function start(cache_storage, pqconnstr; setup_handlers=true)
                                                                  )",
                                                                  "create index if not exists membership_products_product_id on membership_products (product_id asc)",
                                                                 ])
-    ##
     nothing
 end
 
