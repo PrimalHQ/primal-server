@@ -294,7 +294,7 @@ APP_ROOT = Ref("www")
 nostr_json_query_lock = ReentrantLock()
 function nostr_json_query_by_name(name::String)
     lock(nostr_json_query_lock) do 
-        [Nostr.PubKeyId(pk) for (pk,) in DB.exec(verified_users[], DB.@sql("select pubkey from verified_users where name = ?1"), (name,))]
+        [Nostr.PubKeyId(pk) for (pk,) in DB.exec(verified_users[], DB.@sql("select pubkey from verified_users where lower(name) = lower(?1)"), (name,))]
     end
 end
 function nostr_json_query_by_pubkey(pubkey::Nostr.PubKeyId)
