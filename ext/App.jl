@@ -1186,7 +1186,11 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
     data = Media.strip_metadata(data)
 
     key = (; type="member_upload", pubkey, sha256=bytes2hex(SHA.sha256(data)))
-    (mi, lnk) = Media.media_import((_)->data, key; media_path=UPLOADS_DIR[])
+    new_import = Ref(false)
+    (mi, lnk) = Media.media_import(function (_)
+                                       new_import[] = true
+                                       data
+                                   end, key; media_path=UPLOADS_DIR[])
     _, ext = splitext(lnk)
     url = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
 
@@ -1214,6 +1218,11 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
         # @sync for ((size, anim), media_url) in r
         #     @async @show begin HTTP.get(Media.cdn_url(surl, size, anim); readtimeout=15, connect_timeout=5).body; nothing; end
         # end
+    end
+
+    if new_import[]
+        DB.exec(Main.InternalServices.verified_users[], "update memberships set used_storage = used_storage + ?2 where pubkey = ?1",
+                (pubkey, length(data)))
     end
 
     [(; kind=Int(UPLOADED), content=surl)]
