@@ -1272,10 +1272,14 @@ function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
     ulid = Base.UUID(c["upload_id"])
 
     fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
+    c["file_length"] == stat(fn).size || error("incorrect upload size")
 
     data = read(fn)
+    c["sha256"] == bytes2hex(SHA.sha256(data)) || error("incorrect sha256")
+
     @show res = import_upload(est, e.pubkey, data)
     rm(fn)
+
     res
 end
 
