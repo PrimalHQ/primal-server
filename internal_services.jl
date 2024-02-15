@@ -149,8 +149,8 @@ function content_refs_resolved(e::Nostr.Event)
                 ""
             end)
     replace(c, DB.re_mention => function (r)
-                prefix = "nostr:npub"
-                startswith(r, prefix) || return r
+                # prefix = "nostr:npub"
+                # startswith(r, prefix) || return r
                 if !isnothing(local pk = Bech32.nip19_decode_wo_tlv(r[7:end]))
                     try
                         c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
@@ -229,9 +229,10 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         return (; 
                 title="Download Primal apps and source code", 
                 description="",
-                image="",
+                image="https://primal.net/public/primal-link-preview.jpg",
                 url="https://primal.net/downloads",
-                twitter_card = "summary_large_image")
+                twitter_card = "summary_large_image",
+                twitter_image = "https://primal.net/images/twitter-hero.jpg")
 
     elseif !isnothing(local m = match(r"^/(.*)", path))
         name = string(m[1])
@@ -313,6 +314,11 @@ function preview_handler(req::HTTP.Request)
                 el["name"] = "twitter:card"
                 EzXML.link!(head, el)
                 index_elems[:twitter_card] = el
+
+                el = EzXML.ElementNode("meta")
+                el["name"] = "twitter:image"
+                EzXML.link!(head, el)
+                index_elems[:twitter_image] = el
 
                 for e in EzXML.findall("/html/head/script", doc) # WARN needed to run client app in browser
                     EzXML.link!(e, EzXML.TextNode(" "))
