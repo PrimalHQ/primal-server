@@ -28,6 +28,7 @@ union!(exposed_functions, Set([
                      :get_default_relays,
                      :get_recommended_users,
                      :get_suggested_users,
+                     :get_app_releases,
                      :user_profile_scored_content,
                      :search,
                      :relays,
@@ -78,6 +79,7 @@ RECOMMENDED_USERS=10_000_200
 NOTIFICATIONS_SUMMARY_2=10_000_132
 SUGGESTED_USERS=10_000_134
 UPLOAD_CHUNK=10_000_135
+APP_RELEASES=10_000_138
 
 # ------------------------------------------------------ #
 
@@ -578,6 +580,14 @@ function get_suggested_users(est::DB.CacheStorage)
     append!(res, res_meta_data)
     append!(res, user_scores(est, res_meta_data))
     res
+end
+
+APP_RELEASES_FILE = Ref("app-releases.json")
+
+function get_app_releases(est::DB.CacheStorage)
+    [(; kind=Int(APP_RELEASES), 
+      content=JSON.json(try JSON.parse(read(APP_RELEASES_FILE[], String))
+                        catch _; (;) end))]
 end
 
 function parse_notification_settings(est::DB.CacheStorage, e::Nostr.Event)
