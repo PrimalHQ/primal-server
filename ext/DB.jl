@@ -754,7 +754,7 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
                                     end
                                 elseif ftype == "video"
                                     # @show (:video, url, fn)
-                                    if !isnothing(local d = try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull)) catch _ end)
+                                    if !isnothing(local d = try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull, stdout=`convert - -`)) catch _ end)
                                         (mi, lnk) = Media.media_import((_)->d, (; url, type=:video_thumbnail))
                                         thumbnail_media_url = Media.make_media_url(mi, ".png")
                                         thumb_fn = abspath(Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(thumbnail_media_url).path)
