@@ -45,6 +45,7 @@ function import_from(
 end
 
 function event_ids_by_created_at(
+        from::Tuple{Int, Int}, 
         since_hours=6, 
         since=trunc(Int, time()-since_hours*3600),
         until=trunc(Int, time()),
