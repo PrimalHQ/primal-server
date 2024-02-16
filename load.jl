@@ -16,6 +16,7 @@ for fn in [
            "firehose_client.jl",
            "firehose_server.jl",
            "cache_server_sync.jl",
+           "event_sync.jl",
           ]
     fn = "src/$fn"
     println(fn, " -> ", include(fn))
