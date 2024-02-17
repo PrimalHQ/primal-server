@@ -678,12 +678,12 @@ function expire_hashtag_score_cb(est::CacheStorage, hashtag, d_score)
     exec(est.ext[].hashtags, @sql("update hashtags set score = score - ?2 where hashtag = ?1"), (hashtag, d_score))
 end
 
-re_hashtag = r"\#([0-9a-zA-Z]+)"
+re_hashtag = r"(^|[^0-9a-zA-Z_\-])\#([0-9a-zA-Z_\-]+)"
 
 function for_hashtags(body::Function, est::CacheStorage, e::Nostr.Event)
     e.kind == Int(Nostr.TEXT_NOTE) || return
     for m in eachmatch(re_hashtag, e.content)
-        body(String(m.captures[1]))
+        body(String(m.captures[2]))
     end
 end
 
