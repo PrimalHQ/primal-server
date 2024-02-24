@@ -50,6 +50,7 @@ union!(exposed_functions, Set([
                      :report_note,
                      :get_filterlist,
                      :check_filterlist,
+                     :broadcast_reply,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -1410,6 +1411,7 @@ function broadcast_event_to_relays(e::Nostr.Event; relays=sort(JSON.parse(read(D
             verbose && println(typeof(ex))
         end
     end
+    res
 end
 
 function broadcast_spam_list_to_relays(; verbose=false)
@@ -1470,5 +1472,23 @@ function load_lists()
 end
 function remove_from_list(list::String, pk::Nostr.PubKeyId)
     DB.exec(lists[], "delete from lists where list = ?1 and pubkey = ?2", (list, pk))
+end
+
+function broadcast_reply(est::DB.CacheStorage; event)
+    e = cast(event, Nostr.Event)
+    Nostr.verify(e) || error("verification failed")
+    relays = collect(Set([t[2] for t in get_user_relays(est; e.pubkey)[end].tags]))
+    events = []
+    for t in e.tags
+        if length(t.fields) >= 4 && t.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(t.fields[2]) catch _ nothing end) && t.fields[4] in ["root", "reply"]
+            eid in est.events && push!(events, est.events[eid])
+        end
+    end
+    isempty(events) || asyncmap((e)->broadcast_event_to_relays(e; relays), [e, events...])
+    []
+end
+
+function ext_import_event(est::DB.CacheStorage, e::Nostr.Event) 
+    e.kind == Int(Nostr.TEXT_NOTE) && @async broadcast_reply(est; event=e)
 end
 
