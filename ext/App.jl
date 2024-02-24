@@ -1187,11 +1187,31 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
     data = Media.strip_metadata(data)
 
     key = (; type="member_upload", pubkey, sha256=bytes2hex(SHA.sha256(data)))
+
     new_import = Ref(false)
     (mi, lnk) = Media.media_import(function (_)
                                        new_import[] = true
                                        data
                                    end, key; media_path=UPLOADS_DIR[])
+
+    if new_import[]
+        if isempty(DB.exec(Main.InternalServices.memberships[], "select 1 from memberships where pubkey = ?1 limit 1", (pubkey,)))
+            tier = isempty(DB.exec(Main.InternalServices.verified_users[], "select 1 from verified_users where pubkey = ?1 limit 1", (pubkey,))) ? "unverified" : "verified"
+            DB.exec(Main.InternalServices.memberships[], "insert into memberships values (?1, ?2, ?3, ?4, ?5)", (pubkey, tier, missing, missing, 0))
+        end
+        @show tier, used_storage = DB.exec(Main.InternalServices.memberships[], "select tier, used_storage from memberships where pubkey = ?1", (pubkey,))[1]
+        @show max_storage, = DB.exec(Main.InternalServices.membership_tiers[], "select max_storage from membership_tiers where tier = ?1", (tier,))[1]
+
+        @show used_storage += length(data)
+        if used_storage > max_storage
+            error("insufficient storage available")
+            @show rm(mi.path)
+        end
+
+        DB.exec(Main.InternalServices.memberships[], "update memberships set used_storage = ?2 where pubkey = ?1",
+                (pubkey, used_storage))
+    end
+
     _, ext = splitext(lnk)
     url = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
 
@@ -1219,11 +1239,6 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
         # @sync for ((size, anim), media_url) in r
         #     @async @show begin HTTP.get(Media.cdn_url(surl, size, anim); readtimeout=15, connect_timeout=5).body; nothing; end
         # end
-    end
-
-    if new_import[]
-        DB.exec(Main.InternalServices.verified_users[], "update memberships set used_storage = used_storage + ?2 where pubkey = ?1",
-                (pubkey, length(data)))
     end
 
     [(; kind=Int(UPLOADED), content=surl)]
