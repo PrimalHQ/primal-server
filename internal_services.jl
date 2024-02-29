@@ -22,6 +22,7 @@ est = Ref{Any}(nothing)
 
 short_urls = Ref{Any}(nothing)
 verified_users = Ref{Any}(nothing)
+inappropriate_names = Ref{Any}(nothing)
 memberships = Ref{Any}(nothing)
 membership_tiers = Ref{Any}(nothing)
 membership_products = Ref{Any}(nothing)
@@ -92,6 +93,12 @@ function start(cache_storage, pqconnstr; setup_handlers=true)
                                                             "create index if not exists verified_users_pubkey on verified_users (pubkey asc)",
                                                             "create index if not exists verified_users_name on verified_users (name asc)",
                                                            ])
+
+    inappropriate_names[] = DB.PQDict{String, Int}("inappropriate_names", pqconnstr,
+                                              init_queries=["create table if not exists inappropriate_names (name varchar(200) primary key)",
+                                                            "create index if not exists inappropriate_names_name on inappropriate_names (name asc)",
+                                                           ])
+
     memberships[] = DB.PQDict{String, Int}("memberships", pqconnstr,
                                            init_queries=["create table if not exists memberships (
                                                          pubkey bytea,
