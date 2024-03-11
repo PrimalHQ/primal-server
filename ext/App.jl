@@ -51,6 +51,7 @@ union!(exposed_functions, Set([
                      :get_filterlist,
                      :check_filterlist,
                      :broadcast_reply,
+                     :trusted_users,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -81,6 +82,7 @@ NOTIFICATIONS_SUMMARY_2=10_000_132
 SUGGESTED_USERS=10_000_134
 UPLOAD_CHUNK=10_000_135
 APP_RELEASES=10_000_138
+TRUSTED_USERS=10_000_140
 
 # ------------------------------------------------------ #
 
@@ -1505,5 +1507,16 @@ end
 
 function ext_import_event(est::DB.CacheStorage, e::Nostr.Event) 
     e.kind == Int(Nostr.TEXT_NOTE) && @async broadcast_reply(est; event=e)
+end
+
+function trusted_users(est::DB.CacheStorage; limit::Int=500, extended_response=true)
+    limit = min(10000, limit)
+    res = []
+    pktrs = Main.TrustRank.pubkey_rank_sorted[1:limit]
+    push!(res, (; kind=Int(TRUSTED_USERS), content=JSON.json([(; pk, tr) for (pk, tr) in pktrs])))
+    for (pk, tr) in pktrs
+        haskey(est.meta_data, pk) && haskey(est.events, est.meta_data[pk]) && push!(res, est.events[est.meta_data[pk]])
+    end
+    res
 end
 
