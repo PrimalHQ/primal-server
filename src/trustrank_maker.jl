@@ -209,7 +209,7 @@ function make(
     @time for i in 1:iterations
         yield(); running[] || break
         energy = sum(tr)
-        println("$i/$N  E:$energy  D:$delta    \r")
+        println("$i/$iterations  E:$energy  D:$delta    \r")
         tr_ = [0.0 for pk in keys(ui)]
         for (pk, follows) in users
             for f in follows
