@@ -271,6 +271,24 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                 twitter_card = "summary_large_image",
                 twitter_image = "https://primal.net/images/twitter-hero.jpg")
 
+    elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
+        return (; 
+                title="Primal", 
+                description="The Social Bitcoin Wallet",
+                image=("https://primal.net/images/primal-link-preview.jpg",),
+                url="https://primal.net/",
+                twitter_card = "summary_large_image",
+                twitter_image = "https://primal.net/images/twitter-hero.jpg")
+
+    elseif !isnothing(local m = match(r"^/landing$", path)) && 1==1
+        return (; 
+                title="Primal", 
+                description="The Social Bitcoin Wallet",
+                image="https://primal.net/images/primal-link-preview.jpg",
+                url="https://primal.net/",
+                twitter_card = "summary_large_image",
+                twitter_image = "https://primal.net/images/twitter-hero.jpg")
+
     elseif !isnothing(local m = match(r"^/(.*)", path))
         name = string(m[1])
         if !isempty(local pks = nostr_json_query_by_name(name))
