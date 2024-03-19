@@ -1,3 +1,5 @@
+#module DB
+
 @enum NotificationType::Int begin
     NEW_USER_FOLLOWED_YOU=1
     USER_UNFOLLOWED_YOU=2
@@ -33,7 +35,7 @@ notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           YOUR_POST_WAS_REPOSTED=>((:your_post, Nostr.EventId), (:who_reposted_it, Nostr.PubKeyId)),
                           YOUR_POST_WAS_REPLIED_TO=>((:your_post, Nostr.EventId), (:who_replied_to_it, Nostr.PubKeyId), (:reply, Nostr.EventId)),
 
-                          YOU_WERE_MENTIONED_IN_POST=>((:you_were_mentioned_in, Nostr.EventId), (:you_were_mentioned_by, Nostr.EventId)),
+                          YOU_WERE_MENTIONED_IN_POST=>((:you_were_mentioned_in, Nostr.EventId), (:you_were_mentioned_by, Nostr.PubKeyId)),
                           YOUR_POST_WAS_MENTIONED_IN_POST=>((:your_post, Nostr.EventId), (:your_post_were_mentioned_in, Nostr.EventId), (:your_post_was_mentioned_by, Nostr.PubKeyId)),
 
                           POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED=>((:post_you_were_mentioned_in, Nostr.EventId), (:who_zapped_it, Nostr.PubKeyId), (:satszapped, Int)),
