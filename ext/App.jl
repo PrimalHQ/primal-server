@@ -678,7 +678,7 @@ function search(
             end
         end
     else
-        query[1] != '!' && (query = transform_search_query(query))
+        query = query[1] == '!' ? query[2:end] : transform_search_query(query)
         if isnothing(until)
             until = DB.exec(est.ext[].event_contents, DB.@sql("select rowid from kv_fts order by rowid desc limit 1"))[1][1]
         end
