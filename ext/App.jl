@@ -973,6 +973,9 @@ function feed_directive(est::DB.CacheStorage; directive::String, kwargs...)
             elseif parts[1] == "withreplies"
                 pk = Nostr.PubKeyId(string(parts[2]))
                 return feed(est; pubkey=pk, include_replies=true, kwargs...)
+            elseif parts[1] == "bookmarks"
+                pk = Nostr.PubKeyId(string(parts[2]))
+                return feed(est; pubkey=pk, notes=:bookmarks, kwargs...)
             else
                 for ps in [(parts[1], parts[2]),
                            (parts[2], parts[1])]
