@@ -1267,7 +1267,7 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
     [(; kind=Int(UPLOADED), content=surl)]
 end
 
-UPLOAD_MAX_SIZE = Ref(100*1024*1024)
+UPLOAD_MAX_SIZE = Ref(1024^4)
 
 function upload(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
