@@ -52,6 +52,7 @@ union!(exposed_functions, Set([
                      :check_filterlist,
                      :broadcast_reply,
                      :trusted_users,
+                     :note_mentions,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -1333,6 +1334,8 @@ end
 function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
+    # push!(Main.stuff, (:upload_cancel, (; event_from_user)))
+
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
 
@@ -1544,3 +1547,22 @@ function ext_user_profile_media(est::DB.CacheStorage, pubkey)
     haskey(est.meta_data, pubkey) ? event_media_response(est, est.meta_data[pubkey]) : []
 end
 
+function note_mentions(est::DB.CacheStorage; event_id, limit=100, offset=0)
+    limit <= 1000 || error("limit too big")
+    event_id = cast(event_id, Nostr.EventId)
+    res = []
+    pks = Set{Nostr.PubKeyId}()
+    for (arg1, arg2, arg3) in DB.exe(est.ext[].notifications.pubkey_notifications, 
+                                     "select arg1, arg2, arg3 from kv 
+                                     where arg1 = ?1 and type = ?2
+                                     order by created_at desc limit ? offset ?",
+                                     event_id, Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST), limit, offset)
+        your_post = Nostr.EventId(arg1)
+        your_post_were_mentioned_in = Nostr.EventId(arg2)
+        your_post_was_mentioned_by = Nostr.PubKeyId(arg3)
+        push!(pks, your_post_was_mentioned_by)
+        reid = your_post_were_mentioned_in
+        reid in est.events && push!(res, est.events[reid])
+    end
+    [res; user_infos(est; pubkeys=collect(pks))]
+end

@@ -71,6 +71,7 @@ Base.@kwdef struct Notifications
                                                           "create index if not exists kv_pubkey on kv (pubkey asc)",
                                                           "create index if not exists kv_created_at on kv (created_at desc)",
                                                           "create index if not exists kv_type on kv (type desc)",
+                                                          "create index if not exists kv_arg1 on kv (arg1 desc)",
                                                          ])
 ##
     pubkey_notification_cnts_init = "create table if not exists kv (
