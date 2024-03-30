@@ -471,7 +471,7 @@ function exiftool(args; stdin=devnull)
 end
 
 function strip_metadata(data::Vector{UInt8})
-    read(exiftool(["-ignoreMinorErrors", "-all=", "-"]; stdin=IOBuffer(data)))
+    read(exiftool(["-ignoreMinorErrors", "-all=", "-tagsfromfile", "@", "-Orientation", "-"]; stdin=IOBuffer(data)))
 end
 
 function is_image_rotated(fn::String)
