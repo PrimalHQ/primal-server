@@ -1538,6 +1538,6 @@ function trusted_users(est::DB.CacheStorage; limit::Int=500, extended_response=t
 end
 
 function ext_user_profile_media(est::DB.CacheStorage, pubkey)
-    haskey(est.meta_data, pubkey) ? [event_media_response(est, est.meta_data[pubkey])] : []
+    haskey(est.meta_data, pubkey) ? event_media_response(est, est.meta_data[pubkey]) : []
 end
 
