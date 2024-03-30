@@ -528,9 +528,26 @@ end
 DEFAULT_RELAYS_FILE = Ref("default-relays.json")
 
 function get_default_relays(est::DB.CacheStorage)
-    [(; kind=Int(DEFAULT_RELAYS), 
-      content=JSON.json(try JSON.parse(read(DEFAULT_RELAYS_FILE[], String))
-                        catch _; (;) end))]
+    mined = [s for s in readlines("primal-server/primal-caching-service/relays-mined-from-contact-lists.txt") if !isempty(s)]
+    mined_idxs = Set()
+    while length(mined_idxs) < 4
+        push!(mined_idxs, rand(1:length(mined)))
+    end
+    relays = [
+              "wss://relay.primal.net",
+              "wss://purplepag.es",
+              rand([
+                    "wss://relay.damus.io", 
+                    "wss://nos.lol", 
+                    "wss://relay.nostr.band", 
+                    "wss://relayable.org",
+                   ]),
+              mined[collect(mined_idxs)]...
+             ]
+    [(; kind=Int(DEFAULT_RELAYS), content=JSON.json(relays))]
+    # [(; kind=Int(DEFAULT_RELAYS), 
+    #   content=JSON.json(try JSON.parse(read(DEFAULT_RELAYS_FILE[], String))
+    #                     catch _; (;) end))]
 end
 
 RECOMMENDED_USERS_FILE = Ref("recommended-users.json")

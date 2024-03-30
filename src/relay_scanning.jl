@@ -8,10 +8,14 @@ using ..Utils
 import ..Utils
 import ..Fetching
 
-function collect_relays(cache_storage)
+function collect_relays(cache_storage; proxy=nothing)
     ##
     relays = DataStructures.Accumulator{String,Int}() |> ThreadSafe
     error_kinds = DataStructures.Accumulator{String,Int}()|>ThreadSafe
+    ##
+    for url in JSON.parse(String(HTTP.request("GET", "https://api.nostr.watch/v1/online"; proxy).body))
+        relays[url] += 1
+    end
     ##
     eids = collect(values(cache_storage.contact_lists))
     Utils.process_collection(eids; error_kinds) do eid
@@ -29,6 +33,7 @@ function collect_relays(cache_storage)
         end
         ()->" relays:$(length(relays))"
     end
+    ##
     (; relays, error_kinds)
 end
 
@@ -77,12 +82,16 @@ function scan_relays_to_file(
         valid_cb=(_)->nothing,
         kwargs...
     )
+    valid_relays = []
+    scan_relays(relays; 
+                valid_cb=function (url) 
+                    push!(valid_relays, url)
+                end, 
+                kwargs...)
     open(output_filename, "w+") do fout
-        scan_relays(relays; 
-                    valid_cb=function (url) 
-                        println(fout, url)
-                    end, 
-                    kwargs...)
+        for url in sort(valid_relays)
+            println(fout, url)
+        end
     end
 end
 
