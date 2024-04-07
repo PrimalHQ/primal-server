@@ -48,7 +48,11 @@ include("firehose_server_default_message_processors.jl")
 
 include("internal_services.jl")
 
+CONFIG_FILE = get(ENV, "PRIMALNODE_CONFIG", "primalnode_config.jl")
+isfile(CONFIG_FILE) && include(CONFIG_FILE)
+
 pqconnstr = get(ENV, "PRIMALSERVER_PGCONNSTR", "host=127.0.0.1 dbname=primal user=primal")
+if startswith(pqconnstr, ":"); pqconnstr = Symbol(pqconnstr[2:end]); end
 DB.PG_DISABLE[] = get(ENV, "PRIMALSERVER_PG_DISABLE", "") == "1"
 
 cache_storage.ext[] = DB.CacheStorageExt(; commons=cache_storage.commons, pqconnstr)
@@ -75,9 +79,6 @@ function fetching_pushgateway_sender_stop()
     fetching_pushgateway_sender_running[] = false
     wait(fetching_pushgateway_sender_task)
 end
-
-CONFIG_FILE = get(ENV, "PRIMALNODE_CONFIG", "primalnode_config.jl")
-isfile(CONFIG_FILE) && include(CONFIG_FILE)
 
 CacheServer.PORT[] = 8800+NODEIDX
 

@@ -537,7 +537,8 @@ function execute(connstr::String, query::String)
     end
 end
 
-function execute(prepared_stmt::PreparedStatement, params=[])
+function execute(prepared_stmt::PreparedStatement, params::Any=[])
+    params = collect(params)
     session = get_session(prepared_stmt.connstr)
     try
         write_collect(session.socket) do io
@@ -553,7 +554,8 @@ function execute(prepared_stmt::PreparedStatement, params=[])
     end
 end
 
-function execute(pool::Symbol, query::String, params=[])
+function execute(pool::Symbol, query::String, params::Any=[])
+    params = collect(params)
     p, srvs = lock(pools) do pools
         p = pools[pool]
         (p, [(i, srv) for (i, srv) in enumerate(p.servers) 

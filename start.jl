@@ -11,6 +11,8 @@ CacheServerHandlers.netstats_start()
 
 CacheServer.start()
 
+Postgres.start_monitoring()
+
 FirehoseServer.start()
 
 InternalServices.start(cache_storage, pqconnstr)
