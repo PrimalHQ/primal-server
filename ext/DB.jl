@@ -7,14 +7,17 @@ union!(stat_names, Set([
                         :scoresexpired,
                        ]))
 
-include("../src/psql.jl")
+# include("../src/psql.jl")
+
+include("../src/psql2.jl")
+PQDict = PGDict
 
 include("../src/notifications.jl")
 
 Base.@kwdef struct CacheStorageExt
     commons
 
-    pqconnstr::String
+    pqconnstr::Union{String,Symbol}
 
     periodic_task_running = Ref(false)
     periodic_task = Ref{Union{Nothing, Task}}(nothing)
@@ -660,14 +663,14 @@ function expire_scores(est::CacheStorage) # should be called periodically
     cnt
 end
 
-function reconnect_pq_tables(est::CacheStorage)
-    for d in [est.ext[].app_settings]
-        close(d)
-        empty!(d.dbconns)
-        push!(d.dbconns, LibPQConn([LibPQ.Connection(est.ext[].pqconnstr)
-                                    for _ in 1:Threads.nthreads()]) |> ThreadSafe)
-    end
-end
+# function reconnect_pq_tables(est::CacheStorage)
+#     for d in [est.ext[].app_settings]
+#         close(d)
+#         empty!(d.dbconns)
+#         push!(d.dbconns, LibPQConn([LibPQ.Connection(est.ext[].pqconnstr)
+#                                     for _ in 1:Threads.nthreads()]) |> ThreadSafe)
+#     end
+# end
 
 # function register_relay(est::CacheStorage, relay_url::String) # TDB use est.contact_lists for mining relays
 #     exe(est.ext[].relays, @sql("insert or ignore into kv (url, times_referenced) values (?1, 0)"), relay_url)

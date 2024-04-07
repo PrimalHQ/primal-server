@@ -50,7 +50,7 @@ notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
 ##
 Base.@kwdef struct Notifications
     directory::String
-    pqconnstr::String
+    pqconnstr::Union{String,Symbol}
 
     dbargs = (; )
 
