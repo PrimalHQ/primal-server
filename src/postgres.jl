@@ -28,10 +28,11 @@ struct PGConnPool
 end
 
 mutable struct PGServer
+    kind::Symbol # :primary or :replica
     state::Symbol
     connstr::String
     exception::Any
-    PGServer(connstr) = new(:ok, connstr, nothing)
+    PGServer(kind, connstr) = new(kind, :ok, connstr, nothing)
 end
 
 struct PGPool
@@ -584,7 +585,7 @@ function execute(pool::Symbol, query::String, params::Any=[])
             # @show r
             if r isa Base.IOError
                 p.servers[i].state = :fail
-                p.servers[i].exception = (Dates.now(), r)
+                p.servers[i].exception = (Dates.now(), query, params, r)
             else
                 push!(res, r)
             end
@@ -592,15 +593,29 @@ function execute(pool::Symbol, query::String, params::Any=[])
         res = collect(res)
         if length(res) == 1
             r = res[1]
-            if r isa Exception
-                # push!(Main.stuff, @show (; pool, query, params))
-                throw(r)
-            end
+            r isa Exception && throw(r)
             r
         elseif length(res) == 0
             error("postgres all upstream servers failed: $query")
         else
-            error("postgres upstream server results mismatch: $query")
+            println("postgres upstream server results mismatch: $query")
+            r_primary = nothing
+            for (i, r) in collect(rs)
+                r isa Base.IOError && continue
+                if p.servers[i].kind == :primary
+                    r_primary = r
+                elseif p.servers[i].kind == :replica
+                    p.servers[i].state = :mismatch
+                    p.servers[i].exception = (Dates.now(), query, params, r)
+                end
+            end
+            r = r_primary
+            if isnothing(r)
+                error("postgres upstream server results mismatch: $query")
+            else
+                r isa Exception && throw(r)
+                r
+            end
         end
     end
 end
