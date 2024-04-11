@@ -352,6 +352,10 @@ function send_cancel_request(io::IO, process_id, secret_key)
     end
 end
 
+struct PostgresException <: Exception
+    fields::Dict{Char, String}
+end
+
 function recv_message(io::IO)
     msg_type = recv_int1(io)
     msg_len = recv_int4(io)
@@ -445,10 +449,7 @@ function recv_rows(io::IO)
         if msg.type == :command_complete
             break
         elseif msg.type == :error_response
-            for (ft, fd) in msg.fields
-                ft == 'M' && error("postgres error response: $fd")
-            end
-            error("postgres error response: $(msg.fields)")
+            throw(PostgresException(Dict(msg.fields)))
         elseif msg.type == :notice_response
             for (ft, fd) in msg.fields
                 ft == 'M' && println("postgres notice: $fd")
@@ -571,6 +572,7 @@ function execute(pool::Symbol, query::String, params::Any=[])
                                 execute(srv.connstr, query)
                             end
                         catch ex 
+                            @show (query, params)
                             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
                             ex 
                         end)
