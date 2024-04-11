@@ -8,7 +8,7 @@ include("rexec_client.jl")
 PRINT_EXCEPTIONS = Ref(true)
 
 MYSELF = Ref{Union{Nothing, Tuple{Int, Int}}}(nothing)
-SRC = Ref((3,17))
+SRC = Ref{Any}(nothing)
 PERIOD = Ref(5.0)
 
 tsk = Ref{Any}(nothing)
@@ -22,7 +22,7 @@ function start()
     @assert !running[]
     running[] = true
     tsk[] = errormonitor(@async while running[]
-                             try
+                             isnothing(SRC[]) || try
                                  last_duration[] = @elapsed Base.invokelatest(pull_media, SRC[], MYSELF[])
                                  last_t[] = time()
                              catch _

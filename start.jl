@@ -19,5 +19,5 @@ InternalServices.start(cache_storage, pqconnstr)
 
 WSConnUnblocker.start()
 
-#Threads.@spawn CacheServerSync.start()
+Threads.@spawn CacheServerSync.start()
 
