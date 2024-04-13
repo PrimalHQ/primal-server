@@ -4,22 +4,23 @@ using Sockets: connect!, TCPSocket
 
 import Dates
 using Decimals: decimal, Decimal
+import JSON, HTTP
 
 import ..Utils
 using ..Utils: ThreadSafe
 
 import ..PushGatewayExporter
 
-struct PreparedStatement
-    connstr::String
-    name::String
-end
-
 struct Session
     socket::TCPSocket
     parameters::Dict{String, String}
     backend_key_data::Any
-    prepared_statements::Dict{String, PreparedStatement}
+    prepared_statements::Dict{String, String}
+end
+
+struct PreparedStatement
+    session::Session
+    name::String
 end
 
 struct PGConnPool
@@ -28,45 +29,40 @@ struct PGConnPool
 end
 
 mutable struct PGServer
-    kind::Symbol # :primary or :replica
-    state::Symbol
     connstr::String
+    tracking_url::String
     exception::Any
-    PGServer(kind, connstr) = new(kind, :ok, connstr, nothing)
-end
-
-struct PGPool
-    servers::Vector{PGServer}
+    function PGServer(; connstr="", tracking_url="")
+        @assert !isempty(connstr) || !isempty(tracking_url)
+        new(connstr, tracking_url, nothing)
+    end
 end
 
 PRINT_EXCEPTIONS = Ref(true)
+print_exceptions_lock = ReentrantLock()
 
-SESSIONS_PER_POOL = Ref(50)
+SESSIONS_PER_POOL = Ref(20)
 MAX_WAIT_FOR_SESSION = Ref(30.0)
 MAX_WAIT_FOR_CONNECTION = Ref(5.0)
 
 connpools = Dict{String, PGConnPool}() |> ThreadSafe
-pools = Dict{Symbol, PGPool}() |> ThreadSafe
+servers = Dict{Symbol, PGServer}() |> ThreadSafe
+
+const USE_TASK_LOCAL_STORAGE = Ref(true)
 
 pg_to_jl_type_conversion = Dict{Int32, Function}()
 jl_to_pg_type_conversion = Dict{Type, Function}()
 
-import JSON
 @inline function log_time(; kwargs...)
     println("$(Dates.now())  $(JSON.json(kwargs))")
 end
 
-function healthy!(srv::PGServer)
-    srv.state = :ok
-    srv.exception = nothing
-end
-
 function make_session(connstr::String)
-    opts = Dict([map(string, split(s, '=')) for s in split(connstr, ' ')])
+    opts = Dict([map(string, split(s, '=')) for s in split(connstr, ' ') if !isempty(s)])
 
     tstart = time()
     io = TCPSocket()
-    connect!(io, opts["host"], parse(Int, opts["port"]))
+    connect!(io, opts["host"], parse(Int, get(opts, "port", "5432")))
     while io.status != Base.StatusOpen
         if time() - tstart >= MAX_WAIT_FOR_CONNECTION[]
             close(io)
@@ -103,6 +99,8 @@ function make_session(connstr::String)
 
     Session(io, parameters, backend_key_data, Dict{String, PreparedStatement}())
 end
+
+Base.close(session::Session) = close(session.socket)
 
 function simple_test(io::IO)
     # rows = execute_simple(io, "select 123, 'abc', 'bcd'::varchar, true, null, '\\x1234'::bytea, now()::timestamp")
@@ -169,6 +167,23 @@ function remove_session(connstr, session)
         deleteat!(pool.sessions,      findfirst(sess->sess==session, pool.sessions))
         deleteat!(pool.free_sessions, findfirst(sess->sess==session, pool.free_sessions))
         get_connection_pool(connpools, connstr)
+    end
+end
+
+function close_sessions(connstr)
+    lock(connpools) do connpools
+        pool = get_connection_pool(connpools, connstr)
+        for session in pool.sessions
+            try close(session) catch _ end
+        end
+        empty!(pool.sessions)
+        empty!(pool.free_sessions)
+    end
+end
+
+function close_servers()
+    for server in collect(values(servers))
+        close_sessions(server.connstr)
     end
 end
 
@@ -502,153 +517,161 @@ function execute_simple(io::IO, query::String)
     recv_rows(io)
 end
 
-function prepare(connstr::String, query::String)
-    session = get_session(connstr)
+function handle_errors(body::Function, connstr::String)
     try
+        session = get_session(connstr)
         try
-            get!(session.prepared_statements, query) do
-                stmt_name = "__psql2_stmt_$(length(session.prepared_statements)+1)__"
-                write_collect(session.socket) do io
-                    send_parse(io, stmt_name, query)
-                    send_sync(io)
-                end
-                recv_until(session.socket, msg->msg.type == :parse_complete)
-                PreparedStatement(connstr, stmt_name)
-            end
+            body(session)
         finally
             free_session(connstr, session)
         end
-    catch ex
-        ex isa Base.IOError && remove_session(connstr, session)
+    catch ex 
+        PRINT_EXCEPTIONS[] && lock(print_exceptions_lock) do
+            Utils.print_exceptions()
+        end
+        if ex isa Base.IOError
+            close_sessions(connstr)
+            sleep(10)
+        end
         rethrow()
     end
 end
 
-function execute(connstr::String, query::String)
-    session = get_session(connstr)
-    try
+function handle_errors(body::Function, server::Symbol)
+    handle_errors(body, servers[server].connstr)
+end
+
+function transaction(body::Function, server::Symbol=:default)
+    handle_errors(server) do session
+        execute(session, "begin")
+        res = nothing
         try
-            send_simple_query(session.socket, query)
-            recv_rows(session.socket)
-        finally
-            free_session(connstr, session)
+            res = body(session)
+        catch _
+            execute(session, "rollback")
+            rethrow()
         end
-    catch ex
-        ex isa Base.IOError && remove_session(connstr, session)
-        rethrow()
+        execute(session, "commit")
+        res
+    end
+end
+
+function transaction_tls(body::Function, server::Symbol=:default)
+    transaction(server) do session
+        task_local_storage((:postgres_transaction_session, server), session) do 
+            body()
+        end
+    end
+end
+
+function prepare(session::Session, query::String)
+    PreparedStatement(session, 
+                      get!(session.prepared_statements, query) do
+                          stmt_name = "__pg_stmt_$(length(session.prepared_statements)+1)__"
+                          write_collect(session.socket) do io
+                              send_parse(io, stmt_name, query)
+                              send_sync(io)
+                          end
+                          recv_until(session.socket, msg->msg.type == :parse_complete)
+                          stmt_name
+                      end)
+end
+
+function execute_simple(session::Session, query::String)
+    send_simple_query(session.socket, query)
+    recv_rows(session.socket)
+end
+
+function execute(connstr::String, query::String)
+    handle_errors(connstr) do session
+        execute(session, query)
     end
 end
 
 function execute(prepared_stmt::PreparedStatement, params::Any=[])
     params = collect(params)
-    session = get_session(prepared_stmt.connstr)
+    session = prepared_stmt.session
+    write_collect(session.socket) do io
+        send_bind(io, prepared_stmt.name, params)
+        send_describe(io)
+        send_execute(io)
+        send_sync(io)
+    end
+    recv_until(session.socket, msg->msg.type == :bind_complete)
+    recv_rows(session.socket)
+end
+
+function execute(session::Session, query::String, params::Any=[])
     try
-        write_collect(session.socket) do io
-            send_bind(io, prepared_stmt.name, collect(params))
-            send_describe(io)
-            send_execute(io)
-            send_sync(io)
-        end
-        recv_until(session.socket, msg->msg.type == :bind_complete)
-        recv_rows(session.socket)
-    finally
-        free_session(prepared_stmt.connstr, session)
-    end
-end
-
-function execute(pool::Symbol, query::String, params::Any=[])
-    params = collect(params)
-    p, srvs = lock(pools) do pools
-        p = pools[pool]
-        (p, [(i, srv) for (i, srv) in enumerate(p.servers) 
-             if srv.state == :ok])
-    end
-    rs = [] |> ThreadSafe
-    exe(i, srv) = push!(rs, i => 
-                        try 
-                            if '$' in query
-                                execute(prepare(srv.connstr, query), params)
-                            else
-                                execute(srv.connstr, query)
-                            end
-                        catch ex 
-                            @show (query, params)
-                            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
-                            ex 
-                        end)
-    @sync for (i, srv) in srvs
-        @async exe(i, srv)
-    end
-    rs = collect(rs)
-    lock(pools) do pools
-        p = pools[pool]
-        res = Set()
-        for (i, r) in collect(rs)
-            # @show r
-            if r isa Base.IOError
-                p.servers[i].state = :fail
-                p.servers[i].exception = (Dates.now(), query, params, r)
-            else
-                push!(res, r)
-            end
-        end
-        res = collect(res)
-        if length(res) == 1
-            r = res[1]
-            r isa Exception && throw(r)
-            r
-        elseif length(res) == 0
-            error("postgres all upstream servers failed: $query")
+        if '$' in query
+            execute(prepare(session, query), params)
         else
-            println("postgres upstream server results mismatch: $query")
-            r_primary = nothing
-            for (i, r) in collect(rs)
-                r isa Base.IOError && continue
-                if p.servers[i].kind == :primary
-                    r_primary = r
-                elseif p.servers[i].kind == :replica
-                    p.servers[i].state = :mismatch
-                    p.servers[i].exception = (Dates.now(), query, params, r)
-                end
-            end
-            r = r_primary
-            if isnothing(r)
-                error("postgres upstream server results mismatch: $query")
-            else
-                r isa Exception && throw(r)
-                r
-            end
+            @assert isempty(params)
+            execute_simple(session, query)
         end
+    catch _
+        PRINT_EXCEPTIONS[] && lock(print_exceptions_lock) do
+            @show (query, params)
+        end
+        rethrow()
     end
 end
 
-monitoring_task = Ref{Any}(nothing)
-monitoring_running = Ref(false)
-MONITORING_PERIOD = Ref(15.0)
+function execute(server::Symbol, query::String, params::Any=[])
+    if USE_TASK_LOCAL_STORAGE[]
+        if !isnothing(local session = get(task_local_storage(), (:postgres_transaction_session, server), nothing))
+            return execute(session, query, params)
+        end
+    end
 
-function start_monitoring()
-    @assert isnothing(monitoring_task[])
-    monitoring_running[] = true
-    monitoring_task[] = errormonitor(@async while monitoring_running[]
-                                             try
-                                                 Base.invokelatest(monitoring)
-                                             catch _
-                                                 PRINT_EXCEPTIONS[] && Utils.print_exceptions()
-                                             end
-                                             Utils.active_sleep(MONITORING_PERIOD[], monitoring_running; dt=1.0)
-                                         end)
-end
-
-function stop_monitoring()
-    @assert !isnothing(monitoring_task[])
-    monitoring_running[] = false
-    wait(monitoring_task[])
-    monitoring_task[] = nothing
+    handle_errors(server) do session
+        execute(session, query, params)
+    end
 end
 
 function monitoring()
     PushGatewayExporter.set!("postgres_min_free_sessions", 
                              minimum([v.free_sessions for (_, v) in connection_pool_stats()]))
+end
+
+function server_tracking()
+    connstrs = Set()
+
+    for server in collect(values(servers))
+        isempty(server.tracking_url) && continue
+        d = JSON.parse(String(HTTP.request("GET", server.tracking_url; retry=false, timeout=5, connect_timeout=5).body))
+        session = make_session(d["postgres"])
+        try
+            if execute(session, "select pg_is_in_recovery()")[1][1]
+                execute(session, "select pg_promote()")
+            end
+            server.connstr = d["primal"]
+            push!(connstrs, server.connstr)
+        finally
+            try close(session) catch _ end
+        end
+    end
+
+    for connstr in collect(keys(connpools))
+        if !(connstr in connstrs)
+            close_sessions(connstr)
+            delete!(connpools, connstr)
+        end
+    end
+end
+
+tasks = [(monitoring, 15.0), (server_tracking, 1.0)]
+
+function start()
+    for (f, period) in tasks
+        Utils.start_periodic_tasked(f, period)
+    end
+end
+
+function stop()
+    for (f, period) in tasks
+        Utils.stop_periodic_tasked(f)
+    end
 end
 
 end
