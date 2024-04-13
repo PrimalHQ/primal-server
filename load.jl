@@ -55,6 +55,8 @@ pqconnstr = get(ENV, "PRIMALSERVER_PGCONNSTR", "host=127.0.0.1 dbname=primal use
 if startswith(pqconnstr, ":"); pqconnstr = Symbol(pqconnstr[2:end]); end
 DB.PG_DISABLE[] = get(ENV, "PRIMALSERVER_PG_DISABLE", "") == "1"
 
+Postgres.server_tracking()
+
 cache_storage.ext[] = DB.CacheStorageExt(; commons=cache_storage.commons, pqconnstr)
 
 DB.init(cache_storage)
