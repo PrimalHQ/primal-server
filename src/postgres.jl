@@ -457,6 +457,7 @@ function recv_message(io::IO)
 end
 
 function recv_rows(io::IO)
+    columns = nothing
     rows = Any[]
     row_desc = nothing
     while true
@@ -472,6 +473,8 @@ function recv_rows(io::IO)
         elseif msg.type == :row_description
             row_desc = msg.fields
             # dump(row_desc)
+            columns = [f.field_name for f in row_desc]
+            
         elseif msg.type == :data_row
             push!(rows, Any[f.format != :text ? d : 
                             if     ismissing(d) || isnothing(d); d
@@ -485,7 +488,7 @@ function recv_rows(io::IO)
                             elseif f.type_oid == 114; String(d) # json
                             elseif f.type_oid == 700; parse(Float64, String(d)) # float4
                             elseif f.type_oid == 1043; String(d) # varchar
-                            elseif f.type_oid == 1114; Dates.DateTime(replace(String(d), ' '=>'T')[1:23]) # timestamp
+                            elseif f.type_oid == 1114; Dates.DateTime(first(replace(String(d), ' '=>'T'), 23)) # timestamp
                             elseif f.type_oid == 1700; decimal(String(d)) # numeric
                             elseif f.type_oid == 3802; String(d) # jsonb
                             elseif haskey(pg_to_jl_type_conversion, f.type_oid); pg_to_jl_type_conversion[f.type_oid](d)
@@ -495,7 +498,7 @@ function recv_rows(io::IO)
         end
     end
     recv_until(io, msg->msg.type == :ready_for_query)
-    rows
+    (columns, rows)
 end
 
 function recv_until(io::IO, cond::Function=(msg) -> msg.type == :command_complete)
@@ -638,17 +641,20 @@ function server_tracking()
     connstrs = Set()
 
     for server in collect(values(servers))
-        isempty(server.tracking_url) && continue
-        d = JSON.parse(String(HTTP.request("GET", server.tracking_url; retry=false, timeout=5, connect_timeout=5).body))
-        session = make_session(d["postgres"])
-        try
-            if execute(session, "select pg_is_in_recovery()")[1][1]
-                execute(session, "select pg_promote()")
-            end
-            server.connstr = d["primal"]
+        if isempty(server.tracking_url) && !isempty(server.connstr)
             push!(connstrs, server.connstr)
-        finally
-            try close(session) catch _ end
+        else
+            d = JSON.parse(String(HTTP.request("GET", server.tracking_url; retry=false, timeout=5, connect_timeout=5).body))
+            session = make_session(d["postgres"])
+            try
+                if execute(session, "select pg_is_in_recovery()")[1][1]
+                    execute(session, "select pg_promote()")
+                end
+                server.connstr = d["primal"]
+                push!(connstrs, server.connstr)
+            finally
+                try close(session) catch _ end
+            end
         end
     end
 

@@ -17,15 +17,19 @@ function exe_replacing_args(conn::PGConnection, query, args...)
     Postgres.execute(conn.connsel, replace(query, "?"=>"\$"), args...)
 end
 function exe(conn::PGConnection, query, args...) 
-    exe_replacing_args(conn, query, args...)
+    _, rows = exe_replacing_args(conn, query, args...)
+    rows
 end
 
 # exe(conn::ThreadSafe{PGConn}, args...) = exe(conn.wrapped, args...)
 exe(conn::ThreadSafe{PGConn}, args...) = lock(conn) do conn; exe(conn, args...); end
 exe(conn::PGConn, args...) = exe(conn.dbs[1], args...)
 
-exd(conn::PGConnection, query, args...) = [NamedTuple(zip(propertynames(row), collect(row))) 
-                                           for row in exe_replacing_args(conn, query, args...)]
+function exd(conn::PGConnection, query, args...)
+    columns, rows = exe_replacing_args(conn, query, args...)
+    columns = map(Symbol, columns)
+    [NamedTuple(zip(columns, row)) for row in rows]
+end
 exd(conn::ThreadSafe{PGConn}, args...) = lock(conn) do conn; exd(conn, args...); end
 exd(conn::PGConn, args...) = exd(conn.dbs[1], args...)
 
@@ -89,7 +93,7 @@ db_conversion_funcs(::Type{PGDict{K, V}}, ::Type{Base.UUID}) where {K, V} = DBCo
 # Postgres.jl_to_pg_type_conversion[Any] = string
 # Postgres.jl_to_pg_type_conversion[Tuple] = v->string("(", join(v, ","), ")")
 
-Postgres.pg_to_jl_type_conversion[2950] = d->Base.UUID(string(d))
+Postgres.pg_to_jl_type_conversion[2950] = d->Base.UUID(String(d))
 
 function Base.setindex!(ssd::PGDict{K, V}, v::V, k::K)::V where {K, V}
     exe(ssd.dbconns[shard(ssd, k)],
