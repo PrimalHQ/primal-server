@@ -560,10 +560,14 @@ function transaction(body::Function, server::Symbol=:default)
 end
 
 function transaction_tls(body::Function, server::Symbol=:default)
-    transaction(server) do session
-        task_local_storage((:postgres_transaction_session, server), session) do 
-            body()
+    if isnothing(get(task_local_storage(), (:postgres_transaction_session, server), nothing))
+        transaction(server) do session
+            task_local_storage((:postgres_transaction_session, server), session) do 
+                body()
+            end
         end
+    else
+        body()
     end
 end
 
