@@ -651,7 +651,7 @@ function server_tracking()
             d = JSON.parse(String(HTTP.request("GET", server.tracking_url; retry=false, timeout=5, connect_timeout=5).body))
             session = make_session(d["postgres"])
             try
-                if execute(session, "select pg_is_in_recovery()")[1][1]
+                if execute(session, "select pg_is_in_recovery()")[2][1][1]
                     execute(session, "select pg_promote()")
                 end
                 server.connstr = d["primal"]
