@@ -487,6 +487,7 @@ function recv_rows(io::IO)
                             elseif f.type_oid == 25; String(d) # text
                             elseif f.type_oid == 114; String(d) # json
                             elseif f.type_oid == 700; parse(Float64, String(d)) # float4
+                            elseif f.type_oid == 701; parse(Float64, String(d)) # float8
                             elseif f.type_oid == 1043; String(d) # varchar
                             elseif f.type_oid == 1114; Dates.DateTime(first(replace(String(d), ' '=>'T'), 23)) # timestamp
                             elseif f.type_oid == 1700; decimal(String(d)) # numeric
