@@ -18,6 +18,7 @@ for fn in [
            "cache_server_sync.jl",
            "event_sync.jl",
            "postgres.jl",
+           "blossom.jl",
           ]
     fn = "src/$fn"
     println(fn, " -> ", include(fn))
@@ -88,6 +89,8 @@ FirehoseServer.HOST[] = "0.0.0.0"
 FirehoseServer.PORT[] = 12000+NODEIDX
 
 InternalServices.PORT[] = 14000+NODEIDX
+
+Blossom.PORT[] = 21000+NODEIDX
 
 union!(DB.stat_names, Set([:media_downloads,
                            :media_downloaded_bytes,

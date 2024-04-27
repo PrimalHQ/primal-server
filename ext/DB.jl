@@ -181,10 +181,15 @@ Base.@kwdef struct CacheStorageExt
                                                                       category varchar(100) not null, 
                                                                       category_confidence real not null, 
                                                                       width int8 not null, 
-                                                                      height int8 not null 
+                                                                      height int8 not null,
+
+                                                                      sha256 bytea,
+                                                                      moderation_category varchar
                                                                       )",
                                                                       "create index if not exists media_uploads_pubkey on media_uploads (pubkey asc)",
                                                                       "create index if not exists media_uploads_created_at on media_uploads (created_at desc)",
+                                                                      "create index if not exists media_uploads_sha256 on media_uploads (sha256 asc)",
+                                                                      "create index if not exists media_uploads_path on media_uploads (path asc)",
                                                                      ])
 
     notification_settings = PQDict{Nostr.PubKeyId, Bool}("notification_settings", pqconnstr;

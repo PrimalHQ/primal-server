@@ -86,6 +86,7 @@ UPLOAD_CHUNK=10_000_135
 APP_RELEASES=10_000_138
 TRUSTED_USERS=10_000_140
 NOTE_MENTIONS_COUNT=10_000_143
+UPLOADED_2=10_000_142
 
 # ------------------------------------------------------ #
 
@@ -1261,15 +1262,17 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
     mimetype = Media.parse_image_mimetype(data)
 
     if isempty(DB.exe(est.ext[].media_uploads, DB.@sql("select 1 from media_uploads where pubkey = ?1 and key = ?2 limit 1"), pubkey, JSON.json(key)))
-        DB.exe(est.ext[].media_uploads, DB.@sql("insert into media_uploads values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"), 
+        DB.exe(est.ext[].media_uploads, DB.@sql("insert into media_uploads values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"), 
                pubkey,
                key.type, JSON.json(key),
                trunc(Int, time()),
                string(URIs.parse_uri(url).path),
-               stat(lnk).size, 
+               stat(mi.path).size, 
                mimetype,
                "", 1.0, 
-               width, height, 0.0)
+               width, height,
+               0.0,
+               sha256)
     end
 
     # surl = String(HTTP.get("$(URL_SHORTENING_SERVICE[])$(URIs.escapeuri(url))").body)
