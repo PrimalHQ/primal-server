@@ -478,6 +478,7 @@ function recv_rows(io::IO)
         elseif msg.type == :data_row
             push!(rows, Any[f.format != :text ? d : 
                             if     ismissing(d) || isnothing(d); d
+                            elseif haskey(pg_to_jl_type_conversion, f.type_oid); pg_to_jl_type_conversion[f.type_oid](d)
                             elseif f.type_oid == 16; String(d) == "t" # bool
                             elseif f.type_oid == 17 # bytea
                                 @assert d[1] == UInt8('\\') && d[2] == UInt8('x')
@@ -492,7 +493,6 @@ function recv_rows(io::IO)
                             elseif f.type_oid == 1114; Dates.DateTime(first(replace(String(d), ' '=>'T'), 23)) # timestamp
                             elseif f.type_oid == 1700; decimal(String(d)) # numeric
                             elseif f.type_oid == 3802; String(d) # jsonb
-                            elseif haskey(pg_to_jl_type_conversion, f.type_oid); pg_to_jl_type_conversion[f.type_oid](d)
                             else; @show (; type_oid=f.type_oid, data=d)
                             end
                             for (f, d) in zip(row_desc, msg.fields)])
