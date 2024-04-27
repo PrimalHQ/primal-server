@@ -1203,15 +1203,22 @@ end
 
 @cached 600 trending_images_4h(est::DB.CacheStorage) = trending_images(est; created_after=trunc(Int, time()-4*3600), limit=500)
 
-UPLOADS_DIR = Ref("uploads")
+UPLOADS_DIR = Ref(:uploads)
 MEDIA_URL_ROOT = Ref("https://media.primal.net/uploads")
 URL_SHORTENING_SERVICE = Ref("http://127.0.0.1:14001/url-shortening?u=")
 MEDIA_UPLOAD_PATH = Ref("incoming")
 
+categorized_uploads = Ref{Any}(nothing)
+
 function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
+    if !isempty(DB.exec(categorized_uploads[], "select 1 from categorized_uploads where sha256 = ?1 and type = 'blocked' limit 1", (SHA.sha256(data),)))
+        error("blocked content")
+    end
+
     data = Media.strip_metadata(data)
 
-    key = (; type="member_upload", pubkey, sha256=bytes2hex(SHA.sha256(data)))
+    sha256 = SHA.sha256(data)
+    key = (; type="member_upload", pubkey, sha256=bytes2hex(sha256))
 
     new_import = Ref(false)
     (mi, lnk) = Media.media_import(function (_)
@@ -1266,16 +1273,24 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
         # end
     end
 
-    [(; kind=Int(UPLOADED), content=surl)]
+    [
+     (; kind=Int(UPLOADED_2), content=JSON.json((; sha256=bytes2hex(sha256)))),
+     (; kind=Int(UPLOADED), content=surl),
+    ]
 end
 
 UPLOAD_MAX_SIZE = Ref(1024^4)
+
+function is_upload_blocked(pubkey::Nostr.PubKeyId)
+    !isempty(DB.exec(lists[], "select 1 from lists where list = ?1 and pubkey = ?2 limit 1", ("upload_block", pubkey)))
+end
 
 function upload(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD) || error("invalid event kind")
+    is_upload_blocked(e.pubkey) && error("upload blocked")
 
     contents = e.content
     data = Base64.base64decode(contents[findfirst(',', contents)+1:end])
@@ -1292,6 +1307,7 @@ function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
 
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
+    is_upload_blocked(e.pubkey) && error("upload blocked")
 
     c = JSON.parse(e.content)
     ulid = Base.UUID(c["upload_id"])
@@ -1317,6 +1333,7 @@ function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
 
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
+    is_upload_blocked(e.pubkey) && error("upload blocked")
 
     c = JSON.parse(e.content)
     ulid = Base.UUID(c["upload_id"])
@@ -1340,6 +1357,7 @@ function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
 
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
+    is_upload_blocked(e.pubkey) && error("upload blocked")
 
     c = JSON.parse(e.content)
     ulid = Base.UUID(c["upload_id"])
@@ -1490,7 +1508,6 @@ function ext_user_profile(est::DB.CacheStorage, pubkey)
     )
 end
 
-lists = Ref{Any}(nothing)
 function start(pqconnstr)
     lists[] = DB.PQDict{String, Int}("lists", pqconnstr,
                                      init_queries=["create table if not exists lists (list varchar(200) not null, pubkey bytea not null, added_at int not null)",
@@ -1498,7 +1515,22 @@ function start(pqconnstr)
                                                    "create index if not exists lists_pubkey on lists (pubkey asc)",
                                                    "create index if not exists lists_added_at on lists (added_at desc)",
                                                   ])
+    categorized_uploads[] = DB.PQDict{String, Int}("categorized_uploads", pqconnstr,
+                                     init_queries=["create table if not exists categorized_uploads (
+                                                   type varchar not null,
+                                                   added_at int not null,
+                                                   sha256 bytea,
+                                                   url varchar,
+                                                   pubkey bytea,
+                                                   event_id bytea,
+                                                   extra json
+                                                   )",
+                                                   "create index if not exists categorized_uploads_added_at on categorized_uploads (added_at desc)",
+                                                   "create index if not exists categorized_uploads_sha256 on categorized_uploads (sha256 asc)",
+                                                  ])
 end
+
+lists = Ref{Any}(nothing)
 function get_list(list)
     [Nostr.PubKeyId(pk) for (pk,) in DB.exec(lists[], "select pubkey from lists where list = ?1", (list,))]
 end
