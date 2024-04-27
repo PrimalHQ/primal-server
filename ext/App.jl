@@ -53,6 +53,7 @@ union!(exposed_functions, Set([
                      :broadcast_reply,
                      :trusted_users,
                      :note_mentions,
+                     :note_mentions_count,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -84,6 +85,7 @@ SUGGESTED_USERS=10_000_134
 UPLOAD_CHUNK=10_000_135
 APP_RELEASES=10_000_138
 TRUSTED_USERS=10_000_140
+NOTE_MENTIONS_COUNT=10_000_143
 
 # ------------------------------------------------------ #
 
@@ -1547,22 +1549,29 @@ function ext_user_profile_media(est::DB.CacheStorage, pubkey)
     haskey(est.meta_data, pubkey) ? event_media_response(est, est.meta_data[pubkey]) : []
 end
 
-function note_mentions(est::DB.CacheStorage; event_id, limit=100, offset=0)
-    limit <= 1000 || error("limit too big")
+function note_mentions(est::DB.CacheStorage; event_id, limit=100, offset=0, user_pubkey=nothing)
     event_id = cast(event_id, Nostr.EventId)
-    res = []
-    pks = Set{Nostr.PubKeyId}()
-    for (arg1, arg2, arg3) in DB.exe(est.ext[].notifications.pubkey_notifications, 
-                                     "select arg1, arg2, arg3 from kv 
-                                     where arg1 = ?1 and type = ?2
-                                     order by created_at desc limit ? offset ?",
-                                     event_id, Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST), limit, offset)
-        your_post = Nostr.EventId(arg1)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    limit <= 1000 || error("limit too big")
+
+    eids = Set{Nostr.EventId}()
+    for (arg1, arg2, arg3) in DB.exec(est.ext[].notifications.pubkey_notifications, 
+                                      "select arg1, arg2, arg3 from kv 
+                                      where arg1 = ?1 and type = ?2
+                                      order by created_at desc limit ? offset ?",
+                                      (event_id, Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST), limit, offset))
         your_post_were_mentioned_in = Nostr.EventId(arg2)
-        your_post_was_mentioned_by = Nostr.PubKeyId(arg3)
-        push!(pks, your_post_was_mentioned_by)
-        reid = your_post_were_mentioned_in
-        reid in est.events && push!(res, est.events[reid])
+        push!(eids, your_post_were_mentioned_in)
     end
-    [res; user_infos(est; pubkeys=collect(pks))]
+    response_messages_for_posts(est, collect(eids); user_pubkey)
+end
+
+function note_mentions_count(est::DB.CacheStorage; event_id)
+    event_id = cast(event_id, Nostr.EventId)
+    (count,) = DB.exec(est.ext[].notifications.pubkey_notifications, 
+                       "select count(1) from kv where arg1 = ?1 and type = ?2",
+                       (event_id, Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST)))[1]
+    [(;
+      kind=Int(NOTE_MENTIONS_COUNT),
+      content=JSON.json((; event_id, count)))]
 end
