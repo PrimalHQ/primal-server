@@ -637,6 +637,13 @@ function execute(server::Symbol, query::String, params::Any=[])
     end
 end
 
+function in_recovery(server::Symbol)::Bool
+    Postgres.execute(server, "select pg_is_in_recovery()")[2][1][1]
+end
+function promote(server::Symbol)
+    Postgres.execute(server, "select pg_promote()")
+end
+
 function monitoring()
     PushGatewayExporter.set!("postgres_min_free_sessions", 
                              minimum([v.free_sessions for (_, v) in connection_pool_stats()]))

@@ -57,8 +57,10 @@ struct PGDict{K, V} <: ShardedDBDict{K, V}
                                              init_extra_indexes),
                          ) where {K, V}
         dbconn = PGConn([PGConnection(connsel)])
-        for q in init_queries
-            exe(dbconn.dbs[1], q)
+        if !exe(dbconn.dbs[1], "select pg_is_in_recovery()")[1][1]
+            for q in init_queries
+                exe(dbconn.dbs[1], q)
+            end
         end
         new{K, V}(table, keycolumn, valuecolumn, [dbconn |> ThreadSafe], hashfunc, keyfuncs, valuefuncs)
     end
