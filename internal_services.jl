@@ -2,6 +2,7 @@ module InternalServices
 
 import HTTP, EzXML, JSON, URIs
 using DataStructures: CircularBuffer
+import Glob
 
 import ..Utils
 import ..Nostr
@@ -469,8 +470,8 @@ function media_cache_handler(req::HTTP.Request)
                 HTTP.Response(302, HTTP.Headers(["Location"=>resurl, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
             else
                 @assert startswith(resurl, Media.MEDIA_URL_ROOT[])
-                fp = Media.MEDIA_PATH[] * "/" * resurl[length(Media.MEDIA_URL_ROOT[])+1:end]
-                _, ext = splitext(fp)
+                fp = Media.MEDIA_PATH[] * resurl[length(Media.MEDIA_URL_ROOT[])+1:end]
+                fpb, ext = splitext(fp)
                 ct = "application/octet-stream"
                 for (mt, ext2) in Media.mimetype_ext
                     if ext2 == ext
@@ -478,9 +479,30 @@ function media_cache_handler(req::HTTP.Request)
                         break
                     end
                 end
-                d = read(fp)
-                # HTTP.Response(200, HTTP.Headers(["Content-Type"=>ct, "Content-Length"=>"$(length(d))", "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]), d)
-                HTTP.Response(200, HTTP.Headers(["Content-Type"=>ct, "Content-Length"=>"$(length(d))", "Cache-Control"=>"max-age=20"]), d)
+
+                ps = splitpath(fpb)
+                for p in Glob.glob(ps[end]*"*", join(ps[1:end-1], '/')[2:end])
+                    rm(p)
+                end
+
+                r = Media.media_variants(est[], url, variants; sync=true)
+                if isnothing(r)
+                    HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+                else
+                    resurl = r[variant]
+                    if !send_content
+                        HTTP.Response(302, HTTP.Headers(["Location"=>resurl, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+                    else
+                        fp = Media.MEDIA_PATH[] * resurl[length(Media.MEDIA_URL_ROOT[])+1:end]
+                        if !isfile(fp)
+                            HTTP.Response(302, HTTP.Headers(["Location"=>resurl, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+                        else
+                            d = read(fp)
+                            # HTTP.Response(200, HTTP.Headers(["Content-Type"=>ct, "Content-Length"=>"$(length(d))", "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]), d)
+                            HTTP.Response(200, HTTP.Headers(["Content-Type"=>ct, "Content-Length"=>"$(length(d))", "Cache-Control"=>"max-age=20"]), d)
+                        end
+                    end
+                end
             end
         end
     end
