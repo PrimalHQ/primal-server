@@ -16,6 +16,8 @@ import ..DB
 PRINT_EXCEPTIONS = Ref(false)
 
 MEDIA_PATH = Ref("/mnt/ppr1/var/www/cdn/cache")
+MEDIA_PATHS = Dict{Symbol, Vector{String}}()
+MEDIA_PATHS[:cache] = ["/mnt/ppr1/var/www/cdn/cache"]
 MEDIA_URL_ROOT = Ref("https://media.primal.net/cache")
 # MEDIA_TMP_DIR  = Ref("/tmp/primalmedia")
 MEDIA_TMP_DIR = Ref("/mnt/ppr1/var/www/cdn/cache/tmp")
@@ -216,7 +218,20 @@ function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector
     end
 end
 
-function media_import(fetchfunc::Union{Function,Nothing}, key; media_path=MEDIA_PATH[])
+function media_import(fetchfunc::Union{Function,Nothing}, key; media_path::Symbol=:cache)
+    rs = []
+    excs = []
+    for mp in MEDIA_PATHS[media_path]
+        try
+            push!(rs, media_import(fetchfunc, key, mp))
+        catch ex
+            push!(excs, ex)
+        end
+    end
+    isempty(rs) ? throw(excs[1]) : rs[1]
+end
+
+function media_import(fetchfunc::Union{Function,Nothing}, key, media_path::String)
     mi = MediaImport(; key, media_path)
     if !isfile(mi.path)
         data = fetchfunc(key)
