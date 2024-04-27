@@ -92,6 +92,8 @@ db_conversion_funcs(::Type{PGDict{K, V}}, ::Type{Base.UUID}) where {K, V} = DBCo
 
 # Postgres.jl_to_pg_type_conversion[Any] = string
 # Postgres.jl_to_pg_type_conversion[Tuple] = v->string("(", join(v, ","), ")")
+Postgres.jl_to_pg_type_conversion[Nostr.EventId] = v -> "\\x" * bytes2hex(collect(v.hash))
+Postgres.jl_to_pg_type_conversion[Nostr.PubKeyId] = v -> "\\x" * bytes2hex(collect(v.pk))
 
 Postgres.pg_to_jl_type_conversion[2950] = d->Base.UUID(String(d))
 
