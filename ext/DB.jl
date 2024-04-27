@@ -278,6 +278,8 @@ function ext_init(est::CacheStorage)
                                                                "create index if not exists event_attributes_key_value on event_attributes (key asc, value desc)",
                                                               ])
 ##
+    est.dyn[:human_override] = PQDict{Nostr.PubKeyId, Bool}("human_override", est.ext[].pqconnstr; keycolumn="pubkey", valuecolumn="is_human")
+##
 end
 
 function insert_stuff(est::CacheStorage, data)
@@ -451,6 +453,9 @@ function ext_is_hidden(est::CacheStorage, eid::Nostr.EventId)
 end
 
 function ext_is_human(est::CacheStorage, pubkey::Nostr.PubKeyId)
+    if pubkey in est.dyn[:human_override]
+        return est.dyn[:human_override][pubkey]
+    end
     isempty(TrustRank.pubkey_rank) || get(TrustRank.pubkey_rank, pubkey, 0.0) > TrustRank.humaness_threshold[]
 end
 
