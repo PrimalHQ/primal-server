@@ -5,6 +5,8 @@ MetricsLogger.start("$STORAGEPATH/metrics-cache$(NODEIDX).log")
 Fetching.start(; since=FETCHER_SINCE)
 fetching_pushgateway_sender_start()
 
+App.start(pqconnstr)
+App.load_lists()
 App.start_periodics(cache_storage)
 
 Media.start_media_queue()
