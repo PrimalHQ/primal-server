@@ -1242,6 +1242,15 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
 
         DB.exec(Main.InternalServices.memberships[], "update memberships set used_storage = ?2 where pubkey = ?1",
                 (pubkey, used_storage))
+
+        try
+            _, ext = splitext(lnk)
+            path = "/uploads/$(mi.subdir)/$(mi.h)$(ext)"
+            DB.ext_media_import(est, nothing, nothing, path, data)
+        catch ex
+            #println(ex)
+            Utils.print_exceptions()
+        end
     end
 
     _, ext = splitext(lnk)

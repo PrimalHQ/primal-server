@@ -757,6 +757,7 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
                             try
                                 if ftype == "image"
                                     category, category_prob = Media.image_category(fn)
+                                    size == :original && anim && ext_media_import(est, eid, url, string(URIs.parse_uri(media_url).path), read(fn))
                                     if Media.is_image_rotated(fn)
                                         width, height = height, width
                                     end
@@ -772,6 +773,7 @@ function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, varian
                                         end
                                         Media.media_queue(@task import_media(est, eid, thumbnail_media_url, Media.all_variants))
                                         category, category_prob = Media.image_category(thumb_fn)
+                                        size == :original && anim && ext_media_import(est, eid, url, string(URIs.parse_uri(media_url).path), read(thumb_fn))
                                         # @show (:video, (; url, fn, thumb_fn, thumbnail_media_url, eid, category, category_prob))
                                     end
                                 end
@@ -845,4 +847,5 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
     end
 end
 
+function ext_media_import(est::CacheStorage, eid::Union{Nothing,Nostr.EventId}, url::Union{Nothing,String}, path::String, data::Vector{UInt8}) end
 
