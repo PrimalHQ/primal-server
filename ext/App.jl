@@ -186,7 +186,7 @@ end
 function followers(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     [Nostr.PubKeyId(pk)
      for (pk,) in DB.exe(est.pubkey_followers,
-                         DB.@sql("select follower_pubkey from kv where pubkey = ?"),
+                         DB.@sql("select follower_pubkey from kv where pubkey = ? limit 10000"),
                          pubkey)]
 end
 
