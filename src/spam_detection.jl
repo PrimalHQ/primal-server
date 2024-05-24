@@ -53,7 +53,7 @@ function on_message(msg::String)::Bool
     try
         tdur = @elapsed begin
             lock(import_lock) do
-                e = try DB.event_from_msg(JSON.parse(msg)) catch _ end
+                relay, e = try DB.event_from_msg(JSON.parse(msg)) catch _; ("", nothing) end
                 e isa Nostr.Event || return
                 (e.created_at < time()+300) || return
                 e.kind == Int(Nostr.TEXT_NOTE) || return
