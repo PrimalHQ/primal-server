@@ -636,7 +636,9 @@ function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5,
                                           order by score desc limit ?"), pubkey, limit)]
     res = Set() |> ThreadSafe
 
-    union!(res, response_messages_for_posts(est, eids; user_pubkey))
+    for e in response_messages_for_posts(est, eids; user_pubkey)
+        e.kind != 1 || e.pubkey == pubkey && push!(res, e)
+    end
 
     pubkey in est.meta_data && push!(res, est.events[est.meta_data[pubkey]])
 
