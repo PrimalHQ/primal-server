@@ -326,21 +326,19 @@ end
 
 analytics_cache = Dict() |> ThreadSafe
 
-function with_analytics_cache(body::Function, key)
-    if haskey(analytics_cache, key)
-        lock(analytics_cache) do analytics_cache
-            get!(analytics_cache, key) do
-                body()
-            end
-        end
-    else
-        analytics_cache[key] = body()
+function with_analytics_cache(body::Function, est::DB.CacheStorage, user_pubkey, scope, key)
+    res = lock(analytics_cache) do analytics_cache
+        haskey(analytics_cache, key) ? analytics_cache[key] : nothing
     end
+    if isnothing(res)
+        res = analytics_cache[key] = body()
+    end
+    [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)) && is_hidden(est, user_pubkey, scope, e.pubkey))]
 end
 
 function explore_global_trending(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    with_analytics_cache((:explore_global_trending, user_pubkey, (; hours))) do
+    with_analytics_cache(est, user_pubkey, :trending, (:explore_global_trending, (; hours))) do
         explore(est; timeframe="trending", scope="global", limit=100, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
     end
 end
@@ -350,8 +348,8 @@ end
 
 function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    with_analytics_cache((:explore_global_mostzapped, user_pubkey, (; hours))) do
-        explore(est; timeframe="mostzapped", scope="global", limit=100, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
+    with_analytics_cache(est, user_pubkey, :trending, (:explore_global_mostzapped, (; hours))) do
+        explore(est; timeframe="mostzapped", scope="global", limit=100, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true)
     end
 end
 function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
@@ -386,7 +384,7 @@ end
 
 function scored_users(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    with_analytics_cache((:scored_users, user_pubkey, (; hours))) do
+    with_analytics_cache(est, user_pubkey, :trending, (:scored_users, (; hours))) do
         scored_users(est; limit=6*4, since=trunc(Int, time()-hours*3600), user_pubkey)
     end
 end
