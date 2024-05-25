@@ -241,23 +241,47 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
 
     elseif !isnothing(local m = match(r"^/(thread|e)/(.*)", path))
         eid = string(m[2])
-        eid = startswith(eid, "note") ? Bech32.nip19_decode_wo_tlv(eid) : Nostr.EventId(eid)
-        if eid in cache_storage.events
-            e = cache_storage.events[eid]
-            url = "https://$(host)/e/$(m[2])"
-            description = replace(content_refs_resolved(e), re_url => "")
-            if e.pubkey in cache_storage.meta_data
-                c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)
-                title = mdtitle(c)
-                image = get(c, "picture", "")
+        try eid = Bech32.nip19_decode(eid) catch _ end
+        isnothing(eid) && (eid = try Nostr.EventId(eid) catch _ end)
+        if eid isa Nostr.EventId
+            if eid in cache_storage.events
+                e = cache_storage.events[eid]
+                url = "https://$(host)/e/$(m[2])"
+                description = replace(content_refs_resolved(e), re_url => "")
+                if e.pubkey in cache_storage.meta_data
+                    c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)
+                    title = mdtitle(c)
+                    image = get(c, "picture", "")
+                end
+                media_urls = DB.exec(cache_storage.ext[].event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
+                if !isempty(media_urls)
+                    twitter_card = "summary_large_image"
+                    image = media_urls[1][1]
+                    thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
+                    if !isempty(thumbnails)
+                        image = (thumbnails[1][1],)
+                    end
+                end
             end
-            media_urls = DB.exec(cache_storage.ext[].event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
-            if !isempty(media_urls)
-                twitter_card = "summary_large_image"
-                image = media_urls[1][1]
-                thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
-                if !isempty(thumbnails)
-                    image = (thumbnails[1][1],)
+        elseif eid isa Vector
+            if startswith(string(m[2]), "naddr")
+                d = Dict(eid)
+                for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                      DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                      (d[Bech32.Author], d[Bech32.Kind], d[Bech32.Special]))
+                    eid = Nostr.EventId(eid)
+                    if eid in cache_storage.events
+                        e = cache_storage.events[eid]
+                        url = "https://$(host)/e/$(m[2])"
+                        for t in e.tags
+                            if length(t.fields) >= 2
+                                t.fields[1] == "title" && (title = t.fields[2])
+                                t.fields[1] == "summary" && (description = t.fields[2])
+                                t.fields[1] == "image" && (image = t.fields[2])
+                            end
+                        end
+                        twitter_card = "summary_large_image"
+                    end
                 end
             end
         end
