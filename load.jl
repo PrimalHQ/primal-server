@@ -99,6 +99,7 @@ union!(DB.stat_names, Set([:media_downloads,
                           ]))
 
 stuff = []
+stuffd = Dict() |> Utils.ThreadSafe
 
 include("primal-caching-service/disable_keep_alive.jl")
 
