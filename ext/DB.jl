@@ -368,6 +368,7 @@ DOWNLOAD_MEDIA = Ref(false)
 DOWNLOAD_PREVIEWS = Ref(false)
 image_exts = [".png", ".gif", ".jpg", ".jpeg", ".webp"]
 video_exts = [".mp4", ".mov"]
+audio_exts = [".wav", ".mp3", ".aac", ".flac", ".ogg"]
 
 function ext_text_note(est::CacheStorage, e::Nostr.Event)
     exe(est.ext[].event_contents, @sql("insert into kv_fts (event_id, content) values (?1, ?2)"), 
