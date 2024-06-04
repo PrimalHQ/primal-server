@@ -99,6 +99,9 @@ Postgres.jl_to_pg_type_conversion[Nostr.PubKeyId] = v -> "\\x" * bytes2hex(colle
 
 Postgres.pg_to_jl_type_conversion[2950] = d->Base.UUID(String(d))
 
+Postgres.pg_to_jl_type_conversion[114] = v -> JSON.parse(String(v))
+Postgres.pg_to_jl_type_conversion[3802] = v -> JSON.parse(String(v))
+
 function Base.setindex!(ssd::PGDict{K, V}, v::V, k::K)::V where {K, V}
     exe(ssd.dbconns[shard(ssd, k)],
         @sql("INSERT INTO $(ssd.table) ($(ssd.keycolumn), $(ssd.valuecolumn))
