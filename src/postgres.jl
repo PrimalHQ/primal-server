@@ -637,6 +637,17 @@ function execute(server::Symbol, query::String, params::Any=[])
     end
 end
 
+prepareR(session::Session, query::String) = prepare(session, replace(query, '?'=>'$'))
+pex_(server::Symbol, query::String, params=[]) = execute(server, replace(query, '?'=>'$'), params)
+pex(server::Symbol, query::String, params=[]) = pex_(server, query, params)[2]
+pexnt(args...) = pex_(args...) |> tonamedtuples
+
+column_to_jl_type = Dict{String, Function}()
+todicts(r) = [Dict([k=>get(column_to_jl_type, k, identity)(v) for (k, v) in zip(r[1], row)]) for row in r[2]]
+tonamedtuples(r) = [(; [Symbol(k)=>get(column_to_jl_type, k, identity)(v) for (k, v) in zip(r[1], row)]...) for row in r[2]]
+
+# recovery
+
 function in_recovery(server::Symbol)::Bool
     Postgres.execute(server, "select pg_is_in_recovery()")[2][1][1]
 end
