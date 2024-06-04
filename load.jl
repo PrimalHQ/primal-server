@@ -100,6 +100,8 @@ union!(DB.stat_names, Set([:media_downloads,
 
 stuff = []
 stuffd = Dict() |> Utils.ThreadSafe
+stuffd_push(k, v) = lock(stuffd) do stuffd; push!(get!(stuffd, k, []), v); end
+pexc(body) = try body() catch ex println(ex) end
 
 include("primal-caching-service/disable_keep_alive.jl")
 
