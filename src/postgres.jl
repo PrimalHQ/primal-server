@@ -651,7 +651,7 @@ tonamedtuples(r) = [(; [Symbol(k)=>get(column_to_jl_type, k, identity)(v) for (k
 function in_recovery(server::Symbol)::Bool
     Postgres.execute(server, "select pg_is_in_recovery()")[2][1][1]
 end
-function promote(server::Symbol)
+function promote_server(server::Symbol)
     Postgres.execute(server, "select pg_promote()")
 end
 
