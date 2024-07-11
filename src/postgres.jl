@@ -646,6 +646,35 @@ column_to_jl_type = Dict{String, Function}()
 todicts(r) = [Dict([k=>get(column_to_jl_type, k, identity)(v) for (k, v) in zip(r[1], row)]) for row in r[2]]
 tonamedtuples(r) = [(; [Symbol(k)=>get(column_to_jl_type, k, identity)(v) for (k, v) in zip(r[1], row)]...) for row in r[2]]
 
+function pgparams()
+    r = (; params=[], wheres=[])
+    (; r...,
+     clear=function()
+         empty!(r.params)
+         empty!(r.wheres)
+         nothing
+     end,
+     P=function(v)
+         push!(r.params, v)
+         "\$$(length(r.params))"
+     end,
+     W=function(w)
+         push!(r.wheres, w)
+         nothing
+     end,
+     fmtwheres=()->join([" and "*s for s in r.wheres]),
+     )
+end
+
+function pgparams(body)
+    p = pgparams()
+    body(p.P), p.params
+end
+
+macro P(arg)
+    :($(esc(:P))($(esc(arg))))
+end
+
 # recovery
 
 function in_recovery(server::Symbol)::Bool
