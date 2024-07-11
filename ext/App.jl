@@ -31,13 +31,17 @@ union!(exposed_functions, Set([
                      :get_suggested_users,
                      :get_app_releases,
                      :user_profile_scored_content,
+                     :user_profile_scored_media_thumbnails,
                      :search,
+                     :advanced_feed,
                      :relays,
                      :get_notifications,
                      :set_notifications_seen,
                      :get_notifications_seen,
                      :user_search,
                      :feed_directive,
+                     :feed_directive_2,
+                     :get_advanced_feeds,
                      :trending_hashtags,
                          :trending_hashtags_4h,
                          :trending_hashtags_7d,
@@ -52,6 +56,7 @@ union!(exposed_functions, Set([
                      :get_filterlist,
                      :check_filterlist,
                      :broadcast_reply,
+                     :broadcast_events,
                      :trusted_users,
                      :note_mentions,
                      :note_mentions_count,
@@ -88,6 +93,8 @@ APP_RELEASES=10_000_138
 TRUSTED_USERS=10_000_140
 NOTE_MENTIONS_COUNT=10_000_143
 UPLOADED_2=10_000_142
+EVENT_BROADCAST_RESPONSES=10_000_149
+ADVANCED_FEEDS=10_000_150
 
 # ------------------------------------------------------ #
 
@@ -334,7 +341,11 @@ function with_analytics_cache(body::Function, est::DB.CacheStorage, user_pubkey,
     if isnothing(res)
         res = analytics_cache[key] = body()
     end
-    [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)) && is_hidden(est, user_pubkey, scope, e.pubkey))]
+    if user_pubkey==Nostr.hex(Main.test_pubkeys[:pedja])
+        [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)))]
+    else
+        [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)) && is_hidden(est, user_pubkey, scope, e.pubkey))]
+    end
 end
 
 function explore_global_trending(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
@@ -548,9 +559,6 @@ function get_default_relays(est::DB.CacheStorage)
               mined[collect(mined_idxs)]...
              ]
     [(; kind=Int(DEFAULT_RELAYS), content=JSON.json(relays))]
-    # [(; kind=Int(DEFAULT_RELAYS), 
-    #   content=JSON.json(try JSON.parse(read(DEFAULT_RELAYS_FILE[], String))
-    #                     catch _; (;) end))]
 end
 
 RECOMMENDED_USERS_FILE = Ref("recommended-users.json")
@@ -613,6 +621,14 @@ function get_app_releases(est::DB.CacheStorage)
                         catch _; (;) end))]
 end
 
+ADVANCED_FEEDS_FILE = Ref("advanced-feeds.json")
+
+function get_advanced_feeds(est::DB.CacheStorage)
+    [(; kind=Int(ADVANCED_FEEDS), 
+      content=JSON.json(try JSON.parse(read(ADVANCED_FEEDS_FILE[], String))
+                        catch _; (;) end))]
+end
+
 function parse_notification_settings(est::DB.CacheStorage, e::Nostr.Event)
     d = JSON.parse(e.content)
     if haskey(d, "notifications")
@@ -644,6 +660,33 @@ function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5,
     pubkey in est.meta_data && push!(res, est.events[est.meta_data[pubkey]])
 
     collect(res)
+end
+
+function user_profile_scored_media_thumbnails(est::DB.CacheStorage; pubkey, limit::Int=5, user_pubkey=nothing)
+    limit = min(100, limit)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    eids = Nostr.EventId[]
+
+    if !isnothing(DAG_OUTPUTS_DB[])
+        for (eid,) in Postgres.pex(:p1timelimit, "
+            SELECT
+                event_stats.event_id
+            FROM
+                prod.event_stats,
+                prod.event_media
+            WHERE 
+                event_stats.author_pubkey = \$1 AND event_stats.event_id = event_media.event_id
+            ORDER BY
+                event_stats.score24h DESC
+            LIMIT \$2
+            ", [pubkey, limit])
+            push!(eids, Nostr.EventId(eid))
+        end
+    end
+
+    response_messages_for_posts(est, eids; user_pubkey)
 end
 
 function transform_search_query(query::String)
@@ -700,6 +743,7 @@ function search(
             end
         end
     else
+        occursin("lolicon", query) && return []
         query = query[1] == '!' ? query[2:end] : transform_search_query(query)
         if isnothing(until)
             until = DB.exec(est.ext[].event_contents, DB.@sql("select rowid from kv_fts order by rowid desc limit 1"))[1][1]
@@ -710,6 +754,10 @@ function search(
         eids = [Nostr.EventId(eid) for (eid, _) in res]
         vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
     end
+end
+
+function advanced_feed(est::DB.CacheStorage; kwargs...)
+    JSON.parse(String(HTTP.request("GET", "http://192.168.17.7:14017/api", [], JSON.json(["advanced_feed", kwargs])).body))
 end
 
 function relays(est::DB.CacheStorage; limit::Int=20)
@@ -891,6 +939,8 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     limit = min(100, limit)
     limit <= 1000 || error("limit too big")
     
+    occursin("lolicon", query) && return []
+
     q = "^" * repr(query) * "*"
 
     res = Dict()
@@ -950,7 +1000,10 @@ function ext_user_infos(est::DB.CacheStorage, res, res_meta_data)
     end
 end
 
-function feed_directive(est::DB.CacheStorage; directive::String, kwargs...)
+feed_directive(est::DB.CacheStorage; kwargs...) = feed_directive_(est, feed; kwargs...)
+feed_directive_2(est::DB.CacheStorage; kwargs...) = feed_directive_(est, feed_2; kwargs...)
+
+function feed_directive_(est::DB.CacheStorage, feed; directive::String, kwargs...)
     if !isnothing(local pk = try Nostr.PubKeyId(directive) catch _ end)
         return feed(est; pubkey=pk, kwargs...)
 
@@ -1515,11 +1568,39 @@ function broadcast_event_to_relays(e::Nostr.Event; relays=sort(JSON.parse(read(D
                 r[] = HTTP.WebSockets.receive(ws)
             end
             verbose && println(r[])
-            push!(res, r[])
+            push!(res, (url, r[]))
         catch ex
             verbose && println(typeof(ex))
         end
     end
+    res
+end
+
+function broadcast_event_to_relays_async(e::Nostr.Event; relays, proxy=Main.PROXY, timeout=15)
+    res = []
+    cond = Condition()
+    function sendto(url)
+        try
+            r = Ref("")
+            HTTP.WebSockets.open(url; suppress_close_error=true, retry=false, connect_timeout=timeout, timeout, readtimeout=timeout, proxy) do ws
+                HTTP.WebSockets.send(ws, JSON.json(["EVENT", e]))
+                r[] = HTTP.WebSockets.receive(ws)
+            end
+            push!(res, (url, r[]))
+            rr = JSON.parse(r[])
+            rr[1] == "OK" && rr[3] && notify(cond)
+        catch ex
+            # println("broadcast_event_to_relays_async: $(typeof(ex))")
+        end
+    end
+    @async begin
+        sleep(timeout)
+        notify(cond)
+    end
+    for url in relays
+        @async sendto(url)
+    end
+    wait(cond)
     res
 end
 
@@ -1607,8 +1688,15 @@ function broadcast_reply(est::DB.CacheStorage; event)
             eid in est.events && push!(events, est.events[eid])
         end
     end
-    isempty(events) || asyncmap((e)->broadcast_event_to_relays(e; relays), [e, events...])
-    []
+    broadcast_events(est; events, relays)
+end
+
+function broadcast_events(est::DB.CacheStorage; events::Vector, relays::Vector)
+    events = [castmaybe(e, Nostr.Event) for e in events]
+    res = asyncmap(events) do e
+        (; event_id=e.id, responses=broadcast_event_to_relays_async(e; relays))
+    end
+    [(; kind=Int(EVENT_BROADCAST_RESPONSES), content=JSON.json(res))]
 end
 
 function ext_import_event(est::DB.CacheStorage, e::Nostr.Event) 
@@ -1630,20 +1718,55 @@ function ext_user_profile_media(est::DB.CacheStorage, pubkey)
     haskey(est.meta_data, pubkey) ? event_media_response(est, est.meta_data[pubkey]) : []
 end
 
-function note_mentions(est::DB.CacheStorage; event_id, limit=100, offset=0, user_pubkey=nothing)
-    event_id = cast(event_id, Nostr.EventId)
+function note_mentions(
+        est::DB.CacheStorage; 
+        event_id=nothing,
+        pubkey=nothing, identifier=nothing,
+        limit=100, offset=0, 
+        user_pubkey=nothing,
+    )
+    event_id = castmaybe(event_id, Nostr.EventId)
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     limit <= 1000 || error("limit too big")
 
+    type = Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST)
+
+    r = if !isnothing(event_id)
+        DB.exec(est.ext[].notifications.pubkey_notifications, 
+                                          "select arg1, arg2 from kv 
+                                          where arg1 = ?1 and type = ?2
+                                          order by created_at desc limit ? offset ?",
+                                          (event_id, type, limit, offset))
+
+    elseif !isnothing(pubkey) && !isnothing(identifier) 
+        Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
+                      SELECT
+                          pubkey_notifications.arg1, 
+                          pubkey_notifications.arg2
+                      FROM
+                          prod.reads_versions,
+                          prod.pubkey_notifications
+                      WHERE 
+                          reads_versions.pubkey = $(@P pubkey) AND 
+                          reads_versions.identifier = $(@P identifier) AND 
+                          reads_versions.eid = pubkey_notifications.arg1 AND 
+                          pubkey_notifications.type = $(@P type)
+                      ORDER BY
+                          pubkey_notifications.created_at DESC
+                      LIMIT $(@P limit) OFFSET $(@P offset)
+                  " end...)
+    else
+        []
+    end
+
     eids = Set{Nostr.EventId}()
-    for (arg1, arg2, arg3) in DB.exec(est.ext[].notifications.pubkey_notifications, 
-                                      "select arg1, arg2, arg3 from kv 
-                                      where arg1 = ?1 and type = ?2
-                                      order by created_at desc limit ? offset ?",
-                                      (event_id, Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST), limit, offset))
+
+    for (arg1, arg2) in r
         your_post_were_mentioned_in = Nostr.EventId(arg2)
         push!(eids, your_post_were_mentioned_in)
     end
+
     response_messages_for_posts(est, collect(eids); user_pubkey)
 end
 
@@ -1656,3 +1779,18 @@ function note_mentions_count(est::DB.CacheStorage; event_id)
       kind=Int(NOTE_MENTIONS_COUNT),
       content=JSON.json((; event_id, count)))]
 end
+
+function ext_long_form_event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
+    isnothing(DAG_OUTPUTS_DB[]) && return []
+
+    cols, rows = Postgres.execute(DAG_OUTPUTS_DB[], "
+                                  select likes, zaps, satszapped, replies, 0 as mentions, 0 as reposts, 0 as score, 0 as score24h 
+                                  from prod.reads where latest_eid = \$1 limit 1", [eid])
+    isempty(rows) && return []
+
+    es = [Symbol(k)=>v for (k, v) in zip(cols, rows[1])]
+    [(; 
+      kind=Int(EVENT_STATS),
+      content=JSON.json((; event_id=eid, es...)))]
+end
+
