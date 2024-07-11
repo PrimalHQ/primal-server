@@ -414,6 +414,18 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
     end
 end
 
+function ext_long_form_note(est::CacheStorage, e::Nostr.Event)
+    # if get(TrustRank.pubkey_rank, e.pubkey, 0.0) > TrustRank.external_resources_threshold[]
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "image"
+                url = t.fields[2]
+                @show (e.id, t)
+                DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true), (:large, true)]))
+            end
+        end
+    # end
+end
+
 function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
     event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, :reply, 10))
     event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_REPLIED_TO, e.id))

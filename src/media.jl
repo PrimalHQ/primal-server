@@ -46,6 +46,7 @@ mimetype_ext = Dict([
     "video/x-m4v" => ".mp4",
     "video/mov" => ".mov",
     "video/webp" => ".webp",
+    "video/webm" => ".webm",
     "video/quicktime"  => ".mov",
     "video/x-matroska" => ".mkv",
     "image/vnd.microsoft.icon" => ".ico",
@@ -317,7 +318,7 @@ function parse_image_dimensions(data::Vector{UInt8})
     isnothing(m) ? nothing : (parse(Int, m[1]), parse(Int, m[2]))
 end
 
-function parse_image_mimetype(data::Vector{UInt8})
+function parse_mimetype(data::Vector{UInt8})
     mktemp() do fn, io
         write(io, data)
         close(io)
@@ -487,8 +488,22 @@ function exiftool(args; stdin=devnull)
              stdin, stderr=devnull)
 end
 
+function ffmpeg(args; stdin=devnull)
+    ffmpeg_path = readlink(strip(read(`which ffmpeg`, String)))
+    pipeline(Cmd(["bwrap", "--new-session", "--die-with-parent", "--unshare-net", 
+                  "--ro-bind", "/nix", "/nix", 
+                  Iterators.flatten([["--ro-bind", p, p] for p in EXIFTOOL_RO_BINDS])...,
+                  ffmpeg_path, args...]);
+             stdin, stderr=devnull)
+end
+
 function strip_metadata(data::Vector{UInt8})
-    read(exiftool(["-ignoreMinorErrors", "-all=", "-tagsfromfile", "@", "-Orientation", "-"]; stdin=IOBuffer(data)))
+    try
+        read(exiftool(["-ignoreMinorErrors", "-all=", "-tagsfromfile", "@", "-Orientation", "-"]; stdin=IOBuffer(data)))
+    catch _
+        ext = replace(mimetype_ext[parse_mimetype(data)], '.'=>"")
+        read(ffmpeg(["-y", "-i", "-", "-map_metadata", "-1", "-c:v", "copy", "-c:a", "copy", "-f", ext, "-"]; stdin=IOBuffer(data)))
+    end
 end
 
 function is_image_rotated(fn::String)

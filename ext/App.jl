@@ -12,6 +12,7 @@ using ..Utils: Throttle
 import ..MetricsLogger
 import ..Filterlist
 import ..Media
+import ..PushGatewayExporter
 
 union!(exposed_functions, Set([
                      :explore_legend_counts,
@@ -1211,7 +1212,9 @@ MEDIA_UPLOAD_PATH = Ref("incoming")
 
 categorized_uploads = Ref{Any}(nothing)
 
-function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
+function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
+    pubkey == Nostr.bech32_decode("npub1stm9lsg3vpeqn3zm53e8gm7q2auqs8qzqyf8xjkqs2t3mjuw0w6qxqdgkf") && push!(Main.stuff, (:import_upload_2, (; pubkey=(@show pubkey), data)))
+
     if !isempty(DB.exec(categorized_uploads[], "select 1 from categorized_uploads where sha256 = ?1 and type = 'blocked' limit 1", (SHA.sha256(data),)))
         error("blocked content")
     end
@@ -1229,16 +1232,17 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
 
     if new_import[]
         if isempty(DB.exec(Main.InternalServices.memberships[], "select 1 from memberships where pubkey = ?1 limit 1", (pubkey,)))
-            tier = isempty(DB.exec(Main.InternalServices.verified_users[], "select 1 from verified_users where pubkey = ?1 limit 1", (pubkey,))) ? "unverified" : "verified"
+            tier = isempty(DB.exec(Main.InternalServices.verified_users[], "select 1 from verified_users where pubkey = ?1 limit 1", (pubkey,))) ? "free" : "premium"
             DB.exec(Main.InternalServices.memberships[], "insert into memberships values (?1, ?2, ?3, ?4, ?5)", (pubkey, tier, missing, missing, 0))
         end
-        @show tier, used_storage = DB.exec(Main.InternalServices.memberships[], "select tier, used_storage from memberships where pubkey = ?1", (pubkey,))[1]
-        @show max_storage, = DB.exec(Main.InternalServices.membership_tiers[], "select max_storage from membership_tiers where tier = ?1", (tier,))[1]
+        tier, used_storage = DB.exec(Main.InternalServices.memberships[], "select tier, used_storage from memberships where pubkey = ?1", (pubkey,))[1]
+        max_storage, = DB.exec(Main.InternalServices.membership_tiers[], "select max_storage from membership_tiers where tier = ?1", (tier,))[1]
 
-        @show used_storage += length(data)
+        used_storage += length(data)
         if used_storage > max_storage
+            @show (:insufficient_storage, pubkey)
             error("insufficient storage available")
-            @show rm(mi.path)
+            rm(mi.path)
         end
 
         DB.exec(Main.InternalServices.memberships[], "update memberships set used_storage = ?2 where pubkey = ?1",
@@ -1259,7 +1263,7 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
 
     wh = Media.parse_image_dimensions(data)
     width, height = isnothing(wh) ? (0, 0) : wh
-    mimetype = Media.parse_image_mimetype(data)
+    mimetype = Media.parse_mimetype(data)
 
     if isempty(DB.exe(est.ext[].media_uploads, DB.@sql("select 1 from media_uploads where pubkey = ?1 and key = ?2 limit 1"), pubkey, JSON.json(key)))
         DB.exe(est.ext[].media_uploads, DB.@sql("insert into media_uploads values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"), 
@@ -1291,6 +1295,10 @@ function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vecto
     ]
 end
 
+function import_upload(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
+    [e for e in import_upload_2(est, pubkey, data) if e.kind == UPLOADED]
+end
+
 UPLOAD_MAX_SIZE = Ref(1024^4)
 
 function is_upload_blocked(pubkey::Nostr.PubKeyId)
@@ -1312,6 +1320,14 @@ function upload(est::DB.CacheStorage; event_from_user::Dict)
     import_upload(est, e.pubkey, data)
 end
 
+active_uploads = Dict() |> ThreadSafe
+upload_stats = (; started=Ref(0), completed=Ref(0), canceled=Ref(0))
+
+function check_upload_id(ulid)
+    @assert !isnothing(match(r"^[-a-zA-Z0-9_]+$", ulid)) ulid
+    ulid
+end
+
 function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
     DB.PG_DISABLE[] && return []
 
@@ -1322,7 +1338,15 @@ function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
     is_upload_blocked(e.pubkey) && error("upload blocked")
 
     c = JSON.parse(e.content)
-    ulid = Base.UUID(c["upload_id"])
+    ulid = check_upload_id(c["upload_id"])
+
+    lock(active_uploads) do active_uploads
+        if !haskey(active_uploads, ulid)
+            active_uploads[ulid] = trunc(Int, time())
+            upload_stats.started[] += 1
+            PushGatewayExporter.set!("cache_upload_stats_started", upload_stats.started[])
+        end
+    end
 
     c["file_length"] > UPLOAD_MAX_SIZE[] && error("upload size too large")
 
@@ -1348,7 +1372,7 @@ function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
     is_upload_blocked(e.pubkey) && error("upload blocked")
 
     c = JSON.parse(e.content)
-    ulid = Base.UUID(c["upload_id"])
+    ulid = check_upload_id(c["upload_id"])
 
     fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
     c["file_length"] == stat(fn).size || error("incorrect upload size")
@@ -1356,8 +1380,14 @@ function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
     data = read(fn)
     c["sha256"] == bytes2hex(SHA.sha256(data)) || error("incorrect sha256")
 
-    @show res = import_upload(est, e.pubkey, data)
+    res = import_upload(est, e.pubkey, data)
     rm(fn)
+
+    lock(active_uploads) do active_uploads
+        delete!(active_uploads, ulid)
+        upload_stats.completed[] += 1
+        PushGatewayExporter.set!("cache_upload_stats_completed", upload_stats.completed[])
+    end
 
     res
 end
@@ -1372,10 +1402,17 @@ function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
     is_upload_blocked(e.pubkey) && error("upload blocked")
 
     c = JSON.parse(e.content)
-    ulid = Base.UUID(c["upload_id"])
+    ulid = check_upload_id(c["upload_id"])
 
     fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
     rm(fn)
+
+    lock(active_uploads) do active_uploads
+        delete!(active_uploads, ulid)
+        upload_stats.canceled[] += 1
+        PushGatewayExporter.set!("cache_upload_stats_canceled", upload_stats.canceled[])
+    end
+
     []
 end
 

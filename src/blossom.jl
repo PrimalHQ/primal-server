@@ -63,11 +63,12 @@ function mimetype_for_ext(ext::String)
     nothing
 end
 
-function response_headers(content_type="application/json")
+function response_headers(content_type="application/json"; extra=[])
     HTTP.Headers(["Content-Type"=>content_type,
                   "Access-Control-Allow-Origin"=>"*",
                   "Access-Control-Allow-Methods"=>"*",
-                  "Access-Control-Allow-Headers"=>"*"
+                  "Access-Control-Allow-Headers"=>"*",
+                  extra...
                  ])
 end
 
@@ -97,7 +98,7 @@ function check_action(req, action::String)
     e = Nostr.Event(JSON.parse(String(Base64.base64decode(parts[2]))))
     Nostr.verify(e) || return HTTP.Response(401, response_headers("text/plain"), "unauthorized")
     @assert e.kind == 24242
-    @assert e.created_at <= trunc(Int, time())
+    # @assert e.created_at <= trunc(Int, time())
     for t in e.tags
         if length(t.fields) >= 2
             if t.fields[1] == "expiration"
@@ -114,7 +115,7 @@ end
 function blossom_handler(req::HTTP.Request)
     catch_exception(:blossom_handler, req) do
         host = Dict(req.headers)["Host"]
-        @show (req.method, req.target)
+        # @show (req.method, req.target)
         
         if req.method == "OPTIONS"
             return HTTP.Response(200, response_headers("text/plain"), "ok")
@@ -143,7 +144,8 @@ function blossom_handler(req::HTTP.Request)
             elseif !isnothing(match(r"^/[0-9a-fA-F]{64}", req.target))
                 r = find_blob(req.target)
                 if !isnothing(r)
-                    return HTTP.Response(200, response_headers(r.mimetype), read(r.filepath))
+                    # return HTTP.Response(200, response_headers(r.mimetype), read(r.filepath))
+                    return HTTP.Response(302, response_headers(r.mimetype; extra=["Location"=>"https://primal.b-cdn.net/media-cache?s=o&a=1&u=https://media.primal.net$(r.path)"]), "redirecting")
                 else
                     return HTTP.Response(404, response_headers("text/plain"), "not found")
                 end
@@ -163,13 +165,13 @@ function blossom_handler(req::HTTP.Request)
             if !isnothing(r)
                 pex("delete from media_uploads where pubkey = ?1 and sha256 = ?2", [e.pubkey, r.sha256])
                 if isempty(pex("select 1 from media_uploads where sha256 = ?1 limit 1", [r.sha256])[2])
-                    @show (:rm, r.path)
+                    # @show (:rm, r.path)
                     for mp in Main.Media.MEDIA_PATHS[Main.App.UPLOADS_DIR[]]
                         filepath = join(split(mp, '/')[1:end-1], '/') * r.path
                         try 
                             if isfile(filepath)
                                 rm(filepath) 
-                                @show (:rm_ok, filepath)
+                                # @show (:rm_ok, filepath)
                             end
                         catch ex
                             println(ex)
@@ -184,16 +186,16 @@ function blossom_handler(req::HTTP.Request)
         elseif req.method == "PUT"
             e = check_action(req, "upload")
             data = collect(req.body)
-            @show r = JSON.parse([x for x in Main.App.import_upload(est[], e.pubkey, data) 
+            r = JSON.parse([x for x in Main.App.import_upload_2(est[], e.pubkey, data) 
                                   if x.kind == Int(Main.App.UPLOADED_2)][1].content)
-            @show sha256 = hex2bytes(r["sha256"])
+            sha256 = hex2bytes(r["sha256"])
             for (mimetype, created_at, path, size) in pex("select mimetype, created_at, path, size from media_uploads where sha256 = ?1", [sha256])[2]
-                @show path
+                # @show path
                 # _, ext = splitext(path)
                 # mimetype = mimetype_for_ext(ext)
                 ext = get(Main.Media.mimetype_ext, mimetype, "application/octet-stream")
                 return HTTP.Response(200, response_headers("application/json"), 
-                                     JSON.json(@show (;
+                                     JSON.json((;
                                                 url="$(BASE_URL[])/$(bytes2hex(sha256))$(ext)",
                                                 sha256=bytes2hex(sha256),
                                                 size,
