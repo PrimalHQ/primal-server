@@ -13,6 +13,7 @@ import ..MetricsLogger
 import ..Filterlist
 import ..Media
 import ..PushGatewayExporter
+import ..Postgres
 
 union!(exposed_functions, Set([
                      :explore_legend_counts,
@@ -1785,7 +1786,7 @@ function ext_long_form_event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
 
     cols, rows = Postgres.execute(DAG_OUTPUTS_DB[], "
                                   select likes, zaps, satszapped, replies, 0 as mentions, 0 as reposts, 0 as score, 0 as score24h 
-                                  from prod.reads where latest_eid = \$1 limit 1", [eid])
+                                  from reads where latest_eid = \$1 limit 1", [eid])
     isempty(rows) && return []
 
     es = [Symbol(k)=>v for (k, v) in zip(cols, rows[1])]
