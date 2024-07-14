@@ -1785,8 +1785,8 @@ function ext_long_form_event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
     isnothing(DAG_OUTPUTS_DB[]) && return []
 
     cols, rows = Postgres.execute(DAG_OUTPUTS_DB[], "
-                                  select likes, zaps, satszapped, replies, 0 as mentions, 0 as reposts, 0 as score, 0 as score24h 
-                                  from reads where latest_eid = \$1 limit 1", [eid])
+                                  select likes, zaps, satszapped, replies, 0 as mentions, reposts, 0 as score, 0 as score24h 
+                                  from prod.reads where latest_eid = \$1 limit 1", [eid])
     isempty(rows) && return []
 
     es = [Symbol(k)=>v for (k, v) in zip(cols, rows[1])]
