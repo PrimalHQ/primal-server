@@ -1,0 +1,8 @@
+set max_parallel_workers = 0;
+set max_parallel_workers_per_gather = 0;
+
+\timing
+select pg_backend_pid(), p_julia_init();
+--select p_julia_eval('try spi_runtests() catch ex Utils.print_exceptions() end |> string');
+select p_julia_eval('try init_cache_storage() catch ex Utils.print_exceptions() end |> string');
+

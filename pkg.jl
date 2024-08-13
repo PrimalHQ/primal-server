@@ -1,1 +1,2 @@
-include("primal-caching-service/pkg.jl")
+import Pkg; Pkg.instantiate(); Pkg.precompile()
+

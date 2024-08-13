@@ -19,10 +19,10 @@ mkShell {
   start_postgres = pkgs.writeShellScript "start_postgres.sh" ''
     set -ex
     PGVER=$(pg_ctl -V | awk '{print $NF}')
-    PGHOST="$(pwd)/primal-caching-service/var/pg"
+    PGHOST="$(pwd)/var/pg"
     if ! [ -f pgurl ]; then
-      mkdir -p $(pwd)/primal-caching-service/var
-      pg_tmp -w 0 -k -d $(pwd)/primal-caching-service/var/pg || true
+      mkdir -p $(pwd)/var
+      pg_tmp -w 0 -k -d $(pwd)/var/pg || true
       echo "postgresql:///test?host=$(echo $PGHOST | sed 's:/:%2F:g')" > pgurl
     fi
     echo "pgurl: $(cat pgurl)"
@@ -30,7 +30,7 @@ mkShell {
 
   stop_postgres = pkgs.writeShellScript "stop_postgres.sh" ''
     set -ex
-    pg_ctl -w -D $(pwd)/primal-caching-service/var/pg/1*.* stop
+    pg_ctl -w -D $(pwd)/var/pg/1*.* stop
     rm -fv pgurl
   '';
 
@@ -43,15 +43,13 @@ mkShell {
     export PRIMALSERVER_RELAYS='few-relays.txt'
     export PRIMALSERVER_PGCONNSTR="$(cat pgurl)"
     export PRIMALSERVER_AUTO_FETCH_MISSING_EVENTS="1"
-    export LD_LIBRARY_PATH=".:$(pwd)/primal-caching-service:$LD_LIBRARY_PATH"
+    export LD_LIBRARY_PATH=".:$(pwd):$LD_LIBRARY_PATH"
     julia --project -t8 -L pkg.jl -L load.jl -L start.jl
   '';
 
   shellHook = ''
-    export LD_LIBRARY_PATH=${secp256k1}/lib:$PWD/primal-caching-service:.
+    export LD_LIBRARY_PATH=${secp256k1}/lib:$PWD:.
     export NIX_LD=${glibc}/lib/ld-linux-x86-64.so.2
-    cd primal-caching-service
     make
-    cd ..
   '';
 }

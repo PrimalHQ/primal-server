@@ -195,7 +195,7 @@ end
 function followers(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     [Nostr.PubKeyId(pk)
      for (pk,) in DB.exe(est.pubkey_followers,
-                         DB.@sql("select follower_pubkey from kv where pubkey = ? limit 10000"),
+                         DB.@sql("select follower_pubkey from pubkey_followers where pubkey = ?1 limit 10000"),
                          pubkey)]
 end
 
@@ -240,7 +240,9 @@ function scored_content(
         time_exceeded=()->false,
     )
     limit = min(50, limit)
-    created_after = max(trunc(Int, time()-24*3600), created_after)
+    if timeframe != :popular
+        created_after = max(trunc(Int, time()-24*3600), created_after)
+    end
     if !isnothing(since); since = max(max(1, since), created_after); end
     # desc = timeframe == :latest ? string((; timeframe, lenpks=length(pubkeys), created_after, limit, since, until, user_pubkey)) : nothing
 
@@ -263,10 +265,10 @@ function scored_content(
     wheres() = isempty(where_exprs) ? "" : "where " * join(where_exprs, " and ")
 
     # TODO optimization, to only use $field index, create new collection, if since is fixed to 24h delete rows older than 24h periodically
-    push!(where_exprs, "$created_after <= created_at")
+    created_after > 0 && push!(where_exprs, "$created_after <= created_at")
     # push!(where_exprs, "created_at <= $(trunc(Int, time()))") # future events are ignore during import
 
-    isnothing(since) || push!(where_exprs, "$since <= $field")
+    (isnothing(since) || since == 0) || push!(where_exprs, "$since <= $field")
     isnothing(until) || push!(where_exprs, "$until >= $field")
 
     timeframe == :mostzapped && push!(where_exprs, "$field > 0")
@@ -283,31 +285,45 @@ function scored_content(
         if isempty(pubkeys)
             q_wheres = wheres()
             if group_by_pubkey
-                q_groups = "group by author_pubkey"
-                q_indexs = "indexed by kv_created_at"
-                field_ = "max($field)"
+                q = "
+                with a as (
+                    select author_pubkey, max($field) as maxfield 
+                    from event_stats 
+                    where $field > 0 and $created_after <= created_at 
+                    group by author_pubkey 
+                    order by maxfield desc 
+                    limit ?1 offset ?2
+                ) 
+                select a.author_pubkey, es.event_id, es.$field
+                from a, event_stats es 
+                where a.author_pubkey = es.author_pubkey and a.maxfield = es.$field
+                "
             else
-                q_groups = q_indexs = ""
-                field_ = field
+                # q = "with a as materialized (select author_pubkey, event_id, $field from event_stats $q_wheres) select * from a order by $field desc limit ?1 offset ?2"
+                q = "select author_pubkey, event_id, $field from event_stats $q_wheres order by $field desc limit ?1 offset ?2"
             end
-            @threads for dbconn in est.event_stats.dbconns
-                r = DB.exe(dbconn, "select event_id, $field_ from kv $q_indexs $q_wheres $q_groups order by $field_ desc limit ? offset ?", (n, offset))
-                append!(posts, map(Tuple, r))
+            # @show (q, (n, offset))
+            pkseen = Set{Nostr.PubKeyId}()
+            for (pk, eid, v) in DB.exec(est.event_stats, q, (n, offset))
+                pk = Nostr.PubKeyId(pk)
+                pk in pkseen && continue
+                push!(pkseen, pk)
+                push!(posts, (eid, v))
             end
-        else
+        else # TODO optimize db query
             field_ = field
-            push!(where_exprs, "author_pubkey = ?")
+            push!(where_exprs, "author_pubkey = ?1")
             q_wheres = wheres()
             @threads for pk in pubkeys
                 time_exceeded() && break
-                append!(posts, map(Tuple, DB.exe(est.event_stats_by_pubkey, "select event_id, $field_ from kv $q_wheres order by $field_ desc limit ? offset ?", pk, n, offset)))
+                append!(posts, map(Tuple, DB.exec(est.event_stats, "select event_id, $field_ from event_stats $q_wheres order by $field_ desc limit ?2 offset ?3", (pk, n, offset))))
             end
         end
 
         empty!(posts_filtered)
         for (eid, v) in posts.wrapped
             local eid = Nostr.EventId(eid)
-            local pk = DB.exe(est.event_stats, DB.@sql("select event_id, author_pubkey from kv where event_id = ?"), 
+            local pk = DB.exe(est.event_stats, DB.@sql("select event_id, author_pubkey from event_stats where event_id = ?1"), 
                               eid)[1][2] |> Nostr.PubKeyId
             if  pk in Filterlist.access_pubkey_unblocked ||
                 !(pk in Filterlist.import_pubkey_blocked) && 
@@ -342,18 +358,14 @@ function with_analytics_cache(body::Function, est::DB.CacheStorage, user_pubkey,
     if isnothing(res)
         res = analytics_cache[key] = body()
     end
-    if user_pubkey==Nostr.hex(Main.test_pubkeys[:pedja])
-        [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)))]
-    else
-        [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)) && is_hidden(est, user_pubkey, scope, e.pubkey))]
-    end
+    [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)) && is_hidden(est, user_pubkey, scope, e.pubkey))]
 end
 
 function explore_global_trending(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    with_analytics_cache(est, user_pubkey, :trending, (:explore_global_trending, (; hours))) do
+    # with_analytics_cache(est, user_pubkey, :trending, (:explore_global_trending, (; hours))) do # FIXME
         explore(est; timeframe="trending", scope="global", limit=100, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
-    end
+    # end
 end
 function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
     explore_global_trending(est, 24; user_pubkey)
@@ -361,9 +373,9 @@ end
 
 function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    with_analytics_cache(est, user_pubkey, :trending, (:explore_global_mostzapped, (; hours))) do
+    # with_analytics_cache(est, user_pubkey, :trending, (:explore_global_mostzapped, (; hours))) do # FIXME
         explore(est; timeframe="mostzapped", scope="global", limit=100, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true)
-    end
+    # end
 end
 function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
     explore_global_mostzapped(est, 4; user_pubkey)
@@ -397,9 +409,9 @@ end
 
 function scored_users(est::DB.CacheStorage, hours::Int; user_pubkey=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    with_analytics_cache(est, user_pubkey, :trending, (:scored_users, (; hours))) do
+    # with_analytics_cache(est, user_pubkey, :trending, (:scored_users, (; hours))) do # FIXME
         scored_users(est; limit=6*4, since=trunc(Int, time()-hours*3600), user_pubkey)
-    end
+    # end
 end
 function scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing)
     scored_users(est, 24; user_pubkey)
@@ -434,12 +446,12 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0, user_pu
 
     pubkeys = [] |> ThreadSafe
     q_wheres = wheres()
-    @threads for dbconn in est.event_stats_by_pubkey.dbconns
+    @threads for dbconn in est.event_stats.dbconns
         for r in DB.exe(dbconn, "select author_pubkey, max($field) as maxscore
-                                 from kv indexed by kv_created_at
+                                 from event_stats
                                  $q_wheres
                                  group by author_pubkey
-                                 order by maxscore desc limit ?", (limit,))
+                                 order by maxscore desc limit ?1", (limit,))
             push!(pubkeys, (Nostr.PubKeyId(r[1]), r[2]))
         end
     end
@@ -477,17 +489,17 @@ function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dic
     try
         body(e)
     finally
-        DB.exe(est.ext[].app_settings, DB.@sql("update app_settings set accessed_at = ?2 where key = ?1"),
+        DB.exe(est.app_settings, DB.@sql("update app_settings set accessed_at = ?2 where key = ?1"),
                e.pubkey, trunc(Int, time()))
-        DB.exe(est.ext[].app_settings_log, DB.@sql("insert into app_settings_log values (?1, ?2, ?3)"), 
+        DB.exe(est.app_settings_log, DB.@sql("insert into app_settings_log values (?1, ?2, ?3)"), 
                e.pubkey, e, trunc(Int, time()))
     end
 end
     
 function set_app_settings(est::DB.CacheStorage; settings_event::Dict)
     app_settings(est, settings_event) do e
-        if e.pubkey in est.ext[].app_settings
-            ee = est.ext[].app_settings[e.pubkey]
+        if e.pubkey in est.app_settings
+            ee = est.app_settings[e.pubkey]
             d1 = JSON.parse(ee.content)
             d2 = JSON.parse(e.content)
             d3 = copy(d2)
@@ -498,8 +510,8 @@ function set_app_settings(est::DB.CacheStorage; settings_event::Dict)
                 e = Nostr.Event(e.id, e.pubkey, e.created_at, e.kind, e.tags, JSON.json(d2), e.sig)
             end
         end
-        est.ext[].app_settings[e.pubkey] = e
-        DB.exe(est.ext[].app_settings, 
+        est.app_settings[e.pubkey] = e
+        DB.exe(est.app_settings, 
                DB.@sql("update app_settings set created_at = ?2, event_id = ?3 where key = ?1"),
                e.pubkey, e.created_at, e.id)
         parse_notification_settings(est, e)
@@ -509,13 +521,13 @@ end
     
 function get_app_settings(est::DB.CacheStorage; event_from_user::Dict)
     app_settings(est, event_from_user) do e
-        if e.pubkey in est.ext[].app_settings
-            [est.ext[].app_settings[e.pubkey]]
+        if e.pubkey in est.app_settings
+            [est.app_settings[e.pubkey]]
         else
             ee = get_default_app_settings(est; client=event_from_user["tags"][1][2])[1]
             ee = (; ee..., id=join(["00" for _ in 1:32]), pubkey=join(["00" for _ in 1:32]), sig=join(["00" for _ in 1:64]), created_at=trunc(Int, time()))
             ee = Nostr.Event(JSON.parse(JSON.json(ee)))
-            est.ext[].app_settings[e.pubkey] = ee
+            est.app_settings[e.pubkey] = ee
             [ee]
         end
     end
@@ -523,8 +535,8 @@ end
 
 function get_app_settings_2(est::DB.CacheStorage; event_from_user::Dict)
     app_settings(est, event_from_user) do e
-        if e.pubkey in est.ext[].app_settings
-            [est.ext[].app_settings[e.pubkey]]
+        if e.pubkey in est.app_settings
+            [est.app_settings[e.pubkey]]
         else
             []
         end
@@ -543,7 +555,7 @@ end
 DEFAULT_RELAYS_FILE = Ref("default-relays.json")
 
 function get_default_relays(est::DB.CacheStorage)
-    mined = [s for s in readlines("primal-server/primal-caching-service/relays-mined-from-contact-lists.txt") if !isempty(s)]
+    mined = [s for s in readlines("primal-server/relays-mined-from-contact-lists.txt") if !isempty(s)]
     mined_idxs = Set()
     while length(mined_idxs) < 4
         push!(mined_idxs, rand(1:length(mined)))
@@ -633,10 +645,10 @@ end
 function parse_notification_settings(est::DB.CacheStorage, e::Nostr.Event)
     d = JSON.parse(e.content)
     if haskey(d, "notifications")
-        DB.exe(est.ext[].notification_settings, DB.@sql("delete from notification_settings where pubkey = ?1"),
+        DB.exe(est.notification_settings, DB.@sql("delete from notification_settings where pubkey = ?1"),
                e.pubkey)
         for (k, v) in d["notifications"]
-            DB.exe(est.ext[].notification_settings, DB.@sql("insert into notification_settings values (?1, ?2, ?3)"),
+            DB.exe(est.notification_settings, DB.@sql("insert into notification_settings values (?1, ?2, ?3)"),
                    e.pubkey, k, v)
         end
     end
@@ -648,10 +660,10 @@ function user_profile_scored_content(est::DB.CacheStorage; pubkey, limit::Int=5,
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     eids = [Nostr.EventId(eid) 
-            for (eid,) in DB.exe(est.event_stats_by_pubkey,
-                                 DB.@sql("select event_id from kv
-                                          where author_pubkey = ? and score > 0
-                                          order by score desc limit ?"), pubkey, limit)]
+            for (eid,) in DB.exec(est.event_stats,
+                                  DB.@sql("select event_id from event_stats
+                                          where author_pubkey = ?1 and score > 0
+                                          order by score desc limit ?2"), (pubkey, limit))]
     res = Set() |> ThreadSafe
 
     for e in response_messages_for_posts(est, eids; user_pubkey)
@@ -718,9 +730,15 @@ function transform_search_query(query::String)
     sout
 end
 
-function search(
+DAG_OUTPUTS = Ref{Any}(nothing) |> ThreadSafe
+
+function search(est::DB.CacheStorage; kwargs...)
+    JSON.parse(String(HTTP.request("GET", "http://192.168.12.7:14017/api", [], JSON.json(["search", kwargs])).body))
+end
+function search_(
         est::DB.CacheStorage; 
         query::String, 
+        kind=nothing,
         limit::Int=20, since::Union{Nothing,Int}=0, until::Union{Nothing,Int}=nothing, offset::Int=0,
         user_pubkey=nothing,
     )
@@ -745,24 +763,193 @@ function search(
         end
     else
         occursin("lolicon", query) && return []
-        query = query[1] == '!' ? query[2:end] : transform_search_query(query)
-        if isnothing(until)
-            until = DB.exec(est.ext[].event_contents, DB.@sql("select rowid from kv_fts order by rowid desc limit 1"))[1][1]
+        eids = 
+        # if 1==0
+        #     query = query[1] == '!' ? query[2:end] : transform_search_query(query)
+        #     if isnothing(until)
+        #         until = DB.exec(Main.cache_storage_sqlite.event_contents, DB.@sql("select rowid from event_contents order by rowid desc limit 1"))[1][1]
+        #     end
+        #     res = DB.exec(Main.cache_storage_sqlite.event_contents, DB.@sql("select event_id, rowid from event_contents where rowid >= ?1 and rowid <= ?2 and content match ?3 order by rowid desc limit ?4 offset ?5"),
+        #                   (since, until, query, limit, offset))
+        #     res = sort(res; by=r->-r[2])
+        #     [Nostr.EventId(eid) for (eid, _) in res]
+        # else
+        begin
+            since = !isnothing(since) ? since : 0
+            since = max(since, Utils.current_time() - 300*24*3600)
+            until = !isnothing(until) ? until : Utils.current_time()
+            res = Main.DAG.search(est, user_pubkey, query; outputs=DAG_OUTPUTS[], since, until, limit, offset, kind)[1]
+            Nostr.EventId[eid for (eid, _) in res]
         end
-        res = DB.exec(est.ext[].event_contents, DB.@sql("select event_id, rowid from kv_fts where rowid >= ?1 and rowid <= ?2 and content match ?3 order by rowid desc limit ?4 offset ?5"),
-                      (since, until, query, limit, offset))
-        res = sort(res; by=r->-r[2])
-        eids = [Nostr.EventId(eid) for (eid, _) in res]
-        vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
+        res = vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
+        display(Utils.counts([e.kind for e in res]))
+        res
     end
 end
 
-function advanced_feed(est::DB.CacheStorage; kwargs...)
-    JSON.parse(String(HTTP.request("GET", "http://192.168.17.7:14017/api", [], JSON.json(["advanced_feed", kwargs])).body))
+ADVANCED_FEED_PROVIDER_HOST = Ref{Any}(nothing)
+
+function advanced_feed(
+        est::DB.CacheStorage;
+        specification,
+        kwargs...,
+        # since=0, until=Utils.current_time(), limit::Int=20, offset::Int=0,
+        # user_pubkey=nothing, kwargs...,
+    )
+    isnothing(ADVANCED_FEED_PROVIDER_HOST[]) || return JSON.parse(String(HTTP.request("GET", ADVANCED_FEED_PROVIDER_HOST[], [], JSON.json(["advanced_feed", (; specification, kwargs...)])).body))
+
+    specargs() = NamedTuple([Symbol(k)=>v for (k, v) in (length(specification) >= 2 ? specification[2] : [])])
+
+    upk() = :pubkey in keys(kwargs) ? NamedTuple(kwargs).pubkey : NamedTuple(kwargs).user_pubkey
+    
+    if isnothing(specification)
+        []
+    elseif specification[1] == "advanced_search"
+        kwargs = NamedTuple(kwargs)
+        limit = min(100, get(kwargs, :limit, 20))
+        user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
+        kwargs = NamedTuple([k=>v for (k, v) in pairs(kwargs) if k != :user_pubkey])
+        res = []
+        eids = Nostr.EventId[]
+        query = specification[2]["query"]
+        isempty(query) && error("query is empty")
+        if !isnothing(DAG_OUTPUTS[])
+            mod, outputs = DAG_OUTPUTS[]
+            res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; outputs, logextra=(; user_pubkey), kwargs...)
+            eids = [eid for (eid, created_at) in res]
+        end
+        vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
+    elseif specification[1] == "feed"
+        feed(est; specargs()..., kwargs..., pubkey=upk())
+    elseif specification[1] == "global-trending"
+        explore(est; timeframe="trending", scope="global", created_after=trunc(Int, time()-specargs().timeperiod_h*3600), kwargs...)
+    elseif specification[1] == "trending-in-my-network"
+        explore(est; timeframe="trending", scope="follows", created_after=trunc(Int, time()-specargs().timeperiod_h*3600), kwargs...)
+    elseif specification[1] == "most-zapped"
+        explore(est; timeframe="mostzapped", scope="global", created_after=trunc(Int, time()-specargs().timeperiod_h*3600), kwargs...)
+    elseif specification == "hall-of-fame-notes"
+        explore(est; timeframe="trending", scope="global", created_after=0, kwargs...)
+    elseif specification == "wide-net-notes"
+        wide_net_notes_feed(est; created_after=Utils.current_time()-24*3600, kwargs..., pubkey=upk())
+    elseif specification == "wide-net-notes-by-interactions"
+        wide_net_notes_scored_feed(est; created_after=Utils.current_time()-24*3600, kwargs..., pubkey=upk())
+    else
+        []
+    end
+end
+
+postgres_query_log = CircularBuffer(100000) |> ThreadSafe
+function pex(s, query, params=[]; noresults=false)
+    tdur = @elapsed explained = Postgres.execute(s, "explain (analyze,buffers) "*query, params)
+    push!(postgres_query_log, (; t=time(), query, params, tdur, explained))
+    noresults ? nothing : Postgres.execute(s, query, params)[2]
+end
+
+function wide_net_notes_feed(
+        est::DB.CacheStorage;
+        created_after::Int,
+        pubkey,
+        limit=20, offset=0, since=0, until=Utils.current_time(),
+        user_pubkey=nothing,
+    )
+    limit=500
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    posts = []
+
+    Postgres.transaction(:p1) do session
+        Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
+        for pk in follows(est, pubkey)
+            Postgres.execute(session, "insert into pks values (\$1)", [pk])
+        end
+        for (eid, created_at) in pex(session, "
+                select 
+                    es.id, es.created_at
+                from 
+                    pks,
+                    basic_tags bt1, 
+                    basic_tags bt2, 
+                    events es 
+                where 
+                  (bt1.kind = $(Int(Nostr.TEXT_NOTE)) or bt1.kind = $(Int(Nostr.REPOST)) or bt1.kind = $(Int(Nostr.REACTION)) or bt1.kind = $(Int(Nostr.ZAP_RECEIPT))) and 
+                  bt1.pubkey = pks.pubkey and
+                  bt1.id = bt2.id and bt2.tag = 'e' and
+                  bt2.arg1 = es.id and es.created_at >= \$1 and es.created_at <= \$2
+                order by es.created_at desc
+                limit \$3 offset \$4
+                ", [since, until, limit, offset])
+            push!(posts, (Nostr.EventId(eid), created_at))
+        end
+    end
+
+    eids = collect(map(first, posts))
+
+    vcat(response_messages_for_posts(est, eids; user_pubkey), range(posts, :created_at))
+end
+
+function wide_net_notes_scored_feed(
+        est::DB.CacheStorage;
+        created_after::Int,
+        pubkey,
+        user_pubkey=nothing,
+        limit=200,
+    )
+    limit = 200
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    notes = Dict()
+
+    function interaction(body::Function, eid::Nostr.EventId)
+        if eid in est.events
+            e = est.events[eid]
+            body(get!(notes, e.id) do
+                     (; e.created_at, interactions=Ref(0))
+                 end)
+        end
+    end
+
+    Postgres.transaction(:p1) do session
+        Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
+        for pk in follows(est, pubkey)
+            Postgres.execute(session, "insert into pks values (\$1)", [pk])
+        end
+        # @show Postgres.execute(session, "select count(1) from pks")[2]
+        pex(session, "
+                create temp table eids on commit drop as (
+                select id
+                from basic_tags, pks
+                where 
+                  created_at >= \$1 and 
+                  (kind = $(Int(Nostr.TEXT_NOTE)) or kind = $(Int(Nostr.REPOST)) or kind = $(Int(Nostr.REACTION)) or kind = $(Int(Nostr.ZAP_RECEIPT))) and 
+                  tag = 'p' and arg1 = pks.pubkey
+                order by created_at asc
+                )", [created_after]; noresults=true)
+        # @show Postgres.execute(session, "select count(1) from eids")[2]
+        for r in pex(session, "
+                select events.*
+                from events, eids
+                where eids.id  = events.id
+                ")
+            e = event_from_row(r)
+            for t in e.tags
+                if length(t.fields) >= 2 && t.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(t.fields[2]) catch _ end)
+                    interaction(eid) do n
+                        n.interactions[] += 1
+                    end
+                end
+            end
+        end
+    end
+
+    eids = [eid for (eid, _) in first(sort(collect(notes); by=x->-x[2].interactions[]), limit)]
+
+    response_messages_for_posts(est, eids; user_pubkey)
 end
 
 function relays(est::DB.CacheStorage; limit::Int=20)
-    res = DB.exec(est.relays, DB.@sql("select url, times_referenced from kv order by times_referenced desc limit ?"), (limit,))
+    res = DB.exec(est.relays, DB.@sql("select url, times_referenced from relays order by times_referenced desc limit ?1"), (limit,))
     res = res[1:min(limit, length(res))]
     [(; kind=Int(RELAYS), content=JSON.json(Dict(res)))]
 end
@@ -806,21 +993,23 @@ function get_notifications(
     eids = Set{Nostr.EventId}()
 
     rs = if isnothing(type)
-        DB.exe(est.ext[].notifications.pubkey_notifications, 
-               DB.@sql("select * from kv 
-                       where pubkey = ? and created_at >= ? and created_at <= ?
-                       order by created_at desc limit ? offset ?"),
+        DB.exe(est.pubkey_notifications, 
+               DB.@sql("select pubkey, created_at, type, arg1, arg2, arg3, arg4
+                       from pubkey_notifications 
+                       where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
+                       order by created_at desc limit ?4 offset ?5"),
                pubkey, since, until, limit, offset)
     else
         if !(type isa Vector)
             type = [type]
         end
         type = join([Int(t) for t in type], ",")
-        DB.exe(est.ext[].notifications.pubkey_notifications, 
-               "select * from kv 
-               where pubkey = ? and created_at >= ? and created_at <= ?
+        DB.exe(est.pubkey_notifications, 
+               "select pubkey, created_at, type, arg1, arg2, arg3, arg4
+               from pubkey_notifications 
+               where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
                and type in ($type)
-               order by created_at desc limit ? offset ?",
+               order by created_at desc limit ?4 offset ?5",
                pubkey, since, until, limit, offset)
     end
     for r in rs
@@ -830,7 +1019,7 @@ function get_notifications(
                                        arg1, arg2, arg3, arg4))
 
         if notif_d.type == DB.USER_UNFOLLOWED_YOU
-            if !isempty(DB.exe(est.pubkey_followers, DB.@sql("select 1 from kv where pubkey = ? and follower_pubkey = ? limit 1"),
+            if !isempty(DB.exe(est.pubkey_followers, DB.@sql("select 1 from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2 limit 1"),
                                pubkey, notif_d.follower))
                 continue
             end
@@ -845,7 +1034,7 @@ function get_notifications(
                     is_blocked = true
                 else
                     push!(pks, pk)
-                    if !haskey(res_meta_data, pk) && pk in est.meta_data
+                    if !haskey(res_meta_data, pk) && pk in est.meta_data && est.meta_data[pk] in est.events
                         res_meta_data[pk] = est.events[est.meta_data[pk]]
                     end
                 end
@@ -865,11 +1054,11 @@ function get_notifications(
         #     args = [a for a in r[4:end] if !ismissing(a)]
         #     wheres = join(["arg$i = ?" for (i, a) in enumerate(args)], " and ")
         #     wheres = isempty(wheres) ? "" : ("and " * wheres)
-        #     DB.exe(est.ext[].notifications.pubkey_notifications, 
-        #            "delete from kv where pubkey = ? and created_at = ? and type = ? $wheres",
+        #     DB.exe(est.pubkey_notifications, 
+        #            "delete from pubkey_notifications where pubkey = ? and created_at = ? and type = ? $wheres",
         #            pubkey, created_at, type, args...)
-        #     DB.exe(est.ext[].notifications.pubkey_notification_cnts,
-        #            "update kv set type$(type) = type$(type) - 1 where pubkey = ?1",
+        #     DB.exe(est.pubkey_notification_cnts,
+        #            "update pubkey_notification_cnts set type$(type) = type$(type) - 1 where pubkey = ?1",
         #            pubkey)
         end
     end
@@ -899,10 +1088,10 @@ function set_notifications_seen(
 
     e = parse_event_from_user(event_from_user)
 
-    est.ext[].notifications.pubkey_notifications_seen[e.pubkey] = e.created_at
+    est.pubkey_notifications_seen[e.pubkey] = e.created_at
 
-    DB.exe(est.ext[].notifications.pubkey_notification_cnts,
-           "update kv set $(join(["type$(i|>Int) = 0" for i in instances(DB.NotificationType)], ", ")) where pubkey = ?1",
+    DB.exe(est.pubkey_notification_cnts,
+           "update pubkey_notification_cnts set $(join(["type$(i|>Int) = 0" for i in instances(DB.NotificationType)], ", ")) where pubkey = ?1",
            e.pubkey)
 
     []
@@ -910,9 +1099,9 @@ end
 
 function get_notifications_seen(est::DB.CacheStorage; pubkey)
     pubkey = cast(pubkey, Nostr.PubKeyId)
-    if pubkey in est.ext[].notifications.pubkey_notifications_seen
+    if pubkey in est.pubkey_notifications_seen
         [(; kind=Int(NOTIFICATIONS_SEEN_UNTIL),
-          content=JSON.json(est.ext[].notifications.pubkey_notifications_seen[pubkey]))] 
+          content=JSON.json(est.pubkey_notifications_seen[pubkey]))] 
     else
         []
     end
@@ -923,8 +1112,8 @@ function get_notification_counts(est::DB.CacheStorage; pubkey)
     [(; kind=Int(NOTIFICATIONS_SUMMARY), pubkey=Nostr.PubKeyId(pk),
       [Symbol(string(Int(i)))=>cnt
        for (i, cnt) in zip(instances(DB.NotificationType), cnts)]...)
-     for (pk, cnts...) in DB.exe(est.ext[].notifications.pubkey_notification_cnts,
-                                 "select * from kv where pubkey = ?1", pubkey)]
+     for (pk, cnts...) in DB.exe(est.pubkey_notification_cnts,
+                                 "select * from pubkey_notification_cnts where pubkey = ?1", pubkey)]
 end
 
 function get_notification_counts_2(est::DB.CacheStorage; pubkey)
@@ -932,11 +1121,15 @@ function get_notification_counts_2(est::DB.CacheStorage; pubkey)
     [(; kind=Int(NOTIFICATIONS_SUMMARY_2), pubkey=Nostr.PubKeyId(pk),
       content=JSON.json(Dict([Symbol(string(Int(i)))=>cnt
                               for (i, cnt) in zip(instances(DB.NotificationType), cnts)])))
-     for (pk, cnts...) in DB.exe(est.ext[].notifications.pubkey_notification_cnts,
-                                 "select * from kv where pubkey = ?1", pubkey)]
+     for (pk, cnts...) in DB.exe(est.pubkey_notification_cnts,
+                                 "select * from pubkey_notification_cnts where pubkey = ?1", pubkey)]
 end
 
+# function user_search(est::DB.CacheStorage; kwargs...)
+#     JSON.parse(String(HTTP.request("GET", "http://192.168.17.7:14017/api", [], JSON.json(["user_search", kwargs])).body))
+# end
 function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey::Any=nothing)
+    # @show (query, limit, pubkey)
     limit = min(100, limit)
     limit <= 1000 || error("limit too big")
     
@@ -949,9 +1142,13 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     if !isnothing(local pk = try Nostr.bech32_decode(query) catch _ nothing end)
         res[pk] = est.pubkey_followers_cnt[pk]
     elseif isnothing(pubkey)
-        for (pk,) in DB.exec(est.pubkey_followers,
+        for (pk,) in DB.exec(est.dyn[:user_search],
                              DB.@sql("select pubkey from user_search where
-                                     name match ? or username match ? or display_name match ? or displayName match ? or nip05 match ?
+                                     name @@ plainto_tsquery('simple', ?1) or
+                                     username @@ plainto_tsquery('simple', ?2) or
+                                     display_name @@ plainto_tsquery('simple', ?3) or
+                                     displayName @@ plainto_tsquery('simple', ?4) or
+                                     nip05 @@ plainto_tsquery('simple', ?5)
                                      "),
                              (q, q, q, q, q))
             pk = Nostr.PubKeyId(pk)
@@ -964,10 +1161,16 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
                 res[pk] = est.pubkey_followers_cnt[pk]
             end
         else
-            for (pk,) in DB.exec(est.pubkey_followers,
-                                 DB.@sql("select pubkey from user_search where
-                                         pubkey in (select pubkey from kv where follower_pubkey = ?1)
-                                         and (name match ?2 or display_name match ?3 or nip05 match ?4)
+            for (pk,) in DB.exec(est.dyn[:user_search],
+                                 DB.@sql("select us.pubkey 
+                                         from user_search us, pubkey_followers pf
+                                         where
+                                             pf.follower_pubkey = ?1 and pf.pubkey = us.pubkey and
+                                             (
+                                                us.name @@ plainto_tsquery('simple', ?2) or
+                                                us.display_name @@ plainto_tsquery('simple', ?3) or
+                                                us.nip05 @@ plainto_tsquery('simple', ?4)
+                                             )
                                          "),
                                  (pubkey, q, q, q))
                 pk = Nostr.PubKeyId(pk)
@@ -1086,8 +1289,7 @@ function is_hidden_on_primal_nsfw(est::DB.CacheStorage, user_pubkey, scope::Symb
     false
 end
 
-function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
-    cmr = compile_content_moderation_rules(est, user_pubkey)
+function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
     if haskey(cmr.groups, :primal_spam) && pubkey in Filterlist.access_pubkey_blocked_spam && !(pubkey in Filterlist.access_pubkey_unblocked_spam)
         scopes = cmr.groups[:primal_spam].scopes
         return (isempty(scopes) ? true : scope in scopes)
@@ -1100,13 +1302,13 @@ function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol
     false
 end
 
-function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId)
-    eid in est.events && ext_is_hidden_by_group(est, user_pubkey, scope, est.events[eid].pubkey) && return true
-    cmr = compile_content_moderation_rules(est, user_pubkey)
+function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, eid::Nostr.EventId)
+    eid in est.events && ext_is_hidden_by_group(est, cmr, user_pubkey, scope, est.events[eid].pubkey) && return true
+    # cmr = compile_content_moderation_rules(est, user_pubkey)
     # if haskey(cmr.groups, :primal_nsfw)
     #     scopes = cmr.groups[:primal_nsfw].scopes
-    #     for (url,) in DB.exe(est.ext[].event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
-    #         for (category, category_confidence) in DB.exec(est.ext[].media, DB.@sql("select category, category_confidence from media where url = ?1 limit 1"), (url,))
+    #     for (url,) in DB.exe(est.event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
+    #         for (category, category_confidence) in DB.exec(est.media, DB.@sql("select category, category_confidence from media where url = ?1 limit 1"), (url,))
     #             category == "nsfw" && category_confidence >= 0.8 && return (isempty(scopes) ? true : scope in scopes)
     #         end
     #     end
@@ -1122,9 +1324,9 @@ function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
     resources = []
     root_mt = nothing
     thumbnails = Dict()
-    for (url,) in DB.exe(est.ext[].event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
+    for (url,) in DB.exe(est.event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
         variants = []
-        for (s, a, w, h, mt, dur) in DB.exec(est.ext[].media, DB.@sql("select size, animated, width, height, mimetype, duration from media where url = ?1"), (url,))
+        for (s, a, w, h, mt, dur) in DB.exec(est.media, DB.@sql("select size, animated, width, height, mimetype, duration from media where url = ?1"), (url,))
             push!(variants, (; s=s[1], a, w, h, mt, dur, media_url=Media.cdn_url(url, s, a)))
             root_mt = mt
         end
@@ -1133,6 +1335,7 @@ function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
             thumbnails[url] = thumbnail_url
         end
     end
+
     res = Dict()
     if !isempty(resources); res[:resources] = resources; end
     if !isempty(thumbnails); res[:thumbnails] = thumbnails; end
@@ -1142,9 +1345,9 @@ end
 
 function event_preview_response(est::DB.CacheStorage, eid::Nostr.EventId)
     resources = []
-    for (url,) in DB.exe(est.ext[].event_preview, DB.@sql("select url from event_preview where event_id = ?1"), eid)
+    for (url,) in DB.exe(est.event_preview, DB.@sql("select url from event_preview where event_id = ?1"), eid)
         for (mimetype, md_title, md_description, md_image, icon_url) in 
-            DB.exec(est.ext[].preview, DB.@sql("select mimetype, md_title, md_description, md_image, icon_url from preview where url = ?1"), (url,))
+            DB.exec(est.preview, DB.@sql("select mimetype, md_title, md_description, md_image, icon_url from preview where url = ?1"), (url,))
             push!(resources, (; url, mimetype, md_title, md_description, md_image, icon_url))
         end
     end
@@ -1177,22 +1380,24 @@ end
 function trending_hashtags(est::DB.CacheStorage; created_after::Int=trunc(Int, time()-7*24*3600), curated=true)
     # limit = min(500, limit)
     # res = []
-    # for (ht, cnt) in DB.exec(est.ext[].event_hashtags, DB.@sql("select lower(hashtag), count(1) as cnt from event_hashtags where created_at >= ?1 group by lower(hashtag) order by cnt desc"), (created_after,))
+    # for (ht, cnt) in DB.exec(est.event_hashtags, DB.@sql("select lower(hashtag), count(1) as cnt from event_hashtags where created_at >= ?1 group by lower(hashtag) order by cnt desc"), (created_after,))
     #     ht in hashtag_whitelist && push!(res, (ht, cnt))
     # end
     update_hashtag_lists()
     hts = Accumulator{String, Float32}()
     eid2pk = Dict{Nostr.EventId, Nostr.PubKeyId}()
     eid2followers = Dict{Nostr.PubKeyId, Int}()
-    for (i, (eid, ht)) in enumerate(DB.exec(est.ext[].event_hashtags, DB.@sql("select event_id, hashtag from event_hashtags where created_at >= ?1 order by created_at asc"), (created_after,)))
+    for (i, (eid, ht)) in enumerate(DB.exec(est.event_hashtags, DB.@sql("select event_id, hashtag from event_hashtags where created_at >= ?1 order by created_at asc"), (created_after,)))
         yield()
         curated && (ht in hashtag_whitelist || continue)
         # curated && (ht in hashtag_filterlist && continue)
         eid = Nostr.EventId(eid)
-        pk = get!(eid2pk, eid) do; est.events[eid].pubkey end
-        nposts = get!(eid2followers, pk) do; DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ?1"), pk)[1][1] end
-        user_score = est.pubkey_followers_cnt[pk] / nposts
-        hts[ht] += user_score
+        if eid in est.events
+            pk = get!(eid2pk, eid) do; est.events[eid].pubkey end
+            nposts = get!(eid2followers, pk) do; DB.exe(est.pubkey_events, DB.@sql("select count(1) from pubkey_events where pubkey = ?1"), pk)[1][1] end
+            user_score = est.pubkey_followers_cnt[pk] / nposts
+            hts[ht] += user_score
+        end
     end
     res = sort(collect(hts); by=r->-r[2])
     [(; kind=Int(HASHTAGS), content=JSON.json(res))]
@@ -1200,6 +1405,9 @@ end
 
 @cached 600 trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
 @cached 600 trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
+
+# trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
+# trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
 
 function trending_images(est::DB.CacheStorage; created_after::Int=trunc(Int, time()-4*3600), limit=20)
     update_hashtag_lists()
@@ -1219,9 +1427,9 @@ function trending_images(est::DB.CacheStorage; created_after::Int=trunc(Int, tim
             mr = event_media_response(est, eid)
             if !isempty(mr)
                 pk = cast(r.pubkey, Nostr.PubKeyId)
-                nposts = DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ?1"), pk)[1][1]
+                nposts = DB.exe(est.pubkey_events, DB.@sql("select count(1) from pubkey_events where pubkey = ?1"), pk)[1][1]
                 user_score = est.pubkey_followers_cnt[pk] / nposts
-                score = DB.exe(est.event_stats, DB.@sql("select score24h from kv where event_id = ?1"), eid)[1][1]
+                score = DB.exe(est.event_stats, DB.@sql("select score24h from event_stats where event_id = ?1"), eid)[1][1]
                 for mr1 in mr
                     push!(res, (mr1, score*user_score))
                 end
@@ -1239,12 +1447,12 @@ function media_feed(est::DB.CacheStorage; category="", since=0, until=nothing, l
     limit <= 1000 || error("limit too big")
     isnothing(until) && (until = 1<<60)
     posts = []
-    for (eid, url, rowid) in DB.exec(est.ext[].event_media, DB.@sql("select event_id, url, rowid from event_media
-                                                                    where rowid >= ? and rowid <= ?
-                                                                    order by rowid desc limit ? offset ?"),
+    for (eid, url, rowid) in DB.exec(est.event_media, DB.@sql("select event_id, url, rowid from event_media
+                                                              where rowid >= ?1 and rowid <= ?2
+                                                              order by rowid desc limit ?3 offset ?4"),
                                      (since, until, limit, offset))
         eid = Nostr.EventId(eid)
-        for (cat, cat_prob) in DB.exec(est.ext[].media, DB.@sql("select category, category_confidence from media where url = ? limit 1"), (url,))
+        for (cat, cat_prob) in DB.exec(est.media, DB.@sql("select category, category_confidence from media where url = ?1 limit 1"), (url,))
             cat == category && push!(posts, (eid, rowid))
             break
         end
@@ -1267,8 +1475,6 @@ MEDIA_UPLOAD_PATH = Ref("incoming")
 categorized_uploads = Ref{Any}(nothing)
 
 function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
-    pubkey == Nostr.bech32_decode("npub1stm9lsg3vpeqn3zm53e8gm7q2auqs8qzqyf8xjkqs2t3mjuw0w6qxqdgkf") && push!(Main.stuff, (:import_upload_2, (; pubkey=(@show pubkey), data)))
-
     if !isempty(DB.exec(categorized_uploads[], "select 1 from categorized_uploads where sha256 = ?1 and type = 'blocked' limit 1", (SHA.sha256(data),)))
         error("blocked content")
     end
@@ -1319,8 +1525,8 @@ function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vec
     width, height = isnothing(wh) ? (0, 0) : wh
     mimetype = Media.parse_mimetype(data)
 
-    if isempty(DB.exe(est.ext[].media_uploads, DB.@sql("select 1 from media_uploads where pubkey = ?1 and key = ?2 limit 1"), pubkey, JSON.json(key)))
-        DB.exe(est.ext[].media_uploads, DB.@sql("insert into media_uploads values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"), 
+    if isempty(DB.exe(est.media_uploads, DB.@sql("select 1 from media_uploads where pubkey = ?1 and key = ?2 limit 1"), pubkey, JSON.json(key)))
+        DB.exe(est.media_uploads, DB.@sql("insert into media_uploads values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"), 
                pubkey,
                key.type, JSON.json(key),
                trunc(Int, time()),
@@ -1523,8 +1729,8 @@ function ext_user_get_settings(est::DB.CacheStorage, pubkey)
     end
     res = parsed_default_settings[]
 
-    if !isnothing(pubkey) && lock(user_has_app_settings) do user_has_app_settings; get!(user_has_app_settings, pubkey) do; pubkey in est.ext[].app_settings; end; end
-        r = DB.exec(est.ext[].app_settings, DB.@sql("select event_id from app_settings 
+    if !isnothing(pubkey) && lock(user_has_app_settings) do user_has_app_settings; get!(user_has_app_settings, pubkey) do; pubkey in est.app_settings; end; end
+        r = DB.exec(est.app_settings, DB.@sql("select event_id from app_settings 
                                                     where key = ?1 limit 1"), (pubkey,))[1][1]
         if !ismissing(r)
             seid = Nostr.EventId(r)
@@ -1532,7 +1738,7 @@ function ext_user_get_settings(est::DB.CacheStorage, pubkey)
             eml = get(parsed_settings, pubkey, nothing)
             !isnothing(eml) && eml[1] == seid && return eml[2]
 
-            e = est.ext[].app_settings[pubkey]
+            e = est.app_settings[pubkey]
             d = JSON.parse(e.content)
             d["id"] = e.id
 
@@ -1628,7 +1834,7 @@ register_cache_function(:empty_analytics_cache,
 ##
 
 function ext_user_profile(est::DB.CacheStorage, pubkey)
-    if !isempty(local r = DB.exe(est.ext[].pubkey_zapped, DB.@sql("select zaps, satszapped from kv where pubkey = ?1"), pubkey))
+    if !isempty(local r = DB.exe(est.pubkey_zapped, DB.@sql("select zaps, satszapped from pubkey_zapped where pubkey = ?1"), pubkey))
         total_zap_count, total_satszapped = r[1]
     else
         total_zap_count = total_satszapped = 0
@@ -1639,14 +1845,14 @@ function ext_user_profile(est::DB.CacheStorage, pubkey)
     )
 end
 
-function start(pqconnstr)
-    lists[] = DB.PQDict{String, Int}("lists", pqconnstr,
+function start(est::DB.CacheStorage)
+    lists[] = est.params.MembershipDBDict(String, Int, "lists"; connsel=est.pqconnstr,
                                      init_queries=["create table if not exists lists (list varchar(200) not null, pubkey bytea not null, added_at int not null)",
                                                    "create index if not exists lists_list on lists (list asc)",
                                                    "create index if not exists lists_pubkey on lists (pubkey asc)",
                                                    "create index if not exists lists_added_at on lists (added_at desc)",
                                                   ])
-    categorized_uploads[] = DB.PQDict{String, Int}("categorized_uploads", pqconnstr,
+    categorized_uploads[] = est.params.MembershipDBDict(String, Int, "categorized_uploads"; connsel=est.pqconnstr,
                                      init_queries=["create table if not exists categorized_uploads (
                                                    type varchar not null,
                                                    added_at int not null,
@@ -1734,11 +1940,11 @@ function note_mentions(
     type = Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST)
 
     r = if !isnothing(event_id)
-        DB.exec(est.ext[].notifications.pubkey_notifications, 
-                                          "select arg1, arg2 from kv 
-                                          where arg1 = ?1 and type = ?2
-                                          order by created_at desc limit ? offset ?",
-                                          (event_id, type, limit, offset))
+        DB.exec(est.pubkey_notifications, 
+                "select arg1, arg2 from pubkey_notifications 
+                where arg1 = ?1 and type = ?2
+                order by created_at desc limit ?3 offset ?4",
+                (event_id, type, limit, offset))
 
     elseif !isnothing(pubkey) && !isnothing(identifier) 
         Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
@@ -1773,8 +1979,8 @@ end
 
 function note_mentions_count(est::DB.CacheStorage; event_id)
     event_id = cast(event_id, Nostr.EventId)
-    (count,) = DB.exec(est.ext[].notifications.pubkey_notifications, 
-                       "select count(1) from kv where arg1 = ?1 and type = ?2",
+    (count,) = DB.exec(est.pubkey_notifications, 
+                       "select count(1) from pubkey_notifications where arg1 = ?1 and type = ?2",
                        (event_id, Int(DB.YOUR_POST_WAS_MENTIONED_IN_POST)))[1]
     [(;
       kind=Int(NOTE_MENTIONS_COUNT),
@@ -1793,5 +1999,40 @@ function ext_long_form_event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
     [(; 
       kind=Int(EVENT_STATS),
       content=JSON.json((; event_id=eid, es...)))]
+end
+
+struct AppSPI_ end
+AppSPI = AppSPI_()
+
+struct AppSPIFuncall; funcall::Symbol; end
+
+Base.getproperty(appspi::AppSPI_, prop::Symbol) = AppSPIFuncall(prop)
+
+import ..PerfStats
+
+spi_session_funcalls = Dict{Int, Any}() |> ThreadSafe
+
+function (fc::AppSPIFuncall)(est; kwargs...)
+    res = []
+    tdur = @elapsed Postgres.handle_errors(:p0ext) do session
+        pid = session.extra[:backendpid]
+        spi_session_funcalls[pid] = (Utils.current_time(), fc.funcall, kwargs)
+        try
+            PerfStats.recordspi!(:spifuncalls, session.extra[:backendpid], fc.funcall) do
+                for (_, s) in Postgres.execute(session, "select * from p_julia_api_call(\$1) a", [JSON.json([fc.funcall, Dict(kwargs)])])[2]
+                    r = JSON.parse(s)
+                    if r[1] == "EVENT"
+                        push!(res, r[2])
+                    elseif r[1] == "NOTICE"
+                        error(r[2])
+                    end
+                end
+            end
+        finally
+            spi_session_funcalls[pid] = nothing
+        end
+    end
+    tdur > 2 && @show (:slow_AppSPIFuncall, tdur, fc.funcall, kwargs)
+    res
 end
 

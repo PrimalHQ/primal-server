@@ -1,13 +1,13 @@
 #module CacheServerHandlers
 
 import ..PushGatewayExporter
-import ..CacheServerSync
 
 periodic_pushgw = Throttle(; period=15.0)
 periodic_notification_counts = Throttle(; period=1.0)
 
-Media() = Main.eval(:(Media))
-SpamDetection() = Main.eval(:(SpamDetection))
+Media() = Main.Media
+SpamDetection() = Main.SpamDetection
+CacheServerSync() = Main.CacheServerSync
 
 function ext_periodic()
     periodic_notification_counts() do
@@ -53,8 +53,8 @@ function ext_periodic()
 
         PushGatewayExporter.set!("cache_cputime_avg", MetricsLogger.cputime_avg[])
 
-        CacheServerSync.last_t[] > 0 && PushGatewayExporter.set!("cache_sync_last_t", CacheServerSync.last_t[])
-        PushGatewayExporter.set!("cache_sync_last_duration", CacheServerSync.last_duration[])
+        CacheServerSync().last_t[] > 0 && PushGatewayExporter.set!("cache_sync_last_t", CacheServerSync().last_t[])
+        PushGatewayExporter.set!("cache_sync_last_duration", CacheServerSync().last_duration[])
     end
 end
 

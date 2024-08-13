@@ -2,7 +2,7 @@
 @time eids = collect(keys(cache_storage.event_ids))
 ##
 empty!(cache_storage.zap_receipts)
-empty!(cache_storage.ext[].pubkey_zapped)
+empty!(cache_storage.pubkey_zapped)
 # empty!(cache_storage.dyn[:pubkey_zap_stats])
 #
 running = Utils.PressEnterToStop()

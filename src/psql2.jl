@@ -13,8 +13,14 @@ struct PGConn <: DBConn
     PGConn(dbs) = new(dbs)
 end
 
-function exe_replacing_args(conn::PGConnection, query, args...) 
-    Postgres.execute(conn.connsel, replace(query, "?"=>"\$"), args...)
+function exe_replacing_args(conn::PGConnection, query::Int, args...) 
+    exe_replacing_args(conn, registered_queries[query], args...)
+end
+function exe_replacing_args(conn::PGConnection, query::String, args...) 
+    # @show (query, args)
+    tdur = @elapsed res = Postgres.execute(conn.connsel, replace(query, "?"=>"\$"), args...)
+    tdur > SLOW_QUERY_TIME[] && @show (:slow_psql2_query, tdur, replace(query, "?"=>"\$"), args...)
+    res
 end
 function exe(conn::PGConnection, query, args...) 
     _, rows = exe_replacing_args(conn, query, args...)
@@ -41,8 +47,11 @@ struct PGDict{K, V} <: ShardedDBDict{K, V}
     hashfunc::Function
     keyfuncs::DBConversionFuncs
     valuefuncs::DBConversionFuncs
-    function PGDict{K, V}(table::String,
-                           connsel::ConnSelector;
+    dbqueries::Vector{String}
+    function PGDict{K, V}(;
+                           connsel::ConnSelector,
+                           table::String,
+
                            keycolumn="key",
                            valuecolumn="value",
                            keysqltype::String=sqltype(PGDict{K, V}, K),
@@ -52,18 +61,39 @@ struct PGDict{K, V} <: ShardedDBDict{K, V}
                            valuefuncs::DBConversionFuncs=db_conversion_funcs(PGDict{K, V}, V),
                            init_extra_columns="",
                            init_extra_indexes=String[],
-                           init_queries=vcat(["create table if not exists $table ($keycolumn $keysqltype primary key not null, $valuecolumn $valuesqltype $init_extra_columns)"
-                                              "create index if not exists $(table)_$(keycolumn) on $table ($keycolumn asc)"],
+                           init_queries=vcat(["create table if not exists $table ($keycolumn $keysqltype primary key not null, $valuecolumn $valuesqltype $init_extra_columns)",
+                                              # "create index if not exists $(table)_$(keycolumn)_idx on $table ($keycolumn asc)",
+                                              "alter table $(table) add primary key ($(keycolumn))",
+                                             ],
                                              init_extra_indexes),
+                           skipinit=false,
                          ) where {K, V}
         dbconn = PGConn([PGConnection(connsel)])
-        if !exe(dbconn.dbs[1], "select pg_is_in_recovery()")[1][1]
+        if !skipinit && !exe(dbconn.dbs[1], "select pg_is_in_recovery()")[1][1]
             for q in init_queries
-                exe(dbconn.dbs[1], q)
+                if startswith(q, '!')
+                    q = replace(q[2:end], " blob"=>" bytea", " int"=>" int8", " number"=>" float8")
+                end
+                table_exists = !isempty(exe(dbconn.dbs[1], "select 1 from pg_tables where tablename = ?1 and schemaname = 'public'", (table,)))
+                view_exists = !isempty(exe(dbconn.dbs[1], "select 1 from pg_views where viewname = ?1 and schemaname = 'public'", (table,)))
+                view_exists && continue
+                if !occursin("add primary key", q) || isempty(exe(dbconn.dbs[1], "select constraint_name from information_schema.table_constraints where table_name = '$table' and constraint_type = 'PRIMARY KEY'"))
+                    exe(dbconn.dbs[1], q)
+                end
             end
         end
-        new{K, V}(table, keycolumn, valuecolumn, [dbconn |> ThreadSafe], hashfunc, keyfuncs, valuefuncs)
+        ssd = new{K, V}(table, keycolumn, valuecolumn, [dbconn |> ThreadSafe], hashfunc, keyfuncs, valuefuncs, [])
+        append!(ssd.dbqueries, mkdbqueries(ssd))
+        ssd
     end
+end
+
+function PSQLSet(K::Type, table::String; kwargs...)
+    PGDict{K, Bool}(; table, kwargs...)
+end
+
+function PSQLDict(K::Type, V::Type, table::String; kwargs...)
+    PGDict{K, V}(; table, kwargs...)
 end
 
 sqltype(::Type{PGDict{K, V}}, ::Type{Bool}) where {K, V} = "boolean"
@@ -104,11 +134,11 @@ Postgres.pg_to_jl_type_conversion[3802] = v -> JSON.parse(String(v))
 
 function Base.setindex!(ssd::PGDict{K, V}, v::V, k::K)::V where {K, V}
     exe(ssd.dbconns[shard(ssd, k)],
-        @sql("INSERT INTO $(ssd.table) ($(ssd.keycolumn), $(ssd.valuecolumn))
-              VALUES (\$1, \$2)
-              ON CONFLICT ($(ssd.keycolumn)) DO UPDATE 
-              SET $(ssd.valuecolumn) = excluded.$(ssd.valuecolumn)
-              "),
+        ssd.dbqueries[@dbq("INSERT INTO $(ssd.table) ($(ssd.keycolumn), $(ssd.valuecolumn))
+                           VALUES (\$1, \$2)
+                           ON CONFLICT ($(ssd.keycolumn)) DO UPDATE 
+                           SET $(ssd.valuecolumn) = excluded.$(ssd.valuecolumn)
+                           ")],
         (ssd.keyfuncs.to_sql(k), ssd.valuefuncs.to_sql(v)))
     v
 end
@@ -117,3 +147,6 @@ function exd(ssd::PGDict{K, V}, query_rest::String, args...)::Vector where {K, V
     @assert length(ssd.dbconns) == 1
     exd(ssd.dbconns[1], "select * from $(ssd.table) $query_rest", db_args_mapped(typeof(ssd), args))
 end
+
+function Base.close(conn::PGConnection) end
+

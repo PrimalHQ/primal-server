@@ -50,20 +50,22 @@ function rex_(srvnode, expr)
 end
 
 function pull_media(src, dst)
-    for (tbl, ty) in [
-                      (:(Main.cache_storage.ext[].media), Nothing),
-                      (:(Main.cache_storage.ext[].event_media), Nostr.EventId),
-                      (:(Main.cache_storage.ext[].preview), Nothing),
-                      (:(Main.cache_storage.ext[].event_preview), Nothing),
-                      (:(Main.cache_storage.dyn[:video_thumbnails]), Nothing),
-                     ]
-        tblname = rex_(dst, :(($tbl).table))
+    for (tblsrc, tbldst, ty) in [
+                                 (:(Main.cache_storage.ext[].media), :(Main.cache_storage.media), Nothing),
+                                 (:(Main.cache_storage.ext[].event_media), :(Main.cache_storage.event_media), Nostr.EventId),
+                                 (:(Main.cache_storage.ext[].preview), :(Main.cache_storage.preview), Nothing),
+                                 (:(Main.cache_storage.ext[].event_preview), :(Main.cache_storage.event_preview), Nothing),
+                                 (:(Main.cache_storage.dyn[:video_thumbnails]), :(Main.cache_storage.dyn[:video_thumbnails]), Nothing),
+                                ]
+        tblsrcname = rex_(src, :(($tblsrc).table))
+        tbldstname = rex_(dst, :(($tbldst).table))
 
-        q = "select max(rowid) from $tblname"
-        mr1 = rex_(dst, :(DB.exec($tbl, $q)[1][1]))
-        mr2 = rex_(src, :(DB.exec($tbl, $q)[1][1]))
+        q1 = "select max(rowid) from $tbldstname"
+        q2 = "select max(rowid) from $tblsrcname"
+        mr1 = rex_(dst, :(DB.exec($tbldst, $q1)[1][1]))
+        mr2 = rex_(src, :(DB.exec($tblsrc, $q2)[1][1]))
 
-        # @show (tblname, mr1, mr2)
+        # @show ((tbldstname, mr1), (tblsrcname, mr2))
 
         ismissing(mr2) && continue
         ismissing(mr1) && (mr1 = 0)
@@ -71,17 +73,18 @@ function pull_media(src, dst)
 
         n = 2000
         for i in mr1+1:n:mr2
+            running[] || break
             yield()
             r = i:min(i+n-1, mr2)
-            progress[] = (tblname, r.start, mr2)
-            q = "select * from $tblname where rowid >= $(r.start) and rowid <= $(r.stop)"
-            for row in rex_(src, :(DB.exec($tbl, $q)))
-                qi = "insert into $tblname values ($(join(['?' for _ in 1:length(row)], ',')))"
+            progress[] = (tbldstname, r.start, mr2)
+            q = "select *, rowid from $tblsrcname where rowid >= $(r.start) and rowid <= $(r.stop)"
+            for row in rex_(src, :(DB.exec($tblsrc, $q)))
+                qi = "insert into $tbldstname values ($(join(["?$i" for i in 1:length(row)], ','))) on conflict do nothing"
                 if ty == Nothing
-                    rex_(dst, :(DB.exec($tbl, $qi, $row)))
+                    rex_(dst, :(DB.exec($tbldst, $qi, $row)))
                 else
                     args = (ty(row[1]), row[2:end]...)
-                    rex_(dst, :(DB.exe($tbl, $qi, ($args)...)))
+                    rex_(dst, :(DB.exe($tbldst, $qi, ($args)...)))
                 end
             end
         end

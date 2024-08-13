@@ -24,7 +24,7 @@ cnt = Ref(0)
                         _, ext = splitext(lowercase(url))
                         if ext in DB.image_exts
                             cnt[] += 1
-                            if isempty(DB.exec(cache_storage.ext[].event_media, "select 1 from event_media where event_id = ? and url = ? limit 1", (eid, url,)))
+                            if isempty(DB.exec(cache_storage.event_media, "select 1 from event_media where event_id = ? and url = ? limit 1", (eid, url,)))
                                 while Media.media_queue_executor_taskcnt[] >= 5 && running[]; sleep(0.1); end
                                 println("downloading ", i, " ", url)
                                 DB.import_media_async(cache_storage, e.id, url, Media.all_variants)
@@ -45,6 +45,6 @@ println()
 cnt[], errs[], ttotal[], ttotal[]/length(mds)
 ##
 url = "https://nostr.build/i/525a0fe39c0871a192a46682c7833862cdab14e2c4159e3d683a8bec51b7f0cb.jpg"
-DB.exec(cache_storage.ext[].media, "select * from media where url = ? limit 1", (url,))
-DB.exec(cache_storage.ext[].media, "select * from media limit 1")
+DB.exec(cache_storage.media, "select * from media where url = ? limit 1", (url,))
+DB.exec(cache_storage.media, "select * from media limit 1")
 ##

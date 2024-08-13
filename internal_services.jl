@@ -38,10 +38,61 @@ function catch_exception(body::Function, handler::Symbol, args...)
     end
 end
 
-function start(cache_storage, pqconnstr; setup_handlers=true)
+function start(cache_storage::DB.CacheStorage; setup_handlers=true)
     @assert isnothing(server[])
 
     est[] = cache_storage
+
+    short_urls[] = est[].params.MembershipDBDict(Int, String, "short_urls"; connsel=est[].pqconnstr,
+                                          init_queries=["create table if not exists short_urls (
+                                                        idx int8 not null,
+                                                        url text not null,
+                                                        path text not null,
+                                                        ext text not null
+                                                        )",
+                                                        "create index if not exists short_urls_idx on short_urls (idx asc)",
+                                                        "create index if not exists short_urls_url on short_urls (url asc)",
+                                                        "create index if not exists short_urls_path on short_urls (path asc)",
+                                                       ])
+
+    verified_users[] = est[].params.MembershipDBDict(String, Int, "verified_users"; connsel=est[].pqconnstr,
+                                              init_queries=["create table if not exists verified_users (name varchar(200) not null, pubkey bytea not null)",
+                                                            "create index if not exists verified_users_pubkey on verified_users (pubkey asc)",
+                                                            "create index if not exists verified_users_name on verified_users (name asc)",
+                                                           ])
+
+    inappropriate_names[] = est[].params.MembershipDBDict(String, Int, "inappropriate_names"; connsel=est[].pqconnstr,
+                                              init_queries=["create table if not exists inappropriate_names (name varchar(200) primary key)",
+                                                            "create index if not exists inappropriate_names_name on inappropriate_names (name asc)",
+                                                           ])
+
+    memberships[] = est[].params.MembershipDBDict(String, Int, "memberships"; connsel=est[].pqconnstr,
+                                           init_queries=["create table if not exists memberships (
+                                                         pubkey bytea,
+                                                         tier varchar(300),
+                                                         valid_until timestamp,
+                                                         name varchar(500),
+                                                         used_storage int8
+                                                         )",
+                                                         "create index if not exists memberships_pubkey on memberships (pubkey asc)",
+                                                        ])
+    membership_tiers[] = est[].params.MembershipDBDict(String, Int, "membership_tiers"; connsel=est[].pqconnstr,
+                                                init_queries=["create table if not exists membership_tiers (
+                                                              tier varchar(300) not null,
+                                                              max_storage int8
+                                                              )",
+                                                              "create index if not exists membership_tiers_tier on membership_tiers (tier asc)",
+                                                             ])
+    membership_products[] = est[].params.MembershipDBDict(String, Int, "membership_products"; connsel=est[].pqconnstr,
+                                                   init_queries=["create table if not exists membership_products (
+                                                                 product_id varchar(100) not null,
+                                                                 tier varchar(300),
+                                                                 months int,
+                                                                 amount_usd decimal,
+                                                                 max_storage int8
+                                                                 )",
+                                                                 "create index if not exists membership_products_product_id on membership_products (product_id asc)",
+                                                                ])
 
     router[] = HTTP.Router()
     server[] = HTTP.serve!(router[], "0.0.0.0", PORT[])
@@ -77,56 +128,6 @@ function start(cache_storage, pqconnstr; setup_handlers=true)
         HTTP.register!(router[], "/api/suggestions", suggestions_handler)
     end
 
-    short_urls[] = DB.PQDict{Int, String}("short_urls", pqconnstr,
-                                          init_queries=["create table if not exists short_urls (
-                                                        idx int8 not null,
-                                                        url text not null,
-                                                        path text not null,
-                                                        ext text not null
-                                                        )",
-                                                        "create index if not exists short_urls_idx on short_urls (idx asc)",
-                                                        "create index if not exists short_urls_url on short_urls (url asc)",
-                                                        "create index if not exists short_urls_path on short_urls (path asc)",
-                                                       ])
-
-    verified_users[] = DB.PQDict{String, Int}("verified_users", pqconnstr,
-                                              init_queries=["create table if not exists verified_users (name varchar(200) not null, pubkey bytea not null)",
-                                                            "create index if not exists verified_users_pubkey on verified_users (pubkey asc)",
-                                                            "create index if not exists verified_users_name on verified_users (name asc)",
-                                                           ])
-
-    inappropriate_names[] = DB.PQDict{String, Int}("inappropriate_names", pqconnstr,
-                                              init_queries=["create table if not exists inappropriate_names (name varchar(200) primary key)",
-                                                            "create index if not exists inappropriate_names_name on inappropriate_names (name asc)",
-                                                           ])
-
-    memberships[] = DB.PQDict{String, Int}("memberships", pqconnstr,
-                                           init_queries=["create table if not exists memberships (
-                                                         pubkey bytea,
-                                                         tier varchar(300),
-                                                         valid_until timestamp,
-                                                         name varchar(500),
-                                                         used_storage int8
-                                                         )",
-                                                         "create index if not exists memberships_pubkey on memberships (pubkey asc)",
-                                                        ])
-    membership_tiers[] = DB.PQDict{String, Int}("membership_tiers", pqconnstr,
-                                                init_queries=["create table if not exists membership_tiers (
-                                                              tier varchar(300) not null,
-                                                              max_storage int8
-                                                              )",
-                                                              "create index if not exists membership_tiers_tier on membership_tiers (tier asc)",
-                                                             ])
-    membership_products[] = DB.PQDict{String, Int}("membership_products", pqconnstr,
-                                                   init_queries=["create table if not exists membership_products (
-                                                                 product_id varchar(100) not null,
-                                                                 tier varchar(300),
-                                                                 months int,
-                                                                 amount_usd decimal,
-                                                                 max_storage int8
-                                                                 )",
-                                                                 "create index if not exists membership_products_product_id on membership_products (product_id asc)",
-                                                                ])
     nothing
 end
 
@@ -253,7 +254,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                     title = mdtitle(c)
                     image = get(c, "picture", "")
                 end
-                media_urls = DB.exec(cache_storage.ext[].event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
+                media_urls = DB.exec(cache_storage.event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
                 if !isempty(media_urls)
                     twitter_card = "summary_large_image"
                     image = media_urls[1][1]

@@ -6,6 +6,8 @@ import Dates
 using Decimals: decimal, Decimal
 import JSON, HTTP
 
+import Tables, PrettyTables
+
 import ..Utils
 using ..Utils: ThreadSafe
 
@@ -16,6 +18,8 @@ struct Session
     parameters::Dict{String, String}
     backend_key_data::Any
     prepared_statements::Dict{String, String}
+    lock::ReentrantLock
+    extra::Dict
 end
 
 struct PreparedStatement
@@ -31,11 +35,34 @@ end
 mutable struct PGServer
     connstr::String
     tracking_url::String
+    session_initializer::Function
     exception::Any
-    function PGServer(; connstr="", tracking_url="")
+    function PGServer(; connstr="", tracking_url="", session_initializer=identity)
         @assert !isempty(connstr) || !isempty(tracking_url)
-        new(connstr, tracking_url, nothing)
+        new(connstr, tracking_url, session_initializer, nothing)
     end
+end
+
+struct PostgresException <: Exception
+    fields::Dict{Char, String}
+end
+
+struct Result
+    columns::Vector
+    rows::Vector
+    Result(columns, rows) = 
+    new(if isnothing(columns)
+            []
+        else
+            [c == "?column?" ? "_column_$i" : c
+             for (i, c) in enumerate(columns)]
+        end, 
+        rows)
+end
+
+struct ResultRow <: Tables.AbstractRow
+    columns
+    values
 end
 
 PRINT_EXCEPTIONS = Ref(true)
@@ -57,18 +84,21 @@ jl_to_pg_type_conversion = Dict{Type, Function}()
     println("$(Dates.now())  $(JSON.json(kwargs))")
 end
 
-function make_session(connstr::String)
-    opts = Dict([map(string, split(s, '=')) for s in split(connstr, ' ') if !isempty(s)])
+function make_session(connstr::String; connection_check_period=0.2)
+    ps = split(connstr, '|')
+    opts = Dict([map(string, split(s, '=')) for s in split(ps[1], ' ') if !isempty(s)])
 
     tstart = time()
     io = TCPSocket()
     connect!(io, opts["host"], parse(Int, get(opts, "port", "5432")))
-    while io.status != Base.StatusOpen
-        if time() - tstart >= MAX_WAIT_FOR_CONNECTION[]
-            close(io)
-            throw(Base.IOError("postgres waiting too long for TCP connection", 1000))
+    if connection_check_period > 0
+        while io.status != Base.StatusOpen
+            if time() - tstart >= MAX_WAIT_FOR_CONNECTION[]
+                close(io)
+                throw(Base.IOError("postgres waiting too long for TCP connection", 1000))
+            end
+            sleep(connection_check_period)
         end
-        sleep(0.2)
     end
 
     send_ssl_request(io)
@@ -97,7 +127,11 @@ function make_session(connstr::String)
     @assert parameters["server_encoding"] == "UTF8"
     @assert parameters["DateStyle"] == "ISO, MDY"
 
-    Session(io, parameters, backend_key_data, Dict{String, PreparedStatement}())
+    session = Session(io, parameters, backend_key_data, Dict{String, PreparedStatement}(), ReentrantLock(), Dict())
+    
+    length(ps) >= 2 && execute(session, string(ps[2]))
+    
+    session
 end
 
 Base.close(session::Session) = close(session.socket)
@@ -120,23 +154,55 @@ function connection_pool_stats()
     end
 end
 
-function get_connection_pool(connpools, connstr::String)
-    pool = get!(connpools, connstr) do
-        PGConnPool([], [])
+function maintain_connection_pools()
+    for (name, server) in collect(servers)
+        pool = lock(connpools) do connpools
+            get!(connpools, server.connstr) do
+                PGConnPool([], [])
+            end
+        end
+        nnew = SESSIONS_PER_POOL[] - length(pool.sessions)
+        nnew > 0 && println("postgres: creating $nnew new session(s) to server $name")
+        new_sessions = filter(!isnothing, 
+                              asyncmap(function(_)
+                                           sess = make_session(server.connstr)
+                                           try
+                                               server.session_initializer(sess)
+                                           catch ex
+                                               println("postgres: session_initializer for server $name: $ex")
+                                               nothing
+                                           end
+                                       end, 1:nnew))
+        if !isempty(new_sessions)
+            println("postgres:  created $(length(new_sessions)) new session(s) to server $name")
+            lock(connpools) do connpools
+                append!(pool.sessions, new_sessions)
+                append!(pool.free_sessions, new_sessions)
+            end
+        end
     end
-    new_sessions = asyncmap(_->make_session(connstr), 1:(SESSIONS_PER_POOL[] - length(pool.sessions)))
-    if !isempty(new_sessions)
-        append!(pool.sessions, new_sessions)
-        append!(pool.free_sessions, new_sessions)
-    end
-    pool
 end
 
-function get_session(connstr::String)
+# function get_connection_pool(connpools, conninit::NamedTuple)
+#     pool = get!(connpools, conninit.connstr) do
+#         PGConnPool([], [])
+#     end
+#     new_sessions = asyncmap(_->make_session(conninit.connstr) |> conninit.session_initializer,
+#                             1:(SESSIONS_PER_POOL[] - length(pool.sessions)))
+#     if !isempty(new_sessions)
+#         append!(pool.sessions, new_sessions)
+#         append!(pool.free_sessions, new_sessions)
+#     end
+#     pool
+# end
+
+function get_session(conninit::NamedTuple)
     tstart = time()
     while true
+        # doesn't block query execution on existing sessions while new session is being created
         session = lock(connpools) do connpools
-            pool = get_connection_pool(connpools, connstr)
+            # pool = get_connection_pool(connpools, conninit)
+            pool = connpools[conninit.connstr]
             if isempty(pool.free_sessions)
                 nothing
             else
@@ -156,34 +222,47 @@ end
 
 function free_session(connstr::String, session::Session)
     lock(connpools) do connpools
-        pool = get_connection_pool(connpools, connstr)
+        pool = connpools[connstr]
         push!(pool.free_sessions, session)
     end
 end
 
-function remove_session(connstr, session)
+function remove_session(connstr::String, session)
+    println((:remove_session, connstr, session, objectid(session)))
+    sleep(0.5)
     lock(connpools) do connpools
-        pool = get_connection_pool(connpools, connstr)
-        deleteat!(pool.sessions,      findfirst(sess->sess==session, pool.sessions))
-        deleteat!(pool.free_sessions, findfirst(sess->sess==session, pool.free_sessions))
-        get_connection_pool(connpools, connstr)
+        pool = connpools[connstr]
+
+        if !isnothing(local i = findfirst(==(session), pool.sessions))
+            deleteat!(pool.sessions, i)
+        end
+        
+        if !isnothing(local i = findfirst(==(session), pool.free_sessions))
+            deleteat!(pool.free_sessions, i)
+        end
     end
 end
 
-function close_sessions(connstr)
+function close_sessions(connstr::String)
+    println((:close_sessions, connstr))
     lock(connpools) do connpools
-        pool = get_connection_pool(connpools, connstr)
+        pool = connpools[connstr]
         for session in pool.sessions
             try close(session) catch _ end
         end
         empty!(pool.sessions)
         empty!(pool.free_sessions)
     end
+    nothing
+end
+
+function close_sessions(server::Symbol)
+    close_sessions(servers[server].connstr)
 end
 
 function close_servers()
-    for server in collect(values(servers))
-        close_sessions(server.connstr)
+    for server in collect(keys(servers))
+        close_sessions(server)
     end
 end
 
@@ -367,10 +446,6 @@ function send_cancel_request(io::IO, process_id, secret_key)
     end
 end
 
-struct PostgresException <: Exception
-    fields::Dict{Char, String}
-end
-
 function recv_message(io::IO)
     msg_type = recv_int1(io)
     msg_len = recv_int4(io)
@@ -412,7 +487,7 @@ function recv_message(io::IO)
         fields = []
         for _ in 1:field_count
             len = recv_int4(io)
-            push!(fields, len > 0 ? read(io, len) : missing)
+            push!(fields, len < 0 ? missing : read(io, len))
         end
         (; type=:data_row, fields)
 
@@ -456,7 +531,9 @@ function recv_message(io::IO)
     msg
 end
 
-function recv_rows(io::IO)
+function recv_rows(
+        io::IO; 
+        callbacks::Union{Nothing, NamedTuple}=nothing)
     columns = nothing
     rows = Any[]
     row_desc = nothing
@@ -468,38 +545,49 @@ function recv_rows(io::IO)
             throw(PostgresException(Dict(msg.fields)))
         elseif msg.type == :notice_response
             for (ft, fd) in msg.fields
-                ft == 'M' && println("postgres notice: $fd")
+                if !isnothing(callbacks)
+                    callbacks.on_notice(msg.fields)
+                else
+                    ft == 'M' && println("postgres notice: $fd")
+                end
             end
         elseif msg.type == :row_description
             row_desc = msg.fields
             # dump(row_desc)
             columns = [f.field_name for f in row_desc]
+
+            isnothing(callbacks) || callbacks.on_row_description(row_desc)
             
         elseif msg.type == :data_row
-            push!(rows, Any[f.format != :text ? d : 
-                            if     ismissing(d) || isnothing(d); d
-                            elseif haskey(pg_to_jl_type_conversion, f.type_oid); pg_to_jl_type_conversion[f.type_oid](d)
-                            elseif f.type_oid == 16; String(d) == "t" # bool
-                            elseif f.type_oid == 17 # bytea
-                                @assert d[1] == UInt8('\\') && d[2] == UInt8('x')
-                                hex2bytes(d[3:end])
-                            elseif f.type_oid == 20; parse(Int, String(d)) # int8
-                            elseif f.type_oid == 23; parse(Int, String(d)) # int4
-                            elseif f.type_oid == 25; String(d) # text
-                            elseif f.type_oid == 114; String(d) # json
-                            elseif f.type_oid == 700; parse(Float64, String(d)) # float4
-                            elseif f.type_oid == 701; parse(Float64, String(d)) # float8
-                            elseif f.type_oid == 1043; String(d) # varchar
-                            elseif f.type_oid == 1114; Dates.DateTime(first(replace(String(d), ' '=>'T'), 23)) # timestamp
-                            elseif f.type_oid == 1700; decimal(String(d)) # numeric
-                            elseif f.type_oid == 3802; String(d) # jsonb
-                            else; @show (; type_oid=f.type_oid, data=d)
-                            end
-                            for (f, d) in zip(row_desc, msg.fields)])
+            row = Any[f.format != :text ? d : 
+                      if     ismissing(d) || isnothing(d); d
+                      elseif haskey(pg_to_jl_type_conversion, f.type_oid); pg_to_jl_type_conversion[f.type_oid](d)
+                      elseif f.type_oid == 16; String(d) == "t" # bool
+                      elseif f.type_oid == 17 # bytea
+                          @assert d[1] == UInt8('\\') && d[2] == UInt8('x')
+                          hex2bytes(d[3:end])
+                      elseif f.type_oid == 20; parse(Int, String(d)) # int8
+                      elseif f.type_oid == 23; parse(Int, String(d)) # int4
+                      elseif f.type_oid == 25; String(d) # text
+                      elseif f.type_oid == 114; String(d) # json
+                      elseif f.type_oid == 700; parse(Float64, String(d)) # float4
+                      elseif f.type_oid == 701; parse(Float64, String(d)) # float8
+                      elseif f.type_oid == 1043; String(d) # varchar
+                      elseif f.type_oid == 1114; Dates.DateTime(first(replace(String(d), ' '=>'T'), 23)) # timestamp
+                      elseif f.type_oid == 1700; decimal(String(d)) # numeric
+                      elseif f.type_oid == 3802; String(d) # jsonb
+                      else; @show (; type_oid=f.type_oid, data=d)
+                      end
+                      for (f, d) in zip(row_desc, msg.fields)]
+            if isnothing(callbacks)
+                push!(rows, row)
+            else
+                callbacks.on_row(row)
+            end
         end
     end
     recv_until(io, msg->msg.type == :ready_for_query)
-    (columns, rows)
+    Result(columns, rows)
 end
 
 function recv_until(io::IO, cond::Function=(msg) -> msg.type == :command_complete)
@@ -521,42 +609,57 @@ function execute_simple(io::IO, query::String)
     recv_rows(io)
 end
 
-function handle_errors(body::Function, connstr::String)
+function handle_errors(body::Function, conninit::NamedTuple)
     try
-        session = get_session(connstr)
+        session = get_session(conninit)
         try
-            body(session)
-        finally
-            free_session(connstr, session)
+            res = lock(session.lock) do
+                body(session)
+            end
+            # res = body(session)
+            free_session(conninit.connstr, session)
+            res
+        catch ex2
+            if ex2 isa EOFError
+                remove_session(conninit.connstr, session)
+                try close(session) catch _ end
+            else
+                free_session(conninit.connstr, session)
+            end
+            rethrow()
         end
     catch ex 
         PRINT_EXCEPTIONS[] && lock(print_exceptions_lock) do
             Utils.print_exceptions()
         end
         if ex isa Base.IOError
-            close_sessions(connstr)
-            sleep(10)
+            close_sessions(conninit.connstr)
+            sleep(5)
         end
         rethrow()
     end
 end
 
 function handle_errors(body::Function, server::Symbol)
-    handle_errors(body, servers[server].connstr)
+    handle_errors(body, (; servers[server].connstr, servers[server].session_initializer))
+end
+
+function transaction(body::Function, session::Session)
+    execute(session, "begin")
+    res = nothing
+    try
+        res = body(session)
+    catch _
+        execute(session, "rollback")
+        rethrow()
+    end
+    execute(session, "commit")
+    res
 end
 
 function transaction(body::Function, server::Symbol=:default)
     handle_errors(server) do session
-        execute(session, "begin")
-        res = nothing
-        try
-            res = body(session)
-        catch _
-            execute(session, "rollback")
-            rethrow()
-        end
-        execute(session, "commit")
-        res
+        transaction(body, session)
     end
 end
 
@@ -585,18 +688,18 @@ function prepare(session::Session, query::String)
                       end)
 end
 
-function execute_simple(session::Session, query::String)
+function execute_simple(session::Session, query::String; callbacks=nothing)
     send_simple_query(session.socket, query)
-    recv_rows(session.socket)
+    recv_rows(session.socket; callbacks)
 end
 
 function execute(connstr::String, query::String)
-    handle_errors(connstr) do session
+    handle_errors((; connstr, session_initializer=identity)) do session
         execute(session, query)
     end
 end
 
-function execute(prepared_stmt::PreparedStatement, params::Any=[])
+function execute(prepared_stmt::PreparedStatement, params::Any=[]; callbacks=nothing)
     params = collect(params)
     session = prepared_stmt.session
     write_collect(session.socket) do io
@@ -606,16 +709,16 @@ function execute(prepared_stmt::PreparedStatement, params::Any=[])
         send_sync(io)
     end
     recv_until(session.socket, msg->msg.type == :bind_complete)
-    recv_rows(session.socket)
+    recv_rows(session.socket; callbacks)
 end
 
-function execute(session::Session, query::String, params::Any=[])
+function execute(session::Session, query::String, params::Any=[]; callbacks=nothing)
     try
         if '$' in query
-            execute(prepare(session, query), params)
+            execute(prepare(session, query), params; callbacks)
         else
             @assert isempty(params)
-            execute_simple(session, query)
+            execute_simple(session, query; callbacks)
         end
     catch _
         PRINT_EXCEPTIONS[] && lock(print_exceptions_lock) do
@@ -625,21 +728,22 @@ function execute(session::Session, query::String, params::Any=[])
     end
 end
 
-function execute(server::Symbol, query::String, params::Any=[])
+function execute(server::Symbol, query::String, params::Any=[]; callbacks=nothing)
+    # @show (server, query, params)
     if USE_TASK_LOCAL_STORAGE[]
         if !isnothing(local session = get(task_local_storage(), (:postgres_transaction_session, server), nothing))
-            return execute(session, query, params)
+            return execute(session, query, params; callbacks)
         end
     end
 
     handle_errors(server) do session
-        execute(session, query, params)
+        execute(session, query, params; callbacks)
     end
 end
 
 prepareR(session::Session, query::String) = prepare(session, replace(query, '?'=>'$'))
-pex_(server::Symbol, query::String, params=[]) = execute(server, replace(query, '?'=>'$'), params)
-pex(server::Symbol, query::String, params=[]) = pex_(server, query, params)[2]
+pex_(s::Union{Symbol,Session}, query::String, params=[]) = execute(s, replace(query, '?'=>'$'), params)
+pex(s::Union{Symbol,Session}, query::String, params=[]) = pex_(s, query, params)[2]
 pexnt(args...) = pex_(args...) |> tonamedtuples
 
 column_to_jl_type = Dict{String, Function}()
@@ -675,18 +779,61 @@ macro P(arg)
     :($(esc(:P))($(esc(arg))))
 end
 
+Base.length(result::Result) = length(result.rows)
+Base.collect(result::Result) = result.rows
+
+function Base.getindex(result::Result, i::Int)
+    if     i == 1; result.columns
+    elseif i == 2; result.rows
+    else; throw(BoundsError(result, i))
+    end
+end
+
+Base.iterate(result::Result) = iterate(result, 1)
+Base.iterate(result::Result, state::Int) = result[state], state + 1
+
+columnformatter(v, i, j) = v
+
+function Base.show(io::IO, x::Result)
+    PrettyTables.pretty_table(io, x; 
+                              alignment=:l, 
+                              tf=PrettyTables.tf_ascii_dots,
+                              formatters=columnformatter)
+end
+
+Tables.istable(::Type{Result}) = true
+Tables.rowaccess(::Type{Result}) = true
+Tables.rows(x::Result) = (ResultRow(x.columns, row) for row in x.rows)
+
+Tables.getcolumn(row::ResultRow, i::Int) = row.values[i]
+
+function Tables.getcolumn(row::ResultRow, nm::Symbol)
+    if nm == :columns || nm == :values
+        getfield(row, nm)
+    else
+        i = findfirst(==(String(nm)), row.columns)
+        isnothing(i) ? throw(KeyError(nm)) : row.values[i]
+    end
+end
+
+Tables.columnnames(row::ResultRow) = collect(map(Symbol, row.columns))
+
 # recovery
 
 function in_recovery(server::Symbol)::Bool
     Postgres.execute(server, "select pg_is_in_recovery()")[2][1][1]
 end
-function promote_server(server::Symbol)
+function promote(server::Symbol)
     Postgres.execute(server, "select pg_promote()")
 end
 
 function monitoring()
     PushGatewayExporter.set!("postgres_min_free_sessions", 
                              minimum([v.free_sessions for (_, v) in connection_pool_stats()]))
+    for srv in keys(servers)
+        fs = execute(srv, "select max(sessions_fatal) from pg_stat_database")[2][1][1]
+        PushGatewayExporter.set!("postgres_fatal_sessions_$srv", fs)
+    end
 end
 
 function server_tracking()
@@ -718,9 +865,14 @@ function server_tracking()
     end
 end
 
-tasks = [(monitoring, 15.0), (server_tracking, 1.0)]
+tasks = [
+         (monitoring, 15.0), 
+         (server_tracking, 1.0),
+         (maintain_connection_pools, 1.0),
+        ]
 
 function start()
+    maintain_connection_pools()
     for (f, period) in tasks
         Utils.start_periodic_tasked(f, period)
     end
@@ -730,6 +882,7 @@ function stop()
     for (f, period) in tasks
         Utils.stop_periodic_tasked(f)
     end
+    close_servers()
 end
 
 end
