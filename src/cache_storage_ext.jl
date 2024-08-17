@@ -7,9 +7,6 @@ include("../src/notifications.jl")
 
 function notification_counter_update(est, notif)
     lock(est.notification_counter_update_lock) do
-        if notif.pubkey in [Main.test_pubkeys[:miljan], Main.test_pubkeys[:pedja]]
-            @show (notif.pubkey, notif)
-        end
         if !(notif.pubkey in est.pubkey_notification_cnts)
             DB.exe(est.pubkey_notification_cnts, DB.@sql("insert into pubkey_notification_cnts (pubkey) values (?1)"), notif.pubkey)
         end
