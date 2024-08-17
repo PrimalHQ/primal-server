@@ -1560,7 +1560,7 @@ function init(est::DeduplicatedEventStorage, running=Ref(true))
     init(est.commons, running)
 end
 
-function init(est::CacheStorage, running=Ref(true))
+function init(est::CacheStorage, running=Ref(true); noperiodic=false)
     init(est.commons, running)
 
     ext_init(est)
@@ -1614,14 +1614,16 @@ function init(est::CacheStorage, running=Ref(true))
     #                                capacity = Ref(3_000_000))
     # end
 ##
-    est.periodic_task_running[] = true
-    est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]
-                                           catch_exception(est, :periodic) do
-                                               Base.invokelatest(periodic, est)
-                                           end
-                                           Utils.active_sleep(60.0, est.periodic_task_running)
-                                       end)
-
+    
+    if !noperiodic
+        est.periodic_task_running[] = true
+        est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]
+                                               catch_exception(est, :periodic) do
+                                                   Base.invokelatest(periodic, est)
+                                               end
+                                               Utils.active_sleep(60.0, est.periodic_task_running)
+                                           end)
+    end
 end
 
 function periodic(est::CacheStorage)

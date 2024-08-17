@@ -163,18 +163,18 @@ function maintain_connection_pools()
         end
         nnew = SESSIONS_PER_POOL[] - length(pool.sessions)
         nnew > 0 && println("postgres: creating $nnew new session(s) to server $name")
-        new_sessions = filter(!isnothing, 
-                              asyncmap(function(_)
-                                           sess = make_session(server.connstr)
-                                           try
-                                               server.session_initializer(sess)
-                                           catch ex
-                                               println("postgres: session_initializer for server $name: $ex")
-                                               nothing
-                                           end
-                                       end, 1:nnew))
+        tdur = @elapsed new_sessions = filter(!isnothing, 
+                                              asyncmap(function(_)
+                                                           sess = make_session(server.connstr)
+                                                           try
+                                                               server.session_initializer(sess)
+                                                           catch ex
+                                                               println("postgres: session_initializer for server $name: $ex")
+                                                               nothing
+                                                           end
+                                                       end, 1:nnew))
         if !isempty(new_sessions)
-            println("postgres:  created $(length(new_sessions)) new session(s) to server $name")
+            println("postgres:  created $(length(new_sessions)) new session(s) to server $name in $tdur secs")
             lock(connpools) do connpools
                 append!(pool.sessions, new_sessions)
                 append!(pool.free_sessions, new_sessions)
@@ -866,9 +866,9 @@ function server_tracking()
 end
 
 tasks = [
+         (maintain_connection_pools, 1.0),
          (monitoring, 15.0), 
          (server_tracking, 1.0),
-         (maintain_connection_pools, 1.0),
         ]
 
 function start()

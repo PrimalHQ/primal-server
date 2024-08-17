@@ -177,7 +177,7 @@ p_julia_init(PG_FUNCTION_ARGS)
     }
 
     char init_code[2000];
-    sprintf(&init_code[0], "try Main.include(\"%s/primal-server/pg_ext_init.jl\") catch ex println(ex) end", code_root);
+    sprintf(&init_code[0], "try Main.include(\"%s/primal-server/pgext/pg_ext_init.jl\") catch ex println(ex) end", code_root);
 
     jl_eval_string(&init_code[0]);
 

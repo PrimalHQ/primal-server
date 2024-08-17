@@ -9,6 +9,11 @@ Pkg.instantiate()
 import PrimalServer
 include("$rootdir/primal-server/module-globals.jl")
 
+function Utils.GCTask(args...; kwargs...)
+    pplog((:dummy_GCTask, args, kwargs))
+    nothing
+end
+
 import Dates
 import Decimals
 import JSON
@@ -342,7 +347,7 @@ function init_cache_storage()
                                                         keycolumn="id",
                                                         valuecolumn="json_build_object('id', encode(id, 'hex'), 'pubkey', encode(pubkey, 'hex'), 'created_at', created_at, 'kind', kind, 'tags', tags, 'content', content, 'sig', encode(sig, 'hex'))::text"))
 
-    DB.init(cache_storage)
+    DB.init(cache_storage; noperiodic=true)
 
     1==0 && @time "pgext-precompile" try
         pk = "88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079" # qa user
