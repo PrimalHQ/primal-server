@@ -190,12 +190,10 @@ struct OpenedFile
 end
 
 Base.@kwdef struct DeduplicatedEventStorage <: EventStorage
-    directory::String
-
     dbargs = (; )
-    commons = StorageCommons(; directory, dbargs)
+    commons = StorageCommons{SqliteDict}(; dbargs)
 
-    deduped_events = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/deduped_events"; dbargs...,
+    deduped_events = ShardedSqliteSet(Nostr.EventId, "deduped_events"; dbargs...,
                                       init_queries=["create table if not exists kv (
                                                        event_id blob not null,
                                                        pubkey blob not null,
@@ -1129,43 +1127,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         elseif e.kind == Int(Nostr.CONTACT_LIST)
             track_user_stats(est, e.pubkey) do
                 if !haskey(est.contact_lists, e.pubkey) || (e.created_at > est.events[est.contact_lists[e.pubkey]].created_at)
-                    old_follows = Set{Nostr.PubKeyId}()
-
-                    if haskey(est.contact_lists, e.pubkey)
-                        for tag in est.events[est.contact_lists[e.pubkey]].tags
-                            if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                                follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
-                                push!(old_follows, follow_pubkey)
-                            end
-                        end
-                    end
-
-                    est.contact_lists[e.pubkey] = e.id
-
-                    new_follows = Set{Nostr.PubKeyId}()
-                    for tag in e.tags
-                        if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                            follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
-                            push!(new_follows, follow_pubkey)
-                        end
-                    end
-
-                    for follow_pubkey in new_follows
-                        follow_pubkey in old_follows && continue
-                        exe(est.pubkey_followers, @sql("insert into pubkey_followers (pubkey, follower_pubkey, follower_contact_list_event_id) values (?1, ?2, ?3)"),
-                            follow_pubkey, e.pubkey, e.id)
-                        exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = value + 1 where key = ?1"),
-                            follow_pubkey)
-                        ext_new_follow(est, e, follow_pubkey)
-                    end
-                    for follow_pubkey in old_follows
-                        follow_pubkey in new_follows && continue
-                        exe(est.pubkey_followers, @sql("delete from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2 and follower_contact_list_event_id = ?3"),
-                            follow_pubkey, e.pubkey, est.contact_lists[e.pubkey])
-                        exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = value - 1 where key = ?1"),
-                            follow_pubkey)
-                        ext_user_unfollowed(est, e, follow_pubkey)
-                    end
+                    import_contact_list(est, e)
                 end
             end
             # try
@@ -1409,6 +1371,50 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     return true
 end
 
+function import_contact_list(est::CacheStorage, e::Nostr.Event; notifications=true, newonly=false)
+    old_follows = Set{Nostr.PubKeyId}()
+
+    if !newonly
+        if haskey(est.contact_lists, e.pubkey)
+            for tag in est.events[est.contact_lists[e.pubkey]].tags
+                if length(tag.fields) >= 2 && tag.fields[1] == "p"
+                    follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
+                    push!(old_follows, follow_pubkey)
+                end
+            end
+        end
+    end
+
+    est.contact_lists[e.pubkey] = e.id
+
+    new_follows = Set{Nostr.PubKeyId}()
+    for tag in e.tags
+        if length(tag.fields) >= 2 && tag.fields[1] == "p"
+            follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
+            push!(new_follows, follow_pubkey)
+        end
+    end
+
+    for follow_pubkey in new_follows
+        follow_pubkey in old_follows && continue
+        exe(est.pubkey_followers, @sql("insert into pubkey_followers (pubkey, follower_pubkey, follower_contact_list_event_id) values (?1, ?2, ?3)"),
+            follow_pubkey, e.pubkey, e.id)
+        exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = value + 1 where key = ?1"),
+            follow_pubkey)
+        notifications && notification(est, follow_pubkey, e.created_at, NEW_USER_FOLLOWED_YOU, e.pubkey)
+    end
+    for follow_pubkey in old_follows
+        follow_pubkey in new_follows && continue
+        # exe(est.pubkey_followers, @sql("delete from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2 and follower_contact_list_event_id = ?3"),
+        #     follow_pubkey, e.pubkey, est.contact_lists[e.pubkey])
+        exe(est.pubkey_followers, @sql("delete from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2"),
+            follow_pubkey, e.pubkey)
+        exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = value - 1 where key = ?1"),
+            follow_pubkey)
+        notifications && notification(est, follow_pubkey, e.created_at, USER_UNFOLLOWED_YOU, e.pubkey)
+    end
+end
+
 function import_directmsg(est::CacheStorage, e::Nostr.Event)
     incr(est, :directmsgs)
     for tag in e.tags
@@ -1421,16 +1427,20 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
                         isempty(exe(est.pubkey_directmsgs, @sql("select 1 from pubkey_directmsgs where receiver = ?1 and event_id = ?2 limit 1"), receiver, e.id)) &&
                         exe(est.pubkey_directmsgs, @sql("insert into pubkey_directmsgs values (?1, ?2, ?3, ?4)"), receiver, e.pubkey, e.created_at, e.id)
 
+                        cond = "receiver = ?1 and (case when ?2::bytea is null then sender is null else sender = ?2 end)"
                         for sender in [nothing, e.pubkey]
-                            if isempty(exe(est.pubkey_directmsgs_cnt, @sql("select 1 from pubkey_directmsgs_cnt where receiver = ?1 and sender = ?2 limit 1"), receiver, sender))
-                                exe(est.pubkey_directmsgs_cnt, @sql("insert into pubkey_directmsgs_cnt values (?1, ?2, ?3, ?4, ?5)"), receiver, sender, 0, e.created_at, e.id)
+                            # if receiver in [Main.test_pubkeys[:pedja]]
+                            #     @show e
+                            # end
+                            if isempty(exe(est.pubkey_directmsgs_cnt, "select * from pubkey_directmsgs_cnt where $cond limit 1", receiver, sender))
+                                exe(est.pubkey_directmsgs_cnt, "insert into pubkey_directmsgs_cnt values (?1, ?2, ?3, ?4, ?5)", receiver, sender, 0, e.created_at, e.id)
                             end
-                            exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt set cnt = cnt + ?3 where receiver = ?1 and sender = ?2"), receiver, sender, +1)
-                            r = exe(est.pubkey_directmsgs_cnt, @sql("select latest_at from pubkey_directmsgs_cnt where receiver = ?1 and sender = ?2 limit 1"), receiver, sender)
+                            exe(est.pubkey_directmsgs_cnt, "update pubkey_directmsgs_cnt set cnt = cnt + ?3 where $cond", receiver, sender, +1)
+                            r = exe(est.pubkey_directmsgs_cnt, "select latest_at from pubkey_directmsgs_cnt where $cond limit 1", receiver, sender)
                             if !isempty(r)
                                 prev_latest_at = r[1][1]
                                 if e.created_at >= prev_latest_at
-                                    exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt set latest_at = ?3, latest_event_id = ?4 where receiver = ?1 and sender = ?2"), receiver, sender, e.created_at, e.id)
+                                    exe(est.pubkey_directmsgs_cnt, "update pubkey_directmsgs_cnt set latest_at = ?3, latest_event_id = ?4 where $cond", receiver, sender, e.created_at, e.id)
                                 end
                             end
                         end

@@ -25,23 +25,24 @@ function import_from(
         eid in est.events || push!(missing_eids, eid)
     end
     println()
-    imported = []
-    i = 0
-    for eids_chunk in Iterators.partition(missing_eids, 100)
+    imported = [] |> Utils.ThreadSafe
+    i = Ref(0) |> Utils.ThreadSafe
+    Threads.@threads for eids_chunk in collect(Iterators.partition(map(Nostr.hex, missing_eids), 100))
         running[] || break
         yield()
-        es = Main.rex(from..., :([cache_storage.events[eid] for eid in $(eids_chunk)]))
+        es = Main.rex(from..., :([cache_storage.events[Nostr.EventId(eid)] for eid in $(eids_chunk)]))
         for e in es
             running[] || break
-            i += 1
-            msg = JSON.json([nothing, nothing, ["EVENT", "", e]])
-            DB.import_msg_into_storage(msg, est; disable_daily_stats=true) && push!(imported, e.id)
+            DB.incr(i)
+            DB.import_event(est, e; disable_daily_stats=true) && push!(imported, e.id)
         end
-        print("$i / $(length(imported)) / $(length(missing_eids))\r")
+        lock(i) do i
+            print("$(i[]) / $(length(imported)) / $(length(missing_eids))\r")
+        end
     end
     println()
     @show (length(imported), length(eids))
-    imported
+    collect(imported)
 end
 
 function event_ids_by_created_at(

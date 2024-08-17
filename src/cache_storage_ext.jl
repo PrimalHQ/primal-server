@@ -5,16 +5,22 @@ import ..TrustRank
 
 include("../src/notifications.jl")
 
-function ext_init(est::CacheStorage)
-    est.notification_processors[:notification_counter_update] = function (est, notif)
-        lock(est.notification_counter_update_lock) do
-            if !(notif.pubkey in est.pubkey_notification_cnts)
-                exe(est.pubkey_notification_cnts, @sql("insert into pubkey_notification_cnts (pubkey) values (?1)"), notif.pubkey)
-            end
-            nt = Int(notif.type)
-            exe(est.pubkey_notification_cnts, "update pubkey_notification_cnts set type$nt = type$nt + 1 where pubkey = ?1", notif.pubkey)
+function notification_counter_update(est, notif)
+    lock(est.notification_counter_update_lock) do
+        if notif.pubkey in [Main.test_pubkeys[:miljan], Main.test_pubkeys[:pedja]]
+            @show (notif.pubkey, notif)
         end
+        if !(notif.pubkey in est.pubkey_notification_cnts)
+            DB.exe(est.pubkey_notification_cnts, DB.@sql("insert into pubkey_notification_cnts (pubkey) values (?1)"), notif.pubkey)
+        end
+        nt = Int(notif.type)
+        DB.exe(est.pubkey_notification_cnts, "update pubkey_notification_cnts set type$nt = type$nt + 1 where pubkey = ?1", notif.pubkey)
     end
+end
+
+function ext_init(est::CacheStorage)
+##
+    est.notification_processors[:notification_counter_update] = notification_counter_update
 ##
     est.dyn[:user_search] = est.params.DBDict(Nostr.PubKeyId, Nostr.EventId, "user_search"; est.dbargs...,
                               keycolumn="pubkey", valuecolumn="name",
@@ -143,14 +149,6 @@ function ext_metadata_changed(est::CacheStorage, e::Nostr.Event)
             end
         end
     end
-end
-
-function ext_new_follow(est::CacheStorage, e::Nostr.Event, follow_pubkey)
-    notification(est, follow_pubkey, e.created_at, NEW_USER_FOLLOWED_YOU, e.pubkey)
-end
-
-function ext_user_unfollowed(est::CacheStorage, e::Nostr.Event, follow_pubkey)
-    notification(est, follow_pubkey, e.created_at, USER_UNFOLLOWED_YOU, e.pubkey)
 end
 
 function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)

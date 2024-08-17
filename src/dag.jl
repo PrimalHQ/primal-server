@@ -2984,11 +2984,11 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
 
     stats = Ref(zero_usage_stats) |> ThreadSafe
 
-    @time "search-pgexe" try
+    try
         transaction_with_execution_stats(SEARCH_SERVER[]; stats) do session
 
             sql, params = to_sql(est, user_pubkey, session, outputs, expr, kind, since, until, limit, offset)
-            println(sql); println(params)
+            # println(sql); println(params)
 
             Postgres.execute(session, "set statement_timeout=10000")
 
@@ -3009,19 +3009,22 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
                                                     # @show (length(res)+1, row)
                                                     push!(res, (EventId(row[1]), row[2]))
                                                     if length(res) >= limit
-                                                        println("closing session")
+                                                        # println("closing session")
                                                         # close(session)
                                                         error("close session")
                                                     end
                                                 end))
-                catch ex println(ex) end
+                catch ex 
+                    # println(ex) 
+                end
             else
                 Postgres.execute(session, "explain $(sql)", params)[2]
             end
         end
-    catch ex println(ex) end
+    catch ex 
+        # println(ex) 
+    end
 
-    @show length(res)
     res = first(res, limit)
 
     res, stats[]

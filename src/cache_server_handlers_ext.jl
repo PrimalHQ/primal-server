@@ -6,7 +6,7 @@ periodic_pushgw = Throttle(; period=15.0)
 periodic_notification_counts = Throttle(; period=1.0)
 
 Media() = Main.Media
-SpamDetection() = Main.SpamDetection
+SpamDetection() = Main.spamdetector
 CacheServerSync() = Main.CacheServerSync
 
 function ext_periodic()

@@ -38,17 +38,22 @@ mutable struct Dag
     est
     state
 
+    onsuccessful
+    onfailed
+
     Dag(;
         modname,
         runtag, est, state=Utils.Dyn(),
         since=trunc(Int, Dates.datetime2unix(Dates.DateTime("2023-01-01"))),
         until=current_time(),
         active=true,
+        onsuccessful=(_)->nothing,
+        onfailed=(_)->nothing,
         runkwargs...,
        ) = new(modname, getproperty(Main, modname), active,
                runkwargs, runtag, since, until, Ref(false),
                CircularBuffer{Any}(1000), CircularBuffer{Any}(1000), nothing,
-               est, state)
+               est, state, onsuccessful, onfailed)
 end
 
 const dags = Dict{Symbol, Dag}() |> ThreadSafe
@@ -140,6 +145,7 @@ function run_dags()
             m.active = false
             LOG[] && println(@__MODULE__, "(", modname, "): ", "deactivated due to error")
         end
+        ran_ok ? m.onsuccessful(m) : m.onfailed(m)
     end
     current_dag[] = nothing
     current_logs[] = nothing

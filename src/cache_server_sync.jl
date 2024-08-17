@@ -6,6 +6,7 @@ import ..Utils
 include("rexec_client.jl")
 
 PRINT_EXCEPTIONS = Ref(true)
+LOG = Ref(false)
 
 MYSELF = Ref{Union{Nothing, Tuple{Int, Int}}}(nothing)
 SRC = Ref{Any}(nothing)
@@ -41,6 +42,16 @@ function stop()
     nothing
 end
 
+function stop_unblock()
+    @async begin
+        running[] = false
+        Threads.@threads :static for i in 1:Threads.nthreads()
+            try @show (i, Base.throwto(tsk[], ErrorException("unblock")))
+            catch ex println(ex) end
+        end
+    end
+end
+
 function rex_(srvnode, expr)
     if isnothing(srvnode)
         Main.eval(expr)
@@ -65,7 +76,7 @@ function pull_media(src, dst)
         mr1 = rex_(dst, :(DB.exec($tbldst, $q1)[1][1]))
         mr2 = rex_(src, :(DB.exec($tblsrc, $q2)[1][1]))
 
-        # @show ((tbldstname, mr1), (tblsrcname, mr2))
+        LOG[] && println(@__MODULE__, ": ", ((tbldstname, mr1), (tblsrcname, mr2)))
 
         ismissing(mr2) && continue
         ismissing(mr1) && (mr1 = 0)

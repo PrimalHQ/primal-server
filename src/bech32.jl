@@ -166,4 +166,24 @@ function nip19_decode_wo_tlv(data)
     d
 end
 
+function nip19_encode_naddr(kind::Int, pubkey::Nostr.PubKeyId, identifier::String)
+    iob = IOBuffer()
+
+    write(iob, UInt8(Kind))
+    write(iob, UInt8(4))
+    write(iob, hton(UInt32(kind)))
+
+    write(iob, UInt8(Author))
+    write(iob, UInt8(length(pubkey.pk)))
+    write(iob, pubkey.pk)
+
+    d = collect(transcode(UInt8, identifier))
+    write(iob, UInt8(Special))
+    write(iob, UInt8(length(d)))
+    write(iob, d)
+
+    d = take!(iob)
+    encode("naddr", d)
+end
+
 end

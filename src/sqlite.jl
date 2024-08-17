@@ -18,7 +18,7 @@ function get_stmt(conn::SQLiteConn, query::Int)
     if isnothing(stmt)
         q = registered_queries[query]
         try
-            stmt = conn.stmts[query] = DBInterface.prepare(conn.db, q)
+            stmt = conn.stmts[query] = DBInterface.prepare(conn.dbs[Threads.threadid()], q)
         catch ex
             println("exception: $(ex), for query $(repr(q))")
             rethrow()
@@ -108,8 +108,8 @@ struct ShardedSqliteDict{K, V} <: ShardedDBDict{K, V}
     valuefuncs::DBConversionFuncs
     dbqueries::Vector{String}
     function ShardedSqliteDict{K, V}(; 
-                                     rootdirectory::String, 
                                      dbname::String,
+                                     rootdirectory::String, 
                                      table=dbname,
 
                                      keycolumn="key",
@@ -141,7 +141,7 @@ end
 
 function last_insert_rowid(ssd::ShardedSqliteDict{K, V}, k::K) where {K, V}
     lock(ssd.dbconns[shard(ssd, k)]) do dbconn
-        SQLite.last_insert_rowid(dbconn.db)
+        SQLite.last_insert_rowid(dbconn.dbs[Threads.threadid()])
     end
 end
 

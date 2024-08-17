@@ -608,6 +608,9 @@ function get_suggested_users(est::DB.CacheStorage)
         g = (; group, members=[])
         push!(r, g)
         for (pubkey, name) in users
+            if startswith(pubkey, "npub")
+                pubkey = Nostr.hex(Nostr.bech32_decode(pubkey))
+            end
             push!(g.members, ((; pubkey, name)))
             pk = Nostr.PubKeyId(pubkey)
             if pk in est.meta_data
@@ -683,7 +686,7 @@ function user_profile_scored_media_thumbnails(est::DB.CacheStorage; pubkey, limi
     eids = Nostr.EventId[]
 
     if !isnothing(DAG_OUTPUTS_DB[])
-        for (eid,) in Postgres.pex(:p1timelimit, "
+        for (eid,) in Postgres.pex(DAG_OUTPUTS_DB[], "
             SELECT
                 event_stats.event_id
             FROM
@@ -858,7 +861,7 @@ function wide_net_notes_feed(
 
     posts = []
 
-    Postgres.transaction(:p1) do session
+    Postgres.transaction(DAG_OUTPUTS_DB[]) do session
         Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
         for pk in follows(est, pubkey)
             Postgres.execute(session, "insert into pks values (\$1)", [pk])
@@ -910,7 +913,7 @@ function wide_net_notes_scored_feed(
         end
     end
 
-    Postgres.transaction(:p1) do session
+    Postgres.transaction(DAG_OUTPUTS_DB[]) do session
         Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
         for pk in follows(est, pubkey)
             Postgres.execute(session, "insert into pks values (\$1)", [pk])
@@ -1125,17 +1128,16 @@ function get_notification_counts_2(est::DB.CacheStorage; pubkey)
                                  "select * from pubkey_notification_cnts where pubkey = ?1", pubkey)]
 end
 
-# function user_search(est::DB.CacheStorage; kwargs...)
-#     JSON.parse(String(HTTP.request("GET", "http://192.168.17.7:14017/api", [], JSON.json(["user_search", kwargs])).body))
-# end
 function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey::Any=nothing)
-    # @show (query, limit, pubkey)
     limit = min(100, limit)
     limit <= 1000 || error("limit too big")
     
     occursin("lolicon", query) && return []
 
-    q = "^" * repr(query) * "*"
+    length(query) < 2 && return []
+
+    # q = "^" * repr(query) * ":*"
+    q = query * ":*"
 
     res = Dict()
 
@@ -1144,11 +1146,11 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     elseif isnothing(pubkey)
         for (pk,) in DB.exec(est.dyn[:user_search],
                              DB.@sql("select pubkey from user_search where
-                                     name @@ plainto_tsquery('simple', ?1) or
-                                     username @@ plainto_tsquery('simple', ?2) or
-                                     display_name @@ plainto_tsquery('simple', ?3) or
-                                     displayName @@ plainto_tsquery('simple', ?4) or
-                                     nip05 @@ plainto_tsquery('simple', ?5)
+                                     name @@ to_tsquery('simple', ?1) or
+                                     username @@ to_tsquery('simple', ?2) or
+                                     display_name @@ to_tsquery('simple', ?3) or
+                                     displayName @@ to_tsquery('simple', ?4) or
+                                     nip05 @@ to_tsquery('simple', ?5)
                                      "),
                              (q, q, q, q, q))
             pk = Nostr.PubKeyId(pk)
@@ -1405,9 +1407,6 @@ end
 
 @cached 600 trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
 @cached 600 trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
-
-# trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
-# trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
 
 function trending_images(est::DB.CacheStorage; created_after::Int=trunc(Int, time()-4*3600), limit=20)
     update_hashtag_lists()
