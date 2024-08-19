@@ -1944,8 +1944,9 @@ function get_recommended_reads(est::DB.CacheStorage)
     #                     catch _; (;) end))]
     
     r = (; reads=[])
-    for e in first(Random.shuffle([e for e in long_form_content_feed(est; curation="Nostr-Gems-0z9m1e", pubkey="532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb", limit=200) 
-                                   if e.kind == Int(Nostr.LONG_FORM_CONTENT)]), 3)
+    for e in first(Random.shuffle([e isa Dict ? Nostr.Event(e) : e
+                                   for e in long_form_content_feed(est; curation="Nostr-Gems-0z9m1e", pubkey="532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb", limit=200) 
+                                   if (e isa Dict ? e["kind"] : e.kind) == Int(Nostr.LONG_FORM_CONTENT)]), 3)
         identifier = nothing
         title = ""
         for t in e.tags
