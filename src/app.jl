@@ -2320,6 +2320,8 @@ end
 
 DVM_REQUESTER_KEYPAIR = Ref{Any}(nothing)
 
+in_pgspi() = hasproperty(Main, :spi_execute)
+
 function dvm_feed(
         est::DB.CacheStorage;
         dvm_pubkey,
@@ -2327,6 +2329,8 @@ function dvm_feed(
         user_pubkey=nothing,
         kwargs...,
     )
+    in_pgspi() && return []
+
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     # @show (dvm_pubkey, dvm_id)
@@ -2352,7 +2356,7 @@ function dvm_feed(
 
         NostrClient.subscription(client, (; 
                                           limit=0,
-                                          kinds=[6300], 
+                                          kinds=[6300, 7000], 
                                           Symbol("#e")=>[Nostr.hex(jobreq.id)],
                                          )) do m
             try
@@ -2368,13 +2372,20 @@ function dvm_feed(
     function handle_result(client, m)
         m[1] == "EVENT" || return
         e = Nostr.Event(m[3])
-        @assert e.kind == 6300
         @assert Nostr.verify(e)
-        eids = Nostr.EventId[]
-        for t in JSON.parse(e.content)
-            t[1] == "e" && push!(eids, Nostr.EventId(t[2]))
+        if e.kind == 6300
+            eids = Nostr.EventId[]
+            for t in JSON.parse(e.content)
+                t[1] == "e" && push!(eids, Nostr.EventId(t[2]))
+            end
+            notify(cond, eids)
+        elseif e.kind == 7000
+            for t in e.tags; t = t.fields
+                if t[1] == "status" && t[2] == "error"
+                    notify(cond, ErrorException("dvm_feed error: $(t[3])"); error=true)
+                end
+            end
         end
-        notify(cond, eids)
     end
 
     @async begin

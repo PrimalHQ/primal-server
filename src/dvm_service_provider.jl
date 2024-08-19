@@ -7,6 +7,7 @@ using Dates: datetime2unix, DateTime
 import ..Utils
 import ..Nostr
 import ..NostrClient
+import ..Postgres
 
 PRINT_EXCEPTIONS = Ref(true)
 
@@ -15,6 +16,7 @@ exceptions_lock = ReentrantLock()
 NIP89_HANDLER_INFORMATION=31990
 NIP90_NOSTR_CONTENT_DISCOVERY_REQUEST=5300
 NIP90_NOSTR_CONTENT_DISCOVERY_RESULT=6300
+NIP90_JOB_FEEDBACK=7000
 
 PRIMAL_DVM_KEYPAIR_SALT = Ref{Any}(nothing)
 
@@ -187,6 +189,9 @@ function handle_request(client, m)
 
     # @show feed_id
 
+    Postgres.execute(:membership, "insert into dvm_usage values (\$1, \$2, \$3, \$4) on conflict do nothing",
+                     [e.id, e.created_at, e.pubkey, feed_id])
+
     function send(re)
         errormonitor(@async Main.App.broadcast_event_to_relays_async(re; relays=RELAY_URLS))
         # errormonitor(@async Main.App.broadcast_event_to_relays_async(re; relays=[client.relay_url]))
@@ -198,14 +203,24 @@ function handle_request(client, m)
 
     eids = 
     if keypairs[feed_id].verifiedonly && isempty(Main.InternalServices.nostr_json_query_by_pubkey(e.pubkey))
+        # re = Nostr.Event(keypairs[feed_id].seckey, keypairs[feed_id].pubkey,
+        #                 # trunc(Int, time()), 
+        #                 trunc(Int, datetime2unix(DateTime("2024-08-08"))),
+        #                 Int(Nostr.TEXT_NOTE),
+        #                 [Nostr.TagAny(t) for t in []],
+        #                 "error: user not verified @primal")
+        # send(re)
+        # [re.id]
         re = Nostr.Event(keypairs[feed_id].seckey, keypairs[feed_id].pubkey,
-                        # trunc(Int, time()), 
-                        trunc(Int, datetime2unix(DateTime("2024-08-08"))),
-                        Int(Nostr.TEXT_NOTE),
-                        [Nostr.TagAny(t) for t in []],
-                        "error: user not verified @primal")
+                         trunc(Int, time()), 
+                         NIP90_JOB_FEEDBACK,
+                         [Nostr.TagAny(t) for t in [["status", "error", "user not verified @primal"],
+                                                    ["e", Nostr.hex(e.id)],
+                                                    ["p", Nostr.hex(e.pubkey)],
+                                                   ]],
+                         "")
         send(re)
-        [re.id]
+        []
     else
         res = 
         if      feed_id == "primal-dvm-0"
@@ -232,6 +247,8 @@ function handle_request(client, m)
     end
 
     # @show (feed_id, length(eids))
+
+    isempty(eids) && return
 
     content = JSON.json([["e", Nostr.hex(eid)] for eid in eids]) 
 
