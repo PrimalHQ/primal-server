@@ -366,5 +366,8 @@ end
 
 App.DAG_OUTPUTS_DB[] = :local
 
+# TODO load live_bytes fix
+# try GC.enable_logging(true) catch _ end
+
 pplog("primal postgres extension initialized")
 

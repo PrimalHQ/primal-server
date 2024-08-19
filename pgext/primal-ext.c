@@ -10,6 +10,8 @@
 #include "pgstat.h"
 
 #include "storage/ipc.h"
+#include "storage/procsignal.h"
+#include "tcop/tcopprot.h"
 
 #include <julia.h>
 
@@ -174,6 +176,12 @@ p_julia_init(PG_FUNCTION_ARGS)
         jl_options.trace_compile = strdup(&fn[0]);
         printf("julia: writing compilation trace to %s\n", jl_options.trace_compile);
         jl_init();
+
+        // from bgworker.c:
+        pqsignal(SIGINT, StatementCancelHandler);
+        pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+        pqsignal(SIGFPE, FloatExceptionHandler);
+        /* pqsignal(SIGTERM, bgworker_die); */
     }
 
     char init_code[2000];
