@@ -162,7 +162,7 @@ function maintain_connection_pools()
             end
         end
         nnew = SESSIONS_PER_POOL[] - length(pool.sessions)
-        nnew > 0 && println("postgres: creating $nnew new session(s) to server $name")
+        nnew > 0 && println(Dates.now(), " postgres: creating $nnew new session(s) to server $name")
         tdur = @elapsed new_sessions = filter(!isnothing, 
                                               asyncmap(function(_)
                                                            sess = make_session(server.connstr)
@@ -174,7 +174,7 @@ function maintain_connection_pools()
                                                            end
                                                        end, 1:nnew))
         if !isempty(new_sessions)
-            println("postgres:  created $(length(new_sessions)) new session(s) to server $name in $tdur secs")
+            println(Dates.now(), " postgres:  created $(length(new_sessions)) new session(s) to server $name in $tdur secs")
             lock(connpools) do connpools
                 append!(pool.sessions, new_sessions)
                 append!(pool.free_sessions, new_sessions)
@@ -831,8 +831,10 @@ function monitoring()
     PushGatewayExporter.set!("postgres_min_free_sessions", 
                              minimum([v.free_sessions for (_, v) in connection_pool_stats()]))
     for srv in keys(servers)
-        fs = execute(srv, "select max(sessions_fatal) from pg_stat_database")[2][1][1]
-        PushGatewayExporter.set!("postgres_fatal_sessions_$srv", fs)
+        # fs = execute(srv, "select max(sessions_fatal) from pg_stat_database")[2][1][1]
+        # PushGatewayExporter.set!("postgres_fatal_sessions_$srv", fs)
+        # PushGatewayExporter.set!("postgres_uptime_$srv", execute(srv, "select extract(epoch from current_timestamp - pg_postmaster_start_time())::int8")[2][1][1])
+        PushGatewayExporter.set!("postgres_oldest_backend_age_$srv", execute(srv, "select max(extract(epoch from current_timestamp - backend_start)::int8) from pg_stat_activity where backend_type = 'client backend'")[2][1][1])
     end
 end
 
