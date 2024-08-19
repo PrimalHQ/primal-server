@@ -30,7 +30,7 @@ function import_from(
     Threads.@threads for eids_chunk in collect(Iterators.partition(map(Nostr.hex, missing_eids), 100))
         running[] || break
         yield()
-        es = Main.rex(from..., :([cache_storage.events[Nostr.EventId(eid)] for eid in $(eids_chunk)]))
+        es = Main.rex(from..., :([Main.cache_storage.events[Nostr.EventId(eid)] for eid in $(eids_chunk)]))
         for e in es
             running[] || break
             DB.incr(i)
@@ -52,8 +52,8 @@ function event_ids_by_created_at(
         until=trunc(Int, time()),
         limit=100000,
 )
-    eids = Main.rex(from..., :([Nostr.EventId(eid) for (eid,) in DB.exec(cache_storage.event_created_at, 
-                                                                         "select event_id from kv where created_at >= ?1 and created_at <= ?2 limit ?3", 
+    eids = Main.rex(from..., :([Nostr.EventId(eid) for (eid,) in DB.exec(Main.cache_storage.event_created_at, 
+                                                                         "select event_id from event_created_at where created_at >= ?1 and created_at <= ?2 limit ?3", 
                                                                          ($since, $until, $limit))]))
     @assert length(eids) < limit
     eids
