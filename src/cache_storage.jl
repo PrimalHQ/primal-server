@@ -1019,7 +1019,6 @@ end
 function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_daily_stats=false, relay_url=nothing)
     lock(est.tidcnts) do tidcnts; tidcnts[Threads.threadid()] += 1; end
 
-    e.kind in kindints || (30000 <= e.kind < 40000) || return false
     est.verification_enabled && !verify(est, e) && return false
 
     should_import = lock(already_imported_check_lock) do
@@ -1031,6 +1030,9 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             true
         end
     end
+
+    e.kind in kindints || (30000 <= e.kind < 40000) || return false
+
     (force || should_import) || return false
 
     lock(est.event_processors) do event_processors
