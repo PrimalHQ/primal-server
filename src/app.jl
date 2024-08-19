@@ -1802,28 +1802,34 @@ function long_form_content_feed(
             push!(posts, r)
         end
     else
-        pubkeys = 
-        if     notes == :follows;  follows(est, pubkey)
-        elseif notes == :authored; [pubkey]
-        else;                      error("unsupported type of notes")
-        end
-
         Postgres.transaction(DAG_OUTPUTS_DB[]) do session
-            Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
-            for pk in pubkeys
-                Postgres.execute(session, "insert into pks values (\$1)", [pk])
+            qargs = if notes == :follows && !isempty(Postgres.pex(DAG_OUTPUTS_DB[], "select 1 from pubkey_followers pf where pf.follower_pubkey = ?1 limit 1", (pubkey,)))
+                pgparams() do P "
+                    select distinct reads.latest_eid, reads.published_at
+                    from prod.reads, pubkey_followers pf
+                    where 
+                        pf.follower_pubkey = $(@P pubkey) and pf.pubkey = reads.pubkey and 
+                        reads.published_at >= $(@P since) and reads.published_at <= $(@P until) and
+                        reads.words >= $(@P minwords)
+                        $(topic_where(P))
+                    order by published_at desc limit $(@P limit) offset $(@P offset)
+                " end
+            elseif notes == :authored
+                pgparams() do P "
+                    select distinct reads.latest_eid, reads.published_at
+                    from prod.reads
+                    where 
+                        reads.pubkey = $(@P pubkey) and 
+                        reads.published_at >= $(@P since) and reads.published_at <= $(@P until) and
+                        reads.words >= $(@P minwords)
+                        $(topic_where(P))
+                    order by published_at desc limit $(@P limit) offset $(@P offset)
+                " end
+            else
+                error("unsupported type of notes")
             end
 
-            for r in Postgres.execute(session,
-                                      pgparams() do P "
-                                          select distinct reads.latest_eid, reads.published_at
-                                          from prod.reads, pks
-                                          where 
-                                              reads.published_at >= $(@P since) and reads.published_at <= $(@P until) and
-                                              reads.pubkey = pks.pubkey and reads.words >= $(@P minwords)
-                                              $(topic_where(P))
-                                          order by published_at desc limit $(@P limit) offset $(@P offset)
-                                      " end...)[2]
+            for r in Postgres.execute(session, qargs...)[2]
                 push!(posts, r)
             end
         end
