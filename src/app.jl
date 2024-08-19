@@ -2046,7 +2046,7 @@ funcall_content_moderation_scope =
               ]))
 ##
 
-function content_moderation_filtering(est::DB.CacheStorage, res::Vector, funcall::Symbol, kwargs) 
+function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funcall::Symbol, kwargs) 
     kwargs = Dict(kwargs)
     user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
 
@@ -2055,9 +2055,28 @@ function content_moderation_filtering(est::DB.CacheStorage, res::Vector, funcall
     res2 = []
     for e in res
         ok = true
-        if hasproperty(e, :id) && (ext_is_hidden(est, e.id) || e.id in est.deleted_events)
+
+        eid = pubkey = kind = nothing
+        content = ""
+        tags = []
+
+        if e isa Dict
+            haskey(e, "id") && (eid = Nostr.EventId(e["id"]))
+            haskey(e, "pubkey") && (pubkey = Nostr.EventId(e["pubkey"]))
+            haskey(e, "kind") && (kind = e["kind"])
+            haskey(e, "content") && (content = e["content"])
+            haskey(e, "tags") && (tags = e["tags"])
+        else
+            hasproperty(e, :id) && (eid = e.id)
+            hasproperty(e, :pubkey) && (pubkey = e.pubkey)
+            hasproperty(e, :kind) && (kind = e.kind)
+            hasproperty(e, :content) && (content = e.content)
+            hasproperty(e, :tags) && (tags = hasproperty(e.tags, :fields) ? [t.fields for t in e.tags] : e.tags)
+        end
+
+        if !isnothing(eid) && (ext_is_hidden(est, eid) || eid in est.deleted_events)
             ok = false
-        elseif hasproperty(e, :pubkey)
+        elseif !isnothing(pubkey)
             scope = 
             if funcall in funcall_content_moderation_scope.content
                 :content
@@ -2067,38 +2086,38 @@ function content_moderation_filtering(est::DB.CacheStorage, res::Vector, funcall
                 nothing
             end
             if !isnothing(scope)
-                ok &= !is_hidden_(est, cmr, user_pubkey, scope, e.pubkey)
-                # !ok && @show (funcall, user_pubkey, scope, e.pubkey)
+                ok &= !is_hidden_(est, cmr, user_pubkey, scope, pubkey)
+                # !ok && @show (funcall, user_pubkey, scope, pubkey)
             end
-        elseif hasproperty(e, :kind)
-            if e.kind == USER_SCORES
+        elseif !isnothing(kind)
+            if kind == USER_SCORES
                 d = Dict()
-                for (pk, v) in JSON.parse(e.content)
+                for (pk, v) in JSON.parse(content)
                     if !is_hidden_(est, cmr, user_pubkey, :trending, Nostr.PubKeyId(pk))
                         d[pk] = v
                     end
                 end
                 e = (; kind=Int(USER_SCORES), content=JSON.json(d))
 
-            elseif e.kind == Int(Nostr.REPOST)
+            elseif kind == Int(Nostr.REPOST)
                 try
                     hide = false
-                    for t in e.tags
-                        if t.fields[1] == "p"
-                            pk = Nostr.PubKeyId(t.fields[2])
+                    for t in tags
+                        if t[1] == "p"
+                            pk = Nostr.PubKeyId(t[2])
                             hide |= is_hidden_(est, cmr, user_pubkey, :content, pk) || ext_is_hidden(est, pk) 
                         end
                     end
                     ok &= !hide
                 catch _ end
 
-            elseif e.kind == Int(DIRECTMSG_COUNTS)
-                d = [peer=>p for (peer, p) in JSON.parse(e.content)
+            elseif kind == Int(DIRECTMSG_COUNTS)
+                d = [peer=>p for (peer, p) in JSON.parse(content)
                      if !is_hidden_(est, cmr, user_pubkey, :content, Nostr.PubKeyId(peer))]
                 e = (; kind=Int(DIRECTMSG_COUNTS), content=JSON.json(Dict(d)))
 
-            elseif e.kind == Int(ZAP_EVENT)
-                d = JSON.parse(e.content)
+            elseif kind == Int(ZAP_EVENT)
+                d = JSON.parse(content)
                 hidden = false
                 try
                     sender = Nostr.PubKeyId(d["sender"])
@@ -2108,8 +2127,8 @@ function content_moderation_filtering(est::DB.CacheStorage, res::Vector, funcall
                 catch _ end
                 ok &= !hidden
 
-            elseif e.kind == Int(NOTIFICATION)
-                d = JSON.parse(e.content)
+            elseif kind == Int(NOTIFICATION)
+                d = JSON.parse(content)
                 for (k, v) in d
                     length(v) == 64 && try
                         if is_hidden_(est, cmr, user_pubkey, :content, Nostr.PubKeyId(v))
