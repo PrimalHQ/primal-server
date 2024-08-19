@@ -790,6 +790,24 @@ function search_(
     end
 end
 
+function advanced_search(
+        est::DB.CacheStorage;
+        query::String,
+        user_pubkey=nothing, 
+        limit=20,
+        kwargs...,
+    )
+    isempty(query) && error("query is empty")
+    limit = min(100, limit)
+    res = []
+    eids = if !isnothing(DAG_OUTPUTS[])
+        mod, outputs = DAG_OUTPUTS[]
+        res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; outputs, logextra=(; user_pubkey), kwargs...)
+        Nostr.EventId[eid for (eid, created_at) in res]
+    else; Nostr.EventId[] end
+    vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
+end
+
 ADVANCED_FEED_PROVIDER_HOST = Ref{Any}(nothing)
 
 function advanced_feed(
@@ -809,19 +827,10 @@ function advanced_feed(
         []
     elseif specification[1] == "advanced_search"
         kwargs = NamedTuple(kwargs)
-        limit = min(100, get(kwargs, :limit, 20))
         user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
         kwargs = NamedTuple([k=>v for (k, v) in pairs(kwargs) if k != :user_pubkey])
-        res = []
-        eids = Nostr.EventId[]
         query = specification[2]["query"]
-        isempty(query) && error("query is empty")
-        if !isnothing(DAG_OUTPUTS[])
-            mod, outputs = DAG_OUTPUTS[]
-            res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; outputs, logextra=(; user_pubkey), kwargs...)
-            eids = [eid for (eid, created_at) in res]
-        end
-        vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
+        advanced_search(est; query, user_pubkey, kwargs...)
     elseif specification[1] == "feed"
         feed(est; specargs()..., kwargs..., pubkey=upk())
     elseif specification[1] == "global-trending"
