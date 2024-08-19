@@ -2202,6 +2202,7 @@ function mega_feed_directive(
         elseif get(s, "scope", "") == "zappedbyfollows"
             return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:zappedbyfollows, minwords, kwargs...)
         elseif get(s, "scope", "") == "myfollowsinteractions"
+            in_pgspi() && return [] 
             req = (; user_pubkey=kwa[:user_pubkey], specification=["advanced_search", (; query="kind:30023 scope:myfollowsinteractions minwords:$(minwords)")], eventidsonly=true, kwargs...)
             eids = map(Nostr.EventId, JSON.parse(String(HTTP.request("GET", "http://192.168.17.7:14017/api", [], JSON.json(["advanced_feed", req])).body)))
             posts = [let e = est.events[eid]; (e.id, e.created_at); end for eid in eids]
