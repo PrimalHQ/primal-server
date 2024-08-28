@@ -3001,19 +3001,23 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
                 end
                 # [(EventId(eid), created_at) for (eid, created_at) in Postgres.execute(session, sql, params)[2]]
                 try
-                    Postgres.execute(session, sql, params; 
-                                     callbacks=(;
-                                                on_notice=(s)->println("DAG.search: ", s),
-                                                on_row_description=(_)->nothing,
-                                                on_row=function (row)
-                                                    # @show (length(res)+1, row)
-                                                    push!(res, (EventId(row[1]), row[2]))
-                                                    if length(res) >= limit
-                                                        # println("closing session")
-                                                        # close(session)
-                                                        error("close session")
-                                                    end
-                                                end))
+                    if 1==0
+                        Postgres.execute(session, sql, params; 
+                                         callbacks=(;
+                                                    on_notice=(s)->println("DAG.search: ", s),
+                                                    on_row_description=(_)->nothing,
+                                                    on_row=function (row)
+                                                        # @show (length(res)+1, row)
+                                                        push!(res, (EventId(row[1]), row[2]))
+                                                        if length(res) >= limit
+                                                            # println("closing session")
+                                                            # close(session)
+                                                            error("close session")
+                                                        end
+                                                    end))
+                    else
+                        append!(res, Postgres.execute(session, sql, params)[2])
+                    end
                 catch ex 
                     # println(ex) 
                 end
@@ -3312,9 +3316,9 @@ function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, ou
      from $(join(tables, ", "))
      where $(join(conds, " and "))
      order by $(T(o.advsearch)).created_at $order
+     limit $(P(limit)) offset $(P(offset))
      ",
      params)
-     # limit $(P(limit)) offset $(P(offset))
 end
 
 # test
