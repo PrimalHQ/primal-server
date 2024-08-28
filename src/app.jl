@@ -672,7 +672,7 @@ function feed_2(
                     events.pubkey = \$1 AND 
                     events.kind = $(Int(Nostr.TEXT_NOTE)) AND 
                     events.id = event_media.event_id AND
-                    events.created_at >= \$2 and events.created_at <= \$3
+                    events.created_at >= \$2 AND events.created_at <= \$3
                 ORDER BY
                     events.created_at DESC
                 LIMIT \$4 OFFSET \$5

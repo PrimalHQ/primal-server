@@ -321,7 +321,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
         PRINT_EXCEPTIONS[] && !(ex isa Base.IOError) && 
         ex isa TaskFailedException && (ex = ex.task.result)
         try send_error(ex isa ErrorException ? ex.msg : UNKNOWN_ERROR_MESSAGE[]) catch _ end
-        if 1==1 && !(ex isa Base.IOError)
+        if 1==0 && !(ex isa Base.IOError)
             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
             println("initial_filter_handler: ", typeof(ex))
             @show err = (; t=Main.App.Dates.now(), extype=typeof(ex), ex=string(ex), filters)

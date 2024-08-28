@@ -736,7 +736,7 @@ end
 DAG_OUTPUTS = Ref{Any}(nothing) |> ThreadSafe
 
 function search(est::DB.CacheStorage; kwargs...)
-    JSON.parse(String(HTTP.request("GET", "http://192.168.12.7:14017/api", [], JSON.json(["search", kwargs])).body))
+    JSON.parse(String(HTTP.request("GET", "http://192.168.17.7:14016/api", [], JSON.json(["search", kwargs])).body))
 end
 function search_(
         est::DB.CacheStorage; 
@@ -797,12 +797,13 @@ function advanced_search(
         limit=20,
         kwargs...,
     )
+    # return [] # FIXME
     isempty(query) && error("query is empty")
     limit = min(100, limit)
     res = []
     eids = if !isnothing(DAG_OUTPUTS[])
         mod, outputs = DAG_OUTPUTS[]
-        res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; outputs, logextra=(; user_pubkey), kwargs...)
+        res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; outputs, logextra=(; user_pubkey), limit, kwargs...)
         Nostr.EventId[eid for (eid, created_at) in res]
     else; Nostr.EventId[] end
     vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
