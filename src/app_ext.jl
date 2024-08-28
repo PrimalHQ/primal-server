@@ -1845,14 +1845,14 @@ register_cache_function(:empty_analytics_cache,
 ##
 
 function ext_user_profile(est::DB.CacheStorage, pubkey)
-    if !isempty(local r = DB.exe(est.pubkey_zapped, DB.@sql("select zaps, satszapped from pubkey_zapped where pubkey = ?1"), pubkey))
-        total_zap_count, total_satszapped = r[1]
-    else
-        total_zap_count = total_satszapped = 0
-    end
+    total_zap_count, total_satszapped = !isempty(local r = DB.exe(est.pubkey_zapped, DB.@sql("select zaps, satszapped from pubkey_zapped where pubkey = ?1"), pubkey)) ? r[1] : (0, 0)
+    media_count = !isempty(local r = Postgres.execute(DAG_OUTPUTS_DB[], "select cnt from prod.pubkey_media_cnt where pubkey = \$1 limit 1", [pubkey])[2]) ? r[1][1] : 0
+    content_zap_count = !isempty(local r = Postgres.execute(DAG_OUTPUTS_DB[], "select cnt from prod.pubkey_content_zap_cnt where pubkey = \$1 limit 1", [pubkey])[2]) ? r[1][1] : 0
     (;
      total_zap_count,
      total_satszapped,
+     media_count,
+     content_zap_count,
     )
 end
 

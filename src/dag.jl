@@ -1155,8 +1155,9 @@ function reads_node(
                              runtag=runctx.runtag)
 
     # step = nothing
-    step = 90*30*24*3600
-    parallel_workers = 8
+    step = 90*24*3600
+    # parallel_workers = 8
+    parallel_workers = 0
 
     process_segments([reads, 1]; runctx, step, sequential=false) do t1, t2
         transaction_with_execution_stats(events.server; runctx.stats, parallel_workers) do session1
@@ -1642,6 +1643,104 @@ function event_sentiment_node(
     end
 
     (; event_sentiment, event_created_at)
+end
+
+function pubkey_media_cnt_node(
+        events::ServerTable,
+        event_media::ServerTable;
+        runctx::RunCtx,
+        version=1,
+    )
+    pubkey_media_cnt = dbtable(:postgres, runctx.targetserver, "pubkey_media_cnt", version, 
+                    [
+                     events,
+                     event_media,
+                    ],
+                    [
+                     (:pubkey, PubKeyId),
+                     (:cnt,    Int), 
+
+                     "primary key (pubkey)",
+                    ],
+                    [
+                     :pubkey,
+                    ];
+                    runtag=runctx.runtag)
+
+    # step = nothing
+    step = 90*24*3600
+
+    process_segments([pubkey_media_cnt, 1]; runctx, step) do t1, t2
+        transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
+            Postgres.execute(session1, "
+                             with a as (
+                                 select
+                                    es.pubkey,
+                                    count(1)
+                                 from 
+                                    $(events.table) es, 
+                                    $(event_media.table) em
+                                 where 
+                                    es.imported_at >= \$1 and es.imported_at <= \$2 and 
+                                    es.id = em.event_id and es.kind = $(Int(Nostr.TEXT_NOTE))
+                                group by (es.pubkey)
+                                order by (es.pubkey)
+                             )
+                             insert into $(pubkey_media_cnt.table) (pubkey, cnt)
+                             select * from a
+                             on conflict (pubkey) do update set cnt = $(pubkey_media_cnt.table).cnt + excluded.cnt
+                             ", [t1, t2])
+        end
+    end
+
+    (; pubkey_media_cnt)
+end
+
+function pubkey_content_zap_cnt_node(
+        zap_receipts::ServerTable;
+        runctx::RunCtx,
+        version=1,
+    )
+    pubkey_content_zap_cnt = dbtable(:postgres, runctx.targetserver, "pubkey_content_zap_cnt", version, 
+                                     [
+                                      zap_receipts,
+                                     ],
+                                     [
+                                      (:pubkey, PubKeyId),
+                                      (:cnt,    Int), 
+
+                                      "primary key (pubkey)",
+                                     ],
+                                     [
+                                      :pubkey,
+                                     ];
+                                     runtag=runctx.runtag)
+
+    # step = nothing
+    step = 90*24*3600
+
+    process_segments([pubkey_content_zap_cnt, 1]; runctx, step) do t1, t2
+        transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
+            Postgres.execute(session1, "
+                             with a as (
+                                 select
+                                    zr.sender,
+                                    count(1)
+                                 from 
+                                    $(zap_receipts.table) zr
+                                 where 
+                                    zr.imported_at >= \$1 and zr.imported_at <= \$2
+                                group by (zr.sender)
+                                order by (zr.sender)
+                             )
+                             insert into $(pubkey_content_zap_cnt.table) (pubkey, cnt)
+                             select * from a
+                             on conflict (pubkey) do update set cnt = $(pubkey_content_zap_cnt.table).cnt + excluded.cnt
+                             ", [t1, t2])
+        end
+    end
+
+    (; pubkey_content_zap_cnt)
 end
 
 function parse_zap_receipt(tags::Vector)
