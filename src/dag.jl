@@ -3056,6 +3056,7 @@ function init_parsing()
                                                  :to_expr,
                                                  :mention_expr,
                                                  :kind_expr,
+                                                 :minduration_expr,
                                                  :maxduration_expr,
                                                  :filter_expr,
                                                  :url_expr,
@@ -3091,6 +3092,7 @@ function init_parsing()
                    :filter_expr => P.seq(t"filter:", P.some(P.satisfy(isletter))),
                    :url_expr => P.seq(t"url:", :word_expr),
                    :orientation_expr => P.seq(t"orientation:", :word_expr),
+                   :minduration_expr => P.seq(t"minduration:", :number),
                    :maxduration_expr => P.seq(t"maxduration:", :number),
                    :list_expr => P.seq(t"list:", :word_expr),
                    :emoticon_expr => P.first(t":)", t":("),
@@ -3129,6 +3131,7 @@ struct Filter;   filter::String; end
 struct Url;      word::String; end
 struct List;     list::String; end
 struct Orientation; orientation::String; end
+struct MinDuration; duration::Float64; end
 struct MaxDuration; duration::Float64; end
 struct Emoticon; emo::String; end
 struct Question; end
@@ -3185,6 +3188,7 @@ function parse_search_query(query)
         elseif m.rule == :kind_expr; O.Kind(first(s for s in sm if s isa Integer))
         elseif m.rule == :filter_expr; O.Filter(first(s for s in sm if s isa AbstractString))
         elseif m.rule == :url_expr; O.Url(first(s for s in sm if s isa O.Word).word)
+        elseif m.rule == :minduration_expr; O.MinDuration(Float64(first(s for s in sm if s isa Integer)))
         elseif m.rule == :maxduration_expr; O.MaxDuration(Float64(first(s for s in sm if s isa Integer)))
         elseif m.rule == :orientation_expr; O.Orientation(first(s for s in sm if s isa O.Word).word)
         elseif m.rule == :list_expr; O.List(first(s for s in sm if s isa O.Word).word)
@@ -3258,6 +3262,8 @@ function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, ou
         elseif op isa O.Orientation
             compop = op.orientation == "vertical" ? ">" : "<"
             cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).height $compop $(T(o.media)).width")
+        elseif op isa O.MinDuration
+            cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration >= $(P(op.duration)) and $(T(o.media)).duration > 0")
         elseif op isa O.MaxDuration
             cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration <= $(P(op.duration)) and $(T(o.media)).duration > 0")
         elseif op isa O.Emoticon || op isa O.Question
@@ -3327,7 +3333,7 @@ using Test: @testset, @test
 
 function runtests()
     @testset "AdvancedSearch" begin
-        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 lang:fra"
+        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 lang:fra"
         expr = parse_search_query(input)
         # dump(expr)
         for (result, expected) in zip(expr, (O.Word("word1"), O.Word("word2"), 
@@ -3344,6 +3350,7 @@ function runtests()
                                              O.Filter("filter"),
                                              O.Url("urlword1"),
                                              O.Orientation("vertical"),
+                                             O.MinDuration(123),
                                              O.MaxDuration(234),
                                              O.Emoticon(":)"),
                                              O.List("list1"),
