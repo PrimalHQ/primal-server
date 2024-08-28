@@ -1154,17 +1154,19 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     if !isnothing(local pk = try Nostr.bech32_decode(query) catch _ nothing end)
         res[pk] = est.pubkey_followers_cnt[pk]
     elseif isnothing(pubkey)
-        for (pk,) in DB.exec(est.dyn[:user_search],
-                             DB.@sql("select pubkey from user_search where
-                                     name @@ to_tsquery('simple', ?1) or
-                                     username @@ to_tsquery('simple', ?2) or
-                                     display_name @@ to_tsquery('simple', ?3) or
-                                     displayName @@ to_tsquery('simple', ?4) or
-                                     nip05 @@ to_tsquery('simple', ?5)
-                                     "),
-                             (q, q, q, q, q))
-            pk = Nostr.PubKeyId(pk)
-            res[pk] = est.pubkey_followers_cnt[pk]
+        catch_exception(:user_search, (; query)) do
+            for (pk,) in DB.exec(est.dyn[:user_search],
+                                 DB.@sql("select pubkey from user_search where
+                                         name @@ to_tsquery('simple', ?1) or
+                                         username @@ to_tsquery('simple', ?2) or
+                                         display_name @@ to_tsquery('simple', ?3) or
+                                         displayName @@ to_tsquery('simple', ?4) or
+                                         nip05 @@ to_tsquery('simple', ?5)
+                                         "),
+                                 (q, q, q, q, q))
+                pk = Nostr.PubKeyId(pk)
+                res[pk] = est.pubkey_followers_cnt[pk]
+            end
         end
     else
         pubkey = cast(pubkey, Nostr.PubKeyId)
