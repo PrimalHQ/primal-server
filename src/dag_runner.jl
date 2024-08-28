@@ -5,6 +5,7 @@ using DataStructures: CircularBuffer
 
 import ..Utils
 using ..Utils: ThreadSafe, current_time
+import ..PushGatewayExporter
 
 const LOG = Ref(false)
 
@@ -87,6 +88,7 @@ end
 
 function run_dags()
     cnt = 0
+    all_ok = true
     tdur = @elapsed for (modname, m) in collect(dags)
         m.active || continue
         cnt += 1
@@ -146,10 +148,13 @@ function run_dags()
             LOG[] && println(@__MODULE__, "(", modname, "): ", "deactivated due to error")
         end
         ran_ok ? m.onsuccessful(m) : m.onfailed(m)
+        all_ok &= ran_ok
     end
     current_dag[] = nothing
     current_logs[] = nothing
     push!(processing_times, (; t=Dates.now(), tdur, cnt))
+    PushGatewayExporter.set!("dag_runner_duration", tdur)
+    PushGatewayExporter.set!("dag_runner_all_ok", Int(all_ok))
     nothing
 end
 
