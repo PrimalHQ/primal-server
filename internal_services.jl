@@ -224,6 +224,9 @@ function mdpubkey(cache_storage, pk)
             image = try c["picture"] catch _ "" end
         end
     end
+    if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
+        image = r[1][1]
+    end
     return (; title, description, image, (isnothing(url) ? (;) : (; url))...)
 end
 
@@ -261,6 +264,10 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                     thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
                     if !isempty(thumbnails)
                         image = (thumbnails[1][1],)
+                    else
+                        if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
+                            image = r[1][1]
+                        end
                     end
                 end
             end
