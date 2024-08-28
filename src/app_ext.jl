@@ -1304,6 +1304,8 @@ function feed_directive_(est::DB.CacheStorage, feed; directive::String, kwargs..
 
     end
 
+    in_pgspi() && return []
+
     d = JSON.parse(directive)
     funcall = Symbol(d[1])
     args = Dict{Symbol,Any}([Symbol(k)=>v for (k,v) in d[2]])

@@ -94,11 +94,21 @@ function record!(body::Function, d::Symbol, key)
 end
 
 function recordspi!(body::Function, d::Symbol, backendpid::Int, key)
-    u1 = Main.DAG.process_usage_stats(backendpid)
+    u1 = try 
+        Main.DAG.process_usage_stats(backendpid)
+    catch ex
+        println("recordspi!: $(typeof(ex))")
+    end
 
     t = @timed body()
 
-    u2 = Main.DAG.process_usage_stats(backendpid)
+    u2 = try 
+        Main.DAG.process_usage_stats(backendpid)
+    catch ex
+        println("recordspi!: $(typeof(ex))")
+        ex isa SystemError && return t.value
+        rethrow()
+    end
 
     u = u2 - u1
 

@@ -197,8 +197,10 @@ app_funcalls_via_spi = Set([
                             :user_profile_scored_media_thumbnails,
                             :relays,
                             :get_notifications,
+
                             :feed_directive,
                             :feed_directive_2,
+                            
                             # :trending_hashtags,
                             #     :trending_hashtags_4h,
                             #     :trending_hashtags_7d,
@@ -264,12 +266,13 @@ function initial_filter_handler(conn::Conn, subid, filters)
 
                     afc = app_funcall
                     if ENABLE_SPI[]
-                        # if try user in [Main.test_pubkeys[:pedja], Main.test_pubkeys[:marko]] catch _ false end
-                        if true
-                            if funcall in app_funcalls_via_spi
-                                # @show (:spi, funcall)
-                                afc = app_funcall_spi
-                            end
+                        # @show funcall
+                        if (funcall == :feed_directive || funcall == :feed_directive_2) && startswith(Dict(kwargs)[:directive], "search;")
+                            # @show (:feed_directive_override, funcall, kwargs)
+                            afc = app_funcall
+                        elseif funcall in app_funcalls_via_spi
+                            # @show (:spi, funcall)
+                            afc = app_funcall_spi
                         end
                     end
 
