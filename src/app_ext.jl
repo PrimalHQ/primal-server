@@ -26,6 +26,9 @@ union!(exposed_functions, Set([
                      :set_app_settings,
                      :get_app_settings,
                      :get_app_settings_2,
+                     :set_app_subsettings,
+                     :get_default_app_subsettings,
+                     :get_app_subsettings,
                      :get_default_app_settings,
                      :get_default_relays,
                      :get_recommended_users,
@@ -96,6 +99,7 @@ NOTE_MENTIONS_COUNT=10_000_143
 UPLOADED_2=10_000_142
 EVENT_BROADCAST_RESPONSES=10_000_149
 ADVANCED_FEEDS=10_000_150
+APP_SUBSETTINGS=10_000_155
 
 # ------------------------------------------------------ #
 
@@ -541,6 +545,41 @@ function get_app_settings_2(est::DB.CacheStorage; event_from_user::Dict)
             []
         end
     end
+end
+
+function get_default_app_subsettings(est::DB.CacheStorage; subkey::String)
+    if     subkey == "user-home-feeds"
+        [(; kind=Int(APP_SUBSETTINGS), 
+          content=JSON.json(try JSON.parse(read(HOME_FEEDS_FILE[], String))
+                            catch _; (;) end))]
+    elseif subkey == "user-reads-feeds"
+        [(; kind=Int(APP_SUBSETTINGS), 
+          content=JSON.json(try JSON.parse(read(READS_FEEDS_FILE[], String))
+                            catch _; (;) end))]
+    else
+        error("invalid subkey")
+    end
+end
+
+function get_app_subsettings(est::DB.CacheStorage; event_from_user::Dict)
+    e = parse_event_from_user(event_from_user)
+    e.kind == Int(APP_SETTINGS) || error("invalid event kind")
+    d = JSON.parse(e.content)
+    r = Postgres.execute(:membership, "select settings from app_subsettings where pubkey = \$1 and subkey = \$2 limit 1", [e.pubkey, d["subkey"]])[2]
+    if isempty(r)
+        get_default_app_settings(est; subkey=d["subkey"])
+    else
+        [(; kind=Int(APP_SUBSETTINGS), content=JSON.json((; subkey=d["subkey"], settings=r[1][1])))]
+    end
+end
+
+function set_app_subsettings(est::DB.CacheStorage; event_from_user::Dict)
+    e = parse_event_from_user(event_from_user)
+    e.kind == Int(APP_SETTINGS) || error("invalid event kind")
+    d = JSON.parse(e.content)
+    r = Postgres.execute(:membership, "insert into app_subsettings values (\$1, \$2, \$3, \$4) on conflict (pubkey, subkey) do update set updated_at = \$3, settings = \$4", 
+                         [e.pubkey, d["subkey"], Utils.current_time(), JSON.json(d["settings"])])
+    []
 end
 
 DEFAULT_SETTINGS_FILE = Ref("default-settings.json")

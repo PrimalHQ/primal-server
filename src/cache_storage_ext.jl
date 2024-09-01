@@ -89,6 +89,16 @@ function ext_init(est::CacheStorage)
 ##
     est.dyn[:human_override] = est.params.MembershipDBDict(Nostr.PubKeyId, Bool, "human_override"; connsel=est.pqconnstr, keycolumn="pubkey", valuecolumn="is_human")
 ##
+    est.dyn[:app_subsettings] = est.params.MembershipDBDict(Nostr.PubKeyId, String, "app_subsettings"; connsel=est.pqconnstr,
+                                                            init_queries=["create table if not exists app_subsettings (
+                                                                          pubkey bytea not null,
+                                                                          subkey varchar not null,
+                                                                          updated_at int8 not null,
+                                                                          settings jsonb not null,
+                                                                          primary key (pubkey, subkey)
+                                                                          )",
+                                                                         ])
+##
 end
 
 function insert_stuff(est::CacheStorage, data)
