@@ -1339,7 +1339,8 @@ function reads_node(
                                  a_tags.created_at >= \$1 AND
                                  a_tags.created_at <= \$2
                          )
-                         (SELECT * FROM a) UNION ALL (SELECT * FROM b)
+                         SELECT * FROM ((SELECT * FROM a) UNION ALL (SELECT * FROM b)) c
+                         ORDER BY (c.pubkey, c.identifier)
                          ", [t1, t2])[2]
                 reid = EventId(reid)
                 reid in seen_reids && continue
