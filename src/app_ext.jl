@@ -1098,6 +1098,7 @@ function set_notifications_seen(
         replicated=false
     )
     replicated || replicate_request(:set_notifications_seen; event_from_user)
+    est.readonly[] && return []
 
     e = parse_event_from_user(event_from_user)
 

@@ -219,6 +219,8 @@ Base.@kwdef struct CacheStorage{SCommons, DBDict, DBSet, MembershipDBDict} <: Ev
     dbargs = (; )
     commons = SCommons(; dbargs)
 
+    readonly = Ref(false)
+
     pqconnstr::Union{String,Symbol}
 
     verification_enabled = true
@@ -1017,6 +1019,8 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
 end
 
 function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_daily_stats=false, relay_url=nothing)
+    est.readonly[] && return false
+
     lock(est.tidcnts) do tidcnts; tidcnts[Threads.threadid()] += 1; end
 
     est.verification_enabled && !verify(est, e) && return false
@@ -1629,6 +1633,7 @@ function init(est::CacheStorage, running=Ref(true); noperiodic=false)
 end
 
 function periodic(est::CacheStorage)
+    est.readonly[] && return
     run_scheduled_hooks(est)
     cnt = expire_scores(est)
     incr(est, :scoresexpired; by=cnt)

@@ -784,20 +784,25 @@ function thread_view_parents(est::DB.CacheStorage; event_id, user_pubkey=nothing
 end
 
 function network_stats(est::DB.CacheStorage)
-    lock(est.commons.stats) do stats
-        (;
-         kind=Int(NET_STATS),
-         content=JSON.json((;
-                            [k => get(stats, k, 0)
-                             for k in [:users,
-                                       :pubkeys,
-                                       :pubnotes,
-                                       :reactions,
-                                       :reposts,
-                                       :any,
-                                       :zaps,
-                                       :satszapped,
-                                      ]]...)))
+    if est.readonly[]
+        r = JSON.parse(String(HTTP.request("GET", "http://192.168.13.7:14017/api", [], JSON.json(["network_stats", (;)])).body))
+        (; kind=Int(NET_STATS), content=r[2])
+    else
+        lock(est.commons.stats) do stats
+            (;
+             kind=Int(NET_STATS),
+             content=JSON.json((;
+                                [k => get(stats, k, 0)
+                                 for k in [:users,
+                                           :pubkeys,
+                                           :pubnotes,
+                                           :reactions,
+                                           :reposts,
+                                           :any,
+                                           :zaps,
+                                           :satszapped,
+                                          ]]...)))
+        end
     end
 end
 
@@ -1104,9 +1109,9 @@ end
 reset_directmsg_count_lock = ReentrantLock()
 
 function reset_directmsg_count(est::DB.CacheStorage; event_from_user::Dict, sender, replicated=false)
-    DB.PG_DISABLE[] && return []
-
     replicated || replicate_request(:reset_directmsg_count; event_from_user, sender)
+    est.readonly[] && return []
+    DB.PG_DISABLE[] && return []
 
     e = parse_event_from_user(event_from_user)
 
@@ -1133,9 +1138,9 @@ function reset_directmsg_count(est::DB.CacheStorage; event_from_user::Dict, send
 end
 
 function reset_directmsg_counts(est::DB.CacheStorage; event_from_user::Dict, replicated=false)
-    DB.PG_DISABLE[] && return []
-
     replicated || replicate_request(:reset_directmsg_counts; event_from_user)
+    est.readonly[] && return []
+    DB.PG_DISABLE[] && return []
 
     e = parse_event_from_user(event_from_user)
 
@@ -1325,7 +1330,10 @@ function search_filterlist(est::DB.CacheStorage; pubkey, user_pubkey)
     isnothing(res) ? [] : [ (; kind=Int(FILTERING_REASON), content=JSON.json(res))]
 end
 
-function import_events(est::DB.CacheStorage; events::Vector=[])
+function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false)
+    replicated || replicate_request(:import_events; events)
+    est.readonly[] && return []
+
     cnt = Ref(0)
     errcnt = Ref(0)
     for e in events
