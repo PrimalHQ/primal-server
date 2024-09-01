@@ -29,6 +29,7 @@ exposed_functions = Set([:feed,
                          :events,
                          :event_actions,
                          :user_profile,
+                         :user_profile_followed_by,
                          :get_directmsg_contacts,
                          :reset_directmsg_count,
                          :reset_directmsg_counts,
@@ -1001,6 +1002,46 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
 
     res.wrapped
+end
+
+function user_profile_followed_by(est::DB.CacheStorage; pubkey, user_pubkey, limit=10)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+    limit = min(20, limit)
+
+    res = []
+    res_mds = []
+    for r in Postgres.execute(DAG_OUTPUTS_DB[],
+                              pgparams() do P "
+                                  select 
+                                      pf1.pubkey
+                                  from 
+                                    prod.pubkey_followers pf1, 
+                                    prod.pubkey_followers pf2,
+                                    prod.pubkey_followers_cnt pfc
+                                  where 
+                                      $(@P user_pubkey) = pf1.follower_pubkey and 
+                                      pf1.pubkey = pf2.follower_pubkey and
+                                      pf2.pubkey = $(@P pubkey) and
+                                      pf1.pubkey = pfc.key
+                                  group by pf1.pubkey
+                                  order by max(pfc.value) desc limit $(@P limit)
+                              " end...)[2]
+        pk = Nostr.PubKeyId(r[1])
+        if pk in est.meta_data
+            mdid = est.meta_data[pk]
+            if mdid in est.events
+                md = est.events[mdid]
+                push!(res, md)
+                push!(res_mds, md)
+                append!(res, ext_event_response(est, md))
+            end
+        end
+    end
+
+    append!(res, user_scores(est, res_mds))
+
+    res
 end
 
 function parse_event_from_user(event_from_user::Dict)
