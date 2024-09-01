@@ -45,6 +45,7 @@ exposed_functions = Set([:feed,
                          :zaps_feed,
                          :user_zaps,
                          :user_zaps_by_satszapped,
+                         :user_zaps_sent,
                          :event_zaps_by_satszapped,
                          :server_name,
                          :nostr_stats,
@@ -1531,6 +1532,24 @@ function user_zaps_by_satszapped(
     zaps = sort(zaps, by=z->-z[6])[1:min(limit, length(zaps))]
 
     response_messages_for_zaps(est, zaps; order_by=:amount_sats)
+end
+
+function user_zaps_sent(
+        est::DB.CacheStorage;
+        sender,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+    )
+    limit <= 1000 || error("limit too big")
+    sender = cast(sender, Nostr.PubKeyId)
+
+    zaps = map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from og_zap_receipts 
+                                                        where sender = ?1 and created_at >= ?2 and created_at <= ?3
+                                                        order by created_at desc limit ?4 offset ?5"),
+                              (sender, since, until, limit, offset)))
+
+    zaps = sort(zaps, by=z->-z[2])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps; order_by=:created_at)
 end
 
 function event_zaps_by_satszapped(
