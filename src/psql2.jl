@@ -150,3 +150,64 @@ end
 
 function Base.close(conn::PGConnection) end
 
+##
+
+function Base.setindex!(ssd::PGDict{Nostr.EventId, Nostr.Event}, v::Nostr.Event, k::Nostr.EventId)
+    @assert v.id == k
+    exe(ssd.dbconns[shard(ssd, k)],
+           "INSERT INTO $(ssd.table) (
+               $(ssd.keycolumn),
+               pubkey,
+               created_at,
+               kind,
+               tags,
+               content,
+               sig,
+               imported_at 
+           ) VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)
+           ON CONFLICT ($(ssd.keycolumn)) DO UPDATE 
+           SET 
+               pubkey      = excluded.pubkey,
+               created_at  = excluded.created_at,
+               kind        = excluded.kind,
+               tags        = excluded.tags,
+               content     = excluded.content,
+               sig         = excluded.sig,
+               imported_at = excluded.imported_at
+           ",
+           (
+            collect(v.id.hash), 
+            collect(v.pubkey.pk),
+            v.created_at,
+            v.kind,
+            JSON.json(v.tags),
+            v.content,
+            collect(v.sig.sig),
+            Utils.current_time(),
+           ))
+    v
+end
+
+function mkevents(dbargs; 
+        init_queries=["create table if not exists events (
+                      id          bytea  primary key not null,
+                      pubkey      bytea  not null,
+                      created_at  int8   not null,
+                      kind        int8   not null,
+                      tags        jsonb  not null,
+                      content     text   not null,
+                      sig         bytea  not null,
+                      imported_at int8   not null
+                      )",
+                      "create index if not exists events_created_at_idx on events (created_at)",
+                      "create index if not exists events_created_at_kind_idx on events (created_at, kind)",
+                      "create index if not exists events_imported_at_idx on events (imported_at)",
+                      "create index if not exists events_kind_idx on events (kind)",
+                      "create index if not exists events_pubkey_idx on events (pubkey)",
+                     ])
+    PSQLDict(Nostr.EventId, Nostr.Event, "events"; dbargs...,
+                keycolumn="id", 
+                valuecolumn="json_build_object('id', encode(id, 'hex'), 'pubkey', encode(pubkey, 'hex'), 'created_at', created_at, 'kind', kind, 'tags', tags, 'content', content, 'sig', encode(sig, 'hex'))::text",
+                init_queries)
+end
+
