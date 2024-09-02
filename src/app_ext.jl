@@ -486,7 +486,6 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0, user_pu
 end
 
 function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dict)
-    DB.PG_DISABLE[] && return []
     e = parse_event_from_user(event_from_user)
     e.kind == Int(APP_SETTINGS) || error("invalid event kind")
     est.auto_fetch_missing_events && DB.fetch_user_metadata(est, e.pubkey)
@@ -1620,8 +1619,6 @@ function is_upload_blocked(pubkey::Nostr.PubKeyId)
 end
 
 function upload(est::DB.CacheStorage; event_from_user::Dict)
-    DB.PG_DISABLE[] && return []
-
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD) || error("invalid event kind")
     is_upload_blocked(e.pubkey) && error("upload blocked")
@@ -1643,8 +1640,6 @@ function check_upload_id(ulid)
 end
 
 function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
-    DB.PG_DISABLE[] && return []
-
     # push!(Main.stuff, (:upload_chunk, event_from_user))
 
     e = parse_event_from_user(event_from_user)
@@ -1679,8 +1674,6 @@ function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
 end
 
 function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
-    DB.PG_DISABLE[] && return []
-
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
     is_upload_blocked(e.pubkey) && error("upload blocked")
@@ -1707,8 +1700,6 @@ function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
 end
 
 function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
-    DB.PG_DISABLE[] && return []
-
     # push!(Main.stuff, (:upload_cancel, (; event_from_user)))
 
     e = parse_event_from_user(event_from_user)
@@ -1734,7 +1725,6 @@ REPORTED_PUBKEY = 1
 REPORTED_EVENT  = 2
 
 function report_id(est::DB.CacheStorage; event_from_user::Dict, id::Union{Nostr.PubKeyId, Nostr.EventId})
-    DB.PG_DISABLE[] && return []
     e = parse_event_from_user(event_from_user)
     type = id isa Nostr.PubKeyId ? REPORTED_PUBKEY : REPORTED_EVENT
     DB.exec(est.dyn[:reported], 
@@ -2087,6 +2077,34 @@ function (fc::AppSPIFuncall)(est; kwargs...)
         end
     end
     tdur > 2 && @show (:slow_AppSPIFuncall, tdur, fc.funcall, kwargs)
+    res
+end
+
+struct AppDist_ end
+AppDist = AppDist_()
+
+struct AppDistFuncall; funcall::Symbol; end
+
+Base.getproperty(appspi::AppDist_, prop::Symbol) = AppDistFuncall(prop)
+
+dist_session_funcalls = Dict{Int, Any}() |> ThreadSafe
+
+import ..Workers
+
+function (fc::AppDistFuncall)(est; kwargs...)
+    res = []
+    tdur = @elapsed Workers.handle_errors(:workers) do session
+        pid = session.extra[:backendpid]
+        dist_session_funcalls[pid] = (Utils.current_time(), fc.funcall, kwargs)
+        try
+            PerfStats.recordspi!(:distfuncalls, session.extra[:backendpid], fc.funcall) do
+                append!(res, Workers.execute(session, JSON.json([fc.funcall, Dict(kwargs)])))
+            end
+        finally
+            dist_session_funcalls[pid] = nothing
+        end
+    end
+    tdur > 2 && @show (:slow_AppDistFuncall, tdur, fc.funcall, kwargs)
     res
 end
 

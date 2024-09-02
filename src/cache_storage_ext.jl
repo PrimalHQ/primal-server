@@ -335,15 +335,11 @@ function notif2namedtuple(notif::Tuple)
       if !(v isa Missing || v isa Nothing)]...)
 end
 
-PG_DISABLE = Ref(true)
-
 function notification(
         est::CacheStorage,
         pubkey::Nostr.PubKeyId, notif_created_at::Int, notif_type::NotificationType,
         args...
     )
-    PG_DISABLE[] && return
-
     pubkey in est.app_settings || return
 
     callargs = (; pubkey, notif_created_at, notif_type, args)

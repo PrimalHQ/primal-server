@@ -1153,7 +1153,6 @@ reset_directmsg_count_lock = ReentrantLock()
 function reset_directmsg_count(est::DB.CacheStorage; event_from_user::Dict, sender, replicated=false)
     replicated || replicate_request(:reset_directmsg_count; event_from_user, sender)
     est.readonly[] && return []
-    DB.PG_DISABLE[] && return []
 
     e = parse_event_from_user(event_from_user)
 

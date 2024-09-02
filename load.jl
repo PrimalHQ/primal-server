@@ -93,7 +93,6 @@ isfile(CONFIG_FILE) && include(CONFIG_FILE)
 
 pqconnstr = get(ENV, "PRIMALSERVER_PGCONNSTR", "host=127.0.0.1 dbname=primal user=primal")
 if startswith(pqconnstr, ":"); pqconnstr = Symbol(pqconnstr[2:end]); end
-DB.PG_DISABLE[] = get(ENV, "PRIMALSERVER_PG_DISABLE", "") == "1"
 
 Postgres.server_tracking()
 

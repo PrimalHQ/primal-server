@@ -17,6 +17,7 @@ PRINT_EXCEPTIONS = Ref(false)
 MAX_SUBSCRIPTIONS = Ref(200)
 
 ENABLE_SPI = Ref(false)
+ENABLE_DIST = Ref(false)
 
 Tsubid = String
 Tfilters = Vector{Any}
@@ -160,7 +161,7 @@ end
 import ..Postgres
 ##
 CacheServerHandlers.eval(quote
-app_funcalls_via_spi = Set([
+app_funcalls_external = Set([
                             :feed,
                             :thread_view,
                             :contact_list,
@@ -210,18 +211,20 @@ app_funcalls_via_spi = Set([
                            ])
 end)
 ##
-function app_funcall_spi(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing)
-    # @show funcall
-    call() = Base.invokelatest(getproperty(App().AppSPI, funcall), nothing; kwargs...) |> sendres
-    try
-        call()
-    catch ex
-        if ex isa EOFError
-            println(@__MODULE__, ": retrying $funcall")
+function app_funcall_external(app)
+    function (funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing)
+        # @show funcall
+        call() = Base.invokelatest(getproperty(app, funcall), nothing; kwargs...) |> sendres
+        try
             call()
-            println(@__MODULE__, ": retrying $funcall successful")
-        else
-            rethrow()
+        catch ex
+            if ex isa EOFError
+                println(@__MODULE__, ": retrying $funcall")
+                call()
+                println(@__MODULE__, ": retrying $funcall successful")
+            else
+                rethrow()
+            end
         end
     end
 end
@@ -252,7 +255,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 local filt = filt["cache"]
                 funcall = Symbol(filt[1])
                 if funcall in App().exposed_functions
-                    # println(funcall)
+                    # println(Main.App.Dates.now(), "  ", funcall)
                     
                     kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
 
@@ -270,10 +273,20 @@ function initial_filter_handler(conn::Conn, subid, filters)
                         if (funcall == :feed_directive || funcall == :feed_directive_2) && startswith(Dict(kwargs)[:directive], "search;")
                             # @show (:feed_directive_override, funcall, kwargs)
                             afc = app_funcall
-                        elseif funcall in app_funcalls_via_spi
+                        elseif funcall in app_funcalls_external
                             # @show (:spi, funcall)
-                            afc = app_funcall_spi
+                            afc = app_funcall_external(App().AppSPI)
                         end
+                    elseif ENABLE_DIST[]
+                        # @show (:dist, funcall)
+                        afc = app_funcall_external(App().AppDist)
+                        # if (funcall == :feed_directive || funcall == :feed_directive_2) && startswith(Dict(kwargs)[:directive], "search;")
+                        #     # @show (:feed_directive_override, funcall, kwargs)
+                        #     afc = app_funcall
+                        # elseif funcall in app_funcalls_external
+                        #     # @show (:dist, funcall)
+                        #     afc = app_funcall_external(App().AppDist)
+                        # end
                     end
 
                     tdur = @elapsed afc(funcall, kwargs, 

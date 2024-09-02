@@ -27,19 +27,31 @@ struct PreparedStatement
     name::String
 end
 
-struct PGConnPool
+struct ConnPool
     sessions::Vector{Session}
     free_sessions::Vector{Session}
 end
 
-mutable struct PGServer
+abstract type ConnStr end
+Base.isempty(connstr::ConnStr) = isempty(connstr.connstr)
+
+struct PGConnStr <: ConnStr
     connstr::String
+    init_commands::Vector{String}
+    PGConnStr(connstr::String, init_commands=String[]) = new(connstr, init_commands)
+end
+Base.:(==)(cs1::PGConnStr, cs2::PGConnStr) = cs1.connstr == cs2.connstr && cs1.init_commands == cs2.init_commands
+Base.hash(cs::PGConnStr, h::UInt64) = hash(cs.connstr, hash(cs.init_commands, h))
+
+mutable struct Server
+    connstr::ConnStr
     tracking_url::String
     session_initializer::Function
     exception::Any
-    function PGServer(; connstr="", tracking_url="", session_initializer=identity)
+    sessions::Int
+    function Server(; connstr::ConnStr=PGConnStr(""), tracking_url="", session_initializer=identity, sessions=SESSIONS_PER_POOL[])
         @assert !isempty(connstr) || !isempty(tracking_url)
-        new(connstr, tracking_url, session_initializer, nothing)
+        new(connstr, tracking_url, session_initializer, nothing, sessions)
     end
 end
 
@@ -65,42 +77,70 @@ struct ResultRow <: Tables.AbstractRow
     values
 end
 
-PRINT_EXCEPTIONS = Ref(true)
-print_exceptions_lock = ReentrantLock()
+const PRINT_EXCEPTIONS = Ref(true)
+const print_exceptions_lock = ReentrantLock()
 
-SESSIONS_PER_POOL = Ref(20)
-MAX_WAIT_FOR_SESSION = Ref(30.0)
-MAX_WAIT_FOR_CONNECTION = Ref(5.0)
+const SESSIONS_PER_POOL = Ref(20)
+const MAX_WAIT_FOR_SESSION = Ref(30.0)
+const MAX_WAIT_FOR_CONNECTION = Ref(5.0)
 
-connpools = Dict{String, PGConnPool}() |> ThreadSafe
-servers = Dict{Symbol, PGServer}() |> ThreadSafe
+const connpools = Dict{ConnStr, ConnPool}() |> ThreadSafe
+const servers = Dict{Symbol, Server}() |> ThreadSafe
 
 const USE_TASK_LOCAL_STORAGE = Ref(true)
 
-pg_to_jl_type_conversion = Dict{Int32, Function}()
-jl_to_pg_type_conversion = Dict{Type, Function}()
+const pg_to_jl_type_conversion = Dict{Int32, Function}()
+const jl_to_pg_type_conversion = Dict{Type, Function}()
 
 @inline function log_time(; kwargs...)
     println("$(Dates.now())  $(JSON.json(kwargs))")
 end
 
-function make_session(connstr::String; connection_check_period=0.2)
-    ps = split(connstr, '|')
-    opts = Dict([map(string, split(s, '=')) for s in split(ps[1], ' ') if !isempty(s)])
+function make_session(connstr::ConnStr; connection_check_period=0.2)
+    opts = Dict([map(string, split(s, '=')) for s in split(connstr.connstr, ' ') if !isempty(s)])
+
+    extra = Dict()
+    merge!(extra, pre_connect_session(connstr, opts))
+
+    host, port = opts["host"], parse(Int, get(opts, "port", "5432"))
 
     tstart = time()
     io = TCPSocket()
-    connect!(io, opts["host"], parse(Int, get(opts, "port", "5432")))
+    connect!(io, host, port)
     if connection_check_period > 0
-        while io.status != Base.StatusOpen
+        while true
+            if     io.status == Base.StatusOpen
+                break
+            elseif io.status == Base.StatusClosed
+                try close(io) catch _ end
+                io = TCPSocket()
+                connect!(io, host, port)
+            end
             if time() - tstart >= MAX_WAIT_FOR_CONNECTION[]
-                close(io)
+                try close(io) catch _ end
                 throw(Base.IOError("postgres waiting too long for TCP connection", 1000))
             end
             sleep(connection_check_period)
         end
     end
 
+    parameters = Dict{String, String}()
+    backend_key_data = nothing
+
+    pre_init_session(connstr, io, opts, parameters, backend_key_data, extra)
+    
+    session = Session(io, parameters, backend_key_data, Dict{String, PreparedStatement}(), ReentrantLock(), extra)
+    
+    post_init_session(connstr, session)
+
+    session
+end
+
+function pre_connect_session(::ConnStr, opts); Dict(); end
+function pre_init_session(::ConnStr, io::TCPSocket, opts, parameters, backend_key_data, extra) end
+function post_init_session(::ConnStr, session::Session) end
+
+function pre_init_session(::PGConnStr, io::TCPSocket, opts, parameters, backend_key_data, extra)
     send_ssl_request(io)
     @assert recv_int1(io) == 0x4e
 
@@ -110,8 +150,6 @@ function make_session(connstr::String; connection_check_period=0.2)
                               ("application_name", "postgres.jl")
                              ])
 
-    parameters = Dict{String, String}()
-    backend_key_data = nothing
     while true
         msg = recv_message(io)
         if msg.type == :ready_for_query
@@ -126,14 +164,14 @@ function make_session(connstr::String; connection_check_period=0.2)
     @assert parameters["client_encoding"] == "UTF8"
     @assert parameters["server_encoding"] == "UTF8"
     @assert parameters["DateStyle"] == "ISO, MDY"
-
-    session = Session(io, parameters, backend_key_data, Dict{String, PreparedStatement}(), ReentrantLock(), Dict())
-    
-    length(ps) >= 2 && execute(session, string(ps[2]))
-    
-    session
 end
 
+function post_init_session(connstr::PGConnStr, session::Session)
+    for q in connstr.init_commands
+        execute(session, q)
+    end
+end
+    
 Base.close(session::Session) = close(session.socket)
 
 function simple_test(io::IO)
@@ -158,10 +196,10 @@ function maintain_connection_pools()
     for (name, server) in collect(servers)
         pool = lock(connpools) do connpools
             get!(connpools, server.connstr) do
-                PGConnPool([], [])
+                ConnPool([], [])
             end
         end
-        nnew = SESSIONS_PER_POOL[] - length(pool.sessions)
+        nnew = server.sessions - length(pool.sessions)
         nnew > 0 && println(Dates.now(), " postgres: creating $nnew new session(s) to server $name")
         tdur = @elapsed new_sessions = filter(!isnothing, 
                                               asyncmap(function(_)
@@ -185,7 +223,7 @@ end
 
 # function get_connection_pool(connpools, conninit::NamedTuple)
 #     pool = get!(connpools, conninit.connstr) do
-#         PGConnPool([], [])
+#         ConnPool([], [])
 #     end
 #     new_sessions = asyncmap(_->make_session(conninit.connstr) |> conninit.session_initializer,
 #                             1:(SESSIONS_PER_POOL[] - length(pool.sessions)))
@@ -220,14 +258,14 @@ function get_session(conninit::NamedTuple)
     end
 end
 
-function free_session(connstr::String, session::Session)
+function free_session(connstr::ConnStr, session::Session)
     lock(connpools) do connpools
         pool = connpools[connstr]
         push!(pool.free_sessions, session)
     end
 end
 
-function remove_session(connstr::String, session)
+function remove_session(connstr::ConnStr, session)
     println((:remove_session, connstr, session, objectid(session)))
     sleep(0.5)
     lock(connpools) do connpools
@@ -243,7 +281,7 @@ function remove_session(connstr::String, session)
     end
 end
 
-function close_sessions(connstr::String)
+function close_sessions(connstr::ConnStr)
     println((:close_sessions, connstr))
     lock(connpools) do connpools
         pool = connpools[connstr]
@@ -693,7 +731,7 @@ function execute_simple(session::Session, query::String; callbacks=nothing)
     recv_rows(session.socket; callbacks)
 end
 
-function execute(connstr::String, query::String)
+function execute(connstr::ConnStr, query::String)
     handle_errors((; connstr, session_initializer=identity)) do session
         execute(session, query)
     end
@@ -831,10 +869,12 @@ function monitoring()
     PushGatewayExporter.set!("postgres_min_free_sessions", 
                              minimum([v.free_sessions for (_, v) in connection_pool_stats()]))
     for srv in keys(servers)
-        # fs = execute(srv, "select max(sessions_fatal) from pg_stat_database")[2][1][1]
-        # PushGatewayExporter.set!("postgres_fatal_sessions_$srv", fs)
-        # PushGatewayExporter.set!("postgres_uptime_$srv", execute(srv, "select extract(epoch from current_timestamp - pg_postmaster_start_time())::int8")[2][1][1])
-        PushGatewayExporter.set!("postgres_oldest_backend_age_$srv", execute(srv, "select max(extract(epoch from current_timestamp - backend_start)::int8) from pg_stat_activity where backend_type = 'client backend'")[2][1][1])
+        if srv.connstr isa PGConnStr
+            # fs = execute(srv, "select max(sessions_fatal) from pg_stat_database")[2][1][1]
+            # PushGatewayExporter.set!("postgres_fatal_sessions_$srv", fs)
+            # PushGatewayExporter.set!("postgres_uptime_$srv", execute(srv, "select extract(epoch from current_timestamp - pg_postmaster_start_time())::int8")[2][1][1])
+            PushGatewayExporter.set!("postgres_oldest_backend_age_$srv", execute(srv, "select max(extract(epoch from current_timestamp - backend_start)::int8) from pg_stat_activity where backend_type = 'client backend'")[2][1][1])
+        end
     end
 end
 
@@ -842,29 +882,34 @@ function server_tracking()
     connstrs = Set()
 
     for server in collect(values(servers))
-        if isempty(server.tracking_url) && !isempty(server.connstr)
-            push!(connstrs, server.connstr)
-        else
+        if !isempty(server.tracking_url)
             d = JSON.parse(String(HTTP.request("GET", server.tracking_url; retry=false, timeout=5, connect_timeout=5).body))
-            session = make_session(d["postgres"])
+            session = make_session(PGConnStr(d["postgres"]))
             try
                 if execute(session, "select pg_is_in_recovery()")[2][1][1]
                     execute(session, "select pg_promote()")
                 end
-                server.connstr = d["primal"]
+                server.connstr = PGConnStr(d["primal"])
+                # @show (:tracking, server.connstr)
                 push!(connstrs, server.connstr)
             finally
                 try close(session) catch _ end
             end
+        elseif !isempty(server.connstr)
+            # @show (:nontracking, server.connstr)
+            push!(connstrs, server.connstr)
         end
     end
 
-    for connstr in collect(keys(connpools))
-        if !(connstr in connstrs)
-            close_sessions(connstr)
-            delete!(connpools, connstr)
-        end
-    end
+    # @show connstrs
+
+    # for connstr in collect(keys(connpools))
+    #     if !(connstr in connstrs)
+    #         @show (:closing, server.connstr)
+    #         close_sessions(connstr)
+    #         delete!(connpools, connstr)
+    #     end
+    # end
 end
 
 tasks = [
@@ -874,6 +919,7 @@ tasks = [
         ]
 
 function start()
+    server_tracking()
     maintain_connection_pools()
     for (f, period) in tasks
         Utils.start_periodic_tasked(f, period)
