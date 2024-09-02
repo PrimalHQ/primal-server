@@ -236,6 +236,8 @@ function default_pipeline(targetserver, xn, o)
     # xn(sqlite2pg_node; skipprocessing=true)
     xn(override_runtag(sqlite2pg_node, :dev27); skipprocessing=true)
     xn(reads_node, o.events, o.basic_tags, o.zap_receipts, o.event_replies, o.a_tags)
+    xn(pubkey_media_cnt_node, o.events, o.event_media)
+    xn(pubkey_content_zap_cnt_node, o.zap_receipts)
     xn(advsearch_node, o.events, o.basic_tags)
 end
 
