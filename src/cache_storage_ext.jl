@@ -7,10 +7,22 @@ include("../src/notifications.jl")
 
 function notification_counter_update(est, notif)
     lock(est.notification_counter_update_lock) do
+        nt = Int(notif.type)
+        try
+            for arg in collect(values(notif))
+                if arg isa Nostr.PubKeyId
+                    pk = arg
+                    if !is_trusted_user(est, pk)
+                        return
+                    end
+                end
+            end
+        catch ex
+            println("notification_counter_update: ", typeof(ex))
+        end
         if !(notif.pubkey in est.pubkey_notification_cnts)
             DB.exe(est.pubkey_notification_cnts, DB.@sql("insert into pubkey_notification_cnts (pubkey) values (?1)"), notif.pubkey)
         end
-        nt = Int(notif.type)
         DB.exe(est.pubkey_notification_cnts, "update pubkey_notification_cnts set type$nt = type$nt + 1 where pubkey = ?1", notif.pubkey)
     end
 end
@@ -98,6 +110,15 @@ function ext_init(est::CacheStorage)
                                                                           primary key (pubkey, subkey)
                                                                           )",
                                                                          ])
+##
+    est.dyn[:pubkey_trustrank] = est.params.DBDict(Nostr.PubKeyId, Float64, "pubkey_trustrank"; est.dbargs...,
+                                  keycolumn="pubkey", valuecolumn="rank",
+                                  init_queries=["create table if not exists pubkey_trustrank (
+                                                pubkey bytea not null,
+                                                rank float8 not null,
+                                                primary key (pubkey)
+                                                )",
+                                               ])
 ##
 end
 
@@ -271,6 +292,9 @@ function ext_pubkey_zap(est::CacheStorage, e::Nostr.Event, zapped_pk, amount_sat
     if ext_is_human(est, zap_sender(e))
         exe(est.pubkey_zapped, @sql("update pubkey_zapped set zaps = zaps + 1, satszapped = satszapped + ?2 where pubkey = ?1"), zapped_pk, amount_sats)
     end
+    # if get(TrustRank.pubkey_rank, e.pubkey, 0.0) > 0.0
+    #     add_human_override(zapped_pk, true, "received_zap_from_human")
+    # end
 end
 
 function ext_is_hidden(est::CacheStorage, eid::Nostr.EventId)
@@ -680,4 +704,15 @@ function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
 end
 
 function ext_media_import(est::CacheStorage, eid::Union{Nothing,Nostr.EventId}, url::Union{Nothing,String}, path::String, data::Vector{UInt8}) end
+
+function add_human_override(est::CacheStorage, pubkey::Nostr.PubKeyId, is_human::Bool, source::String)
+    try
+        @show DB.exec(est.dyn[:human_override], "insert into human_override values (?1, ?2, now(), ?3) on conflict (pubkey) do update set is_human = ?2, source = ?3",
+                      (pubkey, is_human, source))
+    catch ex println(typeof(ex)) end
+end
+
+function is_trusted_user(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    get(TrustRank.pubkey_rank, pubkey, 0.0) > 0.0 || get(est.dyn[:human_override], pubkey, false)
+end
 

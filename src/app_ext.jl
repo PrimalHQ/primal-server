@@ -1046,10 +1046,11 @@ function get_notifications(
 
     rs = if isnothing(type)
         DB.exe(est.pubkey_notifications, 
-               DB.@sql("select pubkey, created_at, type, arg1, arg2, arg3, arg4
-                       from pubkey_notifications 
+               "select pubkey, created_at, type, arg1, arg2, arg3, arg4
+                       from pubkey_notifications pn
                        where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
-                       order by created_at desc limit ?4 offset ?5"),
+                       and notification_is_visible(type, arg1, arg2)
+                       order by created_at desc limit ?4 offset ?5",
                pubkey, since, until, limit, offset)
     else
         if !(type isa Vector)
@@ -1058,9 +1059,10 @@ function get_notifications(
         type = join([Int(t) for t in type], ",")
         DB.exe(est.pubkey_notifications, 
                "select pubkey, created_at, type, arg1, arg2, arg3, arg4
-               from pubkey_notifications 
+               from pubkey_notifications pn
                where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
                and type in ($type)
+               and notification_is_visible(type, arg1, arg2)
                order by created_at desc limit ?4 offset ?5",
                pubkey, since, until, limit, offset)
     end
@@ -1082,7 +1084,7 @@ function get_notifications(
         for arg in collect(values(notif_d))
             if arg isa Nostr.PubKeyId
                 pk = arg
-                if is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk)
+                if is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk) #|| !is_trusted_user(est, pk)
                     is_blocked = true
                 else
                     push!(pks, pk)

@@ -1385,6 +1385,7 @@ function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false
                 cnt[] += 1
             end
             ext_import_event(est, e)
+            add_human_override(e.pubkey, true, "import_events")
         catch _ 
             errcnt[] += 1
         end
@@ -2129,7 +2130,7 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
 
         if e isa Dict
             haskey(e, "id") && (eid = Nostr.EventId(e["id"]))
-            haskey(e, "pubkey") && (pubkey = Nostr.EventId(e["pubkey"]))
+            haskey(e, "pubkey") && (pubkey = Nostr.PubKeyId(e["pubkey"]))
             haskey(e, "kind") && (kind = e["kind"])
             haskey(e, "content") && (content = e["content"])
             haskey(e, "tags") && (tags = e["tags"])
@@ -2144,6 +2145,10 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
         if !isnothing(eid) && (ext_is_hidden(est, eid) || eid in est.deleted_events)
             ok = false
         elseif !isnothing(pubkey)
+            if !DB.is_trusted_user(est, pubkey)
+                ok = false
+                continue
+            end
             scope = 
             if funcall in funcall_content_moderation_scope.content
                 :content
