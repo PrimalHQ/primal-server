@@ -214,10 +214,28 @@ end)
 function app_funcall_external(app)
     function (funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing)
         # @show funcall
-        call() = Base.invokelatest(getproperty(app, funcall), nothing; kwargs...) |> sendres
+        function call()
+            MetricsLogger.log(r->begin
+                                  lock(max_request_duration) do max_request_duration
+                                      max_request_duration[] = max(max_request_duration[], r.time)
+                                  end
+                                  lock(requests_per_period) do requests_per_period
+                                      requests_per_period[] += 1
+                                  end
+                                  (; funcall, kwargs, ws=string(ws_id), subid)
+                              end) do
+                res = fetch(@async Base.invokelatest(getproperty(app, funcall), nothing; kwargs...)) 
+                # @show (funcall, length(res))
+                res |> sendres
+            end
+        end
+
+        # call() = Base.invokelatest(getproperty(app, funcall), nothing; kwargs...) |> sendres
+
         try
             call()
         catch ex
+            Utils.print_exceptions()
             if ex isa EOFError
                 println(@__MODULE__, ": retrying $funcall")
                 call()
@@ -278,15 +296,11 @@ function initial_filter_handler(conn::Conn, subid, filters)
                             afc = app_funcall_external(App().AppSPI)
                         end
                     elseif ENABLE_DIST[]
-                        # @show (:dist, funcall)
-                        afc = app_funcall_external(App().AppDist)
-                        # if (funcall == :feed_directive || funcall == :feed_directive_2) && startswith(Dict(kwargs)[:directive], "search;")
-                        #     # @show (:feed_directive_override, funcall, kwargs)
-                        #     afc = app_funcall
-                        # elseif funcall in app_funcalls_external
-                        #     # @show (:dist, funcall)
-                        #     afc = app_funcall_external(App().AppDist)
-                        # end
+                        if funcall == :trending_hashtags_4h || funcall == :trending_hashtags_7d
+                            afc = app_funcall
+                        else
+                            afc = app_funcall_external(App().AppDist)
+                        end
                     end
 
                     tdur = @elapsed afc(funcall, kwargs, 
