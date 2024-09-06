@@ -8,6 +8,8 @@ import ..Utils
 import ..Postgres
 using ..Postgres: handle_errors, Session, ConnStr, recv_int4, send_int4
 
+PRINT_EXCEPTIONS = Ref(false)
+
 struct TCPConnStr <: ConnStr
     connstr::String
 end
@@ -121,7 +123,7 @@ function eval_expr(pkt::Vector{UInt8})
         expr = deserialize(IOBuffer(pkt))
         (; ok=true, res=Main.eval(expr))
     catch ex
-        Utils.print_exceptions()
+        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         (; ok=false, res=string(typeof(ex)))
     end
 end
@@ -134,7 +136,7 @@ function api_call(reqjson::String)
 
         (; ok=true, res=Base.invokelatest(getproperty(Main.App, funcall), Main.cache_storage; kwargs...))
     catch ex
-        Utils.print_exceptions()
+        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         (; ok=false, res=string(typeof(ex)))
     end
 end

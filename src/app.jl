@@ -1181,7 +1181,6 @@ end
 function reset_directmsg_counts(est::DB.CacheStorage; event_from_user::Dict, replicated=false)
     replicated || replicate_request(:reset_directmsg_counts; event_from_user)
     est.readonly[] && return []
-    DB.PG_DISABLE[] && return []
 
     e = parse_event_from_user(event_from_user)
 
