@@ -98,6 +98,7 @@ end
 
 sqltype(::Type{PGDict{K, V}}, ::Type{Bool}) where {K, V} = "boolean"
 sqltype(::Type{PGDict{K, V}}, ::Type{Int}) where {K, V} = "int8"
+sqltype(::Type{PGDict{K, V}}, ::Type{Float64}) where {K, V} = "float8"
 sqltype(::Type{PGDict{K, V}}, ::Type{String}) where {K, V} = "text"
 sqltype(::Type{PGDict{K, V}}, ::Type{Symbol}) where {K, V} = "varchar(500)"
 sqltype(::Type{PGDict{K, V}}, ::Type{Nostr.EventId}) where {K, V} = "bytea"
