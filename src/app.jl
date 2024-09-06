@@ -2285,8 +2285,21 @@ function mega_feed_directive(
         end
 
     elseif get(s, "kind", "") == "notes"
-        if s["id"] == "latest"
+        if     s["id"] == "latest"
             return feed(est; pubkey=kwa[:user_pubkey], kwargs...)
+        elseif s["id"] == "global-trending"
+            return explore_global_trending(est, s["hours"]; kwargs...)
+        elseif s["id"] == "short-vertical-videos"
+            return advanced_search(est; query="kind:1 filter:video orientation:vertical maxduration:10", kwargs...)
+        elseif s["id"] == "all-notes"
+            return explore(est; timeframe="latest", scope="global", kwargs...)
+        elseif s["id"] == "most-zapped"
+            return explore_global_mostzapped(est, s["hours"]; kwargs...)
+        elseif s["id"] == "wide-net-notes"
+            return advanced_search(est; query="kind:1 scope:myfollowsinteractions", kwargs...)
+        elseif s["id"] == "feed"
+            skwa = [Symbol(k)=>v for (k, v) in s if !(k in ["id", "kind"])]
+            return feed(est; skwa..., kwargs...)
         end
 
     end
