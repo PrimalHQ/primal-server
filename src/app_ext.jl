@@ -1459,8 +1459,8 @@ function trending_hashtags(est::DB.CacheStorage; created_after::Int=trunc(Int, t
     [(; kind=Int(HASHTAGS), content=JSON.json(res))]
 end
 
-@cached 600 trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
-@cached 600 trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
+@cached 600   trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
+@cached 14400 trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
 
 function trending_images(est::DB.CacheStorage; created_after::Int=trunc(Int, time()-4*3600), limit=20)
     update_hashtag_lists()
