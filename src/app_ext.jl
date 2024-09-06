@@ -566,9 +566,9 @@ function get_app_subsettings(est::DB.CacheStorage; event_from_user::Dict)
     d = JSON.parse(e.content)
     r = Postgres.execute(:membership, "select settings from app_subsettings where pubkey = \$1 and subkey = \$2 limit 1", [e.pubkey, d["subkey"]])[2]
     if isempty(r)
-        get_default_app_settings(est; subkey=d["subkey"])
+        get_default_app_subsettings(est; subkey=d["subkey"])
     else
-        [(; kind=Int(APP_SUBSETTINGS), content=JSON.json((; subkey=d["subkey"], settings=r[1][1])))]
+        [(; kind=Int(APP_SUBSETTINGS), content=JSON.json(r[1][1]))]
     end
 end
 
