@@ -398,6 +398,7 @@ RELAY_URL_MAP = Dict{String, String}()
 RESPONSE_MESSAGES_CACHE_ENABLED = Ref(false)
 response_messages_for_posts_cache_periodic = Throttle(; period=300.0)
 response_messages_for_posts_cache = Dict{Tuple{Nostr.EventId, Union{Nothing, Nostr.PubKeyId}}, Any}() |> ThreadSafe
+response_messages_for_posts_reids_cache = Dict{Tuple{Nostr.EventId}, Any}() |> ThreadSafe
 response_messages_for_posts_res_meta_data_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
 response_messages_for_posts_mds_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
 
@@ -409,6 +410,7 @@ function response_messages_for_posts(
     if RESPONSE_MESSAGES_CACHE_ENABLED[]
         response_messages_for_posts_cache_periodic() do
             empty!(response_messages_for_posts_cache)
+            empty!(response_messages_for_posts_reids_cache)
             empty!(response_messages_for_posts_res_meta_data_cache)
             empty!(response_messages_for_posts_mds_cache)
         end
@@ -418,13 +420,16 @@ function response_messages_for_posts(
         (;
          res = OrderedSet(),
          pks = Set{Nostr.PubKeyId}(),
-         event_relays = Dict{Nostr.EventId, String}())
+         event_relays = Dict{Nostr.EventId, String}(),
+         reids = Set{Nostr.EventId}(),
+        )
     end
 
     function handle_event(
             body::Function, eid::Nostr.EventId; 
             wrapfun::Function=identity, 
             res::OrderedSet, pks::Set{Nostr.PubKeyId}, event_relays::Dict{Nostr.EventId, String},
+            reids::Set{Nostr.EventId}, 
         )
         ext_is_hidden(est, eid) && return
         eid in est.deleted_events && return
@@ -437,19 +442,19 @@ function response_messages_for_posts(
             return
         end
 
-        is_hidden(est, user_pubkey, :content, e.pubkey) && return
-        ext_is_hidden(est, e.pubkey) && return
+        # is_hidden(est, user_pubkey, :content, e.pubkey) && return
+        # ext_is_hidden(est, e.pubkey) && return
 
-        e.kind == Int(Nostr.REPOST) && try 
-            hide = false
-            for t in e.tags
-                if t.fields[1] == "p"
-                    pk = Nostr.PubKeyId(t.fields[2])
-                    hide |= is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk) 
-                end
-            end
-            hide
-        catch _ false end && return
+        # e.kind == Int(Nostr.REPOST) && try 
+        #     hide = false
+        #     for t in e.tags
+        #         if t.fields[1] == "p"
+        #             pk = Nostr.PubKeyId(t.fields[2])
+        #             hide |= is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk) 
+        #         end
+        #     end
+        #     hide
+        # catch _ false end && return
 
         if e.kind == Int(Nostr.LONG_FORM_CONTENT)
             words = length(split(e.content))
@@ -463,7 +468,8 @@ function response_messages_for_posts(
         union!(res, e.kind == Int(Nostr.LONG_FORM_CONTENT) ? 
                ext_long_form_event_stats(est, e.id) : 
                event_stats(est, e.id))
-        isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
+        # isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
+        isnothing(user_pubkey) || push!(reids, e.id)
         push!(pks, e.pubkey)
         union!(res, ext_event_response(est, e))
         
@@ -476,7 +482,7 @@ function response_messages_for_posts(
         # 1==1 && if user_pubkey == Main.test_pubkeys[:qa]
             e.kind == Int(Nostr.LONG_FORM_CONTENT) && for t in e.tags
                 if length(t.fields) >= 2 && t.fields[1] == "d"
-                    identifier = t.fields[2]
+                    # @show identifier = t.fields[2]
                     union!(res, [e for e in event_zaps_by_satszapped(est; pubkey=e.pubkey, identifier, limit=5, user_pubkey)
                                  if e.kind != Int(RANGE) && e.kind != Int(Nostr.TEXT_NOTE) && e.kind != Int(Nostr.LONG_FORM_CONTENT)])
                     break
@@ -517,31 +523,32 @@ function response_messages_for_posts(
 
     event_relays = r2.event_relays
 
-    # @time "eids"
+    # @time "eids" 
     for eid in eids
-        r = RESPONSE_MESSAGES_CACHE_ENABLED[] ? get(response_messages_for_posts_cache, (eid, user_pubkey), nothing) : nothing
+        r = RESPONSE_MESSAGES_CACHE_ENABLED[] ? get(response_messages_for_posts_cache, (eid, #=user_pubkey=#nothing), nothing) : nothing
 
         if isnothing(r)
             r = mkres()
 
             # @time "handle_event" 
-            handle_event(eid; r.res, r.pks, r.event_relays) do subeid
+            handle_event(eid; r.res, r.pks, r.event_relays, r.reids) do subeid
                 yield()
                 time_exceeded() && return
-                handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), e.pubkey, content=JSON.json(e)), r.res, r.pks, r.event_relays) do subeid
+                handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), e.pubkey, content=JSON.json(e)), r.res, r.pks, r.event_relays, r.reids) do subeid
                     yield()
                     time_exceeded() && return
-                    handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), e.pubkey, content=JSON.json(e)), r.res, r.pks, r.event_relays) do _
+                    handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), e.pubkey, content=JSON.json(e)), r.res, r.pks, r.event_relays, r.reids) do _
                     end
                 end
             end
 
-            response_messages_for_posts_cache[(eid, user_pubkey)] = r
+            response_messages_for_posts_cache[(eid, #=user_pubkey=#nothing)] = r
         end
 
         union!(r2.res, r.res)
         union!(r2.pks, r.pks)
         event_relays = union(event_relays, r.event_relays)
+        union!(r2.reids, r.reids)
     end
 
     res_meta_data = res_meta_data |> ThreadSafe
@@ -567,7 +574,12 @@ function response_messages_for_posts(
 
     res = copy(r2.res)
 
-    #@time "mds" 
+    # @time "reids" 
+    for reid in r2.reids
+        union!(res, event_actions_cnt(est, reid, user_pubkey))
+    end
+       
+    # @time "mds" 
     for md in values(res_meta_data)
         push!(res, md)
         union!(res, 
