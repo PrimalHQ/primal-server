@@ -513,11 +513,14 @@ function set_app_settings(est::DB.CacheStorage; settings_event::Dict)
                 e = Nostr.Event(e.id, e.pubkey, e.created_at, e.kind, e.tags, JSON.json(d2), e.sig)
             end
         end
+        cmr1 = compile_content_moderation_rules(est, e.pubkey)
         est.app_settings[e.pubkey] = e
         DB.exe(est.app_settings, 
                DB.@sql("update app_settings set created_at = ?2, event_id = ?3 where key = ?1"),
                e.pubkey, e.created_at, e.id)
         parse_notification_settings(est, e)
+        cmr2 = compile_content_moderation_rules(est, e.pubkey)
+        cmr1 !== cmr2 && import_content_moderation_rules(est, e.pubkey)
         [e]
     end
 end

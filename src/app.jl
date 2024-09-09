@@ -348,6 +348,34 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
     r isa NamedTuple ? r : cmr
 end
 
+function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
+    cmr = compile_content_moderation_rules(est, user_pubkey)
+    Postgres.transaction(DAG_OUTPUTS_DB[]) do sess
+        for tbl in [
+                    :cmr_pubkeys_scopes,
+                    :cmr_pubkeys_parent,
+                    :cmr_groups,
+                    :cmr_pubkeys_allowed,
+                   ]
+            Postgres.execute(sess, "delete from $tbl where user_pubkey = \$1", [user_pubkey])
+        end
+        for (pk, p) in cmr.pubkeys
+            for scope in (isempty(p.scopes) ? [:content, :trending] : p.scopes)
+                Postgres.execute(sess, "insert into cmr_pubkeys_scopes values (\$1, \$2, \$3::cmr_scope)", [user_pubkey, pk, scope])
+            end
+            Postgres.execute(sess, "insert into cmr_pubkeys_parent values (\$1, \$2, \$3)", [user_pubkey, pk, p.parent])
+        end
+        for (grp, g) in cmr.groups
+            for scope in (isempty(g.scopes) ? [:content, :trending] : g.scopes)
+                Postgres.execute(sess, "insert into cmr_groups values (\$1, \$2::cmr_grp, \$3::cmr_scope)", [user_pubkey, grp, scope])
+            end
+        end
+        for pk in cmr.pubkeys_allowed
+            Postgres.execute(sess, "insert into cmr_pubkeys_allowed values (\$1, \$2)", [user_pubkey, pk])
+        end
+    end
+end
+
 is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId) = false
 is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId) = false
 

@@ -120,6 +120,46 @@ function ext_init(est::CacheStorage)
                                                 )",
                                                ])
 ##
+    est.dyn[:cmr_pubkeys_scopes] = est.params.DBSet(Nostr.PubKeyId, "cmr_pubkeys_scopes"; est.dbargs...,
+                              init_queries=["create table if not exists cmr_pubkeys_scopes (
+                                                user_pubkey bytea,
+                                                pubkey bytea not null,
+                                                scope cmr_scope not null
+                                            )",
+                                            "create index if not exists cmr_pubkeys_scopes_user_pubkey_pubkey_scope_idx on cmr_pubkeys_scopes (user_pubkey, pubkey, scope)",
+                                            ])
+    est.dyn[:cmr_pubkeys_parent] = est.params.DBSet(Nostr.PubKeyId, "cmr_pubkeys_parent"; est.dbargs...,
+                              init_queries=["create table if not exists cmr_pubkeys_parent (
+                                                user_pubkey bytea,
+                                                pubkey bytea not null,
+                                                parent bytea not null
+                                            )",
+                                            "create index if not exists cmr_pubkeys_parent_user_pubkey_pubkey_idx on cmr_pubkeys_parent (user_pubkey, pubkey)",
+                                            ])
+    est.dyn[:cmr_groups] = est.params.DBSet(Nostr.PubKeyId, "cmr_groups"; est.dbargs...,
+                              init_queries=["create table if not exists cmr_groups (
+                                                user_pubkey bytea,
+                                                grp cmr_grp not null,
+                                                scope cmr_scope not null
+                                            )",
+                                            "create index if not exists cmr_groups_user_pubkey_grp_scope_idx on cmr_groups (user_pubkey, grp, scope)",
+                                            ])
+    est.dyn[:cmr_pubkeys_allowed] = est.params.DBSet(Nostr.PubKeyId, "cmr_pubkeys_allowed"; est.dbargs...,
+                              init_queries=["create table if not exists cmr_pubkeys_allowed (
+                                                user_pubkey bytea,
+                                                pubkey bytea not null
+                                            )",
+                                            "create index if not exists cmr_pubkeys_allowed_user_pubkey_pubkey_idx on cmr_pubkeys_allowed (user_pubkey, pubkey)",
+                                            ])
+    est.dyn[:filterlist_pubkey] = est.params.DBSet(Nostr.PubKeyId, "filterlist_pubkey"; est.dbargs...,
+                              init_queries=["create table if not exists filterlist_pubkey (
+                                                pubkey bytea not null,
+                                                blocked bool not null,
+                                                grp filterlist_grp not null
+                                            )",
+                                            "create index if not exists filterlist_pubkey_pubkey_blocked_grp_idx on filterlist_pubkey (pubkey, blocked, grp)",
+                                            ])
+##
 end
 
 function insert_stuff(est::CacheStorage, data)
@@ -711,9 +751,25 @@ function ext_media_import(est::CacheStorage, eid::Union{Nothing,Nostr.EventId}, 
 
 function add_human_override(est::CacheStorage, pubkey::Nostr.PubKeyId, is_human::Bool, source::String)
     try
-        @show DB.exec(est.dyn[:human_override], "insert into human_override values (?1, ?2, now(), ?3) on conflict (pubkey) do update set is_human = ?2, source = ?3",
+        DB.exec(est.dyn[:human_override], "insert into human_override values (?1, ?2, now(), ?3) on conflict (pubkey) do update set is_human = ?2, source = ?3",
                       (pubkey, is_human, source))
-    catch ex println(typeof(ex)) end
+    catch ex println("add_human_override: ", typeof(ex)) end
 end
 
+function import_filterlists(est::CacheStorage)
+    Postgres.transaction(est.dbargs.connsel) do sess
+        Postgres.execute(sess, "delete from filterlist_pubkey")
+        for (b, grp) in [
+                  (:blocked, :spam),
+                  (:unblocked, :spam),
+                  (:blocked, :nsfw ),
+                  (:unblocked, :nsfw),
+                 ]
+            n = Symbol("access_pubkey_$(b)_$(grp)")
+            for pk in collect(getproperty(Filterlist, n))
+                Postgres.execute(sess, "insert into filterlist_pubkey values (\$1, \$2, \$3::filterlist_grp)", [pk, b == :blocked, grp])
+            end
+        end
+    end
+end
 
