@@ -56,6 +56,7 @@ function mkmetrics()
      readcalls=0,
      writebytes=0,
      writecalls=0,
+     resultcount=0,
     )
 end
 
@@ -87,6 +88,7 @@ function record!(body::Function, d::Symbol, key)
                     readcalls=0,
                     writebytes=0,
                     writecalls=0,
+                    resultcount=r.resultcount + (t.value isa Vector ? length(t.value) : 1),
                    )
     end
 
@@ -129,6 +131,7 @@ function recordspi!(body::Function, d::Symbol, backendpid::Int, key)
                     readcalls=r.readcalls+u.readcalls,
                     writebytes=r.writebytes+u.writebytes,
                     writecalls=r.writecalls+u.writecalls,
+                    resultcount=r.resultcount + (t.value isa Vector ? length(t.value) : 1),
                    )
     end
 
