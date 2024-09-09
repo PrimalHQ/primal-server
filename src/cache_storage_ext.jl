@@ -311,6 +311,10 @@ function ext_is_human(est::CacheStorage, pubkey::Nostr.PubKeyId)
     isempty(TrustRank.pubkey_rank) || get(TrustRank.pubkey_rank, pubkey, 0.0) > TrustRank.humaness_threshold[]
 end
 
+function is_trusted_user(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    get(TrustRank.pubkey_rank, pubkey, 0.0) > 0.0 || get(est.dyn[:human_override], pubkey, false)
+end
+
 # TODO refactor event scoring to use scheduled_hooks to expire scores
 function score_event_cb(est::CacheStorage, e::Nostr.Event, initiator, scored_at, action, increment)
     initiator = Nostr.PubKeyId(initiator)
@@ -712,7 +716,4 @@ function add_human_override(est::CacheStorage, pubkey::Nostr.PubKeyId, is_human:
     catch ex println(typeof(ex)) end
 end
 
-function is_trusted_user(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
-    get(TrustRank.pubkey_rank, pubkey, 0.0) > 0.0 || get(est.dyn[:human_override], pubkey, false)
-end
 

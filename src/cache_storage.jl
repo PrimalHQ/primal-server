@@ -1209,7 +1209,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             end
             if !isnothing(parent_eid)
                 incr(est, :replies)
-                ext_is_hidden(est, e.id) || event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
+                ext_is_hidden(est, e.id) || !is_trusted_user(est, e.pubkey) || event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
                 exe(est.event_replies, @sql("insert into event_replies (event_id, reply_event_id, reply_created_at) values (?1, ?2, ?3)"),
                     parent_eid, e.id, e.created_at)
                 event_pubkey_action(est, parent_eid, e, :replied)
