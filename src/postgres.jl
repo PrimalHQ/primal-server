@@ -437,6 +437,7 @@ function send_bind(io::IO, prepared_stmt_name, params::Vector; portal="")
                              if     p isa Bool; p ? "1" : "0"
                              elseif p isa Number; string(p)
                              elseif p isa String; p
+                             elseif p isa Symbol; string(p)
                              elseif p isa Dates.DateTime; replace(string(p), 'T'=>' ')
                              elseif p isa Vector{UInt8}; "\\x" * bytes2hex(p)
                              else
