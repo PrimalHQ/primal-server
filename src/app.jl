@@ -2144,7 +2144,7 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
         if !isnothing(eid) && (ext_is_hidden(est, eid) || eid in est.deleted_events)
             ok = false
         elseif !isnothing(pubkey)
-            if (funcall == :thread_view || funcall == :feed_directive || funcall == :mega_feed_directive) && !DB.is_trusted_user(est, pubkey)
+            if funcall == :thread_view && !DB.is_trusted_user(est, pubkey)
                 ok = false
                 continue
             end
