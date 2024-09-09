@@ -617,7 +617,7 @@ function feed_2(
         since::Union{Nothing,Int}=nothing, until::Union{Nothing,Int}=nothing, limit::Int=20, offset::Int=0, order::Union{Nothing,Symbol,String}=nothing,
         user_pubkey=nothing,
         time_exceeded=()->false,
-        usepgfunc=true,
+        usepgfuncs=false,
         apply_humaness_check=false,
     )
     limit <= 1000 || error("limit too big")
@@ -727,12 +727,10 @@ function feed_2(
     else
         tdur2 = @elapsed begin
             if notes == :follows
-                if usepgfunc == true
+                if usepgfuncs
                     q = "select distinct e, e->>'created_at' from feed_user_follows(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null order by e->>'created_at' desc"
-                    @time "feed_user_follows" res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
-                                                      @show [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, apply_humaness_check])]
-                    @show length(res)
-                    return res
+                    return [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
+                                                       [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, apply_humaness_check])]
                 end
                 if !isempty(Postgres.pex(DAG_OUTPUTS_DB[], "select 1 from pubkey_followers pf where pf.follower_pubkey = ?1 limit 1", (pubkey,)))
                     append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
@@ -1861,7 +1859,7 @@ function long_form_content_feed(
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
         time_exceeded=()->false,
-        usepgfunc=true,
+        usepgfuncs=false,
         apply_humaness_check=false,
     )
     limit <= 1000 || error("limit too big")
@@ -1869,11 +1867,10 @@ function long_form_content_feed(
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     notes = Symbol(notes)
 
-    if usepgfunc == true
+    if usepgfuncs
         q = "select distinct e, e->>'created_at' from long_form_content_feed(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11) f(e) where e is not null order by e->>'created_at' desc"
-        @time "long_form_content_feed" res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
-                                                                         @show [pubkey, notes, topic, curation, minwords, limit, since, until, offset, user_pubkey, apply_humaness_check])]
-        @show length(res)
+        res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
+                                           [pubkey, notes, topic, curation, minwords, limit, since, until, offset, user_pubkey, apply_humaness_check])]
         return res
     end
 
@@ -2176,7 +2173,7 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
     kwargs = Dict(kwargs)
     user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
 
-    if get(kwargs, :usepgfuncs, false) && (funcall == :feed || funcall == :feed_directive || funcall == :feed_directive_2 || funcall == :long_form_content_feed || funcall == :mega_feed_directive)
+    if get(kwargs, :usepgfuncs, false) && (funcall == :feed || funcall == :long_form_content_feed || funcall == :mega_feed_directive)
         return res
     end
 
@@ -2319,6 +2316,7 @@ reads_feed_directive(est::DB.CacheStorage; kwargs...) = mega_feed_directive(est;
 function mega_feed_directive(
         est::DB.CacheStorage;
         spec::String,
+        usepgfuncs=false,
         kwargs...,
     )
     # @show (spec, kwargs)
@@ -2332,9 +2330,9 @@ function mega_feed_directive(
     elseif get(s, "id", "") == "reads-feed" || get(s, "kind", "") == "reads"
         minwords = get(s, "minwords", 100)
         if get(s, "scope", "") == "follows"
-            return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:follows, minwords, kwargs...)
+            return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:follows, minwords, kwargs..., usepgfuncs)
         elseif get(s, "scope", "") == "zappedbyfollows"
-            return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:zappedbyfollows, minwords, kwargs...)
+            return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:zappedbyfollows, minwords, kwargs..., usepgfuncs)
         elseif get(s, "scope", "") == "myfollowsinteractions"
             in_pgspi() && return [] 
             req = (; user_pubkey=kwa[:user_pubkey], specification=["advanced_search", (; query="kind:30023 scope:myfollowsinteractions minwords:$(minwords)")], eventidsonly=true, kwargs...)
@@ -2344,11 +2342,11 @@ function mega_feed_directive(
             append!(res, parametrized_replaceable_events_extended_response(est, eids))
             return vcat(res, range(posts, :created_at))
         elseif haskey(s, "topic")
-            return long_form_content_feed(est; topic=s["topic"], minwords, kwargs...)
+            return long_form_content_feed(est; topic=s["topic"], minwords, kwargs..., usepgfuncs)
         elseif haskey(s, "pubkey") && haskey(s, "curation")
-            return long_form_content_feed(est; pubkey=s["pubkey"], curation=s["curation"], minwords, kwargs...)
+            return long_form_content_feed(est; pubkey=s["pubkey"], curation=s["curation"], minwords, kwargs..., usepgfuncs)
         else
-            return long_form_content_feed(est; minwords, kwargs...)
+            return long_form_content_feed(est; minwords, kwargs..., usepgfuncs)
         end
 
     elseif get(s, "kind", "") == "notes"
@@ -2366,7 +2364,7 @@ function mega_feed_directive(
             return advanced_search(est; query="kind:1 scope:myfollowsinteractions", kwargs...)
         elseif s["id"] == "feed"
             skwa = [Symbol(k)=>v for (k, v) in s if !(k in ["id", "kind"])]
-            return feed(est; skwa..., kwargs...)
+            return feed(est; skwa..., kwargs..., usepgfuncs)
         end
 
     end

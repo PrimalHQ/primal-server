@@ -18,6 +18,7 @@ MAX_SUBSCRIPTIONS = Ref(200)
 
 ENABLE_SPI = Ref(false)
 ENABLE_DIST = Ref(false)
+ENABLE_PGFUNCS = Ref(false)
 
 Tsubid = String
 Tfilters = Vector{Any}
@@ -277,6 +278,12 @@ function initial_filter_handler(conn::Conn, subid, filters)
                     
                     kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
 
+                    if ENABLE_PGFUNCS[]
+                        if funcall == :feed || funcall == :feed_2 || funcall == :long_form_content_feed || funcall == :mega_feed_directive
+                            push!(kwargs, :usepgfuncs=>true)
+                        end
+                    end
+
                     isnothing(conn.user[]) && for (k, v) in kwargs
                         if k == :user_pubkey 
                             try conn.user[] = Nostr.PubKeyId(v) catch _ end
@@ -287,12 +294,9 @@ function initial_filter_handler(conn::Conn, subid, filters)
 
                     afc = app_funcall
                     if ENABLE_SPI[]
-                        # @show funcall
                         if (funcall == :feed_directive || funcall == :feed_directive_2) && startswith(Dict(kwargs)[:directive], "search;")
-                            # @show (:feed_directive_override, funcall, kwargs)
                             afc = app_funcall
                         elseif funcall in app_funcalls_external
-                            # @show (:spi, funcall)
                             afc = app_funcall_external(App().AppSPI)
                         end
                     elseif ENABLE_DIST[]
