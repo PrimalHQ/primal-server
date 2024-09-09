@@ -605,6 +605,8 @@ function feed_2(
         since::Union{Nothing,Int}=nothing, until::Union{Nothing,Int}=nothing, limit::Int=20, offset::Int=0, order::Union{Nothing,Symbol,String}=nothing,
         user_pubkey=nothing,
         time_exceeded=()->false,
+        usepgfunc=true,
+        apply_humaness_check=false,
     )
     limit <= 1000 || error("limit too big")
 
@@ -713,6 +715,13 @@ function feed_2(
     else
         tdur2 = @elapsed begin
             if notes == :follows
+                if usepgfunc == true
+                    q = "select distinct e, e->>'created_at' from feed_user_follows(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null order by e->>'created_at' desc"
+                    @time "feed_user_follows" res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
+                                                      @show [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, apply_humaness_check])]
+                    @show length(res)
+                    return res
+                end
                 if !isempty(Postgres.pex(DAG_OUTPUTS_DB[], "select 1 from pubkey_followers pf where pf.follower_pubkey = ?1 limit 1", (pubkey,)))
                     append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
                                                            "select pe.event_id, pe.created_at 
@@ -1840,11 +1849,21 @@ function long_form_content_feed(
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
         time_exceeded=()->false,
+        usepgfunc=true,
+        apply_humaness_check=false,
     )
     limit <= 1000 || error("limit too big")
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     notes = Symbol(notes)
+
+    if usepgfunc == true
+        q = "select distinct e, e->>'created_at' from long_form_content_feed(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11) f(e) where e is not null order by e->>'created_at' desc"
+        @time "long_form_content_feed" res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
+                                                                         @show [pubkey, notes, topic, curation, minwords, limit, since, until, offset, user_pubkey, apply_humaness_check])]
+        @show length(res)
+        return res
+    end
 
     topic_where(P) = isnothing(topic) ? "" : "and topics @@ plainto_tsquery('simple', $(@P replace(topic, ' '=>'-')))"
 
@@ -2144,6 +2163,10 @@ funcall_content_moderation_scope =
 function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funcall::Symbol, kwargs) 
     kwargs = Dict(kwargs)
     user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
+
+    if get(kwargs, :usepgfuncs, false) && (funcall == :feed || funcall == :feed_directive || funcall == :feed_directive_2 || funcall == :long_form_content_feed || funcall == :mega_feed_directive)
+        return res
+    end
 
     cmr = compile_content_moderation_rules(est, user_pubkey)
 

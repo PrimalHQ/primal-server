@@ -1768,6 +1768,83 @@ function parse_zap_receipt(tags::Vector)
     (; eid, pubkey, amount_sats)
 end
 
+function import_event_mentions(est::DB.CacheStorage, e::Nostr.Event; connsel=est.dbargs.connsel)
+    DB.for_mentiones(est, e) do tag
+        tag = tag.fields
+        argeid = argpubkey = argkind = argid = nothing
+        if length(tag) >= 2
+            if tag[1] == "e" && !isnothing(local subeid = try Nostr.EventId(tag[2]) catch _ end)
+                argeid = subeid
+            elseif tag[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag[2]) catch _ end)
+                argpubkey = pk
+            elseif tag[1] == "a"
+                if !isnothing(local args = try
+                                  kind, pk, identifier = map(string, split(tag[2], ':'))
+                                  kind = parse(Int, kind)
+                                  (Nostr.PubKeyId(pk), kind, identifier)
+                              catch _ end)
+                    argpubkey, argkind, argid = args
+                end
+            end
+        end
+        if !isnothing(argeid) || !isnothing(argpubkey)
+            Postgres.execute(connsel, "
+                             insert into $(event_mentions.table)
+                             values (\$1, \$2, \$3, \$4, \$5, \$6)
+                             on conflict (eid) do nothing
+                             ",
+                             [e.id, tag[1], arge, argp, argkind, argid])
+        end
+    end
+end
+
+function event_mentions_node(
+        events::ServerTable,
+        parametrized_replaceable_events::ServerTable;
+        runctx::RunCtx,
+        version=1,
+        since=max(runctx.since, current_time() - 10*24*3600),
+        until=min(runctx.until, current_time()),
+    )
+    event_mentions = dbtable(:postgres, runctx.targetserver, "event_mentions", version, 
+                    [
+                     events,
+                     parametrized_replaceable_events,
+                    ],
+                    [
+                     (:eid, EventId),
+                     (:tag, Char), 
+                     (:argeid, (EventId, "")),
+                     (:argpubkey, (PubKeyId, "")),
+                     (:argkind, (Int, "")),
+                     (:argid, (String, "")),
+
+                     "primary key (eid)",
+                    ],
+                    [
+                    ];
+                    runtag=runctx.runtag)
+
+    # step = nothing
+    step = 1*24*3600
+
+    process_segments([event_mentions, 1]; runctx, step, since, until) do t1, t2
+        transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
+            for r in Postgres.execute(session1, "
+                                      select * from $(events.table)
+                                      where 
+                                        imported_at >= \$1 and imported_at <= \$2 and
+                                        (kind = $(Int(Nostr.TEXT_NOTE)) or kind = $(Int(Nostr.LONG_FORM_CONTENT)) or kind = $(Int(Nostr.REPOST)))
+                                      ", [t1, t2])[2]
+                e = event_from_row(r)
+                import_event_mentions(runctx.est, e; connsel=session1)
+            end
+        end
+    end
+
+    (; event_mentions)
+end
+
 function postgres_dbtable_code_from_sqlite(source, destname::String)
     columns = []
     indexes = []
@@ -2555,6 +2632,7 @@ function sqlite2pg_node(;
                :kind,
                :identifier,
                :created_at,
+               :event_id,
                :rowid,
               ];
               runctx.runtag)),
