@@ -482,7 +482,7 @@ function response_messages_for_posts(
         # 1==1 && if user_pubkey == Main.test_pubkeys[:qa]
             e.kind == Int(Nostr.LONG_FORM_CONTENT) && for t in e.tags
                 if length(t.fields) >= 2 && t.fields[1] == "d"
-                    # @show identifier = t.fields[2]
+                    identifier = t.fields[2]
                     union!(res, [e for e in event_zaps_by_satszapped(est; pubkey=e.pubkey, identifier, limit=5, user_pubkey)
                                  if e.kind != Int(RANGE) && e.kind != Int(Nostr.TEXT_NOTE) && e.kind != Int(Nostr.LONG_FORM_CONTENT)])
                     break
