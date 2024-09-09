@@ -367,11 +367,11 @@ function process_collection(
         running=PressEnterToStop()|>ThreadSafe,
         errors=Ref(0)|>ThreadSafe,
         error_kinds=DataStructures.Accumulator{String,Int}()|>ThreadSafe,
+        usethreads=true,
     )
     i = Ref(0) |> ThreadSafe
-    Threads.@threads for x in collection
-        yield()
-        running[] || break
+
+    function process_element(x)
         f = nothing
         try 
             f = body(x)
@@ -393,6 +393,21 @@ function process_collection(
             end
         end
     end
+
+    if usethreads
+        Threads.@threads for x in collection
+            yield()
+            running[] || break
+            process_element(x)
+        end
+    else
+        for x in collection
+            yield()
+            running[] || break
+            process_element(x)
+        end
+    end
+
     (; running, errors, error_kinds)
 end
 
