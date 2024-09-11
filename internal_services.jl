@@ -627,16 +627,24 @@ function api_handler(req::HTTP.Request)
         host = Dict(req.headers)["Host"]
         filt = JSON.parse(body)
         funcall = Symbol(filt[1])
+
         @assert funcall in Main.App.exposed_functions
         kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
         res = Ref{Any}(nothing)
+
         try
-            Base.invokelatest(Main.CacheServerHandlers.app_funcall, funcall, kwargs, function(r); res[] = r; end)
+            Main.CacheServerHandlers.metrics_logged(funcall, kwargs; subid="http") do
+                wait(Threads.@spawn Base.invokelatest(Main.CacheServerHandlers.app_funcall, funcall, kwargs, 
+                                                      function(r)
+                                                          res[] = Main.App.content_moderation_filtering_2(est[], r, funcall, kwargs)
+                                                      end))
+            end
         catch ex
             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
             ex isa TaskFailedException && (ex = ex.task.result)
             res[] = (; error=(ex isa ErrorException ? ex.msg : "error"))
         end
+
         HTTP.Response(200, api_headers, JSON.json(res[]))
     end
 end
