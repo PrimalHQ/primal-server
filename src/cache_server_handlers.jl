@@ -210,6 +210,14 @@ app_funcalls_external = Set([
                             # :mega_feed_directive, # FIXME (create temps -> pubkey_followers)
                             :enrich_feed_events,
                            ])
+app_funcalls_with_pgfuncs = Set([
+                                 :feed,
+                                 :feed_2,
+                                 :long_form_content_feed,
+                                 :mega_feed_directive,
+                                 :user_infos,
+                                 :thread_view,
+                                ])
 end)
 ##
 function app_funcall_external(app)
@@ -279,8 +287,9 @@ function initial_filter_handler(conn::Conn, subid, filters)
                     kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
 
                     if ENABLE_PGFUNCS[]
-                        if funcall == :feed || funcall == :feed_2 || funcall == :long_form_content_feed || funcall == :mega_feed_directive
+                        if funcall in app_funcalls_with_pgfuncs
                             push!(kwargs, :usepgfuncs=>true)
+                            push!(kwargs, :apply_humaness_check=>true)
                         end
                     end
 
@@ -310,6 +319,9 @@ function initial_filter_handler(conn::Conn, subid, filters)
                     tdur = @elapsed afc(funcall, kwargs, 
                         res->(App().content_moderation_filtering_2(est(), res, funcall, kwargs)) |> sendres; 
                         subid, ws_id)
+
+                    # tdur >= 0.1 && println(Main.App.Dates.now(), "  ", funcall, "  ", tdur, " s")
+
                 elseif funcall in App().exposed_async_functions
                     sendres([])
                 else

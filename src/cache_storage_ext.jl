@@ -151,13 +151,15 @@ function ext_init(est::CacheStorage)
                                             )",
                                             "create index if not exists cmr_pubkeys_allowed_user_pubkey_pubkey_idx on cmr_pubkeys_allowed (user_pubkey, pubkey)",
                                             ])
-    est.dyn[:filterlist_pubkey] = est.params.DBSet(Nostr.PubKeyId, "filterlist_pubkey"; est.dbargs...,
-                              init_queries=["create table if not exists filterlist_pubkey (
-                                                pubkey bytea not null,
+##
+    est.dyn[:filterlist] = est.params.DBSet(Vector{UInt8}, "filterlist"; est.dbargs...,
+                              init_queries=["create table if not exists filterlist (
+                                                target bytea not null,
+                                                target_type filterlist_target not null,
                                                 blocked bool not null,
-                                                grp filterlist_grp not null
+                                                grp filterlist_grp not null,
+                                                primary key (target, target_type, blocked, grp)
                                             )",
-                                            "create index if not exists filterlist_pubkey_pubkey_blocked_grp_idx on filterlist_pubkey (pubkey, blocked, grp)",
                                             ])
 ##
 end
@@ -758,16 +760,22 @@ end
 
 function import_filterlists(est::CacheStorage)
     Postgres.transaction(est.dbargs.connsel) do sess
-        Postgres.execute(sess, "delete from filterlist_pubkey")
-        for (b, grp) in [
-                  (:blocked, :spam),
-                  (:unblocked, :spam),
-                  (:blocked, :nsfw ),
-                  (:unblocked, :nsfw),
-                 ]
-            n = Symbol("access_pubkey_$(b)_$(grp)")
-            for pk in collect(getproperty(Filterlist, n))
-                Postgres.execute(sess, "insert into filterlist_pubkey values (\$1, \$2, \$3::filterlist_grp)", [pk, b == :blocked, grp])
+        Postgres.execute(sess, "delete from filterlist")
+        ns = names(Filterlist; all=true)
+        for ty in [:pubkey, :event]
+            for (b, grp) in [
+                      (:blocked, :spam),
+                      (:unblocked, :spam),
+                      (:blocked, :nsfw ),
+                      (:unblocked, :nsfw),
+                     ]
+                n = Symbol("access_$(ty)_$(b)_$(grp)")
+                if n in ns
+                    println(n)
+                    for v in collect(getproperty(Filterlist, n))
+                        Postgres.execute(sess, "insert into filterlist values (\$1, \$2::filterlist_target, \$3, \$4::filterlist_grp)", [v, ty, b == :blocked, grp])
+                    end
+                end
             end
         end
     end

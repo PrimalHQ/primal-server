@@ -11,9 +11,10 @@ CREATE OR REPLACE FUNCTION public.c_USER_SCORES() RETURNS int LANGUAGE sql IMMUT
 CREATE OR REPLACE FUNCTION public.c_RANGE() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000113';
 CREATE OR REPLACE FUNCTION public.c_EVENT_ACTIONS_COUNT() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000115';
 CREATE OR REPLACE FUNCTION public.c_MEDIA_METADATA() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000119';
-CREATE OR REPLACE FUNCTION public.c_EVENT_RELAYS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000141';
 CREATE OR REPLACE FUNCTION public.c_LINK_METADATA() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000128';
 CREATE OR REPLACE FUNCTION public.c_ZAP_EVENT() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000129';
+CREATE OR REPLACE FUNCTION public.c_USER_FOLLOWER_COUNTS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000133';
+CREATE OR REPLACE FUNCTION public.c_EVENT_RELAYS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000141';
 CREATE OR REPLACE FUNCTION public.c_LONG_FORM_METADATA() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000144';
 
 CREATE OR REPLACE FUNCTION public.count_jsonb_keys(j jsonb) RETURNS bigint LANGUAGE sql
@@ -24,19 +25,15 @@ AS $$ SELECT count(*) from (SELECT jsonb_object_keys(j)) v $$;
 CREATE OR REPLACE FUNCTION public.event_is_deleted(a_event_id bytea) RETURNS bool
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
-SELECT
-    EXISTS (
-        SELECT 1
-        FROM deleted_events
-        WHERE event_id = a_event_id
-        LIMIT 1
-    )
+SELECT EXISTS (SELECT 1 FROM deleted_events WHERE event_id = a_event_id)
 $BODY$;
 
 CREATE TYPE cmr_scope AS ENUM ('content', 'trending');
 CREATE TYPE cmr_grp AS ENUM ('primal_spam', 'primal_nsfw');
 CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw');
+CREATE TYPE filterlist_target AS ENUM ('pubkey', 'event');
     
+/* TODO: reimplement to use filterlist table */
 CREATE OR REPLACE FUNCTION public.is_pubkey_hidden_by_group(a_user_pubkey bytea, a_scope cmr_scope, a_pubkey bytea, a_cmr_grp cmr_grp, a_fl_grp filterlist_grp) RETURNS bool
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
@@ -46,8 +43,7 @@ SELECT
         WHERE 
             cmr.user_pubkey = a_user_pubkey AND cmr.grp = a_cmr_grp AND cmr.scope = a_scope AND 
             fl.pubkey = a_pubkey AND fl.blocked AND fl.grp = a_fl_grp AND
-            NOT EXISTS (SELECT 1 FROM filterlist_pubkey fl2 WHERE fl2.pubkey = a_pubkey AND NOT fl2.blocked LIMIT 1)
-        LIMIT 1)
+            NOT EXISTS (SELECT 1 FROM filterlist_pubkey fl2 WHERE fl2.pubkey = a_pubkey AND NOT fl2.blocked))
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_pubkey bytea) RETURNS bool
@@ -56,14 +52,14 @@ AS $BODY$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM cmr_pubkeys_allowed
-        WHERE user_pubkey = a_user_pubkey AND pubkey = a_pubkey LIMIT 1
+        WHERE user_pubkey = a_user_pubkey AND pubkey = a_pubkey
     ) THEN
         RETURN false;
     END IF;
 
     IF EXISTS (
         SELECT 1 FROM cmr_pubkeys_scopes
-        WHERE user_pubkey = a_user_pubkey AND pubkey = a_pubkey AND scope = a_scope LIMIT 1
+        WHERE user_pubkey = a_user_pubkey AND pubkey = a_pubkey AND scope = a_scope
     ) THEN
         RETURN true;
     END IF;
@@ -72,6 +68,12 @@ BEGIN
         is_pubkey_hidden_by_group(a_user_pubkey, a_scope, a_pubkey, 'primal_spam', 'spam') OR
         is_pubkey_hidden_by_group(a_user_pubkey, a_scope, a_pubkey, 'primal_nsfw', 'nsfw');
 END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.is_event_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_event_id bytea) RETURNS bool
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT EXISTS (SELECT 1 FROM events WHERE events.id = a_event_id AND is_pubkey_hidden(a_user_pubkey, a_scope, events.pubkey))
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.user_is_human(a_pubkey bytea) RETURNS bool
@@ -179,27 +181,6 @@ AS $BODY$
 $BODY$;
 
 CREATE TYPE media_size AS ENUM ('original', 'small', 'medium', 'large');
-
-CREATE OR REPLACE FUNCTION cdn_url(a_url varchar, a_size varchar, a_animated bool) RETURNS varchar
-LANGUAGE plrust IMMUTABLE PARALLEL SAFE AS $$
-[dependencies]
-    urlencoding = "2.1.3"
-[code]
-    /* Ok(Some("aaaa".to_string())) */
-    let mut url = String::from("https://primal.b-cdn.net/media-cache");
-    url.push_str("?s=");
-    match a_size.unwrap().chars().nth(0) {
-        None => panic!("a_url is empty"),
-        Some(c) => url.push(c)
-    };
-    url.push_str("&a=");
-    url.push(if a_animated.unwrap() { '1' } else { '0' });
-    url.push_str("&u=");
-    url.push_str(&urlencoding::encode(&a_url.unwrap()).into_owned());
-    Ok(Some(url))
-$$;
-
-    /* 'https://primal.b-cdn.net/media-cache?' || SUBSTR(a_size::varchar, 1, 1) || '&a=' || (animated::int::varchar) || '&u=' || $(URIs.escapeuri(url))" */
 
 CREATE OR REPLACE FUNCTION public.event_media_response(a_event_id bytea) RETURNS SETOF jsonb 
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
@@ -573,6 +554,28 @@ SELECT * FROM enrich_feed_events(
     a_user_pubkey, a_apply_humaness_check)
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.feed_user_authored(
+        a_pubkey bytea,
+        a_since bigint,
+        a_until bigint,
+        a_include_replies bigint,
+        a_limit bigint,
+        a_offset bigint,
+        a_user_pubkey bytea, 
+        a_apply_humaness_check bool) 
+	RETURNS SETOF jsonb
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT * FROM enrich_feed_events(
+    ARRAY (
+        select (pe.event_id, pe.created_at)::post
+        from pubkey_events pe
+        where pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and (pe.is_reply = 0 or pe.is_reply = a_include_replies)
+        order by pe.created_at desc limit a_limit offset a_offset
+    ),
+    a_user_pubkey, a_apply_humaness_check)
+$BODY$;
+
 CREATE OR REPLACE FUNCTION public.long_form_content_feed(
         a_pubkey bytea DEFAULT null, a_notes varchar DEFAULT 'follows',
         a_topic varchar DEFAULT null,
@@ -637,7 +640,7 @@ BEGIN
                     reads.words >= a_minwords
                     and (a_topic is null or topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
                 order by published_at desc limit a_limit offset a_offset) r);
-        ELSIF a_notes == 'authored' THEN
+        ELSIF a_notes = 'authored' THEN
             posts := ARRAY (select distinct r.p FROM (
                 select (reads.latest_eid, reads.published_at)::post as p
                 from reads
@@ -655,3 +658,86 @@ BEGIN
     RETURN QUERY SELECT * FROM enrich_feed_events(posts, a_user_pubkey, a_apply_humaness_check);
 END
 $BODY$;
+
+CREATE OR REPLACE FUNCTION public.user_infos(a_pubkeys text[])
+	RETURNS SETOF jsonb
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT * FROM user_infos(ARRAY (SELECT DECODE(UNNEST(a_pubkeys), 'hex')))
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.user_infos(a_pubkeys bytea[])
+	RETURNS SETOF jsonb
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    mdeid bytea;
+    r jsonb;
+BEGIN
+    FOR mdeid IN SELECT value FROM meta_data WHERE key = ANY(a_pubkeys) LOOP
+        RETURN NEXT get_event_jsonb(mdeid);
+        RETURN QUERY SELECT * FROM event_media_response(mdeid);
+        RETURN QUERY SELECT * FROM event_preview_response(mdeid);
+    END LOOP;
+
+    SELECT json_object_agg(ENCODE(key, 'hex'), value) INTO r FROM pubkey_followers_cnt WHERE key = ANY(a_pubkeys);
+
+	RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', r::text);
+	RETURN NEXT jsonb_build_object('kind', c_USER_FOLLOWER_COUNTS(), 'content', r::text);
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.thread_view(
+    a_event_id bytea,
+    a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0, a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0,
+    a_user_pubkey bytea DEFAULT null,
+    a_apply_humaness_check bool DEFAULT false)
+	RETURNS SETOF jsonb
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    IF NOT is_event_hidden(a_user_pubkey, 'content', a_event_id) AND NOT event_is_deleted(a_event_id) AND 
+        NOT EXISTS (SELECT 1 FROM filterlist WHERE target = a_event_id AND target_type = 'event' AND grp = 'spam' AND blocked)
+    THEN
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT r FROM thread_view_reply_posts(
+                a_event_id, 
+                a_limit, a_since, a_until, a_offset) r),
+            a_user_pubkey, a_apply_humaness_check);
+    END IF;
+
+    RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+        ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
+        a_user_pubkey, a_apply_humaness_check);
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.thread_view_reply_posts(
+    a_event_id bytea,
+    a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0, a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0)
+	RETURNS SETOF post
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+select reply_event_id, reply_created_at from event_replies
+where event_id = a_event_id and reply_created_at >= a_since and reply_created_at <= a_until
+order by reply_created_at desc limit a_limit offset a_offset;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.thread_view_parent_posts(a_event_id bytea)
+	RETURNS SETOF post
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    peid bytea := a_event_id;
+BEGIN
+    WHILE true LOOP
+        RETURN QUERY SELECT peid, created_at FROM events WHERE id = peid;
+        FOR peid IN SELECT value FROM event_thread_parents WHERE key = peid LOOP
+        END LOOP;
+        IF NOT FOUND THEN
+            EXIT;
+        END IF;
+    END LOOP;
+END
+$BODY$;
+
