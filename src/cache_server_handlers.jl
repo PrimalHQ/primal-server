@@ -125,11 +125,8 @@ end
 est() = Main.eval(:(cache_storage))
 App() = Main.eval(:(App))
 
-function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing, est_=nothing)
-    # @show funcall
-    isnothing(est_) && (est_ = est())
-    # ext_funcall(funcall, kwargs, kwargs_extra, ws_id)
-    MetricsLogger.log(r->begin
+function metrics_logged(body::Function, funcall::Symbol, kwargs; ws_id=nothing, subid=nothing)
+    MetricsLogger.log(body, r->begin
                           lock(max_request_duration) do max_request_duration
                               max_request_duration[] = max(max_request_duration[], r.time)
                           end
@@ -137,25 +134,31 @@ function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol,
                               requests_per_period[] += 1
                           end
                           (; funcall, kwargs, ws=string(ws_id), subid)
-                      end) do
-    fetch(Threads.@spawn with_time_limit() do time_exceeded
-              # Base.current_task().sticky = true
+                      end)
+end
 
-              funcall in [:feed, :get_notifications] && push!(kwargs, :time_exceeded=>time_exceeded)
-              res = []
+function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing, est_=nothing)
+    # @show funcall
+    isnothing(est_) && (est_ = est())
+    metrics_logged(funcall, kwargs; ws_id, subid) do
+        fetch(Threads.@spawn with_time_limit() do time_exceeded
+                  # Base.current_task().sticky = true
 
-              PerfStats.record!(:funcalls, funcall) do
-                  # PerfStats.record!(:funcalls2, (funcall, kwargs)) do
+                  funcall in [:feed, :get_notifications] && push!(kwargs, :time_exceeded=>time_exceeded)
+                  res = []
+
+                  PerfStats.record!(:funcalls, funcall) do
+                      # PerfStats.record!(:funcalls2, (funcall, kwargs)) do
                       append!(res, Base.invokelatest(getproperty(App(), funcall), est_; kwargs..., kwargs_extra...))
                       if time_exceeded()
                           # @show (:time_exceeded, Dates.now(), funcall)
                           push!(res, (; kind=App().PARTIAL_RESPONSE))
                       end
-                  # end
-              end
+                      # end
+                  end
 
-              res
-          end)
+                  res
+              end)
     end |> sendres
 end
 
@@ -224,15 +227,7 @@ function app_funcall_external(app)
     function (funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing)
         # @show funcall
         function call()
-            MetricsLogger.log(r->begin
-                                  lock(max_request_duration) do max_request_duration
-                                      max_request_duration[] = max(max_request_duration[], r.time)
-                                  end
-                                  lock(requests_per_period) do requests_per_period
-                                      requests_per_period[] += 1
-                                  end
-                                  (; funcall, kwargs, ws=string(ws_id), subid)
-                              end) do
+            metrics_logged(funcall, kwargs; ws_id, subid) do
                 res = fetch(@async Base.invokelatest(getproperty(app, funcall), nothing; kwargs...)) 
                 # @show (funcall, length(res))
                 res |> sendres
