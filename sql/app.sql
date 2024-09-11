@@ -741,3 +741,10 @@ BEGIN
 END
 $BODY$;
 
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER LANGUAGE 'plpgsql' AS $BODY$
+BEGIN
+   NEW.updated_at = now();
+   RETURN NEW;
+END; $BODY$ 
+

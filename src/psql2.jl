@@ -107,6 +107,7 @@ sqltype(::Type{PGDict{K, V}}, ::Type{Vector{UInt8}}) where {K, V} = "bytea"
 sqltype(::Type{PGDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = "text"
 sqltype(::Type{PGDict{K, V}}, ::Type{Dates.DateTime}) where {K, V} = "timestamp"
 sqltype(::Type{PGDict{K, V}}, ::Type{Base.UUID}) where {K, V} = "uuid"
+sqltype(::Type{PGDict{K, V}}, ::Type{Any}) where {K, V} = "jsonb"
 
 db_conversion_funcs(::Type{PGDict{K, V}}, ::Type{Missing}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{PGDict{K, V}}, ::Type{Nothing}) where {K, V} = DBConversionFuncs(identity, identity)

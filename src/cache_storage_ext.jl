@@ -162,6 +162,17 @@ function ext_init(est::CacheStorage)
                                             )",
                                             ])
 ##
+    est.dyn[:cache] = est.params.DBDict(String, Any, "cache"; est.dbargs...,
+                                        valuefuncs=DB.DBConversionFuncs(JSON.json, identity),
+                                        init_queries=["create unlogged table if not exists cache (
+                                                      key text not null,
+                                                      value jsonb not null,
+                                                      updated_at timestamp not null default now(),
+                                                      primary key (key)
+                                                      ) tablespace ramdisk1",
+                                                      raw"DO $$BEGIN CREATE TRIGGER update_cache_updated_at BEFORE UPDATE ON cache FOR EACH ROW EXECUTE PROCEDURE update_updated_at(); EXCEPTION WHEN duplicate_object THEN NULL; END;$$;",
+                                                     ])
+##
 end
 
 function insert_stuff(est::CacheStorage, data)

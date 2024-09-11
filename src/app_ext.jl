@@ -150,12 +150,19 @@ struct CachedFunction
     updated_at::Ref{Int}
     execution_time::Ref{Float64}
 end
+
 cached_functions = Dict{Symbol, CachedFunction}() |> ThreadSafe
 
-function register_cache_function(funcname, f, period)
-    cached_functions[funcname] = CachedFunction(f, period, nothing, 0, 0)
-
+function unregister_cached_function(funcname::Symbol)
+    delete!(cached_functions, funcname)
     filter!(p->p[1]!=funcname, periodics)
+    nothing
+end
+
+function register_cache_function(funcname::Symbol, f, period)
+    unregister_cached_function(funcname)
+
+    cached_functions[funcname] = CachedFunction(f, period, nothing, 0, 0)
 
     push!(periodics, (funcname,
                       function (est)
@@ -166,6 +173,7 @@ function register_cache_function(funcname, f, period)
                           end
                       end,
                       Throttle(; period, t=0)))
+    nothing
 end
 
 function cached_functions_report()
@@ -422,6 +430,10 @@ function scored_users_24h(est::DB.CacheStorage; user_pubkey=nothing)
 end
 
 function scored(est::DB.CacheStorage; selector, user_pubkey=nothing)
+    get(est.dyn[:cache], "precalculated_analytics_$selector", [])
+end
+
+function scored_(est::DB.CacheStorage; selector, user_pubkey=nothing)
     if     selector == "trending_24h"; explore_global_trending(est, 24; user_pubkey)
     elseif selector == "trending_12h"; explore_global_trending(est, 12; user_pubkey)
     elseif selector == "trending_4h";  explore_global_trending(est, 4; user_pubkey)
@@ -483,6 +495,22 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0, user_pu
     push!(res, (; kind=Int(USER_SCORES), content=JSON.json(Dict([(Nostr.hex(pk), v) for (pk, v) in pubkeys]))))
 
     res
+end
+
+function precalculate_analytics(est::DB.CacheStorage)
+    for selector in [
+        "trending_24h",
+        "trending_12h",
+        "trending_4h",
+        "trending_1h",
+        "mostzapped_24h",
+        "mostzapped_12h",
+        "mostzapped_4h",
+        "mostzapped_1h",
+       ]
+        r = scored_(est; selector)
+        est.dyn[:cache]["precalculated_analytics_$selector"] = r
+    end
 end
 
 function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dict)
