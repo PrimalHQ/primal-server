@@ -858,9 +858,11 @@ function thread_view_parents(est::DB.CacheStorage; event_id, user_pubkey=nothing
     response_messages_for_posts(est, reids; user_pubkey)
 end
 
+NETWORK_STATS_URL = Ref{Any}(nothing)
+
 function network_stats(est::DB.CacheStorage)
-    if est.readonly[]
-        r = JSON.parse(String(HTTP.request("GET", "http://192.168.13.7:14017/api", [], JSON.json(["network_stats", (;)])).body))
+    if !isnothing(NETWORK_STATS_URL[])
+        r = JSON.parse(String(HTTP.request("GET", NETWORK_STATS_URL[], [], JSON.json(["network_stats", (;)])).body))
         (; kind=Int(NET_STATS), content=r[2])
     else
         lock(est.commons.stats) do stats
@@ -1682,8 +1684,9 @@ function event_zaps_by_satszapped(
     response_messages_for_zaps(est, zaps; order_by=:amount_sats, user_pubkey)
 end
 
+server_index() = Int(Sockets.getipaddr().host >> 8 & 0xff)-10
 function server_name(est::DB.CacheStorage)
-    [(; content=JSON.json(Int(Sockets.getipaddr().host >> 8 & 0xff)-10))]
+    [(; content=JSON.json(server_index()))]
 end
 
 REPLICATE_TO_SERVERS = []
