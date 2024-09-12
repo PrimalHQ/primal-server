@@ -7,7 +7,7 @@ mkShell {
     julia
     secp256k1
     gcc
-    postgresql
+    postgresql_15
     ephemeralpg
     gawk
   ];

@@ -266,7 +266,7 @@ export move_cursor
 move_cursor(io, row, col) = print(io, TUI.Terminals.CSI, TUI.INDICES[row], ';', TUI.INDICES[col], 'H')
 move_cursor(row, col) = move_cursor(stdout, row, col)
 export clear_screen
-clear_screen(io) = print(io, TUI.CLEARSCREEN)
+clear_screen(io) = print(io, "\e[2J")
 clear_screen() = clear_screen(stdout)
 
 #ST(T) = T.types[1]

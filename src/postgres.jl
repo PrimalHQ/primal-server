@@ -92,6 +92,13 @@ const USE_TASK_LOCAL_STORAGE = Ref(true)
 const pg_to_jl_type_conversion = Dict{Int32, Function}()
 const jl_to_pg_type_conversion = Dict{Type, Function}()
 
+prepared_queries = Threads.Atomic{Int}(0)
+executed_queries = Threads.Atomic{Int}(0)
+received_message_bytes = Threads.Atomic{Int}(0)
+sent_message_bytes = Threads.Atomic{Int}(0)
+
+@inline incr(x::Threads.Atomic{Int}; by::Int=1) = Threads.atomic_add!(x, by)
+
 @inline function log_time(; kwargs...)
     println("$(Dates.now())  $(JSON.json(kwargs))")
 end
@@ -380,6 +387,7 @@ function send_message(io::IO, msg_type::Char, payload::Vector{UInt8})
         send_int4(io, 4+length(payload))
         write(io, payload)
     end
+    incr(sent_message_bytes; by=1+4+length(payload))
 end
 
 function send_simple_query(io::IO, query::String)
@@ -488,6 +496,7 @@ end
 function recv_message(io::IO)
     msg_type = recv_int1(io)
     msg_len = recv_int4(io)
+    incr(received_message_bytes; by=Int(msg_len))
     payload = read(io, msg_len-4)
     io = IOBuffer(payload)
 
@@ -717,6 +726,7 @@ end
 function prepare(session::Session, query::String)
     PreparedStatement(session, 
                       get!(session.prepared_statements, query) do
+                          incr(prepared_queries)
                           stmt_name = "__pg_stmt_$(length(session.prepared_statements)+1)__"
                           write_collect(session.socket) do io
                               send_parse(io, stmt_name, query)
@@ -752,6 +762,7 @@ function execute(prepared_stmt::PreparedStatement, params::Any=[]; callbacks=not
 end
 
 function execute(session::Session, query::String, params::Any=[]; callbacks=nothing)
+    incr(executed_queries)
     try
         if '$' in query
             execute(prepare(session, query), params; callbacks)
@@ -934,4 +945,20 @@ function stop()
     close_servers()
 end
 
+function mon(; dt=1.0)
+    running = Utils.PressEnterToStop()
+    cnts() = [prepared_queries[], executed_queries[], received_message_bytes[], sent_message_bytes[]]
+    cp = cnts()
+    term = Utils.TUI.Terminal()
+    while running[]
+        cn = cnts()
+        bio = IOBuffer()
+        # Utils.TUI.clear_screen(term)
+        # Utils.TUI.move_cursor(term, 1, 1)
+        println(bio, "prepared/executed/recvmsg/sentmsg: ", (cn-cp))
+        print(String(take!(bio)))
+        flush(stdout)
+        cp = cn
+        sleep(dt)
+    end
 end
