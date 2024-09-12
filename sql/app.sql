@@ -708,7 +708,7 @@ BEGIN
 
     RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
         ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
-        a_user_pubkey, a_apply_humaness_check);
+        a_user_pubkey, false);
 END
 $BODY$;
 
