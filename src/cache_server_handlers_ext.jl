@@ -5,10 +5,6 @@ import ..PushGatewayExporter
 periodic_pushgw = Throttle(; period=15.0)
 periodic_notification_counts = Throttle(; period=1.0)
 
-Media() = Main.Media
-SpamDetection() = Main.spamdetector
-CacheServerSync() = Main.CacheServerSync
-
 function ext_periodic()
     periodic_notification_counts() do
         MetricsLogger.log(r->(; funcall=:broadcast_notification_counts)) do
@@ -24,16 +20,19 @@ function ext_periodic()
 
         PushGatewayExporter.set!("cache_cputime_avg", MetricsLogger.cputime_avg[])
 
-        for (ref, name, ty) in [(max_request_duration, :max_request_duration, :nonrate),
-                                (requests_per_period, :requests_per_second, :rate),
-                                (Media().max_task_duration, :media_max_task_duration, :nonrate),
-                                (Media().tasks_per_period, :media_tasks_per_second, :rate),
-                                (Media().max_download_duration, :media_max_download_duration, :nonrate),
-                                (Media().downloads_per_period, :media_downloads_per_second, :rate),
-                                (Media().execute_distributed_active_slots, :media_execute_distributed_active_slots, :nonrate),
-                                (SpamDetection().max_msg_duration, :spam_max_msg_duration, :nonrate),
-                                (SpamDetection().max_spammer_follower_cnt, :max_spammer_follower_cnt, :nonrate),
-                               ]
+        for (ref, name, ty) in [[(max_request_duration, :max_request_duration, :nonrate),
+                                 (requests_per_period, :requests_per_second, :rate),
+                                 (max_time_between_requests, :max_time_between_requests, :nonrate),
+                                 (Main.Media.max_task_duration, :media_max_task_duration, :nonrate),
+                                 (Main.Media.tasks_per_period, :media_tasks_per_second, :rate),
+                                 (Main.Media.max_download_duration, :media_max_download_duration, :nonrate),
+                                 (Main.Media.downloads_per_period, :media_downloads_per_second, :rate),
+                                 (Main.Media.execute_distributed_active_slots, :media_execute_distributed_active_slots, :nonrate),
+                                ]; (hasproperty(Main, :spamdetector) ? 
+                                    [
+                                     (Main.spamdetector.max_msg_duration, :spam_max_msg_duration, :nonrate),
+                                     (Main.spamdetector.max_spammer_follower_cnt, :max_spammer_follower_cnt, :nonrate),
+                                    ] : [])]
             lock(ref) do ref
                 PushGatewayExporter.set!("cache_$(name)", 
                                          ty == :nonrate ? ref[] : ref[] / periodic_pushgw.period)
@@ -41,7 +40,7 @@ function ext_periodic()
             end
         end
 
-        PushGatewayExporter.set!("media_queue_size", Media().media_processing_channel.n_avail_items)
+        PushGatewayExporter.set!("media_queue_size", Main.Media.media_processing_channel.n_avail_items)
 
         for name in [:media_downloaded_bytes]
             lock(est().commons.stats) do stats
@@ -53,8 +52,8 @@ function ext_periodic()
 
         PushGatewayExporter.set!("cache_cputime_avg", MetricsLogger.cputime_avg[])
 
-        CacheServerSync().last_t[] > 0 && PushGatewayExporter.set!("cache_sync_last_t", CacheServerSync().last_t[])
-        PushGatewayExporter.set!("cache_sync_last_duration", CacheServerSync().last_duration[])
+        Main.CacheServerSync.last_t[] > 0 && PushGatewayExporter.set!("cache_sync_last_t", Main.CacheServerSync.last_t[])
+        PushGatewayExporter.set!("cache_sync_last_duration", Main.CacheServerSync.last_duration[])
     end
 end
 

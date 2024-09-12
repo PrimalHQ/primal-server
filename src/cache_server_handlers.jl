@@ -4,6 +4,7 @@ import HTTP
 using HTTP.WebSockets
 import JSON
 using DataStructures: CircularBuffer
+import SHA
 
 import ..Utils
 using ..Utils: ThreadSafe, Throttle
@@ -35,6 +36,8 @@ sendcnt = Ref(0) |> ThreadSafe
 
 max_request_duration = Ref(0.0) |> ThreadSafe
 requests_per_period = Ref(0) |> ThreadSafe
+max_time_between_requests = Ref(0.0) |> ThreadSafe
+t_last_request = Ref(0.0) |> ThreadSafe
 
 include("cache_server_handlers_ext.jl")
 
@@ -311,11 +314,23 @@ function initial_filter_handler(conn::Conn, subid, filters)
                         end
                     end
 
+                    reslen = Ref(0)
                     tdur = @elapsed afc(funcall, kwargs, 
-                        res->(App().content_moderation_filtering_2(est(), res, funcall, kwargs)) |> sendres; 
-                        subid, ws_id)
+                                        function (res)
+                                            r = App().content_moderation_filtering_2(est(), res, funcall, kwargs)
+                                            reslen[] = length(r)
+                                            r |> sendres; 
+                                        end; subid, ws_id)
 
-                    # tdur >= 0.1 && println(Main.App.Dates.now(), "  ", funcall, "  ", tdur, " s")
+                    lock(max_time_between_requests) do time_between_requests
+                        t = time()
+                        if t_last_request[] > 0
+                            max_time_between_requests[] = max(max_time_between_requests[], t - t_last_request[])
+                        end
+                        t_last_request[] = t
+                    end
+
+                    1==0 && tdur >= 0.0 && println(Main.App.Dates.now(), "  ", tdur, "s  ", bytes2hex(SHA.sha256(JSON.json(kwargs)))[1:8], "  ", funcall, "  ", reslen[])
 
                 elseif funcall in App().exposed_async_functions
                     sendres([])
