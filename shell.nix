@@ -10,6 +10,18 @@ mkShell {
     postgresql_15
     ephemeralpg
     gawk
+
+    rustup 
+    pkg-config 
+    icu 
+    readline 
+    flex 
+    bison 
+    zlib 
+    clang 
+    libclang.lib 
+    glibc.dev 
+    openssl
   ];
 
   start_julia = ''
