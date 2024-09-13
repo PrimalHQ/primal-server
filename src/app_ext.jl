@@ -249,6 +249,7 @@ function scored_content(
         offset::Int=0,
         group_by_pubkey::Bool=false,
         user_pubkey=nothing,
+        include_top_zaps=true,
         time_exceeded=()->false,
     )
     limit = min(50, limit)
@@ -356,7 +357,7 @@ function scored_content(
 
     eids = [eid for (eid, _) in posts]
 
-    res = response_messages_for_posts(est, eids; user_pubkey)
+    res = response_messages_for_posts(est, eids; user_pubkey, include_top_zaps)
 
     vcat(res, range(posts, field))
 end
@@ -373,20 +374,20 @@ function with_analytics_cache(body::Function, est::DB.CacheStorage, user_pubkey,
     [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)) && is_hidden(est, user_pubkey, scope, e.pubkey))]
 end
 
-function explore_global_trending(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing)
+function explore_global_trending(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing, include_top_zaps=true)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     # with_analytics_cache(est, user_pubkey, :trending, (:explore_global_trending, (; hours))) do # FIXME
-        explore(est; timeframe="trending", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey)
+        explore(est; timeframe="trending", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey, include_top_zaps)
     # end
 end
 function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
     explore_global_trending(est, 24; user_pubkey)
 end
 
-function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing)
+function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing, include_top_zaps=true)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     # with_analytics_cache(est, user_pubkey, :trending, (:explore_global_mostzapped, (; hours))) do # FIXME
-        explore(est; timeframe="mostzapped", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true)
+        explore(est; timeframe="mostzapped", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, include_top_zaps)
     # end
 end
 function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
@@ -434,14 +435,14 @@ function scored(est::DB.CacheStorage; selector, user_pubkey=nothing)
 end
 
 function scored_(est::DB.CacheStorage; selector, user_pubkey=nothing)
-    if     selector == "trending_24h"; explore_global_trending(est, 24; user_pubkey)
-    elseif selector == "trending_12h"; explore_global_trending(est, 12; user_pubkey)
-    elseif selector == "trending_4h";  explore_global_trending(est, 4; user_pubkey)
-    elseif selector == "trending_1h";  explore_global_trending(est, 1; user_pubkey)
-    elseif selector == "mostzapped_24h"; explore_global_mostzapped(est, 24; user_pubkey)
-    elseif selector == "mostzapped_12h"; explore_global_mostzapped(est, 12; user_pubkey)
-    elseif selector == "mostzapped_4h";  explore_global_mostzapped(est, 4; user_pubkey)
-    elseif selector == "mostzapped_1h";  explore_global_mostzapped(est, 1; user_pubkey)
+    if     selector == "trending_24h"; explore_global_trending(est, 24; user_pubkey, include_top_zaps=false)
+    elseif selector == "trending_12h"; explore_global_trending(est, 12; user_pubkey, include_top_zaps=false)
+    elseif selector == "trending_4h";  explore_global_trending(est, 4; user_pubkey, include_top_zaps=false)
+    elseif selector == "trending_1h";  explore_global_trending(est, 1; user_pubkey, include_top_zaps=false)
+    elseif selector == "mostzapped_24h"; explore_global_mostzapped(est, 24; user_pubkey, include_top_zaps=false)
+    elseif selector == "mostzapped_12h"; explore_global_mostzapped(est, 12; user_pubkey, include_top_zaps=false)
+    elseif selector == "mostzapped_4h";  explore_global_mostzapped(est, 4; user_pubkey, include_top_zaps=false)
+    elseif selector == "mostzapped_1h";  explore_global_mostzapped(est, 1; user_pubkey, include_top_zaps=false)
     else; []
     end
 end
@@ -508,7 +509,8 @@ function precalculate_analytics(est::DB.CacheStorage)
         "mostzapped_4h",
         "mostzapped_1h",
        ]
-        r = scored_(est; selector)
+        kinds = [Int(Nostr.SET_METADATA), Int(Nostr.TEXT_NOTE), REFERENCED_EVENT, MEDIA_METADATA]
+        r = [e for e in scored_(est; selector) if e.kind in kinds]
         est.dyn[:cache]["precalculated_analytics_$selector"] = r
     end
 end
