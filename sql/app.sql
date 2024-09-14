@@ -1,9 +1,16 @@
+-- utils
+
 CREATE OR REPLACE FUNCTION public.raise_notice(a text) RETURNS void LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
 RAISE NOTICE '%', a;
 END;
 $BODY$;
+
+CREATE OR REPLACE FUNCTION public.count_jsonb_keys(j jsonb) RETURNS bigint LANGUAGE sql
+AS $$ SELECT count(*) from (SELECT jsonb_object_keys(j)) v $$;
+
+-- consts
 
 CREATE OR REPLACE FUNCTION public.c_EVENT_STATS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000100';
 CREATE OR REPLACE FUNCTION public.c_REFERENCED_EVENT() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000107';
@@ -17,8 +24,15 @@ CREATE OR REPLACE FUNCTION public.c_USER_FOLLOWER_COUNTS() RETURNS int LANGUAGE 
 CREATE OR REPLACE FUNCTION public.c_EVENT_RELAYS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000141';
 CREATE OR REPLACE FUNCTION public.c_LONG_FORM_METADATA() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000144';
 
-CREATE OR REPLACE FUNCTION public.count_jsonb_keys(j jsonb) RETURNS bigint LANGUAGE sql
-AS $$ SELECT count(*) from (SELECT jsonb_object_keys(j)) v $$;
+-- types
+
+CREATE TYPE cmr_scope AS ENUM ('content', 'trending');
+CREATE TYPE cmr_grp AS ENUM ('primal_spam', 'primal_nsfw');
+CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw');
+CREATE TYPE filterlist_target AS ENUM ('pubkey', 'event');
+CREATE TYPE media_size AS ENUM ('original', 'small', 'medium', 'large');
+CREATE TYPE response_messages_for_post_res AS (e jsonb, is_referenced_event bool);
+CREATE TYPE post AS (event_id bytea, created_at int8);
 
 -- content moderation
 
@@ -28,22 +42,17 @@ AS $BODY$
 SELECT EXISTS (SELECT 1 FROM deleted_events WHERE event_id = a_event_id)
 $BODY$;
 
-CREATE TYPE cmr_scope AS ENUM ('content', 'trending');
-CREATE TYPE cmr_grp AS ENUM ('primal_spam', 'primal_nsfw');
-CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw');
-CREATE TYPE filterlist_target AS ENUM ('pubkey', 'event');
-    
 /* TODO: reimplement to use filterlist table */
 CREATE OR REPLACE FUNCTION public.is_pubkey_hidden_by_group(a_user_pubkey bytea, a_scope cmr_scope, a_pubkey bytea, a_cmr_grp cmr_grp, a_fl_grp filterlist_grp) RETURNS bool
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
 SELECT
     EXISTS (
-        SELECT 1 FROM cmr_groups cmr, filterlist_pubkey fl
+        SELECT 1 FROM cmr_groups cmr, filterlist fl
         WHERE 
             cmr.user_pubkey = a_user_pubkey AND cmr.grp = a_cmr_grp AND cmr.scope = a_scope AND 
-            fl.pubkey = a_pubkey AND fl.blocked AND fl.grp = a_fl_grp AND
-            NOT EXISTS (SELECT 1 FROM filterlist_pubkey fl2 WHERE fl2.pubkey = a_pubkey AND NOT fl2.blocked))
+            fl.target = a_pubkey AND fl.target_type = 'pubkey' AND fl.blocked AND fl.grp = a_fl_grp AND
+            NOT EXISTS (SELECT 1 FROM filterlist fl2 WHERE fl2.target = a_pubkey AND fl2.target_type = 'pubkey' AND NOT fl2.blocked))
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_pubkey bytea) RETURNS bool
@@ -179,8 +188,6 @@ AS $BODY$
 		LIMIT 1
 	) a
 $BODY$;
-
-CREATE TYPE media_size AS ENUM ('original', 'small', 'medium', 'large');
 
 CREATE OR REPLACE FUNCTION public.event_media_response(a_event_id bytea) RETURNS SETOF jsonb 
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
@@ -335,8 +342,6 @@ BEGIN
     END LOOP;
 END $BODY$;
 
-CREATE TYPE response_messages_for_post_res AS (e jsonb, is_referenced_event bool);
-
 CREATE OR REPLACE FUNCTION public.response_messages_for_post(
         a_event_id bytea,
         a_user_pubkey bytea,
@@ -418,8 +423,6 @@ LIMIT
 OFFSET
 	a_offset
 $BODY$;
-
-CREATE TYPE post AS (event_id bytea, created_at int8);
 
 CREATE OR REPLACE FUNCTION public.enrich_feed_events(a_posts post[], a_user_pubkey bytea, a_apply_humaness_check bool)
 	RETURNS SETOF jsonb

@@ -1296,9 +1296,9 @@ end
 feed_directive(est::DB.CacheStorage; kwargs...) = feed_directive_(est, feed; kwargs...)
 feed_directive_2(est::DB.CacheStorage; kwargs...) = feed_directive_(est, feed_2; kwargs...)
 
-function feed_directive_(est::DB.CacheStorage, feed; directive::String, kwargs...)
+function feed_directive_(est::DB.CacheStorage, feed; directive::String, usepgfuncs=false, apply_humaness_check=false, kwargs...)
     if !isnothing(local pk = try Nostr.PubKeyId(directive) catch _ end)
-        return feed(est; pubkey=pk, kwargs...)
+        return feed(est; pubkey=pk, usepgfuncs, kwargs...)
 
     elseif !isnothing(match(r"^search;", directive))
         parts = split(directive, ';')
@@ -1317,16 +1317,16 @@ function feed_directive_(est::DB.CacheStorage, feed; directive::String, kwargs..
         if length(parts) == 2
             if parts[1] == "authored"
                 pk = Nostr.PubKeyId(string(parts[2]))
-                return feed(est; pubkey=pk, notes=:authored, kwargs...)
+                return feed(est; pubkey=pk, notes=:authored, usepgfuncs, kwargs...)
             elseif parts[1] == "authoredreplies"
                 pk = Nostr.PubKeyId(string(parts[2]))
-                return feed(est; pubkey=pk, notes=:replies, kwargs...)
+                return feed(est; pubkey=pk, notes=:replies, usepgfuncs, kwargs...)
             elseif parts[1] == "withreplies"
                 pk = Nostr.PubKeyId(string(parts[2]))
-                return feed(est; pubkey=pk, include_replies=true, kwargs...)
+                return feed(est; pubkey=pk, include_replies=true, usepgfuncs, kwargs...)
             elseif parts[1] == "bookmarks"
                 pk = Nostr.PubKeyId(string(parts[2]))
-                return feed(est; pubkey=pk, notes=:bookmarks, kwargs...)
+                return feed(est; pubkey=pk, notes=:bookmarks, usepgfuncs, kwargs...)
             else
                 for ps in [(parts[1], parts[2]),
                            (parts[2], parts[1])]

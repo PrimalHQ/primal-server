@@ -223,6 +223,8 @@ app_funcalls_with_pgfuncs = Set([
                                  :mega_feed_directive,
                                  :user_infos,
                                  :thread_view,
+                                 :feed_directive,
+                                 :feed_directive_2,
                                 ])
 end)
 ##
@@ -314,6 +316,8 @@ function initial_filter_handler(conn::Conn, subid, filters)
                         end
                     end
 
+                    eqsbefore = Main.Postgres.executed_queries[]
+
                     reslen = Ref(0)
                     tdur = @elapsed afc(funcall, kwargs, 
                                         function (res)
@@ -322,6 +326,8 @@ function initial_filter_handler(conn::Conn, subid, filters)
                                             r |> sendres; 
                                         end; subid, ws_id)
 
+                    eqsafter = Main.Postgres.executed_queries[]
+
                     lock(max_time_between_requests) do time_between_requests
                         t = time()
                         if t_last_request[] > 0
@@ -329,6 +335,11 @@ function initial_filter_handler(conn::Conn, subid, filters)
                         end
                         t_last_request[] = t
                     end
+
+                    eqsdiff = eqsafter - eqsbefore
+                    # if eqsdiff >= 1000
+                    #     println((eqsdiff, funcall, kwargs))
+                    # end
 
                     1==0 && tdur >= 0.0 && println(Main.App.Dates.now(), "  ", tdur, "s  ", bytes2hex(SHA.sha256(JSON.json(kwargs)))[1:8], "  ", funcall, "  ", reslen[])
 
