@@ -1,5 +1,7 @@
 use pgrx::prelude::*;
 
+use nostr_sdk::prelude::*;
+
 pgrx::pg_module_magic!();
 
 #[pg_extern]
@@ -16,6 +18,19 @@ fn cdn_url(a_url: Option<String>, a_size: Option<String>, a_animated: Option<boo
     url.push_str("&u=");
     url.push_str(&urlencoding::encode(&a_url.unwrap()).into_owned());
     Ok(Some(url))
+}
+
+#[pg_extern(immutable, parallel_safe)]
+fn nostr_parse(a_str: Option<String>) -> ::std::result::Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync + 'static>>
+{
+    let s = a_str.unwrap();
+    if let Ok(pk) = PublicKey::parse(&s) {
+        return Ok(Some(pk.to_bytes().into()));
+    }
+    if let Ok(eid) = EventId::parse(&s) {
+        return Ok(Some(eid.to_bytes().into()));
+    }
+    Ok(None)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
