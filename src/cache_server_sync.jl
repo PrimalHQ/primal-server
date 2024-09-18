@@ -71,8 +71,8 @@ function pull_media(src, dst)
         tblsrcname = rex_(src, :(($tblsrc).table))
         tbldstname = rex_(dst, :(($tbldst).table))
 
-        q1 = "select max(rowid) from $tbldstname"
-        q2 = "select max(rowid) from $tblsrcname"
+        q1 = "select rowid from $tbldstname order by rowid desc limit 1"
+        q2 = "select rowid from $tblsrcname order by rowid desc limit 1"
         mr1 = rex_(dst, :(DB.exec($tbldst, $q1)[1][1]))
         mr2 = rex_(src, :(DB.exec($tblsrc, $q2)[1][1]))
 
