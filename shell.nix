@@ -53,7 +53,7 @@ mkShell {
 
     mkdir -p $PGDATA
     initdb -D $PGDATA
-    cp -v ${./pg_primal/postgresql.conf} $PGDATA
+    cp -v ${./sql/postgresql.conf} $PGDATA/postgresql.conf
   '';
 
   setup_pg_primal = pkgs.writeShellScript "setup_pg_primal.sh" ''
@@ -65,17 +65,24 @@ mkShell {
   '';
 
   start_postgres = pkgs.writeShellScript "start_postgres.sh" ''
+    PGDIR="$(cat pgdir)"
+    PGBINDIR="$(realpath $PGDIR/postgresql-*/outputs/out/bin)"
+    export PATH="$PGBINDIR:$PATH"
     set -ex
     pg_ctl -w -D $(cat pgdata) start
+    createdb -h127.0.0.1 -p54017 primal1
   '';
 
   stop_postgres = pkgs.writeShellScript "stop_postgres.sh" ''
+    PGDIR="$(cat pgdir)"
+    PGBINDIR="$(realpath $PGDIR/postgresql-*/outputs/out/bin)"
+    export PATH="$PGBINDIR:$PATH"
     set -ex
     pg_ctl -w -D $(cat pgdata) stop -m i
   '';
 
   connect_to_postgres = pkgs.writeShellScript "connect_to_postgres.sh" ''
-    psql $(cat pgurl)
+    psql -h127.0.0.1 -p54017 primal1
   '';
 
   shellHook = ''
