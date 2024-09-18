@@ -1,0 +1,19 @@
+[package]
+name = "ws-connector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio-tungstenite = "0.23.1"
+log = "0.4.17"
+futures-util = { version = "0.3.28", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1.0.0", default-features = false, features = ["full"] }
+env_logger = "0.10.0"
+serde_json = "1.0.128"
+deadpool-postgres = "0.14.0"
+tokio-postgres = { version = "0.7.11", features = ["with-serde_json-1"] }
+hex = "0.4.3"
+measure_time = "0.8.3"
+libc = "0.2.158"
+# tungstenite = "0.24.0"
+
