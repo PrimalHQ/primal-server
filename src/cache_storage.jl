@@ -773,7 +773,7 @@ MAX_SATSZAPPED = Ref(1_100_000)
 re_hashref = r"\#\[([0-9]*)\]"
 re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
 
-function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkeys_in_content=true)
+function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkeys_in_content=true, resolve_parametrized_replaceable_events=true)
     content =
     if     e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.LONG_FORM_CONTENT)
         e.content
@@ -800,8 +800,12 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
     for tag in e.tags
         if length(tag.fields) >= 4 && tag.fields[4] == "mention"
             if tag.fields[1] == "a"
-                ps = split(tag.fields[2], ':')
-                push_parametrized_replaceable_event(Nostr.PubKeyId(string(ps[2])), parse(Int, ps[1]), string(ps[3]))
+                if resolve_parametrized_replaceable_events
+                    ps = split(tag.fields[2], ':')
+                    push_parametrized_replaceable_event(Nostr.PubKeyId(string(ps[2])), parse(Int, ps[1]), string(ps[3]))
+                else
+                    push!(mentiontags, tag)
+                end
             else
                 push!(mentiontags, tag)
             end
@@ -812,7 +816,11 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
         if startswith(s, "naddr")
             catch_exception(est, e, m) do
                 if !isnothing(local r = try Dict(Bech32.nip19_decode(s)) catch _ end)
-                    push_parametrized_replaceable_event(r[Bech32.Author], r[Bech32.Kind], r[Bech32.Special])
+                    if resolve_parametrized_replaceable_events
+                        push_parametrized_replaceable_event(r[Bech32.Author], r[Bech32.Kind], r[Bech32.Special])
+                    else
+                        push!(mentiontags, Nostr.TagAny(["a", "$(r[Bech32.Kind]):$(Nostr.hex(r[Bech32.Author])):$(r[Bech32.Special])"]))
+                    end
                 end
             end
         else
@@ -825,7 +833,7 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
             end
         end
     end
-    for tag in unique(mentiontags)
+    for tag in unique([Nostr.TagAny(t.fields[1:2]) for t in mentiontags])
         body(tag)
     end
 end

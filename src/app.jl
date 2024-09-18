@@ -2069,6 +2069,7 @@ function long_form_content_thread_view(
         pubkey, kind::Int, identifier::String, 
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
+        usepgfuncs=false, apply_humaness_check=false,
     )
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
@@ -2091,6 +2092,15 @@ function long_form_content_thread_view(
     
     reids = [reid for (reid, _) in posts]
     union!(res, [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)])
+    if usepgfuncs
+        q = "select distinct e, e->>'created_at' from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3) f(e) where e is not null order by e->>'created_at' desc"
+        res2 = map(first, Postgres.pex(DAG_OUTPUTS_DB[], q,
+                                       [JSON.json([(Nostr.hex(p[1]), p[2]) for p in posts]), user_pubkey, apply_humaness_check]))
+        union!(res, res2)
+    else
+        reids = [reid for (reid, _) in posts]
+        union!(res, [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)])
+    end
 
     collect(res)
 end
@@ -2210,7 +2220,9 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
     kwargs = Dict(kwargs)
     user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
 
-    if get(kwargs, :usepgfuncs, false) && funcall in Main.CacheServerHandlers.app_funcalls_with_pgfuncs
+    if funcall == :get_featured_dvm_feeds
+        return res
+    elseif get(kwargs, :usepgfuncs, false) && funcall in Main.CacheServerHandlers.app_funcalls_with_pgfuncs
         return res
     end
 
@@ -2357,8 +2369,6 @@ function mega_feed_directive(
         apply_humaness_check=false,
         kwargs...,
     )
-    # @show (spec, kwargs)
-
     kwa = Dict{Any, Any}(kwargs)
     s = JSON.parse(spec)
 

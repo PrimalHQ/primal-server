@@ -239,6 +239,7 @@ function default_pipeline(targetserver, xn, o)
     xn(pubkey_media_cnt_node, o.events, o.event_media)
     xn(pubkey_content_zap_cnt_node, o.zap_receipts)
     xn(advsearch_node, o.events, o.basic_tags)
+    xn(event_mentions_node, o.events, o.parametrized_replaceable_events)
 end
 
 function sqlite2pg_pipeline(targetserver, xn, o)
@@ -256,12 +257,32 @@ function logexec(pslog, func, type="", d=(;))
     nothing
 end
 
+function delete_table_coverages!(session, st::ServerTable)
+    Postgres.execute(session, "delete from $(node_outputs[].table) where output = \$1", [string(st)])
+    Postgres.execute(session, "delete from $(coverages[].table) where name like \$1 || '%'", [string(st)])
+    nothing
+end
 function drop_table!(st::ServerTable; cascade=false)
-    if st.servertype == :postgres
-        Postgres.pex(st.server, "drop table if exists $(st.table) $(cascade ? "cascade" : "")")
+    Postgres.transaction(st.server) do session
+        Postgres.execute(session, "drop table if exists $(st.table) $(cascade ? "cascade" : "")")
+        delete_table_coverages!(session, st)
     end
-    Postgres.pex(node_outputs[].server, "delete from $(node_outputs[].table) where output = ?1", [string(st)])
-    Postgres.pex(coverages[].server, "delete from $(coverages[].table) where name like ?1 || '%'", [string(st)])
+    nothing
+end
+function reset_table!(st::ServerTable)
+    Postgres.transaction(st.server) do session
+        Postgres.execute(session, "delete from $(st.table)")
+        delete_table_coverages!(session, st)
+    end
+    nothing
+end
+function reimport_table!(st::ServerTable; days=15, modname::Symbol=:DAG_20240803_1)
+    Main.DAGRunner.stop()
+    reset_table!(st)
+    Main.DAGRunner.dags[modname].since = current_time()-days*24*3600
+    Main.DAGRunner.LOG[] = true
+    Main.DAGRunner.start()
+    nothing
 end
 ##
 using MLStyle: @match
@@ -1768,8 +1789,8 @@ function parse_zap_receipt(tags::Vector)
     (; eid, pubkey, amount_sats)
 end
 
-function import_event_mentions(est::DB.CacheStorage, e::Nostr.Event; connsel=est.dbargs.connsel)
-    DB.for_mentiones(est, e) do tag
+function import_event_mentions(est::DB.CacheStorage, event_mentions::ServerTable, e::Nostr.Event; connsel=est.dbargs.connsel)
+    DB.for_mentiones(est, e; resolve_parametrized_replaceable_events=false) do tag
         tag = tag.fields
         argeid = argpubkey = argkind = argid = nothing
         if length(tag) >= 2
@@ -1791,9 +1812,9 @@ function import_event_mentions(est::DB.CacheStorage, e::Nostr.Event; connsel=est
             Postgres.execute(connsel, "
                              insert into $(event_mentions.table)
                              values (\$1, \$2, \$3, \$4, \$5, \$6)
-                             on conflict (eid) do nothing
                              ",
-                             [e.id, tag[1], arge, argp, argkind, argid])
+                             [e.id, tag[1], argeid, argpubkey, argkind, argid])
+                             # on conflict (eid, tag, argeid, argpubkey, argkind, argid) do nothing
         end
     end
 end
@@ -1803,8 +1824,8 @@ function event_mentions_node(
         parametrized_replaceable_events::ServerTable;
         runctx::RunCtx,
         version=1,
-        since=max(runctx.since, current_time() - 10*24*3600),
-        until=min(runctx.until, current_time()),
+        # since=max(runctx.since, current_time() - 30*24*3600),
+        # until=min(runctx.until, current_time()),
     )
     event_mentions = dbtable(:postgres, runctx.targetserver, "event_mentions", version, 
                     [
@@ -1819,16 +1840,17 @@ function event_mentions_node(
                      (:argkind, (Int, "")),
                      (:argid, (String, "")),
 
-                     "primary key (eid)",
+                     # "primary key (eid, tag, argeid, argpubkey, argkind, argid)",
                     ],
                     [
+                     :eid,
                     ];
                     runtag=runctx.runtag)
 
     # step = nothing
     step = 1*24*3600
 
-    process_segments([event_mentions, 1]; runctx, step, since, until) do t1, t2
+    process_segments([event_mentions, 1]; runctx, step) do t1, t2
         transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
             for r in Postgres.execute(session1, "
                                       select * from $(events.table)
@@ -1837,7 +1859,7 @@ function event_mentions_node(
                                         (kind = $(Int(Nostr.TEXT_NOTE)) or kind = $(Int(Nostr.LONG_FORM_CONTENT)) or kind = $(Int(Nostr.REPOST)))
                                       ", [t1, t2])[2]
                 e = event_from_row(r)
-                import_event_mentions(runctx.est, e; connsel=session1)
+                import_event_mentions(runctx.est, event_mentions, e; connsel=session1)
             end
         end
     end

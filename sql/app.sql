@@ -124,7 +124,7 @@ $BODY$;
 
 -- enrichment
 
-CREATE OR REPLACE FUNCTION public.get_event(a_event_id bytea) RETURNS events
+CREATE OR REPLACE FUNCTION public.get_event(a_event_id bytea) RETURNS event
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
 SELECT
@@ -183,7 +183,12 @@ CREATE OR REPLACE FUNCTION public.event_action_cnt(a_event_id bytea, a_user_pubk
 AS $BODY$	
 	SELECT jsonb_build_object('kind', c_EVENT_ACTIONS_COUNT(), 'content', row_to_json(a)::text)
 	FROM (
-		SELECT ENCODE(event_id, 'hex') as event_id, replied, liked, reposted, zapped
+		SELECT 
+            ENCODE(event_id, 'hex') AS event_id, 
+            replied::int4::bool, 
+            liked::int4::bool, 
+            reposted::int4::bool, 
+            zapped::int4::bool
 		FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey
 		LIMIT 1
 	) a
@@ -351,8 +356,9 @@ CREATE OR REPLACE FUNCTION public.response_messages_for_post(
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 DECLARE
-	e events%ROWTYPE;
-    r record;
+	e event%ROWTYPE;
+    eid bytea;
+    pk bytea;
 BEGIN
     IF a_depth = 0 THEN
         RETURN;
@@ -375,16 +381,38 @@ BEGIN
 
 	RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE e.pubkey = meta_data.key;
 
-    FOR r IN SELECT * FROM basic_tags WHERE id = a_event_id AND tag in ('e', 'p', 'a') LOOP
-        CASE
-            WHEN r.tag = 'e' THEN
-                RETURN QUERY SELECT * FROM response_messages_for_post(r.arg1, a_user_pubkey, true, a_depth-1);
-            WHEN r.tag = 'p' THEN
-                RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE r.arg1 = meta_data.key;
-            WHEN r.tag = 'a' THEN
-                /* RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE r.arg1 = meta_data.key; */
-                CONTINUE;
-        END CASE;
+    FOR eid IN 
+        (
+            SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag = 'e'
+        ) UNION (
+            SELECT argeid FROM event_mentions em WHERE em.eid = a_event_id AND tag = 'e'
+        )
+    LOOP
+        RETURN QUERY SELECT * FROM response_messages_for_post(eid, a_user_pubkey, true, a_depth-1);
+    END LOOP;
+
+    FOR pk IN 
+        (
+            SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag = 'p'
+        ) UNION (
+            SELECT argpubkey FROM event_mentions em WHERE em.eid = a_event_id AND tag = 'p'
+        )
+    LOOP
+        RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE pk = meta_data.key;
+    END LOOP;
+
+    FOR eid IN 
+        (
+            SELECT pre.event_id 
+            FROM a_tags at, parametrized_replaceable_events pre 
+            WHERE at.eid = a_event_id AND at.ref_kind = pre.kind AND at.ref_pubkey = pre.pubkey AND at.ref_identifier = pre.identifier
+        ) UNION (
+            SELECT pre.event_id
+            FROM event_mentions em, parametrized_replaceable_events pre 
+            WHERE em.eid = a_event_id AND em.tag = 'a' AND em.argkind = pre.kind AND em.argpubkey = pre.pubkey AND em.argid = pre.identifier
+        )
+    LOOP
+        RETURN QUERY SELECT * FROM response_messages_for_post(eid, a_user_pubkey, true, a_depth-1);
     END LOOP;
 END;
 $BODY$;
@@ -463,7 +491,9 @@ BEGIN
                 END IF;
 
                 IF e_kind = 1 OR e_kind = 30023 THEN
-                    RETURN QUERY SELECT * FROM event_zaps(e_id, a_user_pubkey);
+                    IF NOT t.is_referenced_event THEN
+                        RETURN QUERY SELECT * FROM event_zaps(e_id, a_user_pubkey);
+                    END IF;
 
                     FOR identifier IN SELECT pre.identifier FROM parametrized_replaceable_events pre WHERE event_id = e_id LOOP
                         RETURN QUERY SELECT * FROM event_zaps(e_pubkey, identifier, a_user_pubkey);

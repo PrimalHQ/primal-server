@@ -52,7 +52,7 @@ mutable struct Dag
         onfailed=(_)->nothing,
         runkwargs...,
        ) = new(modname, getproperty(Main, modname), active,
-               runkwargs, runtag, since, until, Ref(false),
+               Dict(runkwargs), runtag, since, until, Ref(false),
                CircularBuffer{Any}(1000), CircularBuffer{Any}(1000), nothing,
                est, state, onsuccessful, onfailed)
 end
@@ -166,6 +166,12 @@ end
 function unregister(modname::Symbol)
     delete!(dags, modname)
     nothing
+end
+
+function stop_dags()
+    for (_, m) in collect(dags)
+        m.running[] = false
+    end
 end
 
 end

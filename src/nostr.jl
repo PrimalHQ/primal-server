@@ -21,6 +21,10 @@ struct TagAny <: Tag
     fields::Vector{Any}
 end
 
+Base.:(==)(ta1::TagAny, ta2::TagAny) = ta1.fields == ta2.fields
+Base.hash(ta::TagAny) = hash(ta.fields)
+Base.hash(ta::TagAny, h::UInt) = hash(ta.fields, h)
+
 @enum Kind::Int begin
     SET_METADATA=0
     TEXT_NOTE=1
