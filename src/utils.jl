@@ -416,4 +416,9 @@ current_time() = trunc(Int, time())
 export geoiplookup
 geoiplookup(ip) = join(split(split(read(`geoiplookup $ip`, String), '\n')[1])[4:end], ' ')
 
+import JSON
+function strict_json(d::Dict)::String
+    JSON.json(NamedTuple([Symbol(k)=>v for (k, v) in sort(collect(d); by=kv->kv[1])]))
+end
+
 end

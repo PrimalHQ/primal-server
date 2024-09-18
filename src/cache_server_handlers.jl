@@ -220,6 +220,7 @@ app_funcalls_with_pgfuncs = Set([
                                  :feed,
                                  :feed_2,
                                  :long_form_content_feed,
+                                 :long_form_content_thread_view,
                                  :mega_feed_directive,
                                  :user_infos,
                                  :thread_view,

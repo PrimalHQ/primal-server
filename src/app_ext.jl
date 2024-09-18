@@ -374,20 +374,20 @@ function with_analytics_cache(body::Function, est::DB.CacheStorage, user_pubkey,
     [e for e in res if !((e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.SET_METADATA)) && is_hidden(est, user_pubkey, scope, e.pubkey))]
 end
 
-function explore_global_trending(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing, include_top_zaps=true)
+function explore_global_trending(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing, kwargs...)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     # with_analytics_cache(est, user_pubkey, :trending, (:explore_global_trending, (; hours))) do # FIXME
-        explore(est; timeframe="trending", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey, include_top_zaps)
+        explore(est; timeframe="trending", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey, kwargs...) 
     # end
 end
 function explore_global_trending_24h(est::DB.CacheStorage; user_pubkey=nothing)
     explore_global_trending(est, 24; user_pubkey)
 end
 
-function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing, include_top_zaps=true)
+function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing, kwargs...)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     # with_analytics_cache(est, user_pubkey, :trending, (:explore_global_mostzapped, (; hours))) do # FIXME
-        explore(est; timeframe="mostzapped", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, include_top_zaps)
+        explore(est; timeframe="mostzapped", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, kwargs...)
     # end
 end
 function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)

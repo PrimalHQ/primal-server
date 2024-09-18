@@ -2071,6 +2071,9 @@ function long_form_content_thread_view(
         user_pubkey=nothing,
         usepgfuncs=false, apply_humaness_check=false,
     )
+    @show (; pubkey, kind, identifier, user_pubkey)
+    apply_humaness_check = false
+
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
@@ -2090,8 +2093,6 @@ function long_form_content_thread_view(
                     limit, since, until, offset,
                     user_pubkey)
     
-    reids = [reid for (reid, _) in posts]
-    union!(res, [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)])
     if usepgfuncs
         q = "select distinct e, e->>'created_at' from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3) f(e) where e is not null order by e->>'created_at' desc"
         res2 = map(first, Postgres.pex(DAG_OUTPUTS_DB[], q,
@@ -2371,6 +2372,9 @@ function mega_feed_directive(
     )
     kwa = Dict{Any, Any}(kwargs)
     s = JSON.parse(spec)
+    skwa = [Symbol(k)=>v for (k, v) in s if !(k in ["id", "kind"])]
+
+    # @show (s, kwa)
 
     if haskey(s, "dvm_pubkey") && haskey(s, "dvm_id")   
         return dvm_feed(est; dvm_pubkey=s["dvm_pubkey"], dvm_id=s["dvm_id"], kwargs...)
@@ -2394,7 +2398,7 @@ function mega_feed_directive(
         elseif haskey(s, "pubkey") && haskey(s, "curation")
             return long_form_content_feed(est; pubkey=s["pubkey"], curation=s["curation"], minwords, kwargs..., usepgfuncs, apply_humaness_check)
         else
-            return long_form_content_feed(est; minwords, kwargs..., usepgfuncs, apply_humaness_check)
+            return long_form_content_feed(est; skwa..., minwords, kwargs..., usepgfuncs, apply_humaness_check)
         end
 
     elseif get(s, "kind", "") == "notes"
@@ -2411,16 +2415,20 @@ function mega_feed_directive(
         elseif s["id"] == "wide-net-notes"
             return advanced_search(est; query="kind:1 scope:myfollowsinteractions", kwargs...)
         elseif s["id"] == "feed"
-            skwa = [Symbol(k)=>v for (k, v) in s if !(k in ["id", "kind"])]
             return feed(est; skwa..., kwargs..., usepgfuncs, apply_humaness_check)
+        elseif s["id"] == "search"
+            return search(est; skwa..., kwargs...)
         end
 
+    elseif get(s, "id", "") == "advsearch"
+        return advanced_search(est; skwa..., kwargs...)
     end
 
     []
 end
 
 function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nostr.EventId}) 
+    # event_relays = Dict{Nostr.EventId, String}()
     res = []
     for eid in eids
         if eid in est.events
@@ -2429,6 +2437,9 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
                 if length(t.fields) >= 2 && t.fields[1] == "k" && t.fields[2] == "5300"
                     push!(res, e)
                     # println(JSON.json(JSON.parse(e.content),2))
+                    # if !isempty(local relay = get(est.dyn[:event_relay], eid, ""))
+                    #     event_relays[eid] = relay
+                    # end
                     push!(res, (; kind=Int(EVENT_STATS), 
                                 content=JSON.json((; event_id=eid, likes=123, satszapped=12345))))
                     break
@@ -2436,6 +2447,7 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
             end
         end
     end
+    # !isempty(event_relays) && union!(res, [(; kind=Int(EVENT_RELAYS), content=JSON.json(Dict([Nostr.hex(k)=>get(RELAY_URL_MAP, v, v) for (k, v) in event_relays])))])
     res
 end
 
@@ -2520,6 +2532,7 @@ function dvm_feed(
         est::DB.CacheStorage;
         dvm_pubkey,
         dvm_id::String,
+        dvm_kind::Int=31990,
         user_pubkey=nothing,
         kwargs...,
     )
@@ -2527,9 +2540,28 @@ function dvm_feed(
 
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    # @show (dvm_pubkey, dvm_id)
+    user_pubkey == Main.test_pubkeys[:aquarius] && @show (dvm_pubkey, dvm_id)
 
-    relays = Main.DVMServiceProvider.RELAY_URLS
+    relays = Set{String}()
+    # for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+    #                       DB.@sql("select event_id from parametrized_replaceable_events where kind = ?1 and pubkey = ?2 and identifier = ?3"), 
+    #                       (dvm_kind, dvm_pubkey, dvm_id))
+    #     eid = Nostr.EventId(eid)
+    #     if !isempty(local relay = get(est.dyn[:event_relay], eid, ""))
+    #         push!(relays, relay)
+    #     end
+    # end
+    union!(relays, Main.DVMServiceProvider.RELAY_URLS)
+    1==1 && union!(relays, [
+                    "wss://relay.nostr.band",
+                    "wss://nos.lol",
+                    "wss://nostr-pub.wellorder.net",
+                    "wss://relay.nostr.bg",
+                    "wss://relay.poster.place",
+                    "wss://nostr.oxtr.dev",
+                   ])
+    relays = collect(relays)
+    user_pubkey == Main.test_pubkeys[:aquarius] && @show relays
 
     req_id = UUIDs.uuid4()
 
@@ -2543,13 +2575,8 @@ function dvm_feed(
                          "")
 
     function on_connect(client)
-        NostrClient.send(client, jobreq; timeout=5.0) do m, done
-            m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) feed $dvm_id job request event failed")
-            done(:ok)
-        end
-
         NostrClient.subscription(client, (; 
-                                          limit=0,
+                                          limit=10,
                                           kinds=[6300, 7000], 
                                           Symbol("#e")=>[Nostr.hex(jobreq.id)],
                                          )) do m
@@ -2557,13 +2584,22 @@ function dvm_feed(
                 handle_result(client, m)
             catch _
                 PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+                @async try close(client) catch ex println(ex) end
             end
         end
+
+        NostrClient.send(client, jobreq; timeout=5.0) do m, done
+            user_pubkey == Main.test_pubkeys[:aquarius] && @show (client.relay_url, m)
+            m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) feed $dvm_id job request event failed")
+            done(:ok)
+        end
+
     end
 
     cond = Condition()
 
     function handle_result(client, m)
+        user_pubkey == Main.test_pubkeys[:aquarius] && @show (dvm_id, client.relay_url, m)
         m[1] == "EVENT" || return
         e = Nostr.Event(m[3])
         @assert Nostr.verify(e)
@@ -2583,7 +2619,7 @@ function dvm_feed(
     end
 
     @async begin
-        sleep(15)
+        sleep(30)
         notify(cond, NostrClient.Timeout("dvm_feed"); error=true)
     end
 
@@ -2602,7 +2638,7 @@ function dvm_feed(
         response_messages_for_posts(est, eids; user_pubkey)
     finally
         for client in clients
-            try close(client) catch ex println(ex) end
+            @async try close(client) catch ex println(ex) end
         end
     end
 end
