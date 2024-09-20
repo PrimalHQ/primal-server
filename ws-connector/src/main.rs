@@ -276,7 +276,7 @@ async fn send_eose(subid: &str, cw: &mut tokio::sync::MutexGuard<'_, SplitSink<W
 async fn thread_view(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
     // info_time!("thread_view");
     let event_id = hex::decode(kwargs["event_id"].as_str().unwrap().to_string()).ok();
-    let limit = kwargs["event_id"].as_i64().unwrap_or(20);
+    let limit = kwargs["limit"].as_i64().unwrap_or(20);
     let since = kwargs["since"].as_i64().unwrap_or(0);
     let until = kwargs["until"].as_i64().unwrap_or(get_sys_time_in_secs().try_into().unwrap());
     let offset = kwargs["offset"].as_i64().unwrap_or(0);
