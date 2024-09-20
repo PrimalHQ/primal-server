@@ -59,7 +59,8 @@ mkShell {
   setup_pg_primal = pkgs.writeShellScript "setup_pg_primal.sh" ''
     set -ex
     PGDIR="$(cat pgdir)"
-    pg_config=$(find $PGDIR -name pg_config | grep outputs/out)
+    PGBINDIR="$(find $PGDIR -type d | grep outputs/out/bin | grep -v tmp_install)"
+    pg_config="$(find $PGBINDIR -name pg_config)"
     cd pg_primal
     cargo-pgrx pgrx install -c $pg_config
   '';
