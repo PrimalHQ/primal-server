@@ -169,9 +169,23 @@ function ext_init(est::CacheStorage)
                                                       value jsonb not null,
                                                       updated_at timestamp not null default now(),
                                                       primary key (key)
-                                                      ) tablespace ramdisk1",
+                                                      )",
                                                       raw"DO $$BEGIN CREATE TRIGGER update_cache_updated_at BEFORE UPDATE ON cache FOR EACH ROW EXECUTE PROCEDURE update_updated_at(); EXCEPTION WHEN duplicate_object THEN NULL; END;$$;",
                                                      ])
+##
+    est.dyn[:dvm_feeds] = est.params.DBDict(Nostr.PubKeyId, Any, "dvm_feeds"; est.dbargs...,
+                                            keycolumn="pubkey",
+                                            valuecolumn="results",
+                                            valuefuncs=DB.DBConversionFuncs(JSON.json, identity),
+                                            init_queries=["create table if not exists dvm_feeds (
+                                                          pubkey bytea not null,
+                                                          updated_at timestamp not null,
+                                                          results jsonb,
+                                                          kind varchar not null,
+                                                          ok bool not null,
+                                                          primary key (pubkey)
+                                                          )",
+                                                         ])
 ##
 end
 

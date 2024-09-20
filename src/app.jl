@@ -578,7 +578,7 @@ function response_messages_for_posts(
     res = copy(r2.res)
 
     # @time "reids" 
-    for reid in r2.reids
+    isnothing(user_pubkey) || for reid in r2.reids
         union!(res, event_actions_cnt(est, reid, user_pubkey))
     end
        
@@ -2094,10 +2094,7 @@ function long_form_content_thread_view(
                     user_pubkey)
     
     if usepgfuncs
-        q = "select distinct e, e->>'created_at' from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3) f(e) where e is not null order by e->>'created_at' desc"
-        res2 = map(first, Postgres.pex(DAG_OUTPUTS_DB[], q,
-                                       [JSON.json([(Nostr.hex(p[1]), p[2]) for p in posts]), user_pubkey, apply_humaness_check]))
-        union!(res, res2)
+        union!(res, enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check))
     else
         reids = [reid for (reid, _) in posts]
         union!(res, [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)])
@@ -2405,7 +2402,8 @@ function mega_feed_directive(
         if     s["id"] == "latest"
             return feed(est; pubkey=kwa[:user_pubkey], kwargs...)
         elseif s["id"] == "global-trending"
-            return explore_global_trending(est, s["hours"]; kwargs...)
+            # return explore_global_trending(est, s["hours"]; kwargs...)
+            return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kwargs...) 
         elseif s["id"] == "short-vertical-videos"
             return advanced_search(est; query="kind:1 filter:video orientation:vertical maxduration:10", kwargs...)
         elseif s["id"] == "all-notes"
@@ -2425,6 +2423,32 @@ function mega_feed_directive(
     end
 
     []
+end
+
+function enrich_feed_events(est::DB.CacheStorage; event_ids, user_pubkey=nothing)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    eids = [cast(eid, Nostr.EventId) for eid in event_ids]
+    response_messages_for_posts(est, eids; user_pubkey)
+end
+
+function enrich_feed_events_pg(
+        est::DB.CacheStorage; 
+        posts::Vector{Tuple{Nostr.EventId, Int}}, 
+        user_pubkey=nothing, 
+        apply_humaness_check=false,
+    )
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    q = "select distinct e, e->>'created_at' from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3) f(e) where e is not null order by e->>'created_at' desc"
+    map(first, Postgres.execute(DAG_OUTPUTS_DB[], q,
+                                [JSON.json([(Nostr.hex(p[1]), p[2]) for p in posts]), user_pubkey, apply_humaness_check])[2])
+end
+
+HOME_FEEDS_FILE = Ref("home-feeds.json")
+
+function get_home_feeds(est::DB.CacheStorage)
+    [(; kind=Int(HOME_FEEDS), 
+      content=JSON.json(try JSON.parse(read(HOME_FEEDS_FILE[], String))
+                        catch _; (;) end))]
 end
 
 function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nostr.EventId}) 
@@ -2451,44 +2475,42 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
     res
 end
 
+function get_dvm_feeds_all(est::DB.CacheStorage)
+    map(Nostr.EventId, map(first, 
+                           DB.exec(est.dyn[:parametrized_replaceable_events], 
+                                   DB.@sql("select distinct pre.event_id from parametrized_replaceable_events pre, event_tags et 
+                                           where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' and
+                                           et.created_at >= ?1"),
+                                   (Utils.current_time()-90*24*3600,))))
+end
+
 function get_dvm_feeds(est::DB.CacheStorage)
     eids = Nostr.EventId[]
-    # for r in Postgres.execute(DAG_OUTPUTS_DB[], "
-    #                  select 
-    #                      es.id
-    #                  from 
-    #                      parametrized_replaceable_events pre,
-    #                      events es
-    #                  where
-    #                     pre.kind = 31990 and pre.event_id = es.id
-    #                     ")[2]
-    #     push!(eids, Nostr.EventId(r[1]))
-    # end
     for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
-                          DB.@sql("select event_id from parametrized_replaceable_events where kind = ?1"), 
-                          (31990,))
+                          DB.@sql("select distinct pre.event_id from parametrized_replaceable_events pre, event_tags et, dvm_feeds df
+                                  where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' and
+                                  df.pubkey = pre.pubkey and df.updated_at >= ?1 and df.ok"),
+                          (Dates.now() - Dates.Hour(1),))
         push!(eids, Nostr.EventId(eid))
     end
     response_messages_for_dvm_feeds(est, eids)
 end
 
-function enrich_feed_events(est::DB.CacheStorage; event_ids, user_pubkey=nothing)
-    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    eids = [cast(eid, Nostr.EventId) for eid in event_ids]
-    response_messages_for_posts(est, eids; user_pubkey)
-end
-
-HOME_FEEDS_FILE = Ref("home-feeds.json")
-
-function get_home_feeds(est::DB.CacheStorage)
-    [(; kind=Int(HOME_FEEDS), 
-      content=JSON.json(try JSON.parse(read(HOME_FEEDS_FILE[], String))
-                        catch _; (;) end))]
-end
-
 FEATURED_DVM_FEEDS_FILE = Ref("featured-dvm-feeds.json")
 
 function get_featured_dvm_feeds(est::DB.CacheStorage; kind::String)
+    if 1==1
+        eids = Nostr.EventId[]
+        for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                              DB.@sql("select distinct pre.event_id from parametrized_replaceable_events pre, event_tags et, dvm_feeds df, events es
+                                      where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' and
+                                      df.pubkey = pre.pubkey and df.updated_at >= ?1 and df.ok and df.kind = ?2 and es.id = pre.event_id and not (es.content like '%Primal%')"),
+                              (Dates.now() - Dates.Hour(1), kind))
+            push!(eids, Nostr.EventId(eid))
+        end
+        return response_messages_for_dvm_feeds(est, eids)
+    end
+
     eids = Nostr.EventId[]
     for f in JSON.parse(read(FEATURED_DVM_FEEDS_FILE[], String))
         f["kind"] == kind || continue
@@ -2534,35 +2556,24 @@ function dvm_feed(
         dvm_id::String,
         dvm_kind::Int=31990,
         user_pubkey=nothing,
+        timeout=10,
+        usecache=true,
         kwargs...,
     )
     in_pgspi() && return []
 
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    user_pubkey == Main.test_pubkeys[:aquarius] && @show (dvm_pubkey, dvm_id)
 
-    relays = Set{String}()
-    # for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
-    #                       DB.@sql("select event_id from parametrized_replaceable_events where kind = ?1 and pubkey = ?2 and identifier = ?3"), 
-    #                       (dvm_kind, dvm_pubkey, dvm_id))
-    #     eid = Nostr.EventId(eid)
-    #     if !isempty(local relay = get(est.dyn[:event_relay], eid, ""))
-    #         push!(relays, relay)
-    #     end
-    # end
-    union!(relays, Main.DVMServiceProvider.RELAY_URLS)
-    1==1 && union!(relays, [
-                    "wss://relay.nostr.band",
-                    "wss://nos.lol",
-                    "wss://nostr-pub.wellorder.net",
-                    "wss://relay.nostr.bg",
-                    "wss://relay.poster.place",
-                    "wss://nostr.oxtr.dev",
-                   ])
-    relays = collect(relays)
-    user_pubkey == Main.test_pubkeys[:aquarius] && @show relays
+    usecache && for (res,) in DB.exec(est.dyn[:dvm_feeds], 
+                          DB.@sql("select results from dvm_feeds 
+                                  where pubkey = ?1 and updated_at >= ?2 and ok and results is not null"),
+                          (dvm_pubkey, Dates.now() - Dates.Minute(15),))
+        return res
+    end
 
+    relays = Main.DVMFeedChecker.RELAYS
+                    
     req_id = UUIDs.uuid4()
 
     jobreq = Nostr.Event(DVM_REQUESTER_KEYPAIR[].seckey, DVM_REQUESTER_KEYPAIR[].pubkey,
@@ -2570,7 +2581,10 @@ function dvm_feed(
                          5300,
                          [Nostr.TagAny(t)
                           for t in [["p", Nostr.hex(dvm_pubkey)],
+                                    ["alt", "NIP90 Content Discovery Request"],
                                     ["relays", relays...],
+                                    # ["param", "max_results", "200"],
+                                    # ["param", "user", Nostr.hex(user_pubkey)],
                                    ]],
                          "")
 
@@ -2589,7 +2603,6 @@ function dvm_feed(
         end
 
         NostrClient.send(client, jobreq; timeout=5.0) do m, done
-            user_pubkey == Main.test_pubkeys[:aquarius] && @show (client.relay_url, m)
             m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) feed $dvm_id job request event failed")
             done(:ok)
         end
@@ -2599,7 +2612,6 @@ function dvm_feed(
     cond = Condition()
 
     function handle_result(client, m)
-        user_pubkey == Main.test_pubkeys[:aquarius] && @show (dvm_id, client.relay_url, m)
         m[1] == "EVENT" || return
         e = Nostr.Event(m[3])
         @assert Nostr.verify(e)
@@ -2619,7 +2631,7 @@ function dvm_feed(
     end
 
     @async begin
-        sleep(30)
+        sleep(timeout)
         notify(cond, NostrClient.Timeout("dvm_feed"); error=true)
     end
 

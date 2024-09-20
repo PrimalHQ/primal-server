@@ -251,10 +251,12 @@ function scored_content(
         user_pubkey=nothing,
         include_top_zaps=true,
         time_exceeded=()->false,
+        usepgfuncs=false,
+        apply_humaness_check=false,
     )
     limit = min(50, limit)
     if timeframe != :popular
-        created_after = max(trunc(Int, time()-24*3600), created_after)
+        created_after = max(trunc(Int, time()-7*24*3600), created_after)
     end
     if !isnothing(since); since = max(max(1, since), created_after); end
     # desc = timeframe == :latest ? string((; timeframe, lenpks=length(pubkeys), created_after, limit, since, until, user_pubkey)) : nothing
@@ -264,12 +266,11 @@ function scored_content(
     timeframe = Symbol(timeframe)
     pubkeys = map(pk->pk isa Nostr.PubKeyId ? pk : Nostr.PubKeyId(pk), collect(pubkeys))
 
-    # TODO probably `limit/256` (~1) sql query limit is enough to find `limit` posts in total
-
     field = 
     if     timeframe == :latest; :created_at
     elseif timeframe == :popular; :score
-    elseif timeframe == :trending; :score24h
+    # elseif timeframe == :trending; :score24h
+    elseif timeframe == :trending; :score
     elseif timeframe == :mostzapped; :satszapped
     else   error("unknown timeframe: $(timeframe)")
     end
@@ -355,11 +356,12 @@ function scored_content(
 
     posts = sort(posts_filtered; by=r->-r[2])[1:min(limit, length(posts_filtered))]
 
-    eids = [eid for (eid, _) in posts]
-
-    res = response_messages_for_posts(est, eids; user_pubkey, include_top_zaps)
-
-    vcat(res, range(posts, field))
+    if usepgfuncs
+        enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check)
+    else
+        eids = [eid for (eid, _) in posts]
+        [response_messages_for_posts(est, eids; user_pubkey, include_top_zaps); range(posts, field)]
+    end
 end
 
 analytics_cache = Dict() |> ThreadSafe
@@ -869,16 +871,20 @@ function advanced_search(
         limit=20,
         kwargs...,
     )
-    # return [] # FIXME
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     isempty(query) && error("query is empty")
     limit = min(100, limit)
-    res = []
-    eids = if !isnothing(DAG_OUTPUTS[])
+    if !isnothing(DAG_OUTPUTS[])
         mod, outputs = DAG_OUTPUTS[]
-        res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; outputs, logextra=(; user_pubkey), limit, kwargs...)
-        Nostr.EventId[eid for (eid, created_at) in res]
-    else; Nostr.EventId[] end
-    vcat(response_messages_for_posts(est, eids; user_pubkey), range(res, :created_at))
+        res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
+        Main.stuffd[:res] = res
+        posts = Tuple{Nostr.EventId, Int}[(Nostr.EventId(eid), created_at) for (eid, created_at) in res]
+        eids = Nostr.EventId[eid for (eid, created_at) in posts]
+        vcat(response_messages_for_posts(est, eids; user_pubkey), range(posts, :created_at))
+        # enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false)
+    else
+        [] 
+    end
 end
 
 ADVANCED_FEED_PROVIDER_HOST = Ref{Any}(nothing)

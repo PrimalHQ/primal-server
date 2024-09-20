@@ -226,6 +226,7 @@ app_funcalls_with_pgfuncs = Set([
                                  :thread_view,
                                  :feed_directive,
                                  :feed_directive_2,
+                                 :explore,
                                 ])
 end)
 ##

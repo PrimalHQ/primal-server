@@ -3178,8 +3178,7 @@ const grammar = Ref{Any}(nothing)
 
 SEARCH_SERVER = Ref(:p0timelimit)
 
-function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Utils.current_time(), limit=100, offset=0, kind=nothing, explain=false, logextra=(;))
-
+function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Utils.current_time(), limit=100, offset=0, kind=nothing, explain=false, extra_selects=[], logextra=(;))
     expr = parse_search_query(query)
 
     res = []
@@ -3189,8 +3188,9 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
     try
         transaction_with_execution_stats(SEARCH_SERVER[]; stats) do session
 
-            sql, params = to_sql(est, user_pubkey, session, outputs, expr, kind, since, until, limit, offset)
+            sql, params = to_sql(est, user_pubkey, session, outputs, expr, kind, since, until, limit, offset, extra_selects)
             # println(sql); println(params)
+            push!(get!(Main.stuffd, :qs, []), (sql, params))
 
             Postgres.execute(session, "set statement_timeout=10000")
 
@@ -3419,13 +3419,18 @@ end
 
 # advanced search SQL codegen
 
-function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, outputs::NamedTuple, ops, kind, since, until, limit, offset; order=:desc)
+function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, outputs::NamedTuple, ops, kind, since, until, limit, offset, extra_selects; order=:desc)
     o = outputs
 
     params = []
     function P(v)
         push!(params, v)
         "\$$(length(params))"
+    end
+
+    selects = []
+    function select(s)
+        push!(selects, s)
     end
 
     tables = Set()
@@ -3443,10 +3448,40 @@ function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, ou
         push!(conds, s)
     end
 
+    ctes = []
+    function cte(s)
+        push!(ctes, s)
+    end
+
+    select("$(T(o.advsearch)).id")
+    select("$(T(o.advsearch)).created_at")
+
     cond("$(T(o.advsearch)).created_at >= $(P(since))")
     cond("$(T(o.advsearch)).created_at <= $(P(until))")
 
     !isnothing(kind) && cond("$(T(o.advsearch)).kind <= $(P(kind))")
+
+    function user_pubkey_follows_conds()
+        cte("with pks as (
+                select pf1.pubkey
+                from pubkey_followers pf1
+                where pf1.follower_pubkey = $(P(user_pubkey))
+            )")
+    end
+
+    function user_pubkey_network_conds()
+        cte("with pks as ((
+                select pf1.pubkey
+                from pubkey_followers pf1
+                where pf1.follower_pubkey = $(P(user_pubkey))
+            ) union (
+                select pf2.pubkey
+                from pubkey_followers pf1, pubkey_followers pf2
+                where
+                    pf1.follower_pubkey = $(P(user_pubkey)) and 
+                    pf2.follower_pubkey = pf1.pubkey
+            ))")
+    end
 
     for op in ops
         if     op isa O.Word;    cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
@@ -3475,41 +3510,35 @@ function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, ou
                                                                                                                     else; error("unexpected emoticon: $(op.emo)")
                                                                                                                     end))")
         elseif op isa O.MinScore
-            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score24h >= $(P(op.score))")
+            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score >= $(P(op.score))")
         elseif op isa O.MaxScore
-            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score24h <= $(P(op.score))")
+            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score <= $(P(op.score))")
         elseif op isa O.MinInteractions
             cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps >= $(P(op.interactions))")
         elseif op isa O.MaxInteractions
             cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps <= $(P(op.interactions))")
         elseif op isa O.Scope
             if op.scope in ["myfollows", "mynetwork"]
+                T("pks")
                 pks = 
-                if     op.scope == "myfollows"; Main.App.follows(est, user_pubkey)
-                elseif op.scope == "mynetwork"; Main.App.outer_network(est, user_pubkey)
-                end
-                Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
-                for pk in pks
-                    Postgres.execute(session, "insert into pks values (\$1)", [pk])
+                if     op.scope == "myfollows"
+                    user_pubkey_follows_conds()
+                elseif op.scope == "mynetwork"
+                    user_pubkey_network_conds()
                 end
                 cond("$(T(o.advsearch)).pubkey = $(T("pks")).pubkey")
             elseif op.scope in ["myfollowsinteractions", "mynetworkinteractions"]
-                pks = 
-                if     op.scope == "myfollowsinteractions"; Main.App.follows(est, user_pubkey)
-                elseif op.scope == "mynetworkinteractions"; Main.App.outer_network(est, user_pubkey)
-                end
-                Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
-                for pk in pks
-                    Postgres.execute(session, "insert into pks values (\$1)", [pk])
-                end
-                T("pks")
+                # TODO: zaps
                 T("basic_tags bt1") 
-                T("basic_tags bt2") 
-                cond("(bt1.kind = $(Int(Nostr.TEXT_NOTE)) or bt1.kind = $(Int(Nostr.REPOST)) or bt1.kind = $(Int(Nostr.REACTION)) or bt1.kind = $(Int(Nostr.ZAP_RECEIPT))) and 
-                      bt1.pubkey = pks.pubkey and
-                      bt1.id = bt2.id and bt2.tag = 'e' and
-                      bt2.arg1 = $(T(o.advsearch)).id
-                      ")
+                T("pks")
+                pks = 
+                if     op.scope == "myfollowsinteractions"
+                    user_pubkey_follows_conds()
+                elseif op.scope == "mynetworkinteractions"
+                    user_pubkey_network_conds()
+                end
+                cond("(bt1.kind = $(Int(Nostr.TEXT_NOTE)) or bt1.kind = $(Int(Nostr.REPOST)) or bt1.kind = $(Int(Nostr.REACTION))) and 
+                     bt1.pubkey = pks.pubkey and bt1.tag = 'e' and bt1.arg1 = $(T(o.advsearch)).id")
             else; error("unsupported scope: $(op.scope)")
             end
         elseif op isa O.MinWords
@@ -3519,8 +3548,11 @@ function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, ou
         end
     end
 
+    append!(selects, extra_selects)
+
     ("
-     select $(T(o.advsearch)).id, $(T(o.advsearch)).created_at
+     $(join(ctes, ", "))
+     select $(join(selects, ", "))
      from $(join(tables, ", "))
      where $(join(conds, " and "))
      order by $(T(o.advsearch)).created_at $order
