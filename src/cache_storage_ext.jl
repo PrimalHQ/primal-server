@@ -179,11 +179,13 @@ function ext_init(est::CacheStorage)
                                             valuefuncs=DB.DBConversionFuncs(JSON.json, identity),
                                             init_queries=["create table if not exists dvm_feeds (
                                                           pubkey bytea not null,
+                                                          identifier varchar not null,
                                                           updated_at timestamp not null,
                                                           results jsonb,
                                                           kind varchar not null,
+                                                          personalized bool not null,
                                                           ok bool not null,
-                                                          primary key (pubkey)
+                                                          primary key (pubkey, identifier)
                                                           )",
                                                          ])
 ##

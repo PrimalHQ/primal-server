@@ -12,6 +12,8 @@ LOG = Ref(false)
 
 exceptions_lock = ReentrantLock()
 
+DVM_REQUESTER_PUBKEY = Ref{Any}(nothing)
+
 RELAYS = [
           "wss://nostr.bitcoiner.social/",
           "wss://relay.nostr.bg/",
@@ -62,38 +64,37 @@ function run_dvm_checks()
         eid in est.events || return
         e = est.events[eid]
         if e.kind == 31990
-            # lock(exceptions_lock) do
-            #     @show e.id
-            #     display(JSON.parse(e.content)["nip90Params"])
-            # end
-            # return
-            tdur = @elapsed r = try
-                Main.App.dvm_feed(est; dvm_id="?", dvm_pubkey=e.pubkey, 
-                                  user_pubkey=Main.App.DVM_REQUESTER_KEYPAIR[].pubkey,
-                                  timeout=TIMEOUT[], usecache=false) |> JSON.json |> JSON.parse
+            dvm_id = Main.App.parametrized_replaceable_event_identifier(e)
+            isnothing(dvm_id) && return
+            tdur = @elapsed (personalized, r) = try
+                (get(JSON.parse(e.content), "personalized", false),
+                 Main.App.dvm_feed(est; dvm_id, dvm_pubkey=e.pubkey, 
+                                   user_pubkey=DVM_REQUESTER_PUBKEY[],
+                                   timeout=TIMEOUT[], usecache=false) |> JSON.json |> JSON.parse)
             catch ex
                 lock(exceptions_lock) do
                     # println("run_dvm_checks: ", typeof(ex))
                     PRINT_EXCEPTIONS[] && Utils.print_exceptions()
                 end
-                nothing
+                (false, nothing)
             end
             LOG[] && println("run_dvm_checks: $(Nostr.hex(e.pubkey)) $(isnothing(r) ? "X" : "+") $tdur s")
             if isnothing(r)
                 badcnt[] += 1
                 DB.exec(est.dyn[:dvm_feeds], 
-                        "insert into dvm_feeds values (?1, ?2, ?3, ?4, ?5) on conflict (pubkey) do update set 
-                        updated_at = ?2, results = ?3, kind = ?4, ok = ?5",
-                        (e.pubkey, Dates.now(), JSON.json(nothing), "", false))
+                        "insert into dvm_feeds values (?1, ?2, ?3, ?4, ?5, ?6, ?7) on conflict (pubkey, identifier) do update set 
+                        updated_at = ?3, results = ?4, kind = ?5, personalized = ?6, ok = ?7",
+                        (e.pubkey, dvm_id, Dates.now(), JSON.json(nothing), "", personalized, false))
             else
                 goodcnt[] += 1
-                notes_cnt = length([1 for e in r if e["kind"] == Int(Nostr.LONG_FORM_CONTENT)])
-                reads_cnt = length([1 for e in r if e["kind"] == Int(Nostr.TEXT_NOTE)])
+                notes_cnt = length([1 for e in r if e["kind"] == Int(Nostr.TEXT_NOTE)])
+                reads_cnt = length([1 for e in r if e["kind"] == Int(Nostr.LONG_FORM_CONTENT)])
                 DB.exec(est.dyn[:dvm_feeds], 
-                        "insert into dvm_feeds values (?1, ?2, ?3, ?4, ?5) on conflict (pubkey) do update set 
-                        updated_at = ?2, results = ?3, kind = ?4, ok = ?5",
-                        (e.pubkey, Dates.now(), JSON.json(r),
-                         (notes_cnt > reads_cnt ? :reads : :notes), notes_cnt + reads_cnt > 0))
+                        "insert into dvm_feeds values (?1, ?2, ?3, ?4, ?5, ?6, ?7) on conflict (pubkey, identifier) do update set 
+                        updated_at = ?3, results = ?4, kind = ?5, personalized = ?6, ok = ?7",
+                        (e.pubkey, dvm_id, Dates.now(), JSON.json(r),
+                         (notes_cnt >= reads_cnt ? :notes : :reads), 
+                         personalized, notes_cnt + reads_cnt > 0))
             end
         end
     end

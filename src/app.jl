@@ -7,7 +7,6 @@ macro threads(a); esc(a); end
 
 import DataStructures
 using DataStructures: OrderedSet, CircularBuffer, Accumulator
-using ReadWriteLocks: read_lock
 import Sockets
 import Dates
 
@@ -106,6 +105,7 @@ READS_FEEDS=10_000_152
 HOME_FEEDS=10_000_153
 # FEATURED_DVM_FEEDS=10_000_154
 
+DVM_FEED_FOLLOWS_ACTIONS=10_000_156
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
@@ -946,8 +946,7 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, a
     end
 
     res_meta_data = Dict() |> ThreadSafe
-    @threads for pk in pubkeys 
-    # for pk in pubkeys 
+    for pk in pubkeys 
         if pk in est.meta_data
             eid = est.meta_data[pk]
             eid in est.events && (res_meta_data[pk] = est.events[eid])
@@ -2451,7 +2450,7 @@ function get_home_feeds(est::DB.CacheStorage)
                         catch _; (;) end))]
 end
 
-function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nostr.EventId}) 
+function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nostr.EventId}; user_pubkey=nothing) 
     # event_relays = Dict{Nostr.EventId, String}()
     res = []
     for eid in eids
@@ -2459,14 +2458,20 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
             e = est.events[eid]
             for t in e.tags
                 if length(t.fields) >= 2 && t.fields[1] == "k" && t.fields[2] == "5300"
-                    push!(res, e)
-                    # println(JSON.json(JSON.parse(e.content),2))
-                    # if !isempty(local relay = get(est.dyn[:event_relay], eid, ""))
-                    #     event_relays[eid] = relay
-                    # end
-                    push!(res, (; kind=Int(EVENT_STATS), 
-                                content=JSON.json((; event_id=eid, likes=123, satszapped=12345))))
-                    break
+                    if !isnothing(local dvm_id = parametrized_replaceable_event_identifier(e))
+                        push!(res, e)
+                        likes = Postgres.execute(DAG_OUTPUTS_DB[], 
+                                                 "select count(1) from a_tags where kind = 7 and ref_kind = 31990 and ref_pubkey = \$1 and ref_identifier = \$2",
+                                                 [e.pubkey, dvm_id])[2][1][1]
+                        satszapped = Postgres.execute(DAG_OUTPUTS_DB[], 
+                                                      "select sum(satszapped) from zap_receipts where receiver = \$1",
+                                                      [e.pubkey])[2][1][1]
+                        satszapped = ismissing(satszapped) ? 0 : number(satszapped)
+                        # @show (e.pubkey, likes, satszapped)
+                        push!(res, (; kind=Int(EVENT_STATS), content=JSON.json((; event_id=eid, likes, satszapped))))
+                        isnothing(user_pubkey) || append!(res, get_dvm_feed_follows_actions(est; dvm_pubkey=e.pubkey, dvm_id, dvm_kind=e.kind, user_pubkey))
+                        break
+                    end
                 end
             end
         end
@@ -2498,17 +2503,28 @@ end
 
 FEATURED_DVM_FEEDS_FILE = Ref("featured-dvm-feeds.json")
 
-function get_featured_dvm_feeds(est::DB.CacheStorage; kind::String)
+function get_featured_dvm_feeds(est::DB.CacheStorage; kind::Union{String,Nothing}=nothing, user_pubkey=nothing)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     if 1==1
         eids = Nostr.EventId[]
         for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
-                              DB.@sql("select distinct pre.event_id from parametrized_replaceable_events pre, event_tags et, dvm_feeds df, events es
-                                      where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' and
-                                      df.pubkey = pre.pubkey and df.updated_at >= ?1 and df.ok and df.kind = ?2 and es.id = pre.event_id and not (es.content like '%Primal%')"),
+                              DB.@sql("
+                                      select 
+                                        distinct pre.event_id 
+                                      from 
+                                        parametrized_replaceable_events pre, 
+                                        event_tags et, 
+                                        dvm_feeds df, 
+                                        events es
+                                      where 
+                                        et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' and
+                                        df.pubkey = pre.pubkey and df.updated_at >= ?1 and df.ok and 
+                                        (case when ?2::text is null then true else df.kind = ?2 end) and 
+                                        es.id = pre.event_id and not (es.content like '%Primal%')"),
                               (Dates.now() - Dates.Hour(1), kind))
             push!(eids, Nostr.EventId(eid))
         end
-        return response_messages_for_dvm_feeds(est, eids)
+        return response_messages_for_dvm_feeds(est, eids; user_pubkey)
     end
 
     eids = Nostr.EventId[]
@@ -2524,7 +2540,7 @@ function get_featured_dvm_feeds(est::DB.CacheStorage; kind::String)
             push!(eids, Nostr.EventId(eid))
         end
     end
-    response_messages_for_dvm_feeds(est, eids)
+    response_messages_for_dvm_feeds(est, eids; user_pubkey)
 end
 
 import UUIDs
@@ -2565,11 +2581,27 @@ function dvm_feed(
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    usecache && for (res,) in DB.exec(est.dyn[:dvm_feeds], 
+    einfo = nothing
+    for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                          DB.@sql("select event_id from parametrized_replaceable_events where kind = ?1 and pubkey = ?2 and identifier = ?3"), 
+                          (dvm_kind, dvm_pubkey, dvm_id))
+        eid = Nostr.EventId(eid)
+        if eid in est.events
+            einfo = est.events[eid]
+            break
+        end
+    end
+    isnothing(einfo) && return []
+    dvminfo = JSON.parse(einfo.content)
+    personalized = get(dvminfo, "personalized", false)
+
+    if usecache && !personalized
+        for (res,) in DB.exec(est.dyn[:dvm_feeds], 
                           DB.@sql("select results from dvm_feeds 
                                   where pubkey = ?1 and updated_at >= ?2 and ok and results is not null"),
                           (dvm_pubkey, Dates.now() - Dates.Minute(15),))
-        return res
+            return res
+        end
     end
 
     relays = Main.DVMFeedChecker.RELAYS
@@ -2583,8 +2615,10 @@ function dvm_feed(
                           for t in [["p", Nostr.hex(dvm_pubkey)],
                                     ["alt", "NIP90 Content Discovery Request"],
                                     ["relays", relays...],
-                                    # ["param", "max_results", "200"],
-                                    # ["param", "user", Nostr.hex(user_pubkey)],
+                                    (personalized ? [
+                                        ["param", "max_results", "100"],
+                                        ["param", "user", Nostr.hex(user_pubkey)],
+                                    ] : [])...,
                                    ]],
                          "")
 
@@ -2655,4 +2689,87 @@ function dvm_feed(
     end
 end
 
+function get_dvm_feed_follows_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::String, dvm_kind=31990, user_pubkey, limit=5)
+    dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    limit = min(20, limit)
+
+    res = []
+    res_mds = []
+    for r in Postgres.execute(DAG_OUTPUTS_DB[],
+                                          # ) union (
+                                          #     select 
+                                          #         zr.sender as pubkey
+                                          #     from 
+                                          #         zap_receipts zr
+                                          #     where 
+                                          #         zr.receiver = $(@P dvm_pubkey)
+                              pgparams() do P "
+                                  select
+                                      pks.pubkey
+                                  from
+                                      (
+                                          (
+                                              select 
+                                                  es.pubkey
+                                              from 
+                                                  a_tags at,
+                                                  event es
+                                              where 
+                                                  at.ref_kind = $(@P dvm_kind) and
+                                                  at.ref_pubkey = $(@P dvm_pubkey) and
+                                                  at.ref_identifier = $(@P dvm_id) and
+                                                  (at.kind = $(@P Int(Nostr.TEXT_NOTE)) or at.kind = $(@P Int(Nostr.REACTION))) and
+                                                  es.id = at.eid
+                                          ) union (
+                                              select 
+                                                  zr.sender as pubkey
+                                              from 
+                                                  a_tags at,
+                                                  zap_receipts zr
+                                              where 
+                                                  at.ref_kind = $(@P dvm_kind) and
+                                                  at.ref_pubkey = $(@P dvm_pubkey) and
+                                                  at.ref_identifier = $(@P dvm_id) and
+                                                  at.kind = $(@P Int(Nostr.ZAP_RECEIPT)) and
+                                                  at.eid = zr.eid
+                                          )
+                                      ) pks,
+                                      pubkey_followers pf, 
+                                      pubkey_followers_cnt pfc
+                                  where
+                                      pf.pubkey = pks.pubkey and
+                                      $(@P user_pubkey) = pf.follower_pubkey and 
+                                      pks.pubkey = pfc.key
+                                  group by pks.pubkey
+                                  order by max(pfc.value) desc limit $(@P limit)
+                              " end...)[2]
+        pk = Nostr.PubKeyId(r[1])
+        if pk in est.meta_data
+            mdid = est.meta_data[pk]
+            if mdid in est.events
+                md = est.events[mdid]
+                push!(res, md)
+                push!(res_mds, md)
+                append!(res, ext_event_response(est, md))
+            end
+        end
+    end
+
+    append!(res, user_scores(est, res_mds))
+
+    r = (; dvm_pubkey, dvm_id, dvm_kind, users=[Nostr.hex(e.pubkey) for e in res_mds])
+
+    append!(res, [(; kind=Int(DVM_FEED_FOLLOWS_ACTIONS), content=JSON.json(r))])
+
+    res
+end
+
+function parametrized_replaceable_event_identifier(e::Nostr.Event)
+    for tag in e.tags
+        if length(tag.fields) >= 2 && tag.fields[1] == "d"
+            return tag.fields[2]
+        end
+    end
+    nothing
 end
