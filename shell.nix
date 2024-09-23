@@ -59,15 +59,23 @@ mkShell {
   setup_pg_primal = pkgs.writeShellScript "setup_pg_primal.sh" ''
     set -ex
     PGDIR="$(cat pgdir)"
-    PGBINDIR="$(find $PGDIR -type d | grep outputs/out/bin | grep -v tmp_install)"
+    PGBINDIR="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)/out/bin"
     pg_config="$(find $PGBINDIR -name pg_config)"
     cd pg_primal
     cargo-pgrx pgrx install -c $pg_config
   '';
 
+  setup_pg_cron = pkgs.writeShellScript "setup_pg_cron.sh" ''
+    PGDIR="$(cat pgdir)"
+    PGOUTS="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)"
+    set -ex
+    cp -v ${pkgs.postgresql15Packages.pg_cron}/lib/* $PGOUTS/lib/lib/
+    cp -v ${pkgs.postgresql15Packages.pg_cron}/share/postgresql/extension/* $PGOUTS/out/share/postgresql/extension/
+  '';
+
   start_postgres = pkgs.writeShellScript "start_postgres.sh" ''
     PGDIR="$(cat pgdir)"
-    PGBINDIR="$(realpath $PGDIR/postgresql-*/outputs/out/bin)"
+    PGBINDIR="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)/out/bin"
     export PATH="$PGBINDIR:$PATH"
     set -ex
     pg_ctl -w -D $(cat pgdata) start
@@ -76,7 +84,7 @@ mkShell {
 
   stop_postgres = pkgs.writeShellScript "stop_postgres.sh" ''
     PGDIR="$(cat pgdir)"
-    PGBINDIR="$(realpath $PGDIR/postgresql-*/outputs/out/bin)"
+    PGBINDIR="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)/out/bin"
     export PATH="$PGBINDIR:$PATH"
     set -ex
     pg_ctl -w -D $(cat pgdata) stop -m i
