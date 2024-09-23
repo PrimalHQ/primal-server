@@ -66,6 +66,9 @@ exposed_functions = Set([:feed,
                          :enrich_feed_events,
                          :get_home_feeds,
                          :get_featured_dvm_feeds,
+
+                         :explore_zaps,
+                         :explore_people,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -106,7 +109,9 @@ HOME_FEEDS=10_000_153
 # FEATURED_DVM_FEEDS=10_000_154
 
 DVM_FEED_FOLLOWS_ACTIONS=10_000_156
+USER_FOLLOWER_COUNT_INCREASES=10_000_157
 USER_PRIMAL_NAMES=10_000_158
+
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
@@ -1581,7 +1586,7 @@ function user_zaps(
         kinds=nothing,
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
     )
-    limit=min(50, limit)
+    limit = min(50, limit)
     limit <= 1000 || error("limit too big")
     sender = castmaybe(sender, Nostr.PubKeyId)
     receiver = castmaybe(receiver, Nostr.PubKeyId)
@@ -2226,7 +2231,7 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
     kwargs = Dict(kwargs)
     user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
 
-    if funcall == :get_featured_dvm_feeds
+    if funcall == :get_featured_dvm_feeds || funcall == :advanced_search || funcall == :advanced_feed
         return res
     elseif get(kwargs, :usepgfuncs, false) && funcall in Main.CacheServerHandlers.app_funcalls_with_pgfuncs
         return res
@@ -2381,23 +2386,19 @@ function mega_feed_directive(
 
     # @show (s, kwa)
 
+    id = get(s, "id", "")
+
     if haskey(s, "dvm_pubkey") && haskey(s, "dvm_id")   
         return dvm_feed(est; dvm_pubkey=s["dvm_pubkey"], dvm_id=s["dvm_id"], kwargs...)
 
-    elseif get(s, "id", "") == "reads-feed" || get(s, "kind", "") == "reads"
+    elseif id == "reads-feed" || get(s, "kind", "") == "reads"
         minwords = get(s, "minwords", 100)
         if get(s, "scope", "") == "follows"
             return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:follows, minwords, kwargs..., usepgfuncs, apply_humaness_check)
         elseif get(s, "scope", "") == "zappedbyfollows"
             return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:zappedbyfollows, minwords, kwargs..., usepgfuncs, apply_humaness_check)
         elseif get(s, "scope", "") == "myfollowsinteractions"
-            in_pgspi() && return [] 
-            req = (; user_pubkey=kwa[:user_pubkey], specification=["advanced_search", (; query="kind:30023 scope:myfollowsinteractions minwords:$(minwords)")], eventidsonly=true, kwargs...)
-            eids = map(Nostr.EventId, JSON.parse(String(HTTP.request("GET", "http://192.168.17.7:14017/api", [], JSON.json(["advanced_feed", req])).body)))
-            posts = [let e = est.events[eid]; (e.id, e.created_at); end for eid in eids]
-            res = response_messages_for_posts(est, eids; user_pubkey=Nostr.PubKeyId(kwa[:user_pubkey]))
-            append!(res, parametrized_replaceable_events_extended_response(est, eids))
-            return vcat(res, range(posts, :created_at))
+            return advanced_search(est; query="kind:1 scope:myfollowsinteractions", kwargs...)
         elseif haskey(s, "topic")
             return long_form_content_feed(est; topic=s["topic"], minwords, kwargs..., usepgfuncs, apply_humaness_check)
         elseif haskey(s, "pubkey") && haskey(s, "curation")
@@ -2407,27 +2408,32 @@ function mega_feed_directive(
         end
 
     elseif get(s, "kind", "") == "notes"
-        if     s["id"] == "latest"
+        if     id == "latest"
             return feed(est; pubkey=kwa[:user_pubkey], kwargs...)
-        elseif s["id"] == "global-trending"
+        elseif id == "global-trending"
             # return explore_global_trending(est, s["hours"]; kwargs...)
             return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kwargs...) 
-        elseif s["id"] == "short-vertical-videos"
+        elseif id == "short-vertical-videos"
             return advanced_search(est; query="kind:1 filter:video orientation:vertical maxduration:10", kwargs...)
-        elseif s["id"] == "all-notes"
+        elseif id == "all-notes"
             return explore(est; timeframe="latest", scope="global", kwargs...)
-        elseif s["id"] == "most-zapped"
+        elseif id == "most-zapped"
             return explore_global_mostzapped(est, s["hours"]; kwargs...)
-        elseif s["id"] == "wide-net-notes"
+        elseif id == "wide-net-notes"
             return advanced_search(est; query="kind:1 scope:myfollowsinteractions", kwargs...)
-        elseif s["id"] == "feed"
+        elseif id == "feed"
             return feed(est; skwa..., kwargs..., usepgfuncs, apply_humaness_check)
-        elseif s["id"] == "search"
+        elseif id == "search"
             return search(est; skwa..., kwargs...)
         end
 
-    elseif get(s, "id", "") == "advsearch"
+    elseif id == "advsearch"
         return advanced_search(est; skwa..., kwargs...)
+
+    elseif id == "explore-media"
+        return advanced_search(est; query="kind:1 filter:image", kwargs...)
+    elseif id == "explore-zaps"
+        return explore_zaps(est; skwa..., kwargs...)
     end
 
     []
@@ -2781,4 +2787,49 @@ function parametrized_replaceable_event_identifier(e::Nostr.Event)
         end
     end
     nothing
+end
+
+function explore_zaps(
+        est::DB.CacheStorage;
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        created_after=Utils.current_time()-24*3600,
+    )
+    limit = min(50, limit)
+    limit <= 1000 || error("limit too big")
+
+    zaps = map(Tuple, DB.exec(est.zap_receipts, 
+                              DB.@sql("select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats 
+                                      from og_zap_receipts zr, pubkey_trustrank tr
+                                      where 
+                                        zr.created_at >= ?1 and zr.created_at <= ?2 and zr.created_at >= ?3 and
+                                        zr.sender = tr.pubkey and tr.rank >= ?4
+                                      order by zr.created_at desc limit ?5 offset ?6"),
+                              (since, until, created_after, Main.TrustRank.humaness_threshold[], limit, offset)))
+
+    zaps = sort(zaps, by=z->-z[2])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps)
+end
+
+function explore_people(
+        est::DB.CacheStorage;
+        since::Float64=0.0, until::Float64=1.0, offset::Int=0, limit::Int=20, 
+    )
+    limit = min(50, limit)
+
+    res = []
+    for (pk, v) in Postgres.execute(DAG_OUTPUTS_DB[], 
+                                    pgparams() do P "
+                                        select * from daily_followers_cnt_increases
+                                        where increase >= $(@P since) and increase <= $(@P until)
+                                        order by increase desc limit $(@P limit) offset $(@P offset)"
+                                    end...)[2]
+        push!(res, (Nostr.PubKeyId(pk), v))
+    end
+
+    [[(; kind=Int(USER_FOLLOWER_COUNTS), content=JSON.json(Dict([Nostr.hex(pk)=>v for (pk, v) in res])))];
+     user_infos(est; pubkeys=map(first, res)); 
+     range(res, :increase)]
+end
+
 end

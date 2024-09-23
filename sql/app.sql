@@ -715,9 +715,9 @@ BEGIN
     END LOOP;
 
     SELECT json_object_agg(ENCODE(key, 'hex'), value) INTO r FROM pubkey_followers_cnt WHERE key = ANY(a_pubkeys);
-
 	RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', r::text);
 	RETURN NEXT jsonb_build_object('kind', c_USER_FOLLOWER_COUNTS(), 'content', r::text);
+
     SELECT json_object_agg(ENCODE(pubkey, 'hex'), name) INTO r FROM verified_users WHERE pubkey = ANY(a_pubkeys);
 	RETURN NEXT jsonb_build_object('kind', c_USER_PRIMAL_NAMES(), 'content', r::text);
 END
@@ -783,4 +783,44 @@ BEGIN
    NEW.updated_at = now();
    RETURN NEW;
 END; $BODY$ 
+
+CREATE OR REPLACE FUNCTION humaness_threshold_trustrank() RETURNS float4 STABLE LANGUAGE 'sql' AS $$
+SELECT RANK FROM pubkey_trustrank ORDER BY rank DESC LIMIT 1 OFFSET 50000
+$$;
+
+CREATE OR REPLACE PROCEDURE create_trusted_pubkey_followers_cnt_table(a_table varchar) 
+LANGUAGE 'plpgsql' AS $BODY$
+BEGIN
+    EXECUTE format('
+        DROP TABLE IF EXISTS %I;
+
+        CREATE TABLE %I AS 
+        SELECT pubkey, pfc.value AS cnt 
+        FROM pubkey_trustrank tr, pubkey_followers_cnt pfc 
+        WHERE tr.pubkey = pfc.key;
+
+        ALTER TABLE %I ADD PRIMARY KEY (pubkey);
+    ', a_table, a_table, a_table);
+END
+$BODY$;
+
+CREATE OR REPLACE PROCEDURE update_user_relative_daily_follower_count_increases() 
+LANGUAGE 'plpgsql' AS $BODY$
+BEGIN
+    CALL create_trusted_pubkey_followers_cnt_table('trusted_pubkey_followers_cnt_current');
+
+    CREATE TABLE IF NOT EXISTS daily_followers_cnt_increases (pubkey bytea not null, increase float4 not null, primary key (pubkey));
+
+    TRUNCATE daily_followers_cnt_increases;
+
+    INSERT INTO daily_followers_cnt_increases 
+        SELECT pubkey, 100.0*dcnt/cnt AS relcnt FROM (
+            SELECT t1.pubkey, t2.cnt, t2.cnt-t1.cnt AS dcnt 
+            FROM trusted_pubkey_followers_cnt t1, trusted_pubkey_followers_cnt_current t2 
+            WHERE t1.pubkey = t2.pubkey) a 
+        WHERE dcnt > 0 ORDER BY relcnt DESC LIMIT 10000;
+    COMMIT;
+END
+$BODY$;
+
 

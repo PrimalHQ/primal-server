@@ -1500,6 +1500,20 @@ function trending_hashtags(est::DB.CacheStorage; created_after::Int=trunc(Int, t
     [(; kind=Int(HASHTAGS), content=JSON.json(res))]
 end
 
+function explore_topics(est::DB.CacheStorage; created_after::Int=Utils.current_time()-2*24*3600)
+    res = DB.exec(est.event_hashtags, 
+                  DB.@sql("select eh.hashtag, count(1) as cnt
+                          from event_hashtags eh, events es, pubkey_trustrank tr
+                          where 
+                              eh.created_at >= ?1 and eh.event_id = es.id and
+                              es.pubkey = tr.pubkey and tr.rank > ?2
+                          group by eh.hashtag
+                          order by cnt desc
+                          limit 1000"), 
+                  (created_after, Main.TrustRank.humaness_threshold[]))
+    [(; kind=Int(HASHTAGS), content=JSON.json(Dict(res)))]
+end
+
 @cached 600   trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
 @cached 14400 trending_hashtags_7d(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-2*24*3600)) # !! 7d->2d
 
