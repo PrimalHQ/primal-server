@@ -879,9 +879,9 @@ function advanced_search(
         res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
         Main.stuffd[:res] = res
         posts = Tuple{Nostr.EventId, Int}[(Nostr.EventId(eid), created_at) for (eid, created_at) in res]
-        eids = Nostr.EventId[eid for (eid, created_at) in posts]
-        vcat(response_messages_for_posts(est, eids; user_pubkey), range(posts, :created_at))
-        # enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false)
+        # eids = Nostr.EventId[eid for (eid, created_at) in posts]
+        # vcat(response_messages_for_posts(est, eids; user_pubkey), range(posts, :created_at))
+        enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false)
     else
         [] 
     end

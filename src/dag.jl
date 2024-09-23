@@ -3178,7 +3178,7 @@ const grammar = Ref{Any}(nothing)
 
 SEARCH_SERVER = Ref(:p0timelimit)
 
-function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Utils.current_time(), limit=100, offset=0, kind=nothing, explain=false, extra_selects=[], logextra=(;))
+function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Utils.current_time(), limit=100, offset=0, kind=nothing, explain=false, logextra=(;))
     expr = parse_search_query(query)
 
     res = []
@@ -3188,7 +3188,7 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
     try
         transaction_with_execution_stats(SEARCH_SERVER[]; stats) do session
 
-            sql, params = to_sql(est, user_pubkey, session, outputs, expr, kind, since, until, limit, offset, extra_selects)
+            sql, params = to_sql(est, user_pubkey, session, outputs, expr, kind, since, until, limit, offset)
             # println(sql); println(params)
             push!(get!(Main.stuffd, :qs, []), (sql, params))
 
@@ -3419,7 +3419,7 @@ end
 
 # advanced search SQL codegen
 
-function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, outputs::NamedTuple, ops, kind, since, until, limit, offset, extra_selects; order=:desc)
+function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, outputs::NamedTuple, ops, kind, since, until, limit, offset; extra_selects=[], order=:desc)
     o = outputs
 
     params = []
