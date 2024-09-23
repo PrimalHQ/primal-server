@@ -106,6 +106,7 @@ HOME_FEEDS=10_000_153
 # FEATURED_DVM_FEEDS=10_000_154
 
 DVM_FEED_FOLLOWS_ACTIONS=10_000_156
+USER_PRIMAL_NAMES=10_000_158
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
@@ -951,13 +952,23 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, a
         end
     end
     res_meta_data_arr = []
+    res_primal_names = Dict()
     for pk in pubkeys
-        haskey(res_meta_data, pk) && push!(res_meta_data_arr, res_meta_data[pk])
+        if haskey(res_meta_data, pk) 
+            push!(res_meta_data_arr, res_meta_data[pk])
+            for name in Main.InternalServices.nostr_json_query_by_pubkey(pk)
+                res_primal_names[pk] = name
+                break
+            end
+        end
     end
-    res = [res_meta_data_arr..., user_scores(est, res_meta_data_arr)..., 
-           (; kind=Int(USER_FOLLOWER_COUNTS),
-            content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys]))
-           )]
+    res = [
+           res_meta_data_arr..., user_scores(est, res_meta_data_arr)..., 
+           (; kind=USER_FOLLOWER_COUNTS,
+            content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys]))),
+           (; kind=USER_PRIMAL_NAMES, 
+            content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names]))),
+          ]
     ext_user_infos(est, res, res_meta_data_arr)
     res
 end
