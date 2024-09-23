@@ -205,8 +205,8 @@ function event_actions(est::DB.CacheStorage;
                             ref_event_id, 
                             ref_pubkey
                         FROM
-                            prod.reads_versions,
-                            prod.event_pubkey_action_refs
+                            reads_versions,
+                            event_pubkey_action_refs
                         WHERE 
                             reads_versions.pubkey = $(@P pubkey) AND 
                             reads_versions.identifier = $(@P identifier) AND 
@@ -713,25 +713,23 @@ function feed_2(
             end
         end
     elseif notes == :user_media_thumbnails
-        if !isnothing(DAG_OUTPUTS_DB[])
-            for (eid, created_at) in Postgres.pex(DAG_OUTPUTS_DB[], "
-                SELECT
-                    DISTINCT events.id, 
-                    events.created_at
-                FROM
-                    prod.events,
-                    prod.event_media
-                WHERE 
-                    events.pubkey = \$1 AND 
-                    events.kind = $(Int(Nostr.TEXT_NOTE)) AND 
-                    events.id = event_media.event_id AND
-                    events.created_at >= \$2 AND events.created_at <= \$3
-                ORDER BY
-                    events.created_at DESC
-                LIMIT \$4 OFFSET \$5
-                ", [pubkey, since, until, limit, offset])
-                push!(posts, (eid, created_at))
-            end
+        for (eid, created_at) in Postgres.pex(DAG_OUTPUTS_DB[], "
+            SELECT
+                DISTINCT es.id, es.created_at
+            FROM
+                events es,
+                event_media em
+            WHERE 
+                es.pubkey = \$1 AND 
+                es.kind = $(Int(Nostr.TEXT_NOTE)) AND 
+                es.id = em.event_id AND
+                NOT EXISTS (SELECT 1 FROM event_preview ep WHERE ep.event_id = em.event_id) AND
+                es.created_at >= \$2 AND es.created_at <= \$3
+            ORDER BY
+                es.created_at DESC
+            LIMIT \$4 OFFSET \$5
+            ", [pubkey, since, until, limit, offset])
+            push!(posts, (eid, created_at))
         end
     else
         tdur2 = @elapsed begin
@@ -1099,9 +1097,9 @@ function user_profile_followed_by(est::DB.CacheStorage; pubkey, user_pubkey, lim
                                   select 
                                       pf1.pubkey
                                   from 
-                                    prod.pubkey_followers pf1, 
-                                    prod.pubkey_followers pf2,
-                                    prod.pubkey_followers_cnt pfc
+                                    pubkey_followers pf1, 
+                                    pubkey_followers pf2,
+                                    pubkey_followers_cnt pfc
                                   where 
                                       $(@P user_pubkey) = pf1.follower_pubkey and 
                                       pf1.pubkey = pf2.follower_pubkey and
@@ -1664,8 +1662,8 @@ function event_zaps_by_satszapped(
                           zap_receipts.receiver   as receiver,
                           zap_receipts.satszapped as amount_sats 
                       FROM
-                          prod.reads_versions,
-                          prod.zap_receipts
+                          reads_versions,
+                          zap_receipts
                       WHERE 
                           reads_versions.pubkey = $(@P pubkey) AND 
                           reads_versions.identifier = $(@P identifier) AND 
@@ -1793,8 +1791,8 @@ function highlights(
                              SELECT
                                  events.*
                              FROM
-                                 prod.basic_tags,
-                                 prod.events
+                                 basic_tags,
+                                 events
                              WHERE 
                                  (basic_tags.kind = 1 OR basic_tags.kind = 9802) AND
                                  basic_tags.tag = 'e' AND
@@ -1809,8 +1807,8 @@ function highlights(
                              SELECT
                                  events.*
                              FROM
-                                 prod.a_tags,
-                                 prod.events
+                                 a_tags,
+                                 events
                              WHERE 
                                  a_tags.ref_pubkey = $(@P pubkey) AND 
                                  a_tags.ref_identifier = $(@P identifier) AND 
@@ -1919,9 +1917,9 @@ function long_form_content_feed(
                                   select 
                                       distinct reads.latest_eid, reads.latest_created_at
                                   from 
-                                      prod.parametrized_replaceable_events pre,
-                                      prod.a_tags at,
-                                      prod.reads
+                                      parametrized_replaceable_events pre,
+                                      a_tags at,
+                                      reads
                                   where 
                                       pre.pubkey = $(@P pubkey) and pre.identifier = $(@P curation) and pre.kind = 30004 and
                                       pre.event_id = at.eid and 
@@ -1936,7 +1934,7 @@ function long_form_content_feed(
         for r in Postgres.pex(DAG_OUTPUTS_DB[], 
                               pgparams() do P "
                                   select distinct latest_eid, published_at
-                                  from prod.reads
+                                  from reads
                                   where 
                                       published_at >= $(@P since) and published_at <= $(@P until) and
                                       words >= $(@P minwords)
@@ -1949,7 +1947,7 @@ function long_form_content_feed(
         for r in Postgres.execute(DAG_OUTPUTS_DB[],
                                   pgparams() do P "
                                       select distinct rs.latest_eid, rs.published_at
-                                      from prod.pubkey_followers pf, prod.reads rs, prod.reads_versions rv, prod.zap_receipts zr
+                                      from pubkey_followers pf, reads rs, reads_versions rv, zap_receipts zr
                                       where 
                                           pf.follower_pubkey = $(@P pubkey) and 
                                           pf.pubkey = zr.sender and zr.target_eid = rv.eid and
@@ -1965,7 +1963,7 @@ function long_form_content_feed(
             qargs = if notes == :follows && !isempty(Postgres.pex(DAG_OUTPUTS_DB[], "select 1 from pubkey_followers pf where pf.follower_pubkey = ?1 limit 1", (pubkey,)))
                 pgparams() do P "
                     select distinct reads.latest_eid, reads.published_at
-                    from prod.reads, pubkey_followers pf
+                    from reads, pubkey_followers pf
                     where 
                         pf.follower_pubkey = $(@P pubkey) and pf.pubkey = reads.pubkey and 
                         reads.published_at >= $(@P since) and reads.published_at <= $(@P until) and
@@ -1976,7 +1974,7 @@ function long_form_content_feed(
             elseif notes == :authored
                 pgparams() do P "
                     select distinct reads.latest_eid, reads.published_at
-                    from prod.reads
+                    from reads
                     where 
                         reads.pubkey = $(@P pubkey) and 
                         reads.published_at >= $(@P since) and reads.published_at <= $(@P until) and
@@ -2025,8 +2023,8 @@ function long_form_content_replies(
                                  event_replies.reply_event_id,
                                  event_replies.reply_created_at AS created_at
                              FROM
-                                 prod.reads_versions,
-                                 prod.event_replies
+                                 reads_versions,
+                                 event_replies
                              WHERE 
                                  reads_versions.pubkey = $(@P pubkey) AND 
                                  reads_versions.identifier = $(@P identifier) AND 
@@ -2038,7 +2036,7 @@ function long_form_content_replies(
                                  a_tags.eid,
                                  a_tags.created_at
                              FROM
-                                 prod.a_tags
+                                 a_tags
                              WHERE 
                                  a_tags.kind = $(@P Int(Nostr.TEXT_NOTE)) AND 
                                  a_tags.ref_kind = $(@P Int(Nostr.LONG_FORM_CONTENT)) AND 
