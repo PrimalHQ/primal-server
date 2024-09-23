@@ -604,7 +604,7 @@ SELECT * FROM enrich_feed_events(
     ARRAY (
         select (pe.event_id, pe.created_at)::post
         from pubkey_events pe
-        where pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and (pe.is_reply = 0 or pe.is_reply = a_include_replies)
+        where pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and pe.is_reply = a_include_replies
         order by pe.created_at desc limit a_limit offset a_offset
     ),
     a_user_pubkey, a_apply_humaness_check)
