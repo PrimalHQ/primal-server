@@ -61,6 +61,7 @@ function rex_(srvnode, expr)
 end
 
 function pull_media(src, dst)
+    LOG[] && println(@__MODULE__, ": --------")
     for (tblsrc, tbldst, ty) in [
                                  (:(Main.cache_storage.ext[].media), :(Main.cache_storage.media), Nothing),
                                  (:(Main.cache_storage.ext[].event_media), :(Main.cache_storage.event_media), Nostr.EventId),
