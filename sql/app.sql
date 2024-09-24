@@ -782,7 +782,7 @@ RETURNS TRIGGER LANGUAGE 'plpgsql' AS $BODY$
 BEGIN
    NEW.updated_at = now();
    RETURN NEW;
-END; $BODY$ 
+END; $BODY$;
 
 CREATE OR REPLACE FUNCTION humaness_threshold_trustrank() RETURNS float4 STABLE LANGUAGE 'sql' AS $$
 SELECT RANK FROM pubkey_trustrank ORDER BY rank DESC LIMIT 1 OFFSET 50000
