@@ -62,6 +62,8 @@ static mut state: State = State {
     shutting_down: false,
 };
 
+type ClientWrite = Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>;
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 // #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
@@ -203,8 +205,9 @@ async fn accept_connection(stream: TcpStream, pool: Pool, membership_pool: Pool)
                             let kwargs = &d[2]["cache"][1];
                             let mut handled = false;
                             if funcall == "thread_view" {
-                                thread_view(subid, kwargs, pool.clone(), &client_write_2).await;
-                                handled = true;
+                                if let Ok(_) = thread_view(subid, kwargs, pool.clone(), &client_write_2).await {
+                                    handled = true;
+                                }
                             } else if funcall == "scored" {
                                 scored(subid, kwargs, pool.clone(), &client_write_2).await;
                                 handled = true;
@@ -273,14 +276,18 @@ async fn send_eose(subid: &str, cw: &mut tokio::sync::MutexGuard<'_, SplitSink<W
     cw.send(Text(msg)).await.expect("failed to send message");
 }
 
-async fn thread_view(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
+async fn thread_view(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) -> Result<(), String> {
     // info_time!("thread_view");
     let event_id = hex::decode(kwargs["event_id"].as_str().unwrap().to_string()).ok();
     let limit = kwargs["limit"].as_i64().unwrap_or(20);
     let since = kwargs["since"].as_i64().unwrap_or(0);
     let until = kwargs["until"].as_i64().unwrap_or(get_sys_time_in_secs().try_into().unwrap());
     let offset = kwargs["offset"].as_i64().unwrap_or(0);
-    let user_pubkey = hex::decode(kwargs["user_pubkey"].as_str().unwrap().to_string()).ok();
+    let user_pubkey = 
+        if let Some(v) = kwargs["user_pubkey"].as_str() {
+            hex::decode(v.to_string()).ok()
+        } else { None };
+    
     let apply_humaness_check = true;
 
     let client = pool.get().await.unwrap();
@@ -293,9 +300,11 @@ async fn thread_view(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc
         }
     }
     send_eose(subid, &mut cw).await;
+
+    Ok(())
 }
 
-async fn scored(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
+async fn scored(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) {
     // info_time!("scored");
     let selector = kwargs["selector"].as_str().unwrap();
 
@@ -316,7 +325,7 @@ async fn scored(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mute
     }
 }
 
-async fn get_default_app_settings(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
+async fn get_default_app_settings(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) {
     // info_time!("get_default_app_settings");
 
     let client = kwargs["client"].as_str().unwrap();
@@ -336,7 +345,7 @@ async fn get_default_app_settings(subid: &str, kwargs: &Value, pool: Pool, clien
     send_eose(subid, &mut cw).await;
 }
 
-async fn get_bookmarks(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
+async fn get_bookmarks(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) {
     // info_time!("get_bookmarks");
 
     let pubkey = hex::decode(kwargs["pubkey"].as_str().unwrap().to_string()).ok();
@@ -371,7 +380,7 @@ async fn get_bookmarks(subid: &str, kwargs: &Value, pool: Pool, client_write: &A
     send_eose(subid, &mut cw).await;
 }
 
-async fn user_infos(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
+async fn user_infos(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) {
     // info_time!("user_infos");
 
     let mut cw = client_write.lock().await;
@@ -406,7 +415,7 @@ async fn user_infos(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<
     send_eose(subid, &mut cw).await;
 }
 
-async fn server_name(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
+async fn server_name(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) {
     let mut cw = client_write.lock().await;
 
     let e = unsafe { json!({"content": state.srv_name}) };
@@ -415,7 +424,7 @@ async fn server_name(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc
     send_eose(subid, &mut cw).await;
 }
 
-async fn get_app_releases(subid: &str, kwargs: &Value, pool: Pool, client_write: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) {
+async fn get_app_releases(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) {
     const APP_RELEASES: i64 = 10000138;
 
     let mut cw = client_write.lock().await;
@@ -429,8 +438,6 @@ async fn get_app_releases(subid: &str, kwargs: &Value, pool: Pool, client_write:
 
     send_eose(subid, &mut cw).await;
 }
-
-type ClientWrite = Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>;
 
 async fn get_notifications_seen(subid: &str, kwargs: &Value, pool: Pool, client_write: &ClientWrite) {
     const NOTIFICATIONS_SEEN_UNTIL: i64 = 10000111;
