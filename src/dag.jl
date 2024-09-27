@@ -116,9 +116,21 @@ function init_tables()
     nothing
 end
 
-function runsimple(pipeline=default_pipeline; runtag, days=nothing, tasks=8, kwargs...)
+function runnode(nodefunc::Function; modname=:DAG_20240803_1, mkviews=false, days=nothing)
+    m = methods(Base.bodyfunction(methods(nodefunc)[1]))[1]
+    args = Dict(zip(split(m.slot_syms, '\0'), m.sig.parameters))
+    stargs = [Symbol(n) for (n, ty) in args if ty == ServerTable]
+    dag = Main.DAGRunner.dags[modname]
+    outputs = dag.successful[end].result.outputs
+    r = runsimple(; dag.runtag, [k=>v for (k, v) in dag.runkwargs if !(k in [:pipeline])]..., days) do targetserver, xn, o
+        xn(nodefunc; [n=>getproperty(outputs, n) for n in stargs]...)
+    end
+    mkviews && r.runctx.running[] && for schema in [:prod, :public]; mkviews!(r.outputs; schema); end
+    r
+end
+
+function runsimple(pipeline=default_pipeline; runtag, days=nothing, kwargs...)
     init()
-    PROCESS_SEGMENTS_TASKS[] = tasks
 
     global g_running
     try g_running[] catch _ false end || (g_running = Utils.PressEnterToStop())
@@ -228,6 +240,8 @@ end
 
 function default_pipeline(targetserver, xn, o)
     o.events = ServerTable(:postgres, targetserver, "event")
+    o.pubkey_trustrank = ServerTable(:postgres, targetserver, "pubkey_trustrank")
+    o.pubkey_bookmarks = ServerTable(:postgres, targetserver, "pubkey_bookmarks")
     xn(basic_tags_node, o.events)
     # xn(events_simplified_node, o.events)
     # xn(event_stats_node, o.events, o.events_simplified)
@@ -240,6 +254,8 @@ function default_pipeline(targetserver, xn, o)
     xn(pubkey_content_zap_cnt_node, o.zap_receipts)
     xn(advsearch_node, o.events, o.basic_tags)
     xn(event_mentions_node, o.events, o.parametrized_replaceable_events)
+    xn(note_length_node; o.events)
+    xn(note_stats_node; o.events, o.pubkey_trustrank)
 end
 
 function sqlite2pg_pipeline(targetserver, xn, o)
@@ -271,15 +287,17 @@ function drop_table!(st::ServerTable; cascade=false)
 end
 function reset_table!(st::ServerTable)
     Postgres.transaction(st.server) do session
-        Postgres.execute(session, "delete from $(st.table)")
+        Postgres.execute(session, "truncate $(st.table)")
         delete_table_coverages!(session, st)
     end
     nothing
 end
-function reimport_table!(st::ServerTable; days=15, modname::Symbol=:DAG_20240803_1)
+function reimport_tables!(sts::Vector{ServerTable}; days=nothing, modname::Symbol=:DAG_20240803_1)
     Main.DAGRunner.stop()
-    reset_table!(st)
-    Main.DAGRunner.dags[modname].since = current_time()-days*24*3600
+    for st in sts
+        reset_table!(st)
+    end
+    Main.DAGRunner.dags[modname].since = isnothing(days) ? datetime2unix(DateTime("2023-01-01")) : current_time()-days*24*3600
     Main.DAGRunner.LOG[] = true
     Main.DAGRunner.start()
     nothing
@@ -463,6 +481,10 @@ end
 
 macro pg(args...); _pg(args...); end
 
+function pgpretty(s::String)
+    string(strip(read(pipeline(`pg_format`; stdin=IOBuffer(s*";")), String)))
+end
+
 macro pgpretty(args...)
     e = _pg(args...)
     Base.remove_linenums!(e)
@@ -476,7 +498,7 @@ macro pgpretty(args...)
     # println()
     # println(s[])
     println()
-    println(strip(read(pipeline(`pg_format`; stdin=IOBuffer(s[]*";")), String)))
+    println(pgpretty(s[]))
     nothing
 end
 
@@ -1081,6 +1103,8 @@ function zap_receipts_node(
                            [
                             :target_eid,
                             :imported_at,
+                            :sender,
+                            :receiver,
                            ];
                            runtag=runctx.runtag)
 
@@ -1120,7 +1144,7 @@ function reads_node(
         event_replies::ServerTable,
         a_tags::ServerTable;
         runctx::RunCtx,
-        version=11,
+        version=12,
     )
     reads = dbtable(:postgres, runctx.targetserver, "reads", version, 
                     [
@@ -1148,6 +1172,9 @@ function reads_node(
                      (:words,     Int),
                      (:lang,      String),
                      (:lang_prob, Float64),
+
+                     (:image,   String),
+                     (:summary, String),
 
                      "primary key (pubkey, identifier)",
                     ],
@@ -1209,6 +1236,8 @@ function reads_node(
                 identifier = nothing
                 topics = []
                 published_at = nothing
+                image = ""
+                summary = ""
                 try
                     for t in e.tags
                         if length(t.fields) >= 2
@@ -1220,6 +1249,12 @@ function reads_node(
                             end
                             if t.fields[1] == "published_at"
                                 published_at = parse(Int, t.fields[2])
+                            end
+                            if t.fields[1] == "image"
+                                image = t.fields[2]
+                            end
+                            if t.fields[1] == "summary"
+                                summary = t.fields[2]
                             end
                         end
                     end
@@ -1242,7 +1277,7 @@ function reads_node(
                         end
                     end
 
-                    push!(rs, (; e.pubkey, identifier, eid=e.id, e.created_at, published_at, topics, words, lang, lang_prob))
+                    push!(rs, (; e.pubkey, identifier, eid=e.id, e.created_at, published_at, topics, words, lang, lang_prob, image, summary))
                 end
             end
 
@@ -1270,6 +1305,9 @@ function reads_node(
                      r.words,
                      r.lang,
                      r.lang_prob,
+
+                     r.image,
+                     r.summary,
                     )
                 end
 
@@ -1279,6 +1317,8 @@ function reads_node(
                     rd.words = r.words
                     rd.lang = r.lang
                     rd.lang_prob = r.lang_prob
+                    rd.image = r.image
+                    rd.summary = r.summary
                 end
 
                 save!(rd)
@@ -1828,24 +1868,24 @@ function event_mentions_node(
         # until=min(runctx.until, current_time()),
     )
     event_mentions = dbtable(:postgres, runctx.targetserver, "event_mentions", version, 
-                    [
-                     events,
-                     parametrized_replaceable_events,
-                    ],
-                    [
-                     (:eid, EventId),
-                     (:tag, Char), 
-                     (:argeid, (EventId, "")),
-                     (:argpubkey, (PubKeyId, "")),
-                     (:argkind, (Int, "")),
-                     (:argid, (String, "")),
+                             [
+                              events,
+                              parametrized_replaceable_events,
+                             ],
+                             [
+                              (:eid, EventId),
+                              (:tag, Char), 
+                              (:argeid, (EventId, "")),
+                              (:argpubkey, (PubKeyId, "")),
+                              (:argkind, (Int, "")),
+                              (:argid, (String, "")),
 
-                     # "primary key (eid, tag, argeid, argpubkey, argkind, argid)",
-                    ],
-                    [
-                     :eid,
-                    ];
-                    runtag=runctx.runtag)
+                              # "primary key (eid, tag, argeid, argpubkey, argkind, argid)",
+                             ],
+                             [
+                              :eid,
+                             ];
+                             runtag=runctx.runtag)
 
     # step = nothing
     step = 1*24*3600
@@ -1865,6 +1905,96 @@ function event_mentions_node(
     end
 
     (; event_mentions)
+end
+
+function note_length_node(;
+        events::ServerTable,
+        runctx::RunCtx,
+        version=1,
+        since=max(runctx.since, current_time() - 15*24*3600),
+    )
+    note_length = dbtable(:postgres, runctx.targetserver, "note_length", version, 
+                          [
+                           events,
+                          ],
+                          [
+                           (:eid, EventId),
+                           (:length, Int), 
+                           "primary key (eid)",
+                          ],
+                          [
+                          ];
+                          runtag=runctx.runtag)
+
+    step = 1*24*3600
+
+    process_segments([note_length, 1]; runctx, step, since) do t1, t2
+        transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
+            Postgres.execute(session1, "
+                             insert into $(note_length.table)
+                             select id as eid, length(content) 
+                             from $(events.table)
+                             where 
+                                 imported_at >= \$1 and imported_at <= \$2 and
+                                 (kind = $(Int(Nostr.TEXT_NOTE)) or kind = $(Int(Nostr.LONG_FORM_CONTENT)) or kind = $(Int(Nostr.REPOST)))
+                             on conflict do nothing
+                             ", [t1, t2])
+        end
+    end
+
+    (; note_length)
+end
+
+function note_stats_node(;
+        events::ServerTable,
+        pubkey_trustrank::ServerTable,
+        runctx::RunCtx,
+        version=1,
+        since=max(runctx.since, current_time() - 30*24*3600),
+    )
+    note_stats = dbtable(:postgres, runctx.targetserver, "note_stats", version, 
+                         [
+                          events,
+                         ],
+                         [
+                          (:eid, EventId),
+                          (:long_replies, Int), 
+                          "primary key (eid)",
+                         ],
+                         [
+                         ];
+                          runtag=runctx.runtag)
+
+    step = 1*24*3600
+
+    process_segments([note_stats, 1]; runctx, step, since) do t1, t2
+        transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
+            pex(q, args=[]) = Postgres.execute(session1, q, args)[2]
+            rank = pex("select humaness_threshold_trustrank()")[1][1]
+            for r in pex("
+                    select 
+                        es.* 
+                    from 
+                        $(events.table) es
+                    where 
+                        es.imported_at >= \$1 and es.imported_at <= \$2 and
+                        es.kind = $(Int(Nostr.TEXT_NOTE))
+                    order by es.id
+                    ", [t1, t2])
+                runctx.running[] || break
+                e = event_from_row(r)
+                isempty(pex("select 1 from $(pubkey_trustrank.table) where pubkey = \$1 and rank >= \$2", [e.pubkey, rank])) && continue
+                if !isnothing(local parent_eid = DB.parse_parent_eid(runctx.est, e))
+                    if length(e.content) >= 600
+                        pex("insert into $(note_stats.table) values (\$1, 0) on conflict do nothing", [parent_eid])
+                        pex("update $(note_stats.table) set long_replies = long_replies + 1 where eid = \$1", [parent_eid])
+                    end
+                end
+            end
+        end
+    end
+
+    (; note_stats)
 end
 
 function postgres_dbtable_code_from_sqlite(source, destname::String)
@@ -3188,9 +3318,8 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
     try
         transaction_with_execution_stats(SEARCH_SERVER[]; stats) do session
 
-            sql, params = to_sql(est, user_pubkey, session, outputs, expr, kind, since, until, limit, offset)
+            sql, params = to_sql(est, user_pubkey, outputs, expr, kind, since, until, limit, offset)
             # println(sql); println(params)
-            push!(get!(Main.stuffd, :qs, []), (sql, params))
 
             Postgres.execute(session, "set statement_timeout=10000")
 
@@ -3199,7 +3328,7 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
                 explained = Postgres.execute(session, "explain (settings) $(sql)", params)[2]
                 lock(Main.stuffd) do stuffd
                     # display(explained)
-                    push!(get!(stuffd, :search) do; []; end, (; query, limit, offset, sql, params, explained, logextra...))
+                    push!(get!(stuffd, :search) do; []; end, (; query, since, until, limit, offset, sql, params, explained, logextra...))
                 end
                 # [(EventId(eid), created_at) for (eid, created_at) in Postgres.execute(session, sql, params)[2]]
                 try
@@ -3228,7 +3357,7 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
             end
         end
     catch ex 
-        # println(ex) 
+        println("DAG.search: ", ex isa ErrorException ? ex : typeof(ex))
     end
 
     res = first(res, limit)
@@ -3244,39 +3373,43 @@ end
 
 function init_parsing()
     rules[] = Dict(
-                   :input => P.seq(:ws, :expr, :ws, P.end_of_input),
-                   # :input => P.seq(:ws, :or_expr, :ws, P.end_of_input),
-                   # :or_expr => P.first(P.seq(:and_expr, t" OR ", :or_expr),
-                   #                     P.seq(:and_expr)), 
-                   # :and_expr => P.first(P.seq(:expr, :ws, :expr)),
-                   :expr => P.some(P.seq(P.first(
-                                                 :not_word_expr,
-                                                 :hashtag_expr,
-                                                 :since_expr,
-                                                 :until_expr,
-                                                 :from_expr,
-                                                 :to_expr,
-                                                 :mention_expr,
-                                                 :kind_expr,
-                                                 :minduration_expr,
-                                                 :maxduration_expr,
-                                                 :filter_expr,
-                                                 :url_expr,
-                                                 :orientation_expr,
-                                                 :list_expr,
-                                                 :emoticon_expr,
-                                                 :question_expr,
-                                                 :minscore_expr,
-                                                 :maxscore_expr,
-                                                 :mininteractions_expr,
-                                                 :maxinteractions_expr,
-                                                 :scope_expr,
-                                                 :minwords_expr,
-                                                 :lang_expr,
-                                                 :word_expr,
-                                                 :phrase_expr,
-                                                ), 
-                                         :ws)),
+                   :input => P.seq(:ws, :or_expr, :ws, P.end_of_input),
+
+                   :or_expr => P.first(P.seq(:exprs, t"OR ", :ws, :or_expr),
+                                       :exprs),
+
+                   :exprs => P.some(P.seq(:expr, :ws)),
+                   :expr => P.seq(P.not_followed_by(t"OR "), 
+                                  P.first(
+                                          :not_word_expr,
+                                          :hashtag_expr,
+                                          :since_expr,
+                                          :until_expr,
+                                          :from_expr,
+                                          :to_expr,
+                                          :mention_expr,
+                                          :kind_expr,
+                                          :minduration_expr,
+                                          :maxduration_expr,
+                                          :filter_expr,
+                                          :url_expr,
+                                          :orientation_expr,
+                                          :list_expr,
+                                          :emoticon_expr,
+                                          :question_expr,
+                                          :minscore_expr,
+                                          :maxscore_expr,
+                                          :mininteractions_expr,
+                                          :maxinteractions_expr,
+                                          :scope_expr,
+                                          :minwords_expr,
+                                          :maxchars_expr,
+                                          :minlongreplies_expr,
+                                          :lang_expr,
+                                          :features_expr,
+                                          :word_expr,
+                                          :phrase_expr,
+                                         )), 
                    :word_expr => P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c=='_')||(c=='-'))),
                    :phrase_expr => P.seq(t"\"", P.some(P.satisfy(c->c!='"')), t"\""),
                    :not_word_expr => P.seq(t"-", :word_expr),
@@ -3291,7 +3424,7 @@ function init_parsing()
                    :to_expr => P.seq(t"to:", :pubkey),
                    :mention_expr => P.seq(t"@", :pubkey),
                    :kind_expr => P.seq(t"kind:", :number),
-                   :filter_expr => P.seq(t"filter:", P.some(P.satisfy(isletter))),
+                   :filter_expr => P.seq(t"filter:", :word_expr),
                    :url_expr => P.seq(t"url:", :word_expr),
                    :orientation_expr => P.seq(t"orientation:", :word_expr),
                    :minduration_expr => P.seq(t"minduration:", :number),
@@ -3303,9 +3436,12 @@ function init_parsing()
                    :maxscore_expr => P.seq(t"maxscore:", :number),
                    :mininteractions_expr => P.seq(t"mininteractions:", :number),
                    :maxinteractions_expr => P.seq(t"maxinteractions:", :number),
-                   :scope_expr => P.seq(t"scope:", P.some(P.satisfy(c->isletter(c)||isdigit(c)))),
+                   :scope_expr => P.seq(t"scope:", :word_expr),
                    :minwords_expr => P.seq(t"minwords:", :number),
-                   :lang_expr => P.seq(t"lang:", P.some(P.satisfy(isletter))),
+                   :maxchars_expr => P.seq(t"maxchars:", :number),
+                   :minlongreplies_expr => P.seq(t"minlongreplies:", :number),
+                   :lang_expr => P.seq(t"lang:", :word_expr),
+                   :features_expr => P.seq(t"features:", P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c in "-_,")))),
                    :number => P.some(P.satisfy(isdigit)),
                    :ws => P.many(t" "),
                   )
@@ -3343,69 +3479,69 @@ struct MinInteractions; interactions::Int; end
 struct MaxInteractions; interactions::Int; end
 struct Scope; scope::String; end
 struct MinWords; words::Int; end
+struct MaxChars; chars::Int; end
+struct MinLongReplies; longreplies::Int; end
 struct Lang; lang::String; end
+struct Features; features::Vector{String}; end
 end
+Base.:(==)(a::O.Features, b::O.Features) = a.features == b.features
 
 function parse_search_query(query)
+    query = replace(query, '\n'=>' ')
+
     p = P.parse(grammar[], query)
 
-    function fold(m, p, sm_)
-        # @show (m.rule, m.view, sm_)
-        # m.rule == :until_expr && dump((m.rule, m.view, sm_))
-        
-        m.rule == Symbol("phrase_expr-2") && return string(m.view)
-        m.rule == Symbol("filter_expr-2") && return string(m.view)
-        m.rule == Symbol("scope_expr-2") && return string(m.view)
-        m.rule == Symbol("lang_expr-2") && return string(m.view)
-
-        sm = []
-        for s in sm_
-            isnothing(s) && continue
-            if s isa Tuple && length(s) > 0 && occursin('-', string(s[1]))
-                length(s) >= 2 && append!(sm, s[2:end])
-            # elseif s isa Tuple && length(s) >= 2 && s[1] in [:input, :expr]
-            #     append!(sm, s[2:end])
-            else
-                push!(sm, s)
-            end
+    function fold(m, p, sm)
+        if 0==1
+            println((m.rule, m.view, sm))
+            dump(sm)
+            println()
         end
-        # m.rule in [:expr, :or_expr] && dump((m.rule, m.view, sm_))
         
-        if     m.rule == :input; sm[1][2:end]
-        # elseif m.rule == :or_expr; O.Or(sm)
-        # elseif m.rule == :expr; O.And(sm)
+        if     m.rule == :input; sm[2]
+        elseif m.rule == :or_expr; 
+            if sm[1] isa Vector
+                O.Or(Any[sm[1][2], sm[1][5]])
+            else
+                sm[1]
+            end
+        elseif m.rule == :exprs; O.And(Any[x[2] for x in sm])
+        elseif m.rule == :expr; sm[2][2]
         elseif m.rule == :word_expr; O.Word(string(m.view))
-        elseif m.rule == :phrase_expr; O.Phrase(first(s for s in sm if s isa AbstractString))
+        elseif m.rule == :phrase_expr; O.Phrase(m.view[2:end-1])
         elseif m.rule == :not_word_expr; O.NotWord(first(s.word for s in sm if s isa O.Word))
         elseif m.rule == :hashtag_expr; O.HashTag(first(s.word for s in sm if s isa O.Word))
         elseif m.rule == :ts; string(m.view)
-        elseif m.rule == :since_expr; O.Since(datetime2unix(DateTime(replace(first(s for s in sm if s isa AbstractString), '_'=>'T'))))
-        elseif m.rule == :until_expr; O.Until(datetime2unix(DateTime(replace(first(s for s in sm if s isa AbstractString), '_'=>'T'))))
-        elseif m.rule == :pubkey_hex; Nostr.PubKeyId(string(string(m.view)))
-        elseif m.rule == :pubkey_npub; Nostr.bech32_decode(string(string(m.view)))
-        elseif m.rule == :pubkey; sm_[1]
-        elseif m.rule == :from_expr; O.From(first(s for s in sm if s isa Nostr.PubKeyId))
-        elseif m.rule == :to_expr; O.To(first(s for s in sm if s isa Nostr.PubKeyId))
-        elseif m.rule == :mention_expr; O.Mention(first(s for s in sm if s isa Nostr.PubKeyId))
-        elseif m.rule == :kind_expr; O.Kind(first(s for s in sm if s isa Integer))
-        elseif m.rule == :filter_expr; O.Filter(first(s for s in sm if s isa AbstractString))
-        elseif m.rule == :url_expr; O.Url(first(s for s in sm if s isa O.Word).word)
-        elseif m.rule == :minduration_expr; O.MinDuration(Float64(first(s for s in sm if s isa Integer)))
-        elseif m.rule == :maxduration_expr; O.MaxDuration(Float64(first(s for s in sm if s isa Integer)))
-        elseif m.rule == :orientation_expr; O.Orientation(first(s for s in sm if s isa O.Word).word)
-        elseif m.rule == :list_expr; O.List(first(s for s in sm if s isa O.Word).word)
+        elseif m.rule == :since_expr; O.Since(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
+        elseif m.rule == :until_expr; O.Until(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
+        elseif m.rule == :pubkey_hex; Nostr.PubKeyId(string(m.view))
+        elseif m.rule == :pubkey_npub; Nostr.bech32_decode(string(m.view))
+        elseif m.rule == :pubkey; sm[1]
+        elseif m.rule == :from_expr; O.From(sm[2])
+        elseif m.rule == :to_expr; O.To(sm[2])
+        elseif m.rule == :mention_expr; O.Mention(sm[2])
+        elseif m.rule == :kind_expr; O.Kind(sm[2])
+        elseif m.rule == :filter_expr; O.Filter(sm[2].word)
+        elseif m.rule == :url_expr; O.Url(sm[2].word)
+        elseif m.rule == :minduration_expr; O.MinDuration(Float64(sm[2]))
+        elseif m.rule == :maxduration_expr; O.MaxDuration(Float64(sm[2]))
+        elseif m.rule == :orientation_expr; O.Orientation(sm[2].word)
+        elseif m.rule == :list_expr; O.List(sm[2].word)
         elseif m.rule == :emoticon_expr; O.Emoticon(string(m.view))
         elseif m.rule == :question_expr; O.Question()
-        elseif m.rule == :minscore_expr; O.MinScore(first(s for s in sm if s isa Integer))
-        elseif m.rule == :maxscore_expr; O.MaxScore(first(s for s in sm if s isa Integer))
-        elseif m.rule == :mininteractions_expr; O.MinInteractions(first(s for s in sm if s isa Integer))
-        elseif m.rule == :maxinteractions_expr; O.MaxInteractions(first(s for s in sm if s isa Integer))
-        elseif m.rule == :scope_expr; O.Scope(first(s for s in sm if s isa AbstractString))
-        elseif m.rule == :minwords_expr; O.MinWords(first(s for s in sm if s isa Integer))
-        elseif m.rule == :lang_expr; O.Lang(first(s for s in sm if s isa AbstractString))
+        elseif m.rule == :minscore_expr; O.MinScore(sm[2])
+        elseif m.rule == :maxscore_expr; O.MaxScore(sm[2])
+        elseif m.rule == :mininteractions_expr; O.MinInteractions(sm[2])
+        elseif m.rule == :maxinteractions_expr; O.MaxInteractions(sm[2])
+        elseif m.rule == :scope_expr; O.Scope(sm[2].word)
+        elseif m.rule == :minwords_expr; O.MinWords(sm[2])
+        elseif m.rule == :maxchars_expr; O.MaxChars(sm[2])
+        elseif m.rule == :minlongreplies_expr; O.MinLongReplies(sm[2])
+        elseif m.rule == :lang_expr; O.Lang(sm[2].word)
+        elseif m.rule == :features_expr; O.Features(map(string, split(sm[2][1][2], ',')))
         elseif m.rule == :number; parse(Int, m.view)
         elseif m.rule == :ws; nothing
-        else; (m.rule, sm...)
+        else; [(m.rule, string(m.view)), sm...]
         end
     end
 
@@ -3419,7 +3555,7 @@ end
 
 # advanced search SQL codegen
 
-function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, outputs::NamedTuple, ops, kind, since, until, limit, offset; extra_selects=[], order=:desc)
+function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, kind, since, until, limit, offset; extra_selects=[], order=:desc)
     o = outputs
 
     params = []
@@ -3428,137 +3564,175 @@ function to_sql(est::DB.CacheStorage, user_pubkey, session::Postgres.Session, ou
         "\$$(length(params))"
     end
 
-    selects = []
-    function select(s)
-        push!(selects, s)
-    end
+    function tosql_and(expr::O.And)
+        selects = []
+        function select(s)
+            push!(selects, s)
+        end
 
-    tables = Set()
-    function T(t::ServerTable)
-        push!(tables, t.table)
-        t.table
-    end
-    function T(t::String)
-        push!(tables, t)
-        t
-    end
+        tables = Set()
+        function T(t::ServerTable)
+            push!(tables, t.table)
+            t.table
+        end
+        function T(t::String)
+            push!(tables, t)
+            t
+        end
 
-    conds = []
-    function cond(s)
-        push!(conds, s)
-    end
+        conds = []
+        function cond(s)
+            push!(conds, s)
+        end
 
-    ctes = []
-    function cte(s)
-        push!(ctes, s)
-    end
+        ctes = []
+        function cte(s)
+            push!(ctes, s)
+        end
 
-    select("$(T(o.advsearch)).id")
-    select("$(T(o.advsearch)).created_at")
+        select("$(T(o.advsearch)).id")
+        select("$(T(o.advsearch)).created_at")
 
-    cond("$(T(o.advsearch)).created_at >= $(P(since))")
-    cond("$(T(o.advsearch)).created_at <= $(P(until))")
+        cond("$(T(o.advsearch)).created_at >= $(P(since))")
+        cond("$(T(o.advsearch)).created_at <= $(P(until))")
 
-    !isnothing(kind) && cond("$(T(o.advsearch)).kind <= $(P(kind))")
+        # !isnothing(kind) && cond("$(T(o.advsearch)).kind = $(P(kind))")
 
-    function user_pubkey_follows_conds()
-        cte("with pks as (
-                select pf1.pubkey
-                from pubkey_followers pf1
-                where pf1.follower_pubkey = $(P(user_pubkey))
-            )")
-    end
+        function user_pubkey_follows_conds(table)
+            T(table)
+            cte("with $table as (
+                    select pf1.pubkey
+                    from pubkey_followers pf1
+                    where pf1.follower_pubkey = $(P(user_pubkey))
+                )")
+        end
 
-    function user_pubkey_network_conds()
-        cte("with pks as ((
-                select pf1.pubkey
-                from pubkey_followers pf1
-                where pf1.follower_pubkey = $(P(user_pubkey))
-            ) union (
-                select pf2.pubkey
-                from pubkey_followers pf1, pubkey_followers pf2
-                where
-                    pf1.follower_pubkey = $(P(user_pubkey)) and 
-                    pf2.follower_pubkey = pf1.pubkey
-            ))")
-    end
+        function user_pubkey_network_conds(table)
+            T(table)
+            cte("with $table as ((
+                    select pf1.pubkey
+                    from pubkey_followers pf1
+                    where pf1.follower_pubkey = $(P(user_pubkey))
+                ) union (
+                    select pf2.pubkey
+                    from pubkey_followers pf1, pubkey_followers pf2
+                    where
+                        pf1.follower_pubkey = $(P(user_pubkey)) and 
+                        pf2.follower_pubkey = pf1.pubkey
+                ))")
+        end
 
-    for op in ops
-        if     op isa O.Word;    cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
-        elseif op isa O.Phrase;  cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
-        elseif op isa O.NotWord; cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
-        elseif op isa O.HashTag; cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
-        elseif op isa O.Since;   cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
-        elseif op isa O.Until;   cond("$(T(o.advsearch)).created_at <= $(P(op.ts))")
-        elseif op isa O.From;    cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
-        elseif op isa O.To;      cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
-        elseif op isa O.Mention; cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
-        elseif op isa O.Kind;    cond("$(T(o.advsearch)).kind = $(P(op.kind))")
-        elseif op isa O.Filter;  cond("$(T(o.advsearch)).filter_tsv @@ plainto_tsquery('simple', $(P(op.filter)))")
-        elseif op isa O.Url;     cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
-        elseif op isa O.Orientation
-            compop = op.orientation == "vertical" ? ">" : "<"
-            cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).height $compop $(T(o.media)).width")
-        elseif op isa O.MinDuration
-            cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration >= $(P(op.duration)) and $(T(o.media)).duration > 0")
-        elseif op isa O.MaxDuration
-            cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration <= $(P(op.duration)) and $(T(o.media)).duration > 0")
-        elseif op isa O.Emoticon || op isa O.Question
-            cond("$(T(o.event_sentiment)).eid = $(T(o.advsearch)).id and $(T(o.event_sentiment)).topsentiment = $(P(if op isa O.Question; '?'
-                                                                                                                    elseif op.emo == ":)"; '+'
-                                                                                                                    elseif op.emo == ":("; '-'
-                                                                                                                    else; error("unexpected emoticon: $(op.emo)")
-                                                                                                                    end))")
-        elseif op isa O.MinScore
-            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score >= $(P(op.score))")
-        elseif op isa O.MaxScore
-            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score <= $(P(op.score))")
-        elseif op isa O.MinInteractions
-            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps >= $(P(op.interactions))")
-        elseif op isa O.MaxInteractions
-            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps <= $(P(op.interactions))")
-        elseif op isa O.Scope
-            if op.scope in ["myfollows", "mynetwork"]
-                T("pks")
-                pks = 
-                if     op.scope == "myfollows"
-                    user_pubkey_follows_conds()
-                elseif op.scope == "mynetwork"
-                    user_pubkey_network_conds()
+        for op in expr.ops
+            if     op isa O.Word;    cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
+            elseif op isa O.Phrase;  cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
+            elseif op isa O.NotWord; cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
+            elseif op isa O.HashTag; cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
+            elseif op isa O.Since;   cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
+            elseif op isa O.Until;   cond("$(T(o.advsearch)).created_at <= $(P(op.ts))")
+            elseif op isa O.From;    cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
+            elseif op isa O.To;      cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
+            elseif op isa O.Mention; cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
+            elseif op isa O.Kind;    cond("$(T(o.advsearch)).kind = $(P(op.kind))")
+            elseif op isa O.Filter;  cond("$(T(o.advsearch)).filter_tsv @@ plainto_tsquery('simple', $(P(op.filter)))")
+            elseif op isa O.Url;     cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
+            elseif op isa O.Orientation
+                compop = op.orientation == "vertical" ? ">" : "<"
+                cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).height $compop 1.8 * $(T(o.media)).width")
+            elseif op isa O.MinDuration
+                cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration >= $(P(op.duration)) and $(T(o.media)).duration > 0")
+            elseif op isa O.MaxDuration
+                cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration <= $(P(op.duration)) and $(T(o.media)).duration > 0")
+            elseif op isa O.Emoticon || op isa O.Question
+                cond("$(T(o.event_sentiment)).eid = $(T(o.advsearch)).id and $(T(o.event_sentiment)).topsentiment = $(P(if op isa O.Question; '?'
+                                                                                                                        elseif op.emo == ":)"; '+'
+                                                                                                                        elseif op.emo == ":("; '-'
+                                                                                                                        else; error("unexpected emoticon: $(op.emo)")
+                                                                                                                        end))")
+            elseif op isa O.MinScore
+                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score >= $(P(op.score))")
+            elseif op isa O.MaxScore
+                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score <= $(P(op.score))")
+            elseif op isa O.MinInteractions
+                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps >= $(P(op.interactions))")
+            elseif op isa O.MaxInteractions
+                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps <= $(P(op.interactions))")
+            elseif op isa O.Scope
+                if op.scope in ["myfollows", "mynetwork"]
+                    if     op.scope == "myfollows"
+                        user_pubkey_follows_conds("scope_pks")
+                    elseif op.scope == "mynetwork"
+                        user_pubkey_network_conds("scope_pks")
+                    end
+                    cond("$(T(o.advsearch)).pubkey = scope_pks.pubkey")
+                elseif op.scope in ["myfollowsinteractions", "mynetworkinteractions"]
+                    # TODO: zaps
+                    T("basic_tags bt1") 
+                    if     op.scope == "myfollowsinteractions"
+                        user_pubkey_follows_conds("scope_pks")
+                    elseif op.scope == "mynetworkinteractions"
+                        user_pubkey_network_conds("scope_pks")
+                    end
+                    cond("(bt1.kind = $(Int(Nostr.TEXT_NOTE)) or bt1.kind = $(Int(Nostr.REPOST)) or bt1.kind = $(Int(Nostr.REACTION))) and 
+                         bt1.pubkey = scope_pks.pubkey and bt1.tag = 'e' and bt1.arg1 = $(T(o.advsearch)).id")
+                elseif op.scope == "notmyfollows"
+                    user_pubkey_follows_conds("scope_pks")
+                    cond("not exists (select 1 from scope_pks where scope_pks.pubkey = $(T(o.advsearch)).pubkey)")
+                else
+                    error("unsupported scope: $(op.scope)")
                 end
-                cond("$(T(o.advsearch)).pubkey = $(T("pks")).pubkey")
-            elseif op.scope in ["myfollowsinteractions", "mynetworkinteractions"]
-                # TODO: zaps
-                T("basic_tags bt1") 
-                T("pks")
-                pks = 
-                if     op.scope == "myfollowsinteractions"
-                    user_pubkey_follows_conds()
-                elseif op.scope == "mynetworkinteractions"
-                    user_pubkey_network_conds()
+            elseif op isa O.MinWords
+                cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words >= $(P(op.words))")
+            elseif op isa O.MaxChars
+                cond("$(T(o.advsearch)).id = $(T(o.note_length)).eid and $(T(o.note_length)).length <= $(P(op.chars))")
+            elseif op isa O.MinLongReplies
+                cond("$(T(o.advsearch)).id = $(T(o.note_stats)).eid and $(T(o.note_stats)).long_replies >= $(P(op.longreplies))")
+            elseif op isa O.Lang
+                cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).lang = $(P(op.lang)) and $(T(o.reads)).lang_prob = 1.0")
+            elseif op isa O.Features
+                for feat in op.features
+                    if     feat == "summary"
+                        cond("$(T(o.reads)).summary != '' and $(T(o.reads)).image != ''")
+                    elseif feat == "bookmarked-by-follows"
+                        user_pubkey_follows_conds("bookmarked_by_follows_pks")
+                        cond("$(T(o.advsearch)).id = $(T(o.pubkey_bookmarks)).ref_event_id and $(T(o.pubkey_bookmarks)).pubkey = bookmarked_by_follows_pks.pubkey")
+                    end
                 end
-                cond("(bt1.kind = $(Int(Nostr.TEXT_NOTE)) or bt1.kind = $(Int(Nostr.REPOST)) or bt1.kind = $(Int(Nostr.REACTION))) and 
-                     bt1.pubkey = pks.pubkey and bt1.tag = 'e' and bt1.arg1 = $(T(o.advsearch)).id")
-            else; error("unsupported scope: $(op.scope)")
             end
-        elseif op isa O.MinWords
-            cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words >= $(P(op.words))")
-        elseif op isa O.Lang
-            cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).lang = $(P(op.lang)) and $(T(o.reads)).lang_prob = 1.0")
+        end
+        "
+        $(join(ctes, ", "))
+        select $(join(selects, ", "))
+        from $(join(tables, ", "))
+        where $(join(conds, " and "))
+        order by $(T(o.advsearch)).created_at $order
+        limit $(P(limit)) offset $(P(offset))
+        "
+    end
+
+    function tosql(expr)
+        if     expr isa O.And
+            tosql_and(expr)
+        elseif expr isa O.Or
+            "($(tosql(expr.ops[1]))) union ($(tosql(expr.ops[2])))"
         end
     end
 
-    append!(selects, extra_selects)
-
     ("
-     $(join(ctes, ", "))
-     select $(join(selects, ", "))
-     from $(join(tables, ", "))
-     where $(join(conds, " and "))
-     order by $(T(o.advsearch)).created_at $order
+     select a.id, a.created_at 
+     from ($(tosql(expr))) a
+     order by created_at $order
      limit $(P(limit)) offset $(P(offset))
-     ",
+     ", 
      params)
+end
+
+function debug_to_sql(est, query; limit=40, user_pubkey=Main.test_pubkeys[:pedja])
+    q = to_sql(est, user_pubkey, Main.App.DAG_OUTPUTS[][2], parse_search_query(query), 1, 0, Utils.current_time(), limit, 0)
+    println(pgpretty(q[1]))
+    foreach(println, map(first, Postgres.execute(:p0timelimit, "explain (analyze,settings,buffers) "*q[1], q[2])[2]))
+    r = Postgres.execute(:p0timelimit, q...)
+    @show length(r)
+    r
 end
 
 # test
@@ -3567,34 +3741,38 @@ using Test: @testset, @test
 
 function runtests()
     @testset "AdvancedSearch" begin
-        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 lang:fra"
+        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 minlongreplies:11 lang:fra features:feat1,feat2"
         expr = parse_search_query(input)
+        @assert expr isa O.And
         # dump(expr)
-        for (result, expected) in zip(expr, (O.Word("word1"), O.Word("word2"), 
-                                             O.Phrase("phraseword1 phraseword2"), 
-                                             O.NotWord("notword1"), 
-                                             O.HashTag("hashtag1"),
-                                             O.Since(1296691200),
-                                             O.Until(1643887320),
-                                             O.From(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
-                                             O.From(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
-                                             O.To(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
-                                             O.Mention(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
-                                             O.Kind(123),
-                                             O.Filter("filter"),
-                                             O.Url("urlword1"),
-                                             O.Orientation("vertical"),
-                                             O.MinDuration(123),
-                                             O.MaxDuration(234),
-                                             O.Emoticon(":)"),
-                                             O.List("list1"),
-                                             O.Question(),
-                                             O.MaxScore(123),
-                                             O.MinInteractions(5),
-                                             O.Scope("myfollows"),
-                                             O.MinWords(100),
-                                             O.Lang("fra"),
-                                            ))
+        for (result, expected) in zip(expr.ops, 
+                                      (O.Word("word1"), O.Word("word2"), 
+                                       O.Phrase("phraseword1 phraseword2"), 
+                                       O.NotWord("notword1"), 
+                                       O.HashTag("hashtag1"),
+                                       O.Since(1296691200),
+                                       O.Until(1643887320),
+                                       O.From(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
+                                       O.From(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
+                                       O.To(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
+                                       O.Mention(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
+                                       O.Kind(123),
+                                       O.Filter("filter"),
+                                       O.Url("urlword1"),
+                                       O.Orientation("vertical"),
+                                       O.MinDuration(123),
+                                       O.MaxDuration(234),
+                                       O.Emoticon(":)"),
+                                       O.List("list1"),
+                                       O.Question(),
+                                       O.MaxScore(123),
+                                       O.MinInteractions(5),
+                                       O.Scope("myfollows"),
+                                       O.MinWords(100),
+                                       O.MinLongReplies(11),
+                                       O.Lang("fra"),
+                                       O.Features(["feat1", "feat2"]),
+                                      ))
             @test result == expected
         end
     end
