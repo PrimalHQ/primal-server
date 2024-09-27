@@ -1171,51 +1171,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
 
             ext_text_note(est, e)
 
-            function parse_eid(tag)
-                if length(tag.fields) >= 4 
-                    if     tag.fields[1] == "e"
-                        return (try Nostr.EventId(tag.fields[2]) catch _ end)
-                    elseif tag.fields[1] == "a" 
-                        kind, pk, identifier = map(string, split(tag.fields[2], ':'))
-                        kind = parse(Int, kind)
-                        pk = Nostr.PubKeyId(pk)
-                        for (eid,) in exec(est.dyn[:parametrized_replaceable_events], 
-                                           @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                           (pk, kind, identifier))
-                            return Nostr.EventId(eid)
-                        end
-                    end
-                end
-                nothing
-            end
-
-            parent_eid = nothing
-            for tag in e.tags
-                if length(tag.fields) >= 4 && tag.fields[4] == "reply"
-                    reid = parse_eid(tag)
-                    if !isnothing(reid)
-                        parent_eid = reid
-                    end
-                end
-            end
-            isnothing(parent_eid) && for tag in e.tags
-                if length(tag.fields) >= 4 && tag.fields[4] == "root"
-                    reid = parse_eid(tag)
-                    if !isnothing(reid)
-                        parent_eid = reid
-                        break
-                    end
-                end
-            end
-            isnothing(parent_eid) && for tag in e.tags
-                if length(tag.fields) >= 2 && (tag.fields[1] == "e" || tag.fields[1] == "a") && (length(tag.fields) < 4 || tag.fields[4] != "mention")
-                    reid = parse_eid(tag)
-                    if !isnothing(reid)
-                        parent_eid = reid
-                    end
-                end
-            end
-            if !isnothing(parent_eid)
+            if !isnothing(local parent_eid = parse_parent_eid(est, e))
                 incr(est, :replies)
                 ext_is_hidden(est, e.id) || !is_trusted_user(est, e.pubkey) || event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
                 exe(est.event_replies, @sql("insert into event_replies (event_id, reply_event_id, reply_created_at) values (?1, ?2, ?3)"),
@@ -1355,6 +1311,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         elseif e.kind == Int(Nostr.BOOKMARKS)
             if !haskey(est.dyn[:bookmarks], e.pubkey) || est.events[est.dyn[:bookmarks][e.pubkey]].created_at < e.created_at
                 est.dyn[:bookmarks][e.pubkey] = e.id
+                import_pubkey_bookmarks(est, e)
             end
         elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
             ext_long_form_note(est, e)
@@ -1383,6 +1340,55 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     exe(est.event_hooks, @sql("delete from event_hooks where event_id = ?1"), e.id)
 
     return true
+end
+
+function parse_parent_eid(est::CacheStorage, e::Nostr.Event)
+    function parse_eid(tag)
+        if length(tag.fields) >= 4 
+            if     tag.fields[1] == "e"
+                return (try Nostr.EventId(tag.fields[2]) catch _ end)
+            elseif tag.fields[1] == "a" 
+                kind, pk, identifier = map(string, split(tag.fields[2], ':'))
+                kind = parse(Int, kind)
+                pk = Nostr.PubKeyId(pk)
+                for (eid,) in exec(est.dyn[:parametrized_replaceable_events], 
+                                   @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                   (pk, kind, identifier))
+                    return Nostr.EventId(eid)
+                end
+            end
+        end
+        nothing
+    end
+
+    parent_eid = nothing
+    for tag in e.tags
+        if length(tag.fields) >= 4 && tag.fields[4] == "reply"
+            reid = parse_eid(tag)
+            if !isnothing(reid)
+                parent_eid = reid
+            end
+        end
+    end
+    isnothing(parent_eid) && for tag in e.tags
+        if length(tag.fields) >= 4 && tag.fields[4] == "root"
+            reid = parse_eid(tag)
+            if !isnothing(reid)
+                parent_eid = reid
+                break
+            end
+        end
+    end
+    isnothing(parent_eid) && for tag in e.tags
+        if length(tag.fields) >= 2 && (tag.fields[1] == "e" || tag.fields[1] == "a") && (length(tag.fields) < 4 || tag.fields[4] != "mention")
+            reid = parse_eid(tag)
+            if !isnothing(reid)
+                parent_eid = reid
+            end
+        end
+    end
+
+    parent_eid
 end
 
 function import_contact_list(est::CacheStorage, e::Nostr.Event; notifications=true, newonly=false)
@@ -1462,6 +1468,19 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
                 end
 
                 break
+            end
+        end
+    end
+end
+
+function import_pubkey_bookmarks(est::CacheStorage, e::Nostr.Event)
+    Postgres.transaction(est.dbargs.connsel) do sess
+        Postgres.execute(sess, "delete from pubkey_bookmarks where pubkey = \$1", [e.pubkey])
+        for tag in e.tags
+            if length(tag.fields) >= 2 && tag.fields[1] == "e"
+                eid = Nostr.EventId(tag.fields[2])
+                Postgres.execute(sess, "insert into pubkey_bookmarks values (\$1, \$2, \$3, \$4, \$5)", 
+                                 [e.pubkey, eid, nothing, nothing, nothing])
             end
         end
     end
@@ -1603,6 +1622,18 @@ function init(est::CacheStorage, running=Ref(true); noperiodic=false)
     est.dyn[:bookmarks] = est.params.DBDict(Nostr.PubKeyId, Nostr.EventId, "bookmarks"; est.dbargs...,
                                             keycolumn="pubkey",
                                             valuecolumn="event_id")
+##
+    est.dyn[:pubkey_bookmarks] = est.params.DBSet(Nostr.PubKeyId, "pubkey_bookmarks"; est.dbargs...,
+                                                  init_queries=["create table if not exists pubkey_bookmarks (
+                                                                pubkey bytea not null,
+                                                                ref_event_id bytea,
+                                                                ref_kind bytea,
+                                                                ref_pubkey bytea,
+                                                                ref_identifier bytea
+                                                                )",
+                                                                "create index if not exists pubkey_bookmarks_pubkey_ref_event_id on pubkey_bookmarks (pubkey, ref_event_id)",
+                                                                "create index if not exists pubkey_bookmarks_ref_event_id on pubkey_bookmarks (ref_event_id)",
+                                                               ])
 ##
     est.dyn[:event_relay] = est.params.DBDict(Nostr.EventId, String, "event_relay"; est.dbargs...,
                                               keycolumn="event_id",
