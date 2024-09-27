@@ -189,6 +189,16 @@ function ext_init(est::CacheStorage)
                                                           )",
                                                          ])
 ##
+    est.dyn[:user_last_online_time] = est.params.MembershipDBDict(Nostr.PubKeyId, Int, "user_last_online_time"; connsel=est.pqconnstr,
+                                                                  keycolumn="pubkey",
+                                                                  valuecolumn="online_at",
+                                                                  init_queries=["create table if not exists user_last_online_time (
+                                                                                pubkey bytea not null,
+                                                                                online_at int8 not null,
+                                                                                primary key (pubkey)
+                                                                                )",
+                                                                               ])
+##
 end
 
 function insert_stuff(est::CacheStorage, data)

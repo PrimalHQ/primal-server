@@ -63,12 +63,17 @@ exposed_functions = Set([:feed,
                          :get_reads_feeds,
                          :mega_feed_directive,
                          :get_dvm_feeds,
+                         :dvm_feed_info,
                          :enrich_feed_events,
                          :get_home_feeds,
                          :get_featured_dvm_feeds,
 
                          :explore_zaps,
                          :explore_people,
+                         :explore_media,
+                         :explore_topics,
+
+                         :set_last_time_user_was_online,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -111,6 +116,7 @@ HOME_FEEDS=10_000_153
 DVM_FEED_FOLLOWS_ACTIONS=10_000_156
 USER_FOLLOWER_COUNT_INCREASES=10_000_157
 USER_PRIMAL_NAMES=10_000_158
+DVM_FEED_METADATA=10_000_159
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -603,6 +609,10 @@ function response_messages_for_posts(
                end)
     end
 
+    if !isempty(r2.pks)
+        union!(res, primal_verified_names(est, collect(r2.pks)))
+    end
+
     collect(res)
 end
 
@@ -941,6 +951,18 @@ function user_infos(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, app
     end
 end
 
+function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
+    res_primal_names = Dict()
+    for pk in pubkeys
+        for name in Main.InternalServices.nostr_json_query_by_pubkey(pk)
+            res_primal_names[pk] = name
+            break
+        end
+    end
+    [(; kind=USER_PRIMAL_NAMES, 
+         content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names])))]
+end
+
 function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, apply_humaness_check=false)
     pubkeys = [pk isa Nostr.PubKeyId ? pk : Nostr.PubKeyId(pk) for pk in pubkeys]
 
@@ -957,22 +979,16 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, a
         end
     end
     res_meta_data_arr = []
-    res_primal_names = Dict()
     for pk in pubkeys
         if haskey(res_meta_data, pk) 
             push!(res_meta_data_arr, res_meta_data[pk])
-            for name in Main.InternalServices.nostr_json_query_by_pubkey(pk)
-                res_primal_names[pk] = name
-                break
-            end
         end
     end
     res = [
            res_meta_data_arr..., user_scores(est, res_meta_data_arr)..., 
            (; kind=USER_FOLLOWER_COUNTS,
             content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys]))),
-           (; kind=USER_PRIMAL_NAMES, 
-            content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names]))),
+           primal_verified_names(est, pubkeys)...,
           ]
     ext_user_infos(est, res, res_meta_data_arr)
     res
@@ -1095,6 +1111,8 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
                                    ext_user_profile(est, pubkey)...,
                                   ))))
     append!(res, ext_user_profile_media(est, pubkey))
+
+    append!(res, primal_verified_names(est, [pubkey]))
 
     !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
 
@@ -1237,6 +1255,8 @@ function get_directmsg_contacts(
         end
     end
 
+    append!(evts, primal_verified_names(est, map(first, d)))
+
     d = [Nostr.hex(peer)=>p for (peer, p) in d]
 
     [(; kind=Int(DIRECTMSG_COUNTS), content=JSON.json(Dict(d))), 
@@ -1328,6 +1348,7 @@ function get_directmsgs(
     res_meta_data = collect(values(res_meta_data))
     append!(res, res_meta_data)
     ext_user_infos(est, res, res_meta_data)
+    append!(res, primal_verified_names(est, [sender, receiver]))
 
     [res..., range(msgs, :created_at)...]
 end
@@ -1357,10 +1378,12 @@ function response_messages_for_list(est::DB.CacheStorage, tables, pubkey, extend
                 end
             end
         end
+        pks = collect(keys(res_meta_data))
         res_meta_data = collect(values(res_meta_data))
         append!(res, res_meta_data)
         append!(res, user_scores(est, res_meta_data))
         ext_user_infos(est, res, res_meta_data)
+        append!(res, primal_verified_names(est, pks))
     end
 
     res
@@ -1395,10 +1418,12 @@ function parametrized_replaceable_events_extended_response(est::DB.CacheStorage,
             end
         end
     end
+    pks = collect(keys(res_meta_data))
     res_meta_data = collect(values(res_meta_data))
     append!(res, res_meta_data)
     append!(res, user_scores(est, res_meta_data))
     ext_user_infos(est, res, res_meta_data)
+    append!(res, primal_verified_names(est, pks))
     res
 end
 
@@ -1507,7 +1532,6 @@ function response_messages_for_zaps(est, zaps; kinds=nothing, order_by=:created_
         end
         hidden && continue
 
-        # user_pubkey == Main.test_pubkeys[:qa] && @show (sender, receiver)
         for pk in [sender, receiver]
             if !haskey(res_meta_data, pk) && pk in est.meta_data
                 mdid = est.meta_data[pk]
@@ -1654,7 +1678,6 @@ function event_zaps_by_satszapped(
         limit::Int=20, since::Int=0, until=nothing, offset::Int=0,
         user_pubkey=nothing,
     )
-    # user_pubkey == Main.test_pubkeys[:qa] && @show (:event_zaps_by_satszapped, pubkey, identifier, event_id)
     limit <= 1000 || error("limit too big")
     event_id = castmaybe(event_id, Nostr.EventId)
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
@@ -2084,7 +2107,6 @@ function long_form_content_thread_view(
         user_pubkey=nothing,
         usepgfuncs=false, apply_humaness_check=false,
     )
-    @show (; pubkey, kind, identifier, user_pubkey)
     apply_humaness_check = false
 
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
@@ -2248,8 +2270,8 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
         tags = []
 
         if e isa Dict
-            haskey(e, "id") && (eid = Nostr.EventId(e["id"]))
-            haskey(e, "pubkey") && (pubkey = Nostr.PubKeyId(e["pubkey"]))
+            haskey(e, "id") && try eid = Nostr.EventId(e["id"]) catch _ end
+            haskey(e, "pubkey") && try pubkey = Nostr.PubKeyId(e["pubkey"]) catch _ end
             haskey(e, "kind") && (kind = e["kind"])
             haskey(e, "content") && (content = e["content"])
             haskey(e, "tags") && (tags = e["tags"])
@@ -2308,7 +2330,7 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
                 e = (; kind=Int(DIRECTMSG_COUNTS), content=JSON.json(Dict(d)))
 
             elseif kind == Int(ZAP_EVENT)
-                d = JSON.parse(content)
+                d = content isa Dict ? content : JSON.parse(content)
                 hidden = false
                 try
                     sender = Nostr.PubKeyId(d["sender"])
@@ -2340,11 +2362,6 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
             is_hidden_(est, cmr, user_pubkey, :content, pubkey) && append!(res2, search_filterlist(est; pubkey, user_pubkey))
         end
     end
-
-    # @show (funcall, length(res), length(res2))
-    # if funcall == :scored_users_24h
-    #     display(Utils.counts([e.kind for e in res2]))
-    # end
 
     res2
 end
@@ -2391,10 +2408,14 @@ function mega_feed_directive(
     if haskey(s, "dvm_pubkey") && haskey(s, "dvm_id")   
         return dvm_feed(est; dvm_pubkey=s["dvm_pubkey"], dvm_id=s["dvm_id"], kwargs...)
 
+    elseif id == "nostr-reads-feed"
+        return advanced_search(est; query="kind:30023 scope:myfollows minwords:100 features:summary", kwargs...)
+
     elseif id == "reads-feed" || get(s, "kind", "") == "reads"
         minwords = get(s, "minwords", 100)
         if get(s, "scope", "") == "follows"
-            return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:follows, minwords, kwargs..., usepgfuncs, apply_humaness_check)
+            # return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:follows, minwords, kwargs..., usepgfuncs, apply_humaness_check)
+            return advanced_search(est; query="kind:30023 scope:myfollows minwords:100 features:summary", kwargs...)
         elseif get(s, "scope", "") == "zappedbyfollows"
             return long_form_content_feed(est; pubkey=kwa[:user_pubkey], notes=:zappedbyfollows, minwords, kwargs..., usepgfuncs, apply_humaness_check)
         elseif get(s, "scope", "") == "myfollowsinteractions"
@@ -2413,14 +2434,24 @@ function mega_feed_directive(
         elseif id == "global-trending"
             # return explore_global_trending(est, s["hours"]; kwargs...)
             return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kwargs...) 
-        elseif id == "short-vertical-videos"
-            return advanced_search(est; query="kind:1 filter:video orientation:vertical maxduration:10", kwargs...)
+        elseif id == "video-reels"
+            return advanced_search(est; query="kind:1 filter:video orientation:vertical maxduration:90 mininteractions:2", kwargs...)
         elseif id == "all-notes"
             return explore(est; timeframe="latest", scope="global", kwargs...)
         elseif id == "most-zapped"
             return explore_global_mostzapped(est, s["hours"]; kwargs...)
         elseif id == "wide-net-notes"
             return advanced_search(est; query="kind:1 scope:myfollowsinteractions", kwargs...)
+        elseif id == "strange-but-popular"
+            return advanced_search(est; query="kind:1 scope:notmyfollows minscore:50", kwargs...)
+        elseif id == "engaging-discussions"
+            return advanced_search(est; query="kind:1 minlongreplies:5", kwargs...)
+        elseif id == "only-tweets"
+            return advanced_search(est; query="kind:1 maxchars:140", kwargs...)
+        elseif id == "bookmarked-by-follows"
+            return advanced_search(est; query="kind:1 features:bookmarked-by-follows", kwargs...)
+        elseif id == "important-notes-i-might-have-missed"
+            return important_notes_i_might_have_missed_feed(est; kwargs...)
         elseif id == "feed"
             return feed(est; skwa..., kwargs..., usepgfuncs, apply_humaness_check)
         elseif id == "search"
@@ -2434,6 +2465,13 @@ function mega_feed_directive(
         return advanced_search(est; query="kind:1 filter:image", kwargs...)
     elseif id == "explore-zaps"
         return explore_zaps(est; skwa..., kwargs...)
+    elseif id == "wide-net-notes"
+        return wide_net_notes_feed(est; created_after=Utils.current_time()-24*3600, kwargs..., pubkey=kwa[:user_pubkey])
+    elseif id == "hall-of-fame-notes"
+        explore(est; timeframe="trending", scope="global", created_after=0, kwargs...)
+    elseif id == "only-tweets"
+    elseif id == "bookmarked-notes"
+    elseif id == "important-notes-i-might-have-missed"
     end
 
     []
@@ -2465,8 +2503,8 @@ function get_home_feeds(est::DB.CacheStorage)
                         catch _; (;) end))]
 end
 
-function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nostr.EventId}; user_pubkey=nothing) 
-    # event_relays = Dict{Nostr.EventId, String}()
+function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nostr.EventId}; user_pubkey=nothing, primal_feeds=nothing) 
+    primal_dvm_pks = [kp.pubkey for kp in values(Main.DVMServiceProvider.keypairs)]
     res = []
     for eid in eids
         if eid in est.events
@@ -2474,7 +2512,12 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
             for t in e.tags
                 if length(t.fields) >= 2 && t.fields[1] == "k" && t.fields[2] == "5300"
                     if !isnothing(local dvm_id = parametrized_replaceable_event_identifier(e))
+                        is_primal = e.pubkey in primal_dvm_pks
+                        primal_feeds == true  && !is_primal && break
+                        primal_feeds == false &&  is_primal && break
+
                         push!(res, e)
+
                         likes = Postgres.execute(DAG_OUTPUTS_DB[], 
                                                  "select count(1) from a_tags where kind = 7 and ref_kind = 31990 and ref_pubkey = \$1 and ref_identifier = \$2",
                                                  [e.pubkey, dvm_id])[2][1][1]
@@ -2482,16 +2525,25 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
                                                       "select sum(satszapped) from zap_receipts where receiver = \$1",
                                                       [e.pubkey])[2][1][1]
                         satszapped = ismissing(satszapped) ? 0 : number(satszapped)
-                        # @show (e.pubkey, likes, satszapped)
                         push!(res, (; kind=Int(EVENT_STATS), content=JSON.json((; event_id=eid, likes, satszapped))))
-                        isnothing(user_pubkey) || append!(res, get_dvm_feed_follows_actions(est; dvm_pubkey=e.pubkey, dvm_id, dvm_kind=e.kind, user_pubkey))
+
+                        if !isnothing(user_pubkey)
+                            append!(res, get_dvm_feed_follows_actions(est; dvm_pubkey=e.pubkey, dvm_id, dvm_kind=e.kind, user_pubkey))
+                            append!(res, get_dvm_feed_user_actions(est; dvm_pubkey=e.pubkey, dvm_id, dvm_kind=e.kind, user_pubkey))
+                        end
+
+                        for (kind,) in Postgres.execute(DAG_OUTPUTS_DB[], 
+                                                        "select df.kind from dvm_feeds df where df.pubkey = \$1 and df.identifier = \$2",
+                                                        [e.pubkey, dvm_id])[2]
+                            append!(res, [(; kind=Int(DVM_FEED_METADATA), content=JSON.json((; event_id=eid, kind, is_primal)))])
+                        end
+
                         break
                     end
                 end
             end
         end
     end
-    # !isempty(event_relays) && union!(res, [(; kind=Int(EVENT_RELAYS), content=JSON.json(Dict([Nostr.hex(k)=>get(RELAY_URL_MAP, v, v) for (k, v) in event_relays])))])
     res
 end
 
@@ -2516,11 +2568,25 @@ function get_dvm_feeds(est::DB.CacheStorage)
     response_messages_for_dvm_feeds(est, eids)
 end
 
+function dvm_feed_info(est::DB.CacheStorage; pubkey, identifier::String)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    eids = Nostr.EventId[]
+    for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                          DB.@sql("select event_id from parametrized_replaceable_events
+                                  where kind = 31990 and pubkey = ?1 and identifier = ?2"),
+                          (pubkey, identifier))
+        push!(eids, Nostr.EventId(eid))
+    end
+    response_messages_for_dvm_feeds(est, eids)
+end
+
 FEATURED_DVM_FEEDS_FILE = Ref("featured-dvm-feeds.json")
 
-function get_featured_dvm_feeds(est::DB.CacheStorage; kind::Union{String,Nothing}=nothing, user_pubkey=nothing)
+function get_featured_dvm_feeds(est::DB.CacheStorage; kind::Union{String,Nothing}=nothing, user_pubkey=nothing, primal_feeds=nothing)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     if 1==1
+        isnothing(user_pubkey) && (user_pubkey = Nostr.PubKeyId("532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb")) # primal pubkey as default
+
         eids = Nostr.EventId[]
         for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
                               DB.@sql("
@@ -2535,11 +2601,11 @@ function get_featured_dvm_feeds(est::DB.CacheStorage; kind::Union{String,Nothing
                                         et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' and
                                         df.pubkey = pre.pubkey and df.updated_at >= ?1 and df.ok and 
                                         (case when ?2::text is null then true else df.kind = ?2 end) and 
-                                        es.id = pre.event_id and not (es.content like '%Primal%')"),
+                                        es.id = pre.event_id"),
                               (Dates.now() - Dates.Hour(1), kind))
             push!(eids, Nostr.EventId(eid))
         end
-        return response_messages_for_dvm_feeds(est, eids; user_pubkey)
+        return response_messages_for_dvm_feeds(est, eids; user_pubkey, primal_feeds)
     end
 
     eids = Nostr.EventId[]
@@ -2560,22 +2626,6 @@ end
 
 import UUIDs
 import ..NostrClient
-
-function dvm_feed_(
-        est::DB.CacheStorage;
-        dvm_pubkey,
-        dvm_id::String,
-        user_pubkey=nothing,
-        kwargs...,
-    )
-    dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
-    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    # @show (dvm_pubkey, dvm_id)
-
-    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    # feed(est; pubkey=Main.test_pubkeys[:miljan], user_pubkey, kwargs...)
-    long_form_content_feed(est; topic="bitcoin", user_pubkey, kwargs...)
-end
 
 DVM_REQUESTER_KEYPAIR = Ref{Any}(nothing)
 
@@ -2704,6 +2754,60 @@ function dvm_feed(
     end
 end
 
+function get_dvm_feed_user_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::String, dvm_kind=31990, user_pubkey)
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+
+    liked = replied = zapped = reposted = false
+
+    for (k,) in Postgres.execute(DAG_OUTPUTS_DB[],
+                                 pgparams() do P "
+                                     select 
+                                         at.kind
+                                     from 
+                                         a_tags at,
+                                         event es
+                                     where 
+                                         at.ref_kind = $(@P dvm_kind) and
+                                         at.ref_pubkey = $(@P dvm_pubkey) and
+                                         at.ref_identifier = $(@P dvm_id) and
+                                         at.eid = es.id and
+                                         es.pubkey = $(@P user_pubkey)
+                                     " end...)[2]
+        if     k == Int(Nostr.TEXT_NOTE); replied = true
+        elseif k == Int(Nostr.REACTION); liked = true
+        elseif k == Int(Nostr.REPOST); reposted = true
+        end
+    end
+
+    for _ in Postgres.execute(DAG_OUTPUTS_DB[],
+                                 pgparams() do P "
+                                     select 
+                                         1
+                                     from 
+                                         a_tags at,
+                                         zap_receipts zr
+                                     where 
+                                         at.ref_kind = $(@P dvm_kind) and
+                                         at.ref_pubkey = $(@P dvm_pubkey) and
+                                         at.ref_identifier = $(@P dvm_id) and
+                                         at.kind = $(@P Int(Nostr.ZAP_RECEIPT)) and
+                                         at.eid = zr.eid and
+                                         zr.sender = $(@P user_pubkey)
+                                     limit 1
+                                 " end...)[2]
+        zapped = true
+    end
+
+    event_id = Postgres.execute(DAG_OUTPUTS_DB[],
+                                pgparams() do P "
+                                    select event_id from parametrized_replaceable_events
+                                    where kind = $(@P dvm_kind) and pubkey = $(@P dvm_pubkey) and identifier = $(@P dvm_id)
+                                    "
+                                end...)[2][1][1] |> Nostr.EventId
+
+    [(; kind=Int(EVENT_ACTIONS_COUNT), content=JSON.json((; event_id, liked, replied, zapped, reposted)))]
+end
+
 function get_dvm_feed_follows_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::String, dvm_kind=31990, user_pubkey, limit=5)
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
@@ -2712,13 +2816,6 @@ function get_dvm_feed_follows_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::
     res = []
     res_mds = []
     for r in Postgres.execute(DAG_OUTPUTS_DB[],
-                                          # ) union (
-                                          #     select 
-                                          #         zr.sender as pubkey
-                                          #     from 
-                                          #         zap_receipts zr
-                                          #     where 
-                                          #         zr.receiver = $(@P dvm_pubkey)
                               pgparams() do P "
                                   select
                                       pks.pubkey
@@ -2773,7 +2870,14 @@ function get_dvm_feed_follows_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::
 
     append!(res, user_scores(est, res_mds))
 
-    r = (; dvm_pubkey, dvm_id, dvm_kind, users=[Nostr.hex(e.pubkey) for e in res_mds])
+    event_id = Postgres.execute(DAG_OUTPUTS_DB[],
+                                pgparams() do P "
+                                    select event_id from parametrized_replaceable_events
+                                    where kind = $(@P dvm_kind) and pubkey = $(@P dvm_pubkey) and identifier = $(@P dvm_id)
+                                    "
+                                end...)[2][1][1] |> Nostr.EventId
+
+    r = (; event_id=Nostr.hex(event_id), dvm_pubkey, dvm_id, dvm_kind, users=[Nostr.hex(e.pubkey) for e in res_mds])
 
     append!(res, [(; kind=Int(DVM_FEED_FOLLOWS_ACTIONS), content=JSON.json(r))])
 
@@ -2813,7 +2917,7 @@ end
 
 function explore_people(
         est::DB.CacheStorage;
-        since::Float64=0.0, until::Float64=1.0, offset::Int=0, limit::Int=20, 
+        since::Float64=0.0, until::Float64=1000000.0, offset::Int=0, limit::Int=20, 
     )
     limit = min(50, limit)
 
@@ -2830,6 +2934,77 @@ function explore_people(
     [[(; kind=Int(USER_FOLLOWER_COUNTS), content=JSON.json(Dict([Nostr.hex(pk)=>v for (pk, v) in res])))];
      user_infos(est; pubkeys=map(first, res)); 
      range(res, :increase)]
+end
+
+function explore_media(est::DB.CacheStorage; kwargs...)
+    mega_feed_directive(est; spec=raw"""{"id":"explore-media"}""", kwargs...)
+end
+
+function explore_topics(est::DB.CacheStorage)
+    get(est.dyn[:cache], "precalculated_analytics_explore_topics", [])
+end
+
+function explore_topics_(est::DB.CacheStorage; created_after::Int=Utils.current_time()-1*24*3600)
+    res = DB.exec(est.event_hashtags, 
+                  DB.@sql("select eh.hashtag, count(1) as cnt
+                          from event_hashtags eh, events es, pubkey_trustrank tr
+                          where 
+                              eh.created_at >= ?1 and eh.event_id = es.id and
+                              es.pubkey = tr.pubkey and tr.rank > ?2
+                          group by eh.hashtag
+                          order by cnt desc
+                          limit 1000"), 
+                  (created_after, Main.TrustRank.humaness_threshold[]))
+    [(; kind=Int(HASHTAGS_2), content=JSON.json(Dict(res)))]
+end
+
+function set_last_time_user_was_online(est::DB.CacheStorage; event_from_user::Dict)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+        
+    e = parse_event_from_user(event_from_user)
+
+    est.dyn[:user_last_online_time][e.pubkey] = parse(Int, e.content)
+
+    []
+end
+
+function important_notes_i_might_have_missed_feed(
+        est::DB.CacheStorage;
+        limit=20, offset=0, since=0, until=Utils.current_time(),
+        user_pubkey=nothing,
+    )
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    # reposted_after = est.dyn[:user_last_online_time][user_pubkey]
+    # reposted_after = DB.exec(est.app_settings, "select accessed_at from app_settings where key = ?1", (user_pubkey,))[1][1]
+    reposted_after = Utils.current_time() - 24*3600
+
+    posts = Tuple{Nostr.EventId, Int}[]
+    append!(posts, 
+            [(Nostr.EventId(eid), created_at)
+             for (eid, created_at) in 
+             Postgres.execute(DAG_OUTPUTS_DB[],
+                              pgparams() do P "
+                              select 
+                                  es.id, es.created_at
+                              from 
+                                  events es,
+                                  basic_tags bt,
+                                  pubkey_followers pf
+                              where 
+                                  pf.follower_pubkey = $(@P user_pubkey) and
+                                  pf.pubkey = bt.pubkey and
+                                  bt.kind = $(Int(Nostr.REPOST)) and
+                                  bt.created_at >= $(@P reposted_after) and
+                                  bt.tag = 'e' and
+                                  bt.id = es.id and
+                                  es.created_at >= $(@P since) and es.created_at <= $(@P until)
+                              order by es.created_at desc
+                              limit $(@P limit) offset $(@P offset)
+                          " end...)[2]])
+
+    # vcat(response_messages_for_posts(est, collect(map(first, posts)); user_pubkey), range(posts, :created_at))
+    enrich_feed_events_pg(est; posts, user_pubkey)
 end
 
 end

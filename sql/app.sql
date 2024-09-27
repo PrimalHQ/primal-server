@@ -174,7 +174,7 @@ CREATE OR REPLACE FUNCTION public.event_stats_for_long_form_content(a_event_id b
 AS $BODY$
 	SELECT jsonb_build_object('kind', c_EVENT_STATS(), 'content', row_to_json(a)::text)
 	FROM (
-        SELECT ENCODE(a_event_id, 'hex') as event_id, likes, 0 AS replies, 0 AS mentions, reposts, zaps, satszapped, 0 AS score, 0 AS score24h 
+        SELECT ENCODE(a_event_id, 'hex') as event_id, likes, replies, 0 AS mentions, reposts, zaps, satszapped, 0 AS score, 0 AS score24h 
         FROM reads WHERE latest_eid = a_event_id LIMIT 1
 	) a
 $BODY$;
@@ -466,6 +466,7 @@ DECLARE
     relay_url varchar;
     relays jsonb := '{}';
     user_scores jsonb := '{}';
+    pubkeys bytea[] := '{}';
     identifier varchar;
 BEGIN
 	FOREACH p IN ARRAY a_posts LOOP
@@ -478,6 +479,10 @@ BEGIN
                 e_kind int8 := e->>'kind';
                 e_pubkey bytea := DECODE(e->>'pubkey', 'hex');
             BEGIN
+                IF e_pubkey IS NOT NULL THEN
+                    pubkeys := array_append(pubkeys, e_pubkey);
+                END IF;
+
                 IF a_apply_humaness_check AND NOT user_is_human(e_pubkey) THEN
                     CONTINUE;
                 END IF;
@@ -538,7 +543,7 @@ BEGIN
 
                 IF e_kind = 0 THEN
                     FOR r IN SELECT value FROM pubkey_followers_cnt WHERE key = e_pubkey LIMIT 1 LOOP
-                        user_scores := jsonb_set(user_scores, array[e_pubkey::text], to_jsonb(r.value));
+                        user_scores := jsonb_set(user_scores, array[e->>'pubkey'::text], to_jsonb(r.value));
                     END LOOP;
                 END IF;
             END;
@@ -551,6 +556,10 @@ BEGIN
 
     IF count_jsonb_keys(relays) > 0 THEN
         RETURN NEXT jsonb_build_object('kind', c_EVENT_RELAYS(), 'content', relays::text);
+    END IF;
+
+    IF pubkeys != '{}' THEN
+        RETURN QUERY SELECT * FROM primal_verified_names(pubkeys);
     END IF;
 
 	RETURN NEXT jsonb_build_object(
@@ -693,6 +702,18 @@ BEGIN
 END
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.primal_verified_names(a_pubkeys bytea[])
+	RETURNS SETOF jsonb
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    r jsonb;
+BEGIN
+    SELECT json_object_agg(ENCODE(pubkey, 'hex'), name) INTO r FROM verified_users WHERE pubkey = ANY(a_pubkeys);
+	RETURN NEXT jsonb_build_object('kind', c_USER_PRIMAL_NAMES(), 'content', r::text);
+END
+$BODY$;
+
 CREATE OR REPLACE FUNCTION public.user_infos(a_pubkeys text[])
 	RETURNS SETOF jsonb
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
@@ -718,8 +739,7 @@ BEGIN
 	RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', r::text);
 	RETURN NEXT jsonb_build_object('kind', c_USER_FOLLOWER_COUNTS(), 'content', r::text);
 
-    SELECT json_object_agg(ENCODE(pubkey, 'hex'), name) INTO r FROM verified_users WHERE pubkey = ANY(a_pubkeys);
-	RETURN NEXT jsonb_build_object('kind', c_USER_PRIMAL_NAMES(), 'content', r::text);
+    RETURN QUERY SELECT * FROM primal_verified_names(a_pubkeys);
 END
 $BODY$;
 
@@ -788,39 +808,55 @@ CREATE OR REPLACE FUNCTION humaness_threshold_trustrank() RETURNS float4 STABLE 
 SELECT RANK FROM pubkey_trustrank ORDER BY rank DESC LIMIT 1 OFFSET 50000
 $$;
 
-CREATE OR REPLACE PROCEDURE create_trusted_pubkey_followers_cnt_table(a_table varchar) 
+CREATE TABLE IF NOT EXISTS trusted_pubkey_followers_cnt (
+    t timestamp not null,
+    pubkey bytea not null,
+    cnt int8 not null,
+    PRIMARY KEY (t, pubkey)
+);
+
+CREATE OR REPLACE PROCEDURE record_trusted_pubkey_followers_cnt() 
 LANGUAGE 'plpgsql' AS $BODY$
+DECLARE
+    t timestamp := NOW();
 BEGIN
-    EXECUTE format('
-        DROP TABLE IF EXISTS %I;
-
-        CREATE TABLE %I AS 
-        SELECT pubkey, pfc.value AS cnt 
-        FROM pubkey_trustrank tr, pubkey_followers_cnt pfc 
-        WHERE tr.pubkey = pfc.key;
-
-        ALTER TABLE %I ADD PRIMARY KEY (pubkey);
-    ', a_table, a_table, a_table);
+    INSERT INTO trusted_pubkey_followers_cnt
+    SELECT t, pubkey, pfc.value
+    FROM pubkey_trustrank tr, pubkey_followers_cnt pfc 
+    WHERE tr.pubkey = pfc.key AND pfc.value >= 1000;
 END
 $BODY$;
 
 CREATE OR REPLACE PROCEDURE update_user_relative_daily_follower_count_increases() 
 LANGUAGE 'plpgsql' AS $BODY$
+DECLARE
+    ts1 timestamp;
+    ts2 timestamp;
 BEGIN
-    CALL create_trusted_pubkey_followers_cnt_table('trusted_pubkey_followers_cnt_current');
+    SELECT t INTO ts2 FROM trusted_pubkey_followers_cnt ORDER BY t DESC LIMIT 1;
+    /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt ORDER BY t DESC LIMIT 1 OFFSET 1; */
+    /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '24h' ORDER BY t DESC LIMIT 1; */
+    SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '12h' ORDER BY t DESC LIMIT 1;
 
     CREATE TABLE IF NOT EXISTS daily_followers_cnt_increases (pubkey bytea not null, increase float4 not null, primary key (pubkey));
 
     TRUNCATE daily_followers_cnt_increases;
 
+    WITH 
+        t1 AS (SELECT pubkey, cnt FROM trusted_pubkey_followers_cnt WHERE t = ts1),
+        t2 AS (SELECT pubkey, cnt FROM trusted_pubkey_followers_cnt WHERE t = ts2)
     INSERT INTO daily_followers_cnt_increases 
         SELECT pubkey, 100.0*dcnt/cnt AS relcnt FROM (
-            SELECT t1.pubkey, t2.cnt, t2.cnt-t1.cnt AS dcnt 
-            FROM trusted_pubkey_followers_cnt t1, trusted_pubkey_followers_cnt_current t2 
+            SELECT t1.pubkey, t1.cnt, t2.cnt-t1.cnt AS dcnt 
+            FROM t1, t2 
             WHERE t1.pubkey = t2.pubkey) a 
         WHERE dcnt > 0 ORDER BY relcnt DESC LIMIT 10000;
+
     COMMIT;
 END
 $BODY$;
 
+SELECT cron.schedule('record_trusted_pubkey_followers_cnt',                 '* */3 * * *', 'CALL record_trusted_pubkey_followers_cnt()');
+SELECT cron.schedule('record_trusted_pubkey_followers_cnt_delete_old',      '0 8 * * *', $$DELETE FROM trusted_pubkey_followers_cnt WHERE t < NOW() - INTERVAL '15 DAY'$$);
+SELECT cron.schedule('update_user_relative_daily_follower_count_increases', '* 0 * * *', 'CALL update_user_relative_daily_follower_count_increases()');
 

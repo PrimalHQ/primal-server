@@ -37,6 +37,7 @@ union!(exposed_functions, Set([
                      :user_profile_scored_content,
                      :user_profile_scored_media_thumbnails,
                      :search,
+                     :advanced_search,
                      :advanced_feed,
                      :relays,
                      :get_notifications,
@@ -100,6 +101,7 @@ UPLOADED_2=10_000_142
 EVENT_BROADCAST_RESPONSES=10_000_149
 ADVANCED_FEEDS=10_000_150
 APP_SUBSETTINGS=10_000_155
+HASHTAGS_2=10_000_160
 
 # ------------------------------------------------------ #
 
@@ -515,6 +517,8 @@ function precalculate_analytics(est::DB.CacheStorage)
         r = [e for e in scored_(est; selector) if e.kind in kinds]
         est.dyn[:cache]["precalculated_analytics_$selector"] = r
     end
+    est.dyn[:cache]["precalculated_analytics_explore_topics"] = explore_topics_(est)
+    nothing
 end
 
 function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dict)
@@ -896,6 +900,8 @@ function advanced_feed(
         # since=0, until=Utils.current_time(), limit::Int=20, offset::Int=0,
         # user_pubkey=nothing, kwargs...,
     )
+    return mega_feed_directive(est; spec=specification, kwargs...)
+
     isnothing(ADVANCED_FEED_PROVIDER_HOST[]) || return JSON.parse(String(HTTP.request("GET", ADVANCED_FEED_PROVIDER_HOST[], [], JSON.json(["advanced_feed", (; specification, kwargs...)])).body))
 
     specargs() = NamedTuple([Symbol(k)=>v for (k, v) in (length(specification) >= 2 ? specification[2] : [])])
@@ -1001,12 +1007,12 @@ function wide_net_notes_scored_feed(
         end
     end
 
+    # TODO: use pubkey_followers
     Postgres.transaction(DAG_OUTPUTS_DB[]) do session
         Postgres.execute(session, "create temp table pks (pubkey bytea primary key not null) on commit drop")
         for pk in follows(est, pubkey)
             Postgres.execute(session, "insert into pks values (\$1)", [pk])
         end
-        # @show Postgres.execute(session, "select count(1) from pks")[2]
         pex(session, "
                 create temp table eids on commit drop as (
                 select id
@@ -1017,7 +1023,6 @@ function wide_net_notes_scored_feed(
                   tag = 'p' and arg1 = pks.pubkey
                 order by created_at asc
                 )", [created_after]; noresults=true)
-        # @show Postgres.execute(session, "select count(1) from eids")[2]
         for r in pex(session, "
                 select events.*
                 from events, eids
@@ -1498,20 +1503,6 @@ function trending_hashtags(est::DB.CacheStorage; created_after::Int=trunc(Int, t
     end
     res = sort(collect(hts); by=r->-r[2])
     [(; kind=Int(HASHTAGS), content=JSON.json(res))]
-end
-
-function explore_topics(est::DB.CacheStorage; created_after::Int=Utils.current_time()-2*24*3600)
-    res = DB.exec(est.event_hashtags, 
-                  DB.@sql("select eh.hashtag, count(1) as cnt
-                          from event_hashtags eh, events es, pubkey_trustrank tr
-                          where 
-                              eh.created_at >= ?1 and eh.event_id = es.id and
-                              es.pubkey = tr.pubkey and tr.rank > ?2
-                          group by eh.hashtag
-                          order by cnt desc
-                          limit 1000"), 
-                  (created_after, Main.TrustRank.humaness_threshold[]))
-    [(; kind=Int(HASHTAGS), content=JSON.json(Dict(res)))]
 end
 
 @cached 600   trending_hashtags_4h(est::DB.CacheStorage) = trending_hashtags(est; created_after=trunc(Int, time()-4*3600))
