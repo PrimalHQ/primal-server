@@ -5,6 +5,7 @@ using HTTP.WebSockets
 import JSON
 using DataStructures: CircularBuffer
 import SHA
+import CodecZlib
 
 import ..Utils
 using ..Utils: ThreadSafe, Throttle
@@ -54,6 +55,7 @@ end
 
 function on_disconnect(ws)
     delete!(conns, ws)
+    delete!(client_protocol, ws.id)
     PerfTestRedirection.enabled() && PerfTestRedirection.stop_redirection(ws.id)
     # ext_on_disconnect(ws)
 end
@@ -110,10 +112,10 @@ end
 
 SEND_ABORT = Ref(false)
 
-function send(ws::WebSocket, s::String)
+function send(ws::WebSocket, s::Union{String, Vector{UInt8}})
     WebSockets.send(ws, s)
 end
-function send(conn::Conn, s::String)
+function send(conn::Conn, s::Union{String, Vector{UInt8}})
     SEND_ABORT[] && return
     lock(conn.ws) do ws
         lock(sendcnt) do sendcnt; sendcnt[] += 1; end
@@ -260,6 +262,11 @@ end
 
 UNKNOWN_ERROR_MESSAGE = Ref("error")
 
+UNCOMPRESSED_RESPONSES_SIZE = Ref(0)
+COMPRESSED_RESPONSES_SIZE = Ref(0)
+
+client_protocol = Dict{Base.UUID, Dict}() |> ThreadSafe
+
 function initial_filter_handler(conn::Conn, subid, filters)
     ws_id = lock(conn.ws) do ws; ws.id; end
 
@@ -283,7 +290,9 @@ function initial_filter_handler(conn::Conn, subid, filters)
             if haskey(filt, "cache")
                 local filt = filt["cache"]
                 funcall = Symbol(filt[1])
-                if funcall in App().exposed_functions
+                if     funcall == :set_primal_protocol
+                    client_protocol[ws_id] = filt[2]
+                elseif funcall in App().exposed_functions
                     # println(Main.App.Dates.now(), "  ", funcall)
                     
                     kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
@@ -320,12 +329,32 @@ function initial_filter_handler(conn::Conn, subid, filters)
 
                     eqsbefore = Main.Postgres.executed_queries[]
 
+                    protocol = lock(client_protocol) do client_protocol
+                        get!(client_protocol, ws_id) do; Dict(); end
+                    end
+                    use_zlib = get(protocol, "compression", "") == "zlib"
+
                     reslen = Ref(0)
                     tdur = @elapsed afc(funcall, kwargs, 
                                         function (res)
                                             r = App().content_moderation_filtering_2(est(), res, funcall, kwargs)
                                             reslen[] = length(r)
-                                            r |> sendres; 
+                                            if use_zlib
+                                                s = JSON.json(["EVENTS", subid, r])
+                                                # ZLIB_HEADER = [0x7a, 0x6c, 0x69, 0x62, 0x30, 0x30, 0x30, 0x31]
+                                                # d = [ZLIB_HEADER; transcode(CodecZlib.ZlibCompressor, s)]
+                                                d = transcode(CodecZlib.ZlibCompressor, s)
+                                                lock(conn.ws) do ws
+                                                    send(ws, d)
+                                                end
+                                                if !occursin("web_", subid)
+                                                    @show (subid, funcall, Float64(length(d))/length(s))
+                                                    UNCOMPRESSED_RESPONSES_SIZE[] += length(s)
+                                                    COMPRESSED_RESPONSES_SIZE[] += length(d)
+                                                end
+                                            else
+                                                r |> sendres
+                                            end; 
                                         end; subid, ws_id)
 
                     eqsafter = Main.Postgres.executed_queries[]
