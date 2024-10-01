@@ -24,6 +24,7 @@ CREATE OR REPLACE FUNCTION public.c_USER_FOLLOWER_COUNTS() RETURNS int LANGUAGE 
 CREATE OR REPLACE FUNCTION public.c_EVENT_RELAYS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000141';
 CREATE OR REPLACE FUNCTION public.c_LONG_FORM_METADATA() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000144';
 CREATE OR REPLACE FUNCTION public.c_USER_PRIMAL_NAMES() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000158';
+/* CREATE OR REPLACE FUNCTION public.c_COLLECTION_ORDER() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000161'; */
 
 -- types
 
@@ -148,7 +149,7 @@ SELECT
 		'created_at', created_at,
 		'kind', kind, 
 		'tags', tags, 
-		'content', content,
+		'content', content::text,
 		'sig', ENCODE(sig, 'hex'))
 FROM
 	events
@@ -297,12 +298,12 @@ BEGIN
     RETURN NEXT jsonb_build_object(
         'kind', c_ZAP_EVENT(),
         'content', json_build_object( 
-            'event_id', r.event_id, 
+            'event_id', ENCODE(r.event_id, 'hex'), 
             'created_at', r.created_at, 
-            'sender', r.sender,
-            'receiver', r.receiver,
+            'sender', ENCODE(r.sender, 'hex'),
+            'receiver', ENCODE(r.receiver, 'hex'),
             'amount_sats', r.amount_sats,
-            'zap_receipt_id', r.zap_receipt_id));
+            'zap_receipt_id', ENCODE(r.zap_receipt_id, 'hex'))::text);
 END $BODY$;
 
 CREATE OR REPLACE FUNCTION public.event_zaps(a_event_id bytea, a_user_pubkey bytea) RETURNS SETOF jsonb 
@@ -453,7 +454,12 @@ OFFSET
 	a_offset
 $BODY$;
 
-CREATE OR REPLACE FUNCTION public.enrich_feed_events(a_posts post[], a_user_pubkey bytea, a_apply_humaness_check bool)
+CREATE OR REPLACE FUNCTION public.enrich_feed_events(
+    a_posts post[], 
+    a_user_pubkey bytea, 
+    a_apply_humaness_check bool, 
+    a_order_by varchar DEFAULT 'created_at'
+)
 	RETURNS SETOF jsonb
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
@@ -468,8 +474,17 @@ DECLARE
     user_scores jsonb := '{}';
     pubkeys bytea[] := '{}';
     identifier varchar;
+    a_posts_sorted post[];
+    elements jsonb := '{}';
 BEGIN
-	FOREACH p IN ARRAY a_posts LOOP
+    BEGIN
+        a_posts_sorted := ARRAY (SELECT (event_id, created_at)::post FROM UNNEST(a_posts) p ORDER BY created_at DESC);
+        SELECT COALESCE(jsonb_agg(ENCODE(event_id, 'hex')), '[]'::jsonb) INTO elements FROM UNNEST(a_posts_sorted) p;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '% %', SQLERRM, SQLSTATE;
+    END;
+
+	FOREACH p IN ARRAY a_posts_sorted LOOP
 		max_created_at := GREATEST(max_created_at, p.created_at);
 		min_created_at := LEAST(min_created_at, p.created_at);
         FOR t IN SELECT * FROM response_messages_for_post(p.event_id, a_user_pubkey, false, 3) LOOP
@@ -497,9 +512,9 @@ BEGIN
                 END IF;
 
                 IF e_kind = 1 OR e_kind = 30023 THEN
-                    IF NOT t.is_referenced_event THEN
+                    /* IF NOT t.is_referenced_event THEN */
                         RETURN QUERY SELECT * FROM event_zaps(e_id, a_user_pubkey);
-                    END IF;
+                    /* END IF; */
 
                     FOR identifier IN SELECT pre.identifier FROM parametrized_replaceable_events pre WHERE event_id = e_id LOOP
                         RETURN QUERY SELECT * FROM event_zaps(e_pubkey, identifier, a_user_pubkey);
@@ -567,8 +582,14 @@ BEGIN
 		'content', json_build_object(
 			'since', min_created_at, 
 			'until', max_created_at, 
-			'order_by', 'created_at')::text);
-
+			'order_by', a_order_by,
+            'elements', elements)::text);
+    
+	/* RETURN NEXT jsonb_build_object( */
+	/* 	'kind', c_COLLECTION_ORDER(), */
+	/* 	'content', json_build_object( */
+	/* 		'elements', elements, */ 
+	/* 		'order_by', a_order_by)::text); */
 END;
 $BODY$;
 
@@ -620,7 +641,8 @@ SELECT * FROM enrich_feed_events(
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.long_form_content_feed(
-        a_pubkey bytea DEFAULT null, a_notes varchar DEFAULT 'follows',
+        a_pubkey bytea DEFAULT null, 
+        a_notes varchar DEFAULT 'follows',
         a_topic varchar DEFAULT null,
         a_curation varchar DEFAULT null,
         a_minwords int8 DEFAULT 0,
@@ -640,7 +662,7 @@ BEGIN
     IF a_curation IS NOT NULL and a_pubkey IS NOT NULL THEN
         posts := ARRAY (select distinct r.p FROM (
             select 
-                (reads.latest_eid, reads.latest_created_at)::post as p
+                (reads.latest_eid, reads.published_at)::post as p
             from 
                 parametrized_replaceable_events pre,
                 a_tags at,
@@ -649,9 +671,9 @@ BEGIN
                 pre.pubkey = a_pubkey and pre.identifier = a_curation and pre.kind = 30004 and
                 pre.event_id = at.eid and 
                 at.ref_kind = 30023 and at.ref_pubkey = reads.pubkey and at.ref_identifier = reads.identifier and
-                reads.latest_created_at >= a_since and reads.latest_created_at <= a_until and
+                reads.published_at >= a_since and reads.published_at <= a_until and
                 reads.words >= a_minwords
-            order by reads.latest_created_at desc limit a_limit offset a_offset) r);
+            order by reads.published_at desc limit a_limit offset a_offset) r);
     ELSIF a_pubkey IS NULL THEN
         posts := ARRAY (select distinct r.p FROM (
             select (latest_eid, published_at)::post as p
@@ -681,8 +703,8 @@ BEGIN
                     pf.follower_pubkey = a_pubkey and pf.pubkey = reads.pubkey and 
                     reads.published_at >= a_since and reads.published_at <= a_until and
                     reads.words >= a_minwords
-                    and (a_topic is null or topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
-                order by published_at desc limit a_limit offset a_offset) r);
+                    and (a_topic is null or reads.topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
+                order by reads.published_at desc limit a_limit offset a_offset) r);
         ELSIF a_notes = 'authored' THEN
             posts := ARRAY (select distinct r.p FROM (
                 select (reads.latest_eid, reads.published_at)::post as p
@@ -698,7 +720,7 @@ BEGIN
         END IF;
     END IF;
 
-    RETURN QUERY SELECT * FROM enrich_feed_events(posts, a_user_pubkey, a_apply_humaness_check);
+    RETURN QUERY SELECT * FROM enrich_feed_events(posts, a_user_pubkey, a_apply_humaness_check, 'published_at');
 END
 $BODY$;
 
@@ -835,10 +857,10 @@ DECLARE
 BEGIN
     SELECT t INTO ts2 FROM trusted_pubkey_followers_cnt ORDER BY t DESC LIMIT 1;
     /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt ORDER BY t DESC LIMIT 1 OFFSET 1; */
-    /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '24h' ORDER BY t DESC LIMIT 1; */
-    SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '12h' ORDER BY t DESC LIMIT 1;
+    SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '24h' ORDER BY t DESC LIMIT 1;
+    /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '12h' ORDER BY t DESC LIMIT 1; */
 
-    CREATE TABLE IF NOT EXISTS daily_followers_cnt_increases (pubkey bytea not null, increase float4 not null, primary key (pubkey));
+    CREATE TABLE IF NOT EXISTS daily_followers_cnt_increases (pubkey bytea not null, increase int8 not null, ratio float4 not null, primary key (pubkey));
 
     TRUNCATE daily_followers_cnt_increases;
 
@@ -846,7 +868,7 @@ BEGIN
         t1 AS (SELECT pubkey, cnt FROM trusted_pubkey_followers_cnt WHERE t = ts1),
         t2 AS (SELECT pubkey, cnt FROM trusted_pubkey_followers_cnt WHERE t = ts2)
     INSERT INTO daily_followers_cnt_increases 
-        SELECT pubkey, 100.0*dcnt/cnt AS relcnt FROM (
+        SELECT pubkey, dcnt, dcnt::float4/cnt AS relcnt FROM (
             SELECT t1.pubkey, t1.cnt, t2.cnt-t1.cnt AS dcnt 
             FROM t1, t2 
             WHERE t1.pubkey = t2.pubkey) a 
@@ -857,6 +879,6 @@ END
 $BODY$;
 
 SELECT cron.schedule('record_trusted_pubkey_followers_cnt',                 '* */3 * * *', 'CALL record_trusted_pubkey_followers_cnt()');
-SELECT cron.schedule('record_trusted_pubkey_followers_cnt_delete_old',      '0 8 * * *', $$DELETE FROM trusted_pubkey_followers_cnt WHERE t < NOW() - INTERVAL '15 DAY'$$);
-SELECT cron.schedule('update_user_relative_daily_follower_count_increases', '* 0 * * *', 'CALL update_user_relative_daily_follower_count_increases()');
+SELECT cron.schedule('record_trusted_pubkey_followers_cnt_delete_old',      '0 * * * *', $$DELETE FROM trusted_pubkey_followers_cnt WHERE t < NOW() - INTERVAL '15 DAY'$$);
+SELECT cron.schedule('update_user_relative_daily_follower_count_increases', '0 * * * *', 'CALL update_user_relative_daily_follower_count_increases()');
 

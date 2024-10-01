@@ -3718,9 +3718,10 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
     end
 
     ("
-     select a.id, a.created_at 
+     select a.id, min(a.created_at)
      from ($(tosql(expr))) a
-     order by created_at $order
+     group by a.id
+     order by min(a.created_at) $order
      limit $(P(limit)) offset $(P(offset))
      ", 
      params)

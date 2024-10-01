@@ -348,7 +348,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                                                     send(ws, d)
                                                 end
                                                 if !occursin("web_", subid)
-                                                    @show (subid, funcall, Float64(length(d))/length(s))
+                                                    # @show (subid, funcall, Float64(length(d))/length(s))
                                                     UNCOMPRESSED_RESPONSES_SIZE[] += length(s)
                                                     COMPRESSED_RESPONSES_SIZE[] += length(d)
                                                 end

@@ -89,10 +89,11 @@ function run_dvm_checks()
                 goodcnt[] += 1
                 notes_cnt = length([1 for e in r if e["kind"] == Int(Nostr.TEXT_NOTE)])
                 reads_cnt = length([1 for e in r if e["kind"] == Int(Nostr.LONG_FORM_CONTENT)])
+                eids = [e["id"] for e in r if e["kind"] in [Int(Nostr.TEXT_NOTE), Int(Nostr.LONG_FORM_CONTENT)]]
                 DB.exec(est.dyn[:dvm_feeds], 
                         "insert into dvm_feeds values (?1, ?2, ?3, ?4, ?5, ?6, ?7) on conflict (pubkey, identifier) do update set 
                         updated_at = ?3, results = ?4, kind = ?5, personalized = ?6, ok = ?7",
-                        (e.pubkey, dvm_id, Dates.now(), JSON.json(r),
+                        (e.pubkey, dvm_id, Dates.now(), JSON.json(eids),
                          (notes_cnt >= reads_cnt ? :notes : :reads), 
                          personalized, notes_cnt + reads_cnt > 0))
             end

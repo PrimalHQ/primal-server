@@ -118,6 +118,8 @@ USER_FOLLOWER_COUNT_INCREASES=10_000_157
 USER_PRIMAL_NAMES=10_000_158
 DVM_FEED_METADATA=10_000_159
 
+# COLLECTION_ORDER=10_000_161
+
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
@@ -137,13 +139,34 @@ function catch_exception(body::Function, args...; rethrow_exception=false, kwarg
     end
 end
 
-function range(res::Vector, order_by; by=r->r[2])
+function range(
+        res::Vector, order_by;
+        by=r->r[2], 
+        element_id=function (r)
+            if r[1] isa Nostr.Event
+                Nostr.hex(r[1].id)
+            elseif r[1] isa Nostr.EventId || r[1] isa Nostr.PubKeyId
+                Nostr.hex(r[1])
+            elseif r[1] isa Vector{UInt8}
+                bytes2hex(r[1])
+            elseif r[1] isa String
+                r[1]
+            else
+                println("range element_id: $((typeof(r[1]), r[1]))")
+                "?"
+            end
+        end)
     if isempty(res)
         [(; kind=Int(RANGE), content=JSON.json((; order_by)))]
     else
         since = min(by(res[1]), by(res[end]))
         until = max(by(res[1]), by(res[end]))
-        [(; kind=Int(RANGE), content=JSON.json((; since, until, order_by)))]
+        elements = try
+            [element_id(r) for r in sort(res; by=r->-by(r))]
+        catch _; [] end
+        [(; kind=Int(RANGE), content=JSON.json((; since, until, order_by, elements))),
+         # (; kind=Int(COLLECTION_ORDER), content=JSON.json((; order_by, elements)))
+        ]
     end
 end
 
@@ -1363,7 +1386,7 @@ function response_messages_for_list(est::DB.CacheStorage, tables, pubkey, extend
     end
 
     if extended_response
-        res_meta_data = Dict()
+        res_meta_data = Dict{Nostr.PubKeyId, Any}()
         for e in res
             for tag in e.tags
                 if length(tag.fields) == 2 && tag.fields[1] == "p"
@@ -1401,7 +1424,7 @@ end
 
 function parametrized_replaceable_events_extended_response(est::DB.CacheStorage, eids::Vector{Nostr.EventId})
     res = []
-    res_meta_data = Dict()
+    res_meta_data = Dict{Nostr.PubKeyId, Nostr.Event}()
     for eid in eids
         eid in est.events || continue
         e = est.events[eid]
@@ -1941,7 +1964,7 @@ function long_form_content_feed(
     notes = Symbol(notes)
 
     if usepgfuncs
-        q = "select distinct e, e->>'created_at' from long_form_content_feed(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11) f(e) where e is not null order by e->>'created_at' desc"
+        q = "select distinct e from long_form_content_feed(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11) f(e) where e is not null"
         res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
                                            [pubkey, notes, topic, curation, minwords, limit, since, until, offset, user_pubkey, apply_humaness_check])]
         return res
@@ -1954,7 +1977,7 @@ function long_form_content_feed(
         for r in Postgres.pex(DAG_OUTPUTS_DB[], 
                               pgparams() do P "
                                   select 
-                                      distinct reads.latest_eid, reads.latest_created_at
+                                      distinct reads.latest_eid, reads.published_at
                                   from 
                                       parametrized_replaceable_events pre,
                                       a_tags at,
@@ -1963,9 +1986,9 @@ function long_form_content_feed(
                                       pre.pubkey = $(@P pubkey) and pre.identifier = $(@P curation) and pre.kind = 30004 and
                                       pre.event_id = at.eid and 
                                       at.ref_kind = 30023 and at.ref_pubkey = reads.pubkey and at.ref_identifier = reads.identifier and
-                                      reads.latest_created_at >= $(@P since) and reads.latest_created_at <= $(@P until) and
+                                      reads.published_at >= $(@P since) and reads.published_at <= $(@P until) and
                                       reads.words >= $(@P minwords)
-                                  order by reads.latest_created_at desc limit $(@P limit) offset $(@P offset)
+                                  order by reads.published_at desc limit $(@P limit) offset $(@P offset)
                               " end...)
             push!(posts, r)
         end
@@ -2462,7 +2485,7 @@ function mega_feed_directive(
         return advanced_search(est; skwa..., kwargs...)
 
     elseif id == "explore-media"
-        return advanced_search(est; query="kind:1 filter:image", kwargs...)
+        return advanced_search(est; query="kind:1 filter:image scope:mynetworkinteractions", kwargs...)
     elseif id == "explore-zaps"
         return explore_zaps(est; skwa..., kwargs...)
     elseif id == "wide-net-notes"
@@ -2518,6 +2541,8 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
 
                         push!(res, e)
 
+                        append!(res, user_infos(est; pubkeys=[e.pubkey]))
+
                         likes = Postgres.execute(DAG_OUTPUTS_DB[], 
                                                  "select count(1) from a_tags where kind = 7 and ref_kind = 31990 and ref_pubkey = \$1 and ref_identifier = \$2",
                                                  [e.pubkey, dvm_id])[2][1][1]
@@ -2568,8 +2593,12 @@ function get_dvm_feeds(est::DB.CacheStorage)
     response_messages_for_dvm_feeds(est, eids)
 end
 
-function dvm_feed_info(est::DB.CacheStorage; pubkey, identifier::String)
+function dvm_feed_info(est::DB.CacheStorage; pubkey, identifier::String, user_pubkey=nothing)
     pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    isnothing(user_pubkey) && (user_pubkey = Nostr.PubKeyId("532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb")) # primal pubkey as default
+
     eids = Nostr.EventId[]
     for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
                           DB.@sql("select event_id from parametrized_replaceable_events
@@ -2577,7 +2606,7 @@ function dvm_feed_info(est::DB.CacheStorage; pubkey, identifier::String)
                           (pubkey, identifier))
         push!(eids, Nostr.EventId(eid))
     end
-    response_messages_for_dvm_feeds(est, eids)
+    response_messages_for_dvm_feeds(est, eids; user_pubkey)
 end
 
 FEATURED_DVM_FEEDS_FILE = Ref("featured-dvm-feeds.json")
@@ -2638,6 +2667,7 @@ function dvm_feed(
         dvm_kind::Int=31990,
         user_pubkey=nothing,
         timeout=10,
+        since=0, until=Utils.current_time(), limit=20, offset=0,
         usecache=true,
         kwargs...,
     )
@@ -2645,6 +2675,19 @@ function dvm_feed(
 
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    @show (dvm_pubkey, dvm_id)
+
+    function response(eids)
+        posts = Tuple{Nostr.EventId, Int}[]
+        for eid in eids
+            if eid in est.events
+                push!(posts, (eid, est.events[eid].created_at))
+            end
+        end
+        posts = first(sort(posts; by=p->-p[2])[offset+1:end], limit)
+        response_messages_for_posts(est, map(first, posts); user_pubkey)
+    end
 
     einfo = nothing
     for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
@@ -2661,11 +2704,11 @@ function dvm_feed(
     personalized = get(dvminfo, "personalized", false)
 
     if usecache && !personalized
-        for (res,) in DB.exec(est.dyn[:dvm_feeds], 
+        for (eids,) in DB.exec(est.dyn[:dvm_feeds], 
                           DB.@sql("select results from dvm_feeds 
                                   where pubkey = ?1 and updated_at >= ?2 and ok and results is not null"),
                           (dvm_pubkey, Dates.now() - Dates.Minute(15),))
-            return res
+            return response(map(Nostr.EventId, eids))
         end
     end
 
@@ -2746,7 +2789,7 @@ function dvm_feed(
 
     try
         eids = wait(cond)
-        response_messages_for_posts(est, eids; user_pubkey)
+        response(eids)
     finally
         for client in clients
             @async try close(client) catch ex println(ex) end
@@ -2808,7 +2851,12 @@ function get_dvm_feed_user_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::Str
     [(; kind=Int(EVENT_ACTIONS_COUNT), content=JSON.json((; event_id, liked, replied, zapped, reposted)))]
 end
 
-function get_dvm_feed_follows_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::String, dvm_kind=31990, user_pubkey, limit=5)
+function get_dvm_feed_follows_actions(
+        est::DB.CacheStorage; 
+        dvm_pubkey, dvm_id::String, dvm_kind=31990, 
+        user_pubkey, 
+        limit=5,
+    )
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     limit = min(20, limit)
@@ -2877,6 +2925,8 @@ function get_dvm_feed_follows_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::
                                     "
                                 end...)[2][1][1] |> Nostr.EventId
 
+    # @show (dvm_pubkey, dvm_id, dvm_kind, event_id, length(res_mds))
+
     r = (; event_id=Nostr.hex(event_id), dvm_pubkey, dvm_id, dvm_kind, users=[Nostr.hex(e.pubkey) for e in res_mds])
 
     append!(res, [(; kind=Int(DVM_FEED_FOLLOWS_ACTIONS), content=JSON.json(r))])
@@ -2895,52 +2945,67 @@ end
 
 function explore_zaps(
         est::DB.CacheStorage;
-        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        limit::Int=20, since::Int=0, until=nothing, offset::Int=0,
         created_after=Utils.current_time()-24*3600,
+        user_pubkey=nothing,
     )
     limit = min(50, limit)
     limit <= 1000 || error("limit too big")
 
+    isnothing(until) && (until = 100_000_000_000)
     zaps = map(Tuple, DB.exec(est.zap_receipts, 
                               DB.@sql("select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats 
                                       from og_zap_receipts zr, pubkey_trustrank tr
                                       where 
-                                        zr.created_at >= ?1 and zr.created_at <= ?2 and zr.created_at >= ?3 and
+                                        zr.amount_sats >= ?1 and zr.amount_sats <= ?2 and zr.created_at >= ?3 and
                                         zr.sender = tr.pubkey and tr.rank >= ?4
-                                      order by zr.created_at desc limit ?5 offset ?6"),
+                                      order by zr.amount_sats desc limit ?5 offset ?6"),
                               (since, until, created_after, Main.TrustRank.humaness_threshold[], limit, offset)))
 
-    zaps = sort(zaps, by=z->-z[2])[1:min(limit, length(zaps))]
+    zaps = sort(zaps, by=z->-z[6])[1:min(limit, length(zaps))]
 
-    response_messages_for_zaps(est, zaps)
+    response_messages_for_zaps(est, zaps; order_by=:amount_sats)
 end
 
 function explore_people(
         est::DB.CacheStorage;
         since::Float64=0.0, until::Float64=1000000.0, offset::Int=0, limit::Int=20, 
+        user_pubkey=nothing,
     )
     limit = min(50, limit)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    isnothing(user_pubkey) && (user_pubkey = Nostr.PubKeyId("532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb")) # primal pubkey as default
 
     res = []
-    for (pk, v) in Postgres.execute(DAG_OUTPUTS_DB[], 
+
+    for (pk, increase, ratio) in Postgres.execute(DAG_OUTPUTS_DB[], 
                                     pgparams() do P "
-                                        select * from daily_followers_cnt_increases
-                                        where increase >= $(@P since) and increase <= $(@P until)
-                                        order by increase desc limit $(@P limit) offset $(@P offset)"
+                                        with scope_pks as (
+                                            select pf1.pubkey
+                                            from pubkey_followers pf1
+                                            where pf1.follower_pubkey = $(@P user_pubkey)
+                                        )
+                                        select * from daily_followers_cnt_increases dfi
+                                        where 
+                                            dfi.ratio >= $(@P since) and dfi.ratio <= $(@P until) and
+                                            not exists (select 1 from scope_pks where scope_pks.pubkey = dfi.pubkey)
+                                        order by dfi.ratio desc limit $(@P limit) offset $(@P offset)"
                                     end...)[2]
-        push!(res, (Nostr.PubKeyId(pk), v))
+        push!(res, (Nostr.PubKeyId(pk), ratio, increase))
     end
 
-    [[(; kind=Int(USER_FOLLOWER_COUNTS), content=JSON.json(Dict([Nostr.hex(pk)=>v for (pk, v) in res])))];
+    [[(; kind=Int(USER_FOLLOWER_COUNT_INCREASES), 
+       content=JSON.json(Dict([Nostr.hex(pk)=>(; increase, ratio) for (pk, ratio, increase) in res])))];
      user_infos(est; pubkeys=map(first, res)); 
-     range(res, :increase)]
+     range(res, :ratio)]
 end
 
 function explore_media(est::DB.CacheStorage; kwargs...)
     mega_feed_directive(est; spec=raw"""{"id":"explore-media"}""", kwargs...)
 end
 
-function explore_topics(est::DB.CacheStorage)
+function explore_topics(est::DB.CacheStorage; user_pubkey=nothing)
     get(est.dyn[:cache], "precalculated_analytics_explore_topics", [])
 end
 
@@ -2953,7 +3018,7 @@ function explore_topics_(est::DB.CacheStorage; created_after::Int=Utils.current_
                               es.pubkey = tr.pubkey and tr.rank > ?2
                           group by eh.hashtag
                           order by cnt desc
-                          limit 1000"), 
+                          limit 200"), 
                   (created_after, Main.TrustRank.humaness_threshold[]))
     [(; kind=Int(HASHTAGS_2), content=JSON.json(Dict(res)))]
 end
