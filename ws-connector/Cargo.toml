@@ -15,5 +15,9 @@ tokio-postgres = { version = "0.7.11", features = ["with-serde_json-1"] }
 hex = "0.4.3"
 measure_time = "0.8.3"
 libc = "0.2.158"
+flate2 = "1.0.34"
+rand = "0.8.5"
+futures = "0.3.30"
+clap = { version = "4.5.18", features = ["derive"] }
 # tungstenite = "0.24.0"
 
