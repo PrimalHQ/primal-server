@@ -1971,6 +1971,7 @@ function note_stats_node(;
         transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
             pex(q, args=[]) = Postgres.execute(session1, q, args)[2]
             rank = pex("select humaness_threshold_trustrank()")[1][1]
+            peids = Nostr.EventId[]
             for r in pex("
                     select 
                         es.* 
@@ -1981,15 +1982,19 @@ function note_stats_node(;
                         es.kind = $(Int(Nostr.TEXT_NOTE))
                     order by es.id
                     ", [t1, t2])
+                yield()
                 runctx.running[] || break
                 e = event_from_row(r)
                 isempty(pex("select 1 from $(pubkey_trustrank.table) where pubkey = \$1 and rank >= \$2", [e.pubkey, rank])) && continue
                 if !isnothing(local parent_eid = DB.parse_parent_eid(runctx.est, e))
                     if length(e.content) >= 600
-                        pex("insert into $(note_stats.table) values (\$1, 0) on conflict do nothing", [parent_eid])
-                        pex("update $(note_stats.table) set long_replies = long_replies + 1 where eid = \$1", [parent_eid])
+                        push!(peids, parent_eid)
                     end
                 end
+            end
+            for peid in sort(peids)
+                pex("insert into $(note_stats.table) values (\$1, 0) on conflict do nothing", [peid])
+                pex("update $(note_stats.table) set long_replies = long_replies + 1 where eid = \$1", [peid])
             end
         end
     end
