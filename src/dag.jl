@@ -1124,8 +1124,8 @@ function zap_receipts_node(
                 e = event_from_row(r)
                 try
                     p = parse_zap_receipt(r[5])
-                    if !isnothing(p.eid) && !isnothing(p.pubkey) && p.amount_sats > 0
-                        push!(pgt, (e.id, e.created_at, p.eid, e.pubkey, p.pubkey, p.amount_sats, r[end]))
+                    if !isnothing(p.eid) && !isnothing(p.receiver) && !isnothing(p.sender) && p.amount_sats > 0
+                        push!(pgt, (e.id, e.created_at, p.eid, p.sender, p.receiver, p.amount_sats, r[end]))
                     end
                 catch ex
                     println(ex)
@@ -1809,14 +1809,16 @@ end
 
 function parse_zap_receipt(tags::Vector)
     eid = nothing
-    pubkey = nothing
+    receiver = sender = nothing
     amount_sats = 0
     for t in tags
         if length(t) >= 2
             if t[1] == "e"
                 eid = EventId(t[2])
             elseif t[1] == "p"
-                pubkey = PubKeyId(t[2])
+                receiver = PubKeyId(t[2])
+            elseif t[1] == "P"
+                sender = PubKeyId(t[2])
             elseif t[1] == "bolt11"
                 if !isnothing(local amount = DB.parse_bolt11(t[2]))
                     if amount <= DB.MAX_SATSZAPPED[]
@@ -1826,7 +1828,7 @@ function parse_zap_receipt(tags::Vector)
             end
         end
     end
-    (; eid, pubkey, amount_sats)
+    (; eid, sender, receiver, amount_sats)
 end
 
 function import_event_mentions(est::DB.CacheStorage, event_mentions::ServerTable, e::Nostr.Event; connsel=est.dbargs.connsel)
