@@ -3,6 +3,9 @@ name = "ws-connector"
 version = "0.1.0"
 edition = "2021"
 
+#[build]
+#rustflags = ["--cfg", "tokio_unstable", "--cfg", "tokio_taskdump"]
+
 [dependencies]
 tokio-tungstenite = "0.23.1"
 log = "0.4.17"
@@ -20,4 +23,5 @@ rand = "0.8.5"
 futures = "0.3.30"
 clap = { version = "4.5.18", features = ["derive"] }
 # tungstenite = "0.24.0"
+
 
