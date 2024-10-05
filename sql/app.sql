@@ -842,10 +842,19 @@ LANGUAGE 'plpgsql' AS $BODY$
 DECLARE
     t timestamp := NOW();
 BEGIN
+    WITH fc AS (
+        SELECT 
+            pf.pubkey, COUNT(1) as cnt
+        FROM 
+            pubkey_followers pf, pubkey_trustrank tr1, pubkey_trustrank tr2
+        WHERE 
+            pf.pubkey = tr1.pubkey AND tr1.rank > 0 AND
+            pf.follower_pubkey = tr2.pubkey AND tr2.rank > 0
+        GROUP BY pf.pubkey
+    )
     INSERT INTO trusted_pubkey_followers_cnt
-    SELECT t, pubkey, pfc.value
-    FROM pubkey_trustrank tr, pubkey_followers_cnt pfc 
-    WHERE tr.pubkey = pfc.key AND pfc.value >= 1000;
+    SELECT t, fc.pubkey, fc.cnt
+    FROM fc;
 END
 $BODY$;
 
@@ -858,9 +867,15 @@ BEGIN
     SELECT t INTO ts2 FROM trusted_pubkey_followers_cnt ORDER BY t DESC LIMIT 1;
     /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt ORDER BY t DESC LIMIT 1 OFFSET 1; */
     SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '24h' ORDER BY t DESC LIMIT 1;
-    /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '12h' ORDER BY t DESC LIMIT 1; */
+    /* SELECT t INTO ts1 FROM trusted_pubkey_followers_cnt WHERE t < ts2 - INTERVAL '3h' ORDER BY t DESC LIMIT 1; */
 
-    CREATE TABLE IF NOT EXISTS daily_followers_cnt_increases (pubkey bytea not null, increase int8 not null, ratio float4 not null, primary key (pubkey));
+    CREATE TABLE IF NOT EXISTS daily_followers_cnt_increases (
+        pubkey bytea not null, 
+        cnt int8 not null, 
+        increase int8 not null, 
+        ratio float4 not null, 
+        primary key (pubkey)
+    );
 
     TRUNCATE daily_followers_cnt_increases;
 
@@ -868,7 +883,7 @@ BEGIN
         t1 AS (SELECT pubkey, cnt FROM trusted_pubkey_followers_cnt WHERE t = ts1),
         t2 AS (SELECT pubkey, cnt FROM trusted_pubkey_followers_cnt WHERE t = ts2)
     INSERT INTO daily_followers_cnt_increases 
-        SELECT pubkey, dcnt, dcnt::float4/cnt AS relcnt FROM (
+        SELECT pubkey, cnt, dcnt, dcnt::float4/cnt AS relcnt FROM (
             SELECT t1.pubkey, t1.cnt, t2.cnt-t1.cnt AS dcnt 
             FROM t1, t2 
             WHERE t1.pubkey = t2.pubkey) a 
