@@ -1282,17 +1282,21 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             end
         elseif e.kind == Int(Nostr.MUTE_LIST)
             est.mute_list[e.pubkey] = e.id
+            update_content_moderation_rules(est, e.pubkey)
         elseif e.kind == Int(Nostr.CATEGORIZED_PEOPLE)
             for tag in e.tags
                 if length(tag.fields) >= 2
                     if tag.fields[1] == "d" && tag.fields[2] == "mute"
                         est.mute_list_2[e.pubkey] = e.id
+                        update_content_moderation_rules(est, e.pubkey)
                         break
                     elseif tag.fields[1] == "d" && tag.fields[2] == "mutelists"
                         est.mute_lists[e.pubkey] = e.id
+                        update_content_moderation_rules(est, e.pubkey)
                         break
                     elseif tag.fields[1] == "d" && tag.fields[2] == "allowlist"
                         est.allow_list[e.pubkey] = e.id
+                        update_content_moderation_rules(est, e.pubkey)
                         break
                     else tag.fields[1] == "d"
                         identifier = tag.fields[2]
@@ -1484,6 +1488,10 @@ function import_pubkey_bookmarks(est::CacheStorage, e::Nostr.Event)
             end
         end
     end
+end
+
+function update_content_moderation_rules(est::CacheStorage, pubkey::Nostr.PubKeyId)
+    pubkey in est.app_settings && Main.App.import_content_moderation_rules(est, pubkey)
 end
 
 function run_scheduled_hooks(est::CacheStorage)
