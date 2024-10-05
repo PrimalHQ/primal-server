@@ -2979,7 +2979,7 @@ function explore_people(
 
     res = []
 
-    for (pk, increase, ratio) in Postgres.execute(DAG_OUTPUTS_DB[], 
+    for (pk, cnt, increase, ratio) in Postgres.execute(DAG_OUTPUTS_DB[], 
                                     pgparams() do P "
                                         with scope_pks as (
                                             select pf1.pubkey
@@ -2992,11 +2992,11 @@ function explore_people(
                                             not exists (select 1 from scope_pks where scope_pks.pubkey = dfi.pubkey)
                                         order by dfi.ratio desc limit $(@P limit) offset $(@P offset)"
                                     end...)[2]
-        push!(res, (Nostr.PubKeyId(pk), ratio, increase))
+        push!(res, (Nostr.PubKeyId(pk), ratio, increase, cnt))
     end
 
     [[(; kind=Int(USER_FOLLOWER_COUNT_INCREASES), 
-       content=JSON.json(Dict([Nostr.hex(pk)=>(; increase, ratio) for (pk, ratio, increase) in res])))];
+       content=JSON.json(Dict([Nostr.hex(pk)=>(; increase, ratio, count=cnt) for (pk, ratio, increase, cnt) in res])))];
      user_infos(est; pubkeys=map(first, res)); 
      range(res, :ratio)]
 end
