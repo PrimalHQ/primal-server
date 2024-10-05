@@ -157,7 +157,7 @@ function range(
             end
         end)
     if isempty(res)
-        [(; kind=Int(RANGE), content=JSON.json((; order_by)))]
+        [(; kind=Int(RANGE), content=JSON.json((; order_by, elements=[])))]
     else
         since = min(by(res[1]), by(res[end]))
         until = max(by(res[1]), by(res[end]))
@@ -2686,7 +2686,7 @@ function dvm_feed(
             end
         end
         posts = first(sort(posts; by=p->-p[2])[offset+1:end], limit)
-        response_messages_for_posts(est, map(first, posts); user_pubkey)
+        [response_messages_for_posts(est, map(first, posts); user_pubkey); range(posts, :created_at)]
     end
 
     einfo = nothing
