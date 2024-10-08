@@ -2959,7 +2959,7 @@ function explore_zaps(
                                       where 
                                         zr.amount_sats >= ?1 and zr.amount_sats <= ?2 and zr.created_at >= ?3 and
                                         zr.sender = tr.pubkey and tr.rank >= ?4
-                                      order by zr.amount_sats desc limit ?5 offset ?6"),
+                                      order by zr.amount_sats desc, zr.event_id asc limit ?5 offset ?6"),
                               (since, until, created_after, Main.TrustRank.humaness_threshold[], limit, offset)))
 
     zaps = sort(zaps, by=z->-z[6])[1:min(limit, length(zaps))]
@@ -2990,7 +2990,7 @@ function explore_people(
                                         where 
                                             dfi.ratio >= $(@P since) and dfi.ratio <= $(@P until) and
                                             not exists (select 1 from scope_pks where scope_pks.pubkey = dfi.pubkey)
-                                        order by dfi.ratio desc limit $(@P limit) offset $(@P offset)"
+                                        order by dfi.ratio desc, dfi.pubkey asc limit $(@P limit) offset $(@P offset)"
                                     end...)[2]
         push!(res, (Nostr.PubKeyId(pk), ratio, increase, cnt))
     end
