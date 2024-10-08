@@ -95,6 +95,14 @@ mkShell {
     psql -h127.0.0.1 -p54017 primal1
   '';
 
+  patch_pgwire = pkgs.writeShellScript "patch_pgwire.sh" ''
+    cd ws-connector/pgwire && patch -p1 ../pgwire.diff
+  '';
+
+  build_wsconn = pkgs.writeShellScript "build_wsconn.sh" ''
+    RUSTFLAGS="-Awarnings --cfg tokio_unstable --cfg tokio_taskdump" cargo build "$@"
+  '';
+
   shellHook = ''
     export LD_LIBRARY_PATH=${secp256k1}/lib:$PWD:.
     export NIX_LD=${glibc}/lib/ld-linux-x86-64.so.2
