@@ -34,5 +34,9 @@ CREATE INDEX IF NOT EXISTS wsconnlog_t_idx ON wsconnlog (t);
 
 CREATE EXTENSION dblink;
 
-CREATE VIEW wsconntasks AS SELECT * FROM dblink('host=127.0.0.1 port=14002', 'select * from tasks;') AS t1(tokio_task int8, task int8, trace varchar);
-
+CREATE OR REPLACE FUNCTION public.wsconntasks(a_port int8 DEFAULT 14001) 
+    RETURNS TABLE(tokio_task int8, task int8, trace varchar)
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT * FROM dblink(format('host=127.0.0.1 port=%s', a_port), 'select * from tasks;') AS t(tokio_task int8, task int8, trace varchar)
+$BODY$;
