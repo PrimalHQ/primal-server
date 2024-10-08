@@ -22,6 +22,9 @@ flate2 = "1.0.34"
 rand = "0.8.5"
 futures = "0.3.30"
 clap = { version = "4.5.18", features = ["derive"] }
+async-trait = "0.1.83"
+sqlparser = "0.51.0"
+function_name = "0.3.0"
 # tungstenite = "0.24.0"
-
-
+#pgwire = "0.25.0"
+pgwire = { path = "./pgwire" }

@@ -1,0 +1,14 @@
+diff --git a/src/api/auth/mod.rs b/src/api/auth/mod.rs
+index a3b2863..7e5524a 100644
+--- a/src/api/auth/mod.rs
++++ b/src/api/auth/mod.rs
+@@ -59,7 +59,8 @@ impl Default for DefaultServerParameterProvider {
+             server_version: env!("CARGO_PKG_VERSION").to_owned(),
+             server_encoding: "UTF8".to_owned(),
+             client_encoding: "UTF8".to_owned(),
+-            date_style: "ISO YMD".to_owned(),
++            // date_style: "ISO YMD".to_owned(),
++            date_style: "ISO, MDY".to_owned(),
+             integer_datetimes: "on".to_owned(),
+         }
+     }

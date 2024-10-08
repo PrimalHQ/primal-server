@@ -7,3 +7,6 @@
 [submodule "bech32"]
 	path = bech32
 	url = https://github.com/sipa/bech32
+[submodule "ws-connector/pgwire"]
+	path = ws-connector/pgwire
+	url = git@github.com:sunng87/pgwire.git
