@@ -16,6 +16,7 @@ mkShell {
     cargo-pgrx
     rustfmt
     rustc
+    lldb
   ];
 
   # start_julia = ''
