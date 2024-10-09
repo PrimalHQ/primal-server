@@ -175,6 +175,9 @@ struct Cli {
     #[arg(short, long, default_value="100")]
     log_sender_batch_size: usize,
 
+    #[arg(short, long, default_value="/home/pr/work/itk/primal/content-moderation")]
+    content_moderation_root: String,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -294,8 +297,8 @@ async fn main() -> Result<(), Error> {
 
     {
         let mut state = state.lock().await;
-        state.default_app_settings = Some(std::fs::read_to_string("../../../content-moderation/default-settings.json").unwrap());
-        state.app_releases = Some(std::fs::read_to_string("../../../content-moderation/app-releases.json").unwrap());
+        state.default_app_settings = Some(std::fs::read_to_string(format!("{}/default-settings.json", cli.content_moderation_root)).unwrap());
+        state.app_releases = Some(std::fs::read_to_string(format!("{}/app-releases.json", cli.content_moderation_root)).unwrap());
     }
 
     let management_pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 4);
