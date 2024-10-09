@@ -294,8 +294,8 @@ async fn main() -> Result<(), Error> {
 
     {
         let mut state = state.lock().await;
-        state.default_app_settings = Some(std::fs::read_to_string("/home/pr/work/itk/primal/content-moderation/default-settings.json").unwrap());
-        state.app_releases = Some(std::fs::read_to_string("/home/pr/work/itk/primal/content-moderation/app-releases.json").unwrap());
+        state.default_app_settings = Some(std::fs::read_to_string("../../../content-moderation/default-settings.json").unwrap());
+        state.app_releases = Some(std::fs::read_to_string("../../../content-moderation/app-releases.json").unwrap());
     }
 
     let management_pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 4);
@@ -317,10 +317,7 @@ async fn main() -> Result<(), Error> {
 
     tokio::task::spawn(management_task(state.clone(), management_pool.clone()));
 
-    {
-        let management_pool = membership_pool.clone();
-        tokio::task::spawn(log_task(state.clone(), logrx, management_pool));
-    }
+    tokio::task::spawn(log_task(state.clone(), logrx, management_pool.clone()));
 
     {
         let state = state.clone();
@@ -443,12 +440,12 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn make_dbconn_pool(host: &str, port: i64, username: &str, dbname: &str, size: usize) -> Pool {
+fn make_dbconn_pool(host: &str, port: u16, username: &str, dbname: &str, size: usize) -> Pool {
     let mut pg_config = tokio_postgres::Config::new();
-    pg_config.host("127.0.0.1");
-    pg_config.port(54017);
-    pg_config.user("pr");
-    pg_config.dbname("primal1");
+    pg_config.host(host);
+    pg_config.port(port);
+    pg_config.user(username);
+    pg_config.dbname(dbname);
     let mgr_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     };
@@ -743,7 +740,7 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                         Ok(Notice(s)) => {
                             handled = true;
                             let cw = &mut client_write.lock().await;
-                            ReqHandlers::send_notice(subid, cw, s.as_str());
+                            ReqHandlers::send_notice(subid, cw, s.as_str()).await;
                         },
                         Err(err) => {
                             handled = false;
@@ -1034,18 +1031,24 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
     async fn get_notifications_seen(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
         const NOTIFICATIONS_SEEN_UNTIL: i64 = 10000111;
 
-        let pubkey = hex::decode(fa.kwargs["pubkey"].as_str().unwrap().to_string()).ok();
+        let pubkey: Vec<u8> = hex::decode(fa.kwargs["pubkey"].as_str().ok_or("invalid pubkey")?.to_string())?;
 
         let e = {
             let client = &Self::pool_get(&fa.membership_pool).await?;
-            if let Ok(row) = client.query_one("select seen_until from pubkey_notifications_seen where pubkey = $1",
-                                              &[&pubkey]).await {
-                let t: i64 = row.get(0);
-                json!({
-                    "kind": NOTIFICATIONS_SEEN_UNTIL, 
-                    "content": json!(t).to_string()})
-            } else {
-                return Ok(Notice("unknown user".to_string()));
+            match client.query_one("select seen_until from pubkey_notifications_seen where pubkey = $1",
+                                   &[&pubkey]).await {
+                Ok(row) => {
+                    let t: i64 = row.get(0);
+                    json!({
+                        "kind": NOTIFICATIONS_SEEN_UNTIL, 
+                        "content": json!(t).to_string()})
+                },
+                Err(err) => {
+                    match err.code() {
+                        Some(ec) => return Err(ec.code().into()),
+                        None => return Ok(Notice("unknown user".to_string())),
+                    }
+                }
             }
         };
 
@@ -1117,9 +1120,9 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         let until = fa.kwargs["until"].as_i64().unwrap_or(get_sys_time_in_secs().try_into().unwrap());
         let offset = fa.kwargs["offset"].as_i64().unwrap_or(0);
 
-        let pubkey = fa.kwargs["pubkey"].as_str().map(|v| hex::decode(v.to_string()).ok()).flatten();
+        let pubkey = fa.kwargs["pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok());
         let user_pubkey = 
-            fa.kwargs["user_pubkey"].as_str().map(|v| hex::decode(v.to_string()).ok()).flatten()
+            fa.kwargs["user_pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok())
             .or(fa.state.lock().await.primal_pubkey.clone());
 
         let notes = fa.kwargs["notes"].as_str();
@@ -1137,44 +1140,6 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
                 &limit, &since, &until, &offset, 
                 &user_pubkey, &apply_humaness_check,
                 ]).await?);
-        dbg!(fa.kwargs, res.len());
-
-        let cw = &mut fa.client_write.lock().await;
-        Self::send_response(fa.subid, cw, &res).await;
-        Self::send_eose(fa.subid, cw).await;
-
-        Ok(Handled)
-    }
-
-    async fn long_form_content_thread_view(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
-        dbg!(fa.kwargs);
-
-        let limit = fa.kwargs["limit"].as_i64().unwrap_or(20);
-        let since = fa.kwargs["since"].as_i64().unwrap_or(0);
-        let until = fa.kwargs["until"].as_i64().unwrap_or(get_sys_time_in_secs().try_into().unwrap());
-        let offset = fa.kwargs["offset"].as_i64().unwrap_or(0);
-
-        let pubkey = fa.kwargs["pubkey"].as_str().map(|v| hex::decode(v.to_string()).ok()).flatten();
-        let user_pubkey = 
-            fa.kwargs["user_pubkey"].as_str().map(|v| hex::decode(v.to_string()).ok()).flatten()
-            .or(fa.state.lock().await.primal_pubkey.clone());
-
-        let notes = fa.kwargs["notes"].as_str();
-        let topic = fa.kwargs["topic"].as_str();
-        let curation = fa.kwargs["curation"].as_str();
-        let minwords = fa.kwargs["minwords"].as_i64().unwrap_or(0);
-
-        let apply_humaness_check = true;
-
-        let res = Self::rows_to_vec(
-            &Self::pool_get(&fa.pool).await?.query(
-                "select distinct e::text, e->>'created_at' from long_form_content_feed($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) f(e) where e is not null order by e->>'created_at' desc",
-                &[
-                &pubkey, &notes, &topic, &curation, &minwords, 
-                &limit, &since, &until, &offset, 
-                &user_pubkey, &apply_humaness_check,
-                ]).await?);
-        dbg!(fa.kwargs, res.len());
 
         let cw = &mut fa.client_write.lock().await;
         Self::send_response(fa.subid, cw, &res).await;
@@ -1190,38 +1155,29 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         let spec = kwargs["spec"].as_str().unwrap().to_string();
         kwargs.remove("spec");
 
-        if let Ok(Value::Object(s)) = serde_json::from_str::<Value>(&spec) {
-            let mut skwa = s.clone();
-            skwa.remove("id");
-            skwa.remove("kind");
+        match serde_json::from_str::<Value>(&spec) {
+            Err(_) => {
+                return Ok(Notice("invalid spec format".to_string()));
+            },
+            Ok(Value::Object(s)) => {
+                let mut skwa = s.clone();
+                skwa.remove("id");
+                skwa.remove("kind");
 
-            dbg!(&s);
-            if s.contains_key("kind") {
-                if s.contains_key("id") && s["kind"] == "notes" && (s["id"] == "feed" || s["id"] == "latest") {
-                    if s["id"] == "latest" {
-                        skwa.insert("pubkey".to_string(), fa.kwargs["user_pubkey"].clone());
-                    }
-                    // dbg!(&skwa);
+                let sg = |k: &str| -> &str {
+                    s.get(k).and_then(Value::as_str).unwrap_or("")
+                };
 
-                    let notes: String = match skwa.get("notes") {
-                        Some(Value::String(v)) => v,
-                        _ => "follows",
-                    }.to_string();
+                if sg("id") == "nostr-reads-feed" {
+                    return Ok(NotHandled);
 
-                    let mut kwa = kwargs.clone();
-                    kwa.insert("pubkey".to_string(), skwa.get("pubkey").expect("pubkey argument required").clone());
-                    kwa.insert("notes".to_string(), Value::String(notes));
+                } else if sg("kind") == "reads" || sg("id") == "reads-feed" {
+                    let minwords = s.get("minwords").and_then(Value::as_i64).unwrap_or(100);
 
-                    return Self::feed(&FunArgs {kwargs: &Value::Object(kwa.clone()), ..(*fa)}).await;
+                    if sg("scope") == "follows" {
+                        return Ok(NotHandled);
 
-                } else if s["kind"] == "reads" || s["id"] == "reads-feed" {
-                    let minwords = s.get("minwords").map(|v| v.as_i64()).flatten().unwrap_or(100);
-
-                    let scope = s.get("scope").map(|v| v.as_str()).flatten().unwrap_or("");
-
-                    dbg!(scope);
-
-                    if scope == "zappedbyfollows" {
+                    } else if sg("scope") == "zappedbyfollows" {
                         let mut kwa = kwargs.clone();
                         kwa.insert("minwords".to_string(), json!(minwords));
                         kwa.insert("pubkey".to_string(), kwa.get("user_pubkey").expect("user_pubkey argument required").clone());
@@ -1229,7 +1185,7 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
 
                         return Self::long_form_content_feed(&FunArgs {kwargs: &Value::Object(kwa.clone()), ..(*fa)}).await;
 
-                    } else if scope == "myfollowsinteractions" {
+                    } else if sg("scope") == "myfollowsinteractions" {
                         return Ok(NotHandled);
 
                     } else if let Some(topic) = s.get("topic") {
@@ -1250,13 +1206,30 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
                     } else {
                         let mut kwa = kwargs.clone();
                         kwa.insert("minwords".to_string(), json!(minwords));
-
-                        dbg!(&kwa);
+                        kwa.append(&mut skwa);
 
                         return Self::long_form_content_feed(&FunArgs {kwargs: &Value::Object(kwa.clone()), ..(*fa)}).await;
                     }
+
+                } else if sg("kind") == "notes" {
+                    if sg("id") == "latest" {
+                        let mut kwa = kwargs.clone();
+                        kwa.insert("pubkey".to_string(), kwa.get("user_pubkey").expect("user_pubkey argument required").clone());
+                        kwa.append(&mut skwa);
+
+                        return Self::feed(&FunArgs {kwargs: &Value::Object(kwa.clone()), ..(*fa)}).await;
+
+                    } else if sg("id") == "feed" {
+                        let mut kwa = kwargs.clone();
+                        kwa.append(&mut skwa);
+
+                        return Self::feed(&FunArgs {kwargs: &Value::Object(kwa.clone()), ..(*fa)}).await;
+                    }
                 }
-            }
+            },
+            Ok(_) => {
+                return Ok(Notice("invalid spec format".to_string()));
+            },
         }
 
         Ok(NotHandled)

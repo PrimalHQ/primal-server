@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS wsconnruns (
     servername varchar not null,
     port int8 not null
 );
-CREATE TABLE IF NOT EXISTS wsconnlog (
+CREATE UNLOGGED TABLE IF NOT EXISTS wsconnlog (
     t timestamp not null,
     run int8 not null,
     task int8 not null,
