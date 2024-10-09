@@ -1091,24 +1091,24 @@ function get_notifications(
     rs = if isnothing(type)
         DB.exe(est.pubkey_notifications, 
                "select pubkey, created_at, type, arg1, arg2, arg3, arg4
-                       from pubkey_notifications pn
-                       where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
-                       and notification_is_visible(type, arg1, arg2)
-                       order by created_at desc limit ?4 offset ?5",
+               from pubkey_notifications pn
+               where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
+               and notification_is_visible(type, arg1, arg2)
+               order by created_at desc limit ?4 offset ?5",
                pubkey, since, until, limit, offset)
     else
         if !(type isa Vector)
             type = [type]
         end
-        type = join([Int(t) for t in type], ",")
+        type = '{'*join([Int(t) for t in type], ',')*'}'
         DB.exe(est.pubkey_notifications, 
                "select pubkey, created_at, type, arg1, arg2, arg3, arg4
                from pubkey_notifications pn
                where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
-               and type in ($type)
+               and type = any (?4::int8[])
                and notification_is_visible(type, arg1, arg2)
-               order by created_at desc limit ?4 offset ?5",
-               pubkey, since, until, limit, offset)
+               order by created_at desc limit ?5 offset ?6",
+               pubkey, since, until, type, limit, offset)
     end
     for r in rs
         (_, created_at, type, arg1, arg2, arg3, arg4) = r
