@@ -2513,9 +2513,33 @@ function enrich_feed_events_pg(
         apply_humaness_check=false,
     )
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-    q = "select distinct e, e->>'created_at' from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3) f(e) where e is not null order by e->>'created_at' desc"
-    map(first, Postgres.execute(DAG_OUTPUTS_DB[], q,
-                                [JSON.json([(Nostr.hex(p[1]), p[2]) for p in posts]), user_pubkey, apply_humaness_check])[2])
+
+    q = "select distinct e from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3) f(e) where e is not null"
+    res = map(first, Postgres.execute(DAG_OUTPUTS_DB[], q,
+                                      [JSON.json([(Nostr.hex(p[1]), p[2]) for p in posts]), user_pubkey, apply_humaness_check])[2])
+
+    elements = []
+    for e in Base.Iterators.reverse(res)
+        if e["kind"] == RANGE
+            d = JSON.parse(e["content"])
+            if haskey(d, "elements")
+                elements = d["elements"]
+                break
+            end
+        end
+    end
+
+    pes = Dict()
+    res2 = []
+    for e in res
+        if haskey(e, "id") && e["id"] in elements
+            pes[e["id"]] = e
+        else
+            push!(res2, e)
+        end
+    end
+
+    [[pes[eid] for eid in elements if haskey(pes, eid)]; res2]
 end
 
 HOME_FEEDS_FILE = Ref("home-feeds.json")
