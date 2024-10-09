@@ -346,6 +346,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                                                 d = transcode(CodecZlib.ZlibCompressor, s)
                                                 lock(conn.ws) do ws
                                                     send(ws, d)
+                                                    send(ws, JSON.json(["EOSE", subid]))
                                                 end
                                                 if !occursin("web_", subid)
                                                     # @show (subid, funcall, Float64(length(d))/length(s))
