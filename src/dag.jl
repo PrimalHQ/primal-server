@@ -708,6 +708,7 @@ function advsearch_node(
                          :pubkey,
                          :created_at,
                          :kind,
+
                          :content_tsv => "using GIN",
                          :hashtag_tsv => "using GIN",
                          :reply_tsv => "using GIN",
@@ -3330,38 +3331,57 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
 
             Postgres.execute(session, "set statement_timeout=10000")
 
-            if !explain
-                # explained = Postgres.execute(session, "explain (analyze,settings,buffers) $(sql)", params)[2]
-                explained = Postgres.execute(session, "explain (settings) $(sql)", params)[2]
-                lock(Main.stuffd) do stuffd
-                    # display(explained)
-                    push!(get!(stuffd, :search) do; []; end, (; query, since, until, limit, offset, sql, params, explained, logextra...))
-                end
-                # [(EventId(eid), created_at) for (eid, created_at) in Postgres.execute(session, sql, params)[2]]
-                try
-                    if 1==0
-                        Postgres.execute(session, sql, params; 
-                                         callbacks=(;
-                                                    on_notice=(s)->println("DAG.search: ", s),
-                                                    on_row_description=(_)->nothing,
-                                                    on_row=function (row)
-                                                        # @show (length(res)+1, row)
-                                                        push!(res, (EventId(row[1]), row[2]))
-                                                        if length(res) >= limit
-                                                            # println("closing session")
-                                                            # close(session)
-                                                            error("close session")
-                                                        end
-                                                    end))
-                    else
-                        append!(res, Postgres.execute(session, sql, params)[2])
-                    end
-                catch ex 
-                    # println(ex) 
-                end
-            else
-                Postgres.execute(session, "explain $(sql)", params)[2]
+            # explained = Postgres.execute(session, "explain (analyze,settings,buffers) $sql limit \$$(length(params)+1)", [params..., limit])[2]
+            explained = Postgres.execute(session, "explain $sql limit \$$(length(params)+1)", [params..., limit])[2]
+            lock(Main.stuffd) do stuffd
+                push!(get!(stuffd, :search) do; []; end, (; query, since, until, limit, offset, sql, params, explained))
             end
+
+            eids = Set()
+            Postgres.execute(session, "declare cur cursor for $sql", params)
+            tstart = time()
+            i = Ref(0)
+            while length(res) < limit && time() - tstart < 9.0
+                i[] += 1
+                r = Postgres.execute(session, "fetch next from cur")[2]
+                isempty(r) && break
+                (eid, posted_at) = r[1]
+                if !(eid in eids)
+                    push!(eids, eid)
+                    push!(res, (eid, posted_at))
+                end
+            end
+            # limit != i[] && @show (; query, since, until, limit, i=i[])
+            Postgres.execute(session, "close cur")
+
+            # if !explain
+            #     # explained = Postgres.execute(session, "explain (analyze,settings,buffers) $(sql)", params)[2]
+            #     explained = Postgres.execute(session, "explain (settings) $(sql)", params)[2]
+            #     # [(EventId(eid), created_at) for (eid, created_at) in Postgres.execute(session, sql, params)[2]]
+            #     try
+            #         if 1==0
+            #             Postgres.execute(session, sql, params; 
+            #                              callbacks=(;
+            #                                         on_notice=(s)->println("DAG.search: ", s),
+            #                                         on_row_description=(_)->nothing,
+            #                                         on_row=function (row)
+            #                                             # @show (length(res)+1, row)
+            #                                             push!(res, (EventId(row[1]), row[2]))
+            #                                             if length(res) >= limit
+            #                                                 # println("closing session")
+            #                                                 # close(session)
+            #                                                 error("close session")
+            #                                             end
+            #                                         end))
+            #         else
+            #             append!(res, Postgres.execute(session, sql, params)[2])
+            #         end
+            #     catch ex 
+            #         # println(ex) 
+            #     end
+            # else
+            #     Postgres.execute(session, "explain $(sql)", params)[2]
+            # end
         end
     catch ex 
         println("DAG.search: ", ex isa ErrorException ? ex : typeof(ex))
@@ -3597,12 +3617,6 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             push!(ctes, s)
         end
 
-        select("$(T(o.advsearch)).id")
-        select("$(T(o.advsearch)).created_at")
-
-        cond("$(T(o.advsearch)).created_at >= $(P(since))")
-        cond("$(T(o.advsearch)).created_at <= $(P(until))")
-
         # !isnothing(kind) && cond("$(T(o.advsearch)).kind = $(P(kind))")
 
         function user_pubkey_follows_conds(table)
@@ -3621,13 +3635,15 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                     from pubkey_followers pf1
                     where pf1.follower_pubkey = $(P(user_pubkey))
                 ) union (
-                    select pf2.pubkey
-                    from pubkey_followers pf1, pubkey_followers pf2
+                    select pf3.pubkey
+                    from pubkey_followers pf2, pubkey_followers pf3
                     where
-                        pf1.follower_pubkey = $(P(user_pubkey)) and 
-                        pf2.follower_pubkey = pf1.pubkey
+                        pf2.follower_pubkey = $(P(user_pubkey)) and 
+                        pf3.follower_pubkey = pf2.pubkey
                 ))")
         end
+
+        kind = Nostr.TEXT_NOTE
 
         for op in expr.ops
             if     op isa O.Word;    cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
@@ -3639,7 +3655,9 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             elseif op isa O.From;    cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
             elseif op isa O.To;      cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
             elseif op isa O.Mention; cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
-            elseif op isa O.Kind;    cond("$(T(o.advsearch)).kind = $(P(op.kind))")
+            elseif op isa O.Kind
+                cond("$(T(o.advsearch)).kind = $(P(op.kind))")
+                kind = Nostr.Kind(op.kind)
             elseif op isa O.Filter;  cond("$(T(o.advsearch)).filter_tsv @@ plainto_tsquery('simple', $(P(op.filter)))")
             elseif op isa O.Url;     cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
             elseif op isa O.Orientation
@@ -3680,7 +3698,7 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                         user_pubkey_network_conds("scope_pks")
                     end
                     cond("(bt1.kind = $(Int(Nostr.TEXT_NOTE)) or bt1.kind = $(Int(Nostr.REPOST)) or bt1.kind = $(Int(Nostr.REACTION))) and 
-                         bt1.pubkey = scope_pks.pubkey and bt1.tag = 'e' and bt1.arg1 = $(T(o.advsearch)).id")
+                         bt1.pubkey = scope_pks.pubkey and bt1.tag = 'e' and bt1.arg1 = $(T(o.advsearch)).id") # TODO reads
                 elseif op.scope == "notmyfollows"
                     user_pubkey_follows_conds("scope_pks")
                     cond("not exists (select 1 from scope_pks where scope_pks.pubkey = $(T(o.advsearch)).pubkey)")
@@ -3706,14 +3724,33 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                 end
             end
         end
+
+        if kind == Nostr.TEXT_NOTE
+            select("$(T(o.advsearch)).id")
+            select("$(T(o.advsearch)).created_at as posted_at")
+            cond("$(T(o.advsearch)).created_at >= $(P(since))")
+            cond("$(T(o.advsearch)).created_at <= $(P(until))")
+            orderby = "$(T(o.advsearch)).created_at"
+        elseif kind == Nostr.LONG_FORM_CONTENT
+            select("$(T(o.advsearch)).id")
+            select("$(T(o.reads)).published_at as posted_at")
+            cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid")
+            cond("$(T(o.reads)).published_at >= $(P(since))")
+            cond("$(T(o.reads)).published_at <= $(P(until))")
+            orderby = "$(T(o.reads)).published_at"
+        else
+            error("unsupported kind")
+        end
+
         "
         $(join(ctes, ", "))
         select $(join(selects, ", "))
         from $(join(tables, ", "))
         where $(join(conds, " and "))
-        order by $(T(o.advsearch)).created_at $order
-        limit $(P(limit)) offset $(P(offset))
+        order by $orderby $order
+        limit 5000
         "
+        # limit $(P(limit))
     end
 
     function tosql(expr)
@@ -3724,12 +3761,18 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         end
     end
 
+    # ("
+    #  select a.id, min(a.posted_at)
+    #  from ($(tosql(expr))) a
+    #  group by a.id
+    #  order by min(a.posted_at) $order
+    #  limit $(P(limit)) offset $(P(offset))
+    #  ", 
+    #  params)
     ("
-     select a.id, min(a.created_at)
+     select a.id, a.posted_at
      from ($(tosql(expr))) a
-     group by a.id
-     order by min(a.created_at) $order
-     limit $(P(limit)) offset $(P(offset))
+     order by a.posted_at $order
      ", 
      params)
 end

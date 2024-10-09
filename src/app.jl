@@ -1958,6 +1958,8 @@ function long_form_content_feed(
         usepgfuncs=false,
         apply_humaness_check=false,
     )
+    # error("obsolete implementation")
+
     limit <= 1000 || error("limit too big")
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
@@ -2486,6 +2488,7 @@ function mega_feed_directive(
 
     elseif id == "explore-media"
         return advanced_search(est; query="kind:1 filter:image scope:mynetworkinteractions", kwargs...)
+        # return advanced_search(est; query="kind:1 filter:image scope:myfollows", kwargs...)
     elseif id == "explore-zaps"
         return explore_zaps(est; skwa..., kwargs...)
     elseif id == "wide-net-notes"
