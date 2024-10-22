@@ -32,6 +32,8 @@ CREATE UNLOGGED TABLE IF NOT EXISTS wsconnlog (
 );
 CREATE INDEX IF NOT EXISTS wsconnlog_t_idx ON wsconnlog (t);
 
+SELECT cron.schedule('wsconnlog_delete_old', '0 * * * *', $$DELETE FROM wsconnlog WHERE t < NOW() - INTERVAL '3 DAY'$$);
+
 CREATE EXTENSION dblink;
 
 CREATE OR REPLACE FUNCTION public.wsconntasks(a_port int8 DEFAULT 14001) 

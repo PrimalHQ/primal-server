@@ -313,6 +313,7 @@ function scored_content(
                 select a.author_pubkey, es.event_id, es.$field
                 from a, event_stats es 
                 where a.author_pubkey = es.author_pubkey and a.maxfield = es.$field
+                and es.$field > 0 and $created_after <= es.created_at 
                 "
             else
                 # q = "with a as materialized (select author_pubkey, event_id, $field from event_stats $q_wheres) select * from a order by $field desc limit ?1 offset ?2"
@@ -868,6 +869,8 @@ function search_(
     end
 end
 
+advsearch_log = Ref{Any}(nothing)
+
 function advanced_search(
         est::DB.CacheStorage;
         query::String,
@@ -876,13 +879,19 @@ function advanced_search(
         kwargs...,
     )
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    isnothing(user_pubkey) && (user_pubkey = Nostr.PubKeyId("532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb")) # primal pubkey as default
     isempty(query) && error("query is empty")
     limit = min(100, limit)
+
     if !isnothing(DAG_OUTPUTS[])
         mod, outputs = DAG_OUTPUTS[]
-        res, stats = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
-        Main.stuffd[:res] = res
-        posts = Tuple{Nostr.EventId, Int}[(Nostr.EventId(eid), created_at) for (eid, created_at) in res]
+        tdur = @elapsed res, stats, err = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
+
+        d = (; host=gethostname(), query, user_pubkey, stats, reslen=length(res), err, tdur) 
+        Postgres.execute(:membership, "insert into advsearch_log values (now(), \$1, \$2::jsonb)", [user_pubkey, JSON.json(d)])
+
+        posts = Tuple{Nostr.EventId, Int}[(Nostr.EventId(eid), orderkey) for (eid, orderkey) in res]
+
         # eids = Nostr.EventId[eid for (eid, created_at) in posts]
         # vcat(response_messages_for_posts(est, eids; user_pubkey), range(posts, :created_at))
         enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false)
@@ -1955,6 +1964,15 @@ function start(est::DB.CacheStorage)
                                                    "create index if not exists categorized_uploads_added_at on categorized_uploads (added_at desc)",
                                                    "create index if not exists categorized_uploads_sha256 on categorized_uploads (sha256 asc)",
                                                   ])
+    advsearch_log[] = est.params.MembershipDBDict(String, Int, "advsearch_log"; connsel=est.pqconnstr,
+                                                  init_queries=["create table if not exists advsearch_log (
+                                                                t timestamp not null,
+                                                                user_pubkey bytea not null,
+                                                                d jsonb not null
+                                                                )",
+                                                                "create index if not exists advsearch_log_t_idx on advsearch_log (t)",
+                                                                "create index if not exists advsearch_log_user_pubkey_t_idx on advsearch_log (user_pubkey, t)",
+                                                               ])
 end
 
 lists = Ref{Any}(nothing)

@@ -489,17 +489,23 @@ async fn log_task(state: Arc<Mutex<State>>, mut logrx: mpsc::Receiver<LogEntry>,
         let mut entries = Vec::new();
         while entries.len() < batch_size {
             if let Some(entry) = logrx.recv().await {
-                entries.push(entry);
+                use std::time::SystemTime;
+                let now: SystemTime = SystemTime::now();
+                entries.push((now, entry));
             }
         }
-        {
+        let f = || async {
             let mut client = management_pool.get().await.unwrap();
             let dbtx = client.transaction().await.unwrap();
-            for e in entries {
-                dbtx.query("insert into wsconnlog values (now(), $1, $2, $3, $4, $5, $6)", 
-                           &[&e.run, &e.task, &e.tokio_task, &e.info, &e.func, &e.conn_id]).await.unwrap();
+            for (t, e) in entries {
+                dbtx.query("insert into wsconnlog values ($1, $2, $3, $4, $5, $6, $7)", 
+                           &[&t, &e.run, &e.task, &e.tokio_task, &e.info, &e.func, &e.conn_id]).await.unwrap();
             }
             dbtx.commit().await.unwrap();
+        };
+        match std::panic::AssertUnwindSafe(f()).catch_unwind().await {
+            Ok(v) => {},
+            Err(err) => println!("log_task panic: {err:?}"),
         }
     }
 }
@@ -1079,12 +1085,10 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         let notes = fa.kwargs["notes"].as_str().unwrap_or("follows");
         let include_replies = fa.kwargs["include_replies"].as_bool().unwrap_or(false) as i64;
 
-        let apply_humaness_check = true;
-
         let send_results = {
             let pubkey = pubkey.clone();
-            |pgfunc: String, include_replies: i64| async move {
-                let q = format!("select distinct e::text, e->>'created_at' from {}($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by e->>'created_at' desc", pgfunc);
+            |pgfunc: String, include_replies: i64, apply_humaness_check: bool| async move {
+                let q = format!("select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from {}($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc", pgfunc);
                 let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &apply_humaness_check];
 
                 let res = Self::rows_to_vec(
@@ -1104,12 +1108,12 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
             let r = Self::pool_get(&fa.pool).await?.query("select 1 from pubkey_followers pf where pf.follower_pubkey = $1 limit 1", 
                                                           &[&pubkey]).await?.len();
             if r > 0 {
-                return send_results("feed_user_follows".to_string(), include_replies).await;
+                return send_results("feed_user_follows".to_string(), include_replies, true).await;
             }
         } else if notes == "authored" {
-            return send_results("feed_user_authored".to_string(), 0).await;
+            return send_results("feed_user_authored".to_string(), include_replies, false).await;
         } else if notes == "replies" {
-            return send_results("feed_user_authored".to_string(), 1).await;
+            return send_results("feed_user_authored".to_string(), 1, false).await;
         }
 
         Ok(NotHandled)

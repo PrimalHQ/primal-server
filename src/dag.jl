@@ -3323,6 +3323,8 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
 
     stats = Ref(zero_usage_stats) |> ThreadSafe
 
+    err = nothing
+
     try
         transaction_with_execution_stats(SEARCH_SERVER[]; stats) do session
 
@@ -3333,6 +3335,7 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
 
             # explained = Postgres.execute(session, "explain (analyze,settings,buffers) $sql limit \$$(length(params)+1)", [params..., limit])[2]
             explained = Postgres.execute(session, "explain $sql limit \$$(length(params)+1)", [params..., limit])[2]
+            # explained = Postgres.execute(session, "explain $sql", params)[2]
             lock(Main.stuffd) do stuffd
                 push!(get!(stuffd, :search) do; []; end, (; query, since, until, limit, offset, sql, params, explained))
             end
@@ -3349,6 +3352,7 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
                 if !(eid in eids)
                     push!(eids, eid)
                     push!(res, (eid, posted_at))
+                    # @show posted_at |> Dates.unix2datetime
                 end
             end
             # limit != i[] && @show (; query, since, until, limit, i=i[])
@@ -3384,12 +3388,14 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Uti
             # end
         end
     catch ex 
+        Utils.print_exceptions()
         println("DAG.search: ", ex isa ErrorException ? ex : typeof(ex))
+        err = string(ex)
     end
 
     res = first(res, limit)
 
-    res, stats[]
+    res, stats[], err
 end
 
 # advanced search query parsing
@@ -3402,12 +3408,16 @@ function init_parsing()
     rules[] = Dict(
                    :input => P.seq(:ws, :or_expr, :ws, P.end_of_input),
 
+                   :sub_expr => P.seq(t"(", :ws, :or_expr, t")"),
+
                    :or_expr => P.first(P.seq(:exprs, t"OR ", :ws, :or_expr),
                                        :exprs),
 
                    :exprs => P.some(P.seq(:expr, :ws)),
                    :expr => P.seq(P.not_followed_by(t"OR "), 
                                   P.first(
+                                          :sub_expr,
+                                          :not_phrase_expr,
                                           :not_word_expr,
                                           :hashtag_expr,
                                           :since_expr,
@@ -3416,6 +3426,7 @@ function init_parsing()
                                           :to_expr,
                                           :mention_expr,
                                           :kind_expr,
+                                          :repliestokind_expr,
                                           :minduration_expr,
                                           :maxduration_expr,
                                           :filter_expr,
@@ -3424,21 +3435,37 @@ function init_parsing()
                                           :list_expr,
                                           :emoticon_expr,
                                           :question_expr,
-                                          :minscore_expr,
-                                          :maxscore_expr,
                                           :mininteractions_expr,
                                           :maxinteractions_expr,
                                           :scope_expr,
                                           :minwords_expr,
+                                          :maxwords_expr,
                                           :maxchars_expr,
                                           :minlongreplies_expr,
                                           :lang_expr,
                                           :features_expr,
+                                          :ref_expr,
+                                          :zappedby_expr,
+                                          :orderby_expr,
+
+                                          :minscore_expr,
+                                          :maxscore_expr,
+                                          :minlikes_expr,
+                                          :maxlikes_expr,
+                                          :minzaps_expr,
+                                          :maxzaps_expr,
+                                          :minreplies_expr,
+                                          :maxreplies_expr,
+                                          :minreposts_expr,
+                                          :maxreposts_expr,
+
                                           :word_expr,
                                           :phrase_expr,
+
                                          )), 
                    :word_expr => P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c=='_')||(c=='-'))),
                    :phrase_expr => P.seq(t"\"", P.some(P.satisfy(c->c!='"')), t"\""),
+                   :not_phrase_expr => P.seq(t"-\"", P.some(P.satisfy(c->c!='"')), t"\""),
                    :not_word_expr => P.seq(t"-", :word_expr),
                    :hashtag_expr => P.seq(t"#", :word_expr),
                    :ts => P.some(P.satisfy(c->isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
@@ -3451,6 +3478,7 @@ function init_parsing()
                    :to_expr => P.seq(t"to:", :pubkey),
                    :mention_expr => P.seq(t"@", :pubkey),
                    :kind_expr => P.seq(t"kind:", :number),
+                   :repliestokind_expr => P.seq(t"repliestokind:", :number),
                    :filter_expr => P.seq(t"filter:", :word_expr),
                    :url_expr => P.seq(t"url:", :word_expr),
                    :orientation_expr => P.seq(t"orientation:", :word_expr),
@@ -3459,16 +3487,30 @@ function init_parsing()
                    :list_expr => P.seq(t"list:", :word_expr),
                    :emoticon_expr => P.first(t":)", t":("),
                    :question_expr => t"?",
-                   :minscore_expr => P.seq(t"minscore:", :number),
-                   :maxscore_expr => P.seq(t"maxscore:", :number),
                    :mininteractions_expr => P.seq(t"mininteractions:", :number),
                    :maxinteractions_expr => P.seq(t"maxinteractions:", :number),
                    :scope_expr => P.seq(t"scope:", :word_expr),
                    :minwords_expr => P.seq(t"minwords:", :number),
+                   :maxwords_expr => P.seq(t"maxwords:", :number),
                    :maxchars_expr => P.seq(t"maxchars:", :number),
                    :minlongreplies_expr => P.seq(t"minlongreplies:", :number),
                    :lang_expr => P.seq(t"lang:", :word_expr),
                    :features_expr => P.seq(t"features:", P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c in "-_,")))),
+                   :ref_expr => P.seq(t"ref:", :word_expr),
+                   :zappedby_expr => P.seq(t"zappedby:", :pubkey),
+                   :orderby_expr => P.seq(t"orderby:", :word_expr),
+
+                   :minscore_expr => P.seq(t"minscore:", :number),
+                   :maxscore_expr => P.seq(t"maxscore:", :number),
+                   :minlikes_expr => P.seq(t"minlikes:", :number),
+                   :maxlikes_expr => P.seq(t"maxlikes:", :number),
+                   :minzaps_expr => P.seq(t"minzaps:", :number),
+                   :maxzaps_expr => P.seq(t"maxzaps:", :number),
+                   :minreplies_expr => P.seq(t"minreplies:", :number),
+                   :maxreplies_expr => P.seq(t"maxreplies:", :number),
+                   :minreposts_expr => P.seq(t"minreposts:", :number),
+                   :maxreposts_expr => P.seq(t"maxreposts:", :number),
+
                    :number => P.some(P.satisfy(isdigit)),
                    :ws => P.many(t" "),
                   )
@@ -3485,6 +3527,7 @@ struct And;      ops; end
 struct Word;     word::String; end
 struct Phrase;   phrase::String; end
 struct NotWord;  word::String; end
+struct NotPhrase; phrase::String; end
 struct HashTag;  hashtag::String; end
 struct Since;    ts::Int; end
 struct Until;    ts::Int; end
@@ -3492,6 +3535,7 @@ struct From;     pubkey::Nostr.PubKeyId; end
 struct To;       pubkey::Nostr.PubKeyId; end
 struct Mention;  pubkey::Nostr.PubKeyId; end
 struct Kind;     kind::Int; end
+struct RepliesToKind; kind::Int; end
 struct Filter;   filter::String; end
 struct Url;      word::String; end
 struct List;     list::String; end
@@ -3506,9 +3550,14 @@ struct MinInteractions; interactions::Int; end
 struct MaxInteractions; interactions::Int; end
 struct Scope; scope::String; end
 struct MinWords; words::Int; end
+struct MaxWords; words::Int; end
 struct MaxChars; chars::Int; end
 struct MinLongReplies; longreplies::Int; end
 struct Lang; lang::String; end
+struct Ref; ref::Union{Nostr.PubKeyId, Nostr.EventId}; end
+struct ZappedBy; pubkey::Nostr.PubKeyId; end
+struct OrderBy; field::String; end
+struct EventStatsField; field::Symbol; operation::Symbol; argument::Int; end
 struct Features; features::Vector{String}; end
 end
 Base.:(==)(a::O.Features, b::O.Features) = a.features == b.features
@@ -3526,17 +3575,25 @@ function parse_search_query(query)
         end
         
         if     m.rule == :input; sm[2]
+        elseif m.rule == :sub_expr; sm[3]
         elseif m.rule == :or_expr; 
             if sm[1] isa Vector
                 O.Or(Any[sm[1][2], sm[1][5]])
             else
                 sm[1]
             end
-        elseif m.rule == :exprs; O.And(Any[x[2] for x in sm])
+        elseif m.rule == :exprs
+            s = Any[x[2] for x in sm]
+            if length(s) > 1
+                O.And(s)
+            else
+                s[1]
+            end
         elseif m.rule == :expr; sm[2][2]
         elseif m.rule == :word_expr; O.Word(string(m.view))
         elseif m.rule == :phrase_expr; O.Phrase(m.view[2:end-1])
         elseif m.rule == :not_word_expr; O.NotWord(first(s.word for s in sm if s isa O.Word))
+        elseif m.rule == :not_phrase_expr; O.NotPhrase(m.view[3:end-1])
         elseif m.rule == :hashtag_expr; O.HashTag(first(s.word for s in sm if s isa O.Word))
         elseif m.rule == :ts; string(m.view)
         elseif m.rule == :since_expr; O.Since(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
@@ -3548,6 +3605,7 @@ function parse_search_query(query)
         elseif m.rule == :to_expr; O.To(sm[2])
         elseif m.rule == :mention_expr; O.Mention(sm[2])
         elseif m.rule == :kind_expr; O.Kind(sm[2])
+        elseif m.rule == :repliestokind_expr; O.RepliesToKind(sm[2])
         elseif m.rule == :filter_expr; O.Filter(sm[2].word)
         elseif m.rule == :url_expr; O.Url(sm[2].word)
         elseif m.rule == :minduration_expr; O.MinDuration(Float64(sm[2]))
@@ -3556,16 +3614,30 @@ function parse_search_query(query)
         elseif m.rule == :list_expr; O.List(sm[2].word)
         elseif m.rule == :emoticon_expr; O.Emoticon(string(m.view))
         elseif m.rule == :question_expr; O.Question()
-        elseif m.rule == :minscore_expr; O.MinScore(sm[2])
-        elseif m.rule == :maxscore_expr; O.MaxScore(sm[2])
         elseif m.rule == :mininteractions_expr; O.MinInteractions(sm[2])
         elseif m.rule == :maxinteractions_expr; O.MaxInteractions(sm[2])
         elseif m.rule == :scope_expr; O.Scope(sm[2].word)
         elseif m.rule == :minwords_expr; O.MinWords(sm[2])
+        elseif m.rule == :maxwords_expr; O.MaxWords(sm[2])
         elseif m.rule == :maxchars_expr; O.MaxChars(sm[2])
         elseif m.rule == :minlongreplies_expr; O.MinLongReplies(sm[2])
         elseif m.rule == :lang_expr; O.Lang(sm[2].word)
         elseif m.rule == :features_expr; O.Features(map(string, split(sm[2][1][2], ',')))
+        elseif m.rule == :ref_expr; O.Ref(Nostr.bech32_decode(sm[2].word))
+        elseif m.rule == :zappedby_expr; O.ZappedBy(sm[2])
+        elseif m.rule == :orderby_expr; O.OrderBy(sm[2].word)
+
+        elseif m.rule == :minscore_expr; O.EventStatsField(:score, :(>=), sm[2])
+        elseif m.rule == :maxscore_expr; O.EventStatsField(:score, :(<=), sm[2])
+        elseif m.rule == :minlikes_expr; O.EventStatsField(:likes, :(>=), sm[2])
+        elseif m.rule == :maxlikes_expr; O.EventStatsField(:likes, :(<=), sm[2])
+        elseif m.rule == :minzaps_expr; O.EventStatsField(:zaps, :(>=), sm[2])
+        elseif m.rule == :maxzaps_expr; O.EventStatsField(:zaps, :(<=), sm[2])
+        elseif m.rule == :minreplies_expr; O.EventStatsField(:replies, :(>=), sm[2])
+        elseif m.rule == :maxreplies_expr; O.EventStatsField(:replies, :(<=), sm[2])
+        elseif m.rule == :minreposts_expr; O.EventStatsField(:reposts, :(>=), sm[2])
+        elseif m.rule == :maxreposts_expr; O.EventStatsField(:reposts, :(<=), sm[2])
+
         elseif m.rule == :number; parse(Int, m.view)
         elseif m.rule == :ws; nothing
         else; [(m.rule, string(m.view)), sm...]
@@ -3646,18 +3718,34 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         kind = Nostr.TEXT_NOTE
 
         for op in expr.ops
-            if     op isa O.Word;    cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
-            elseif op isa O.Phrase;  cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
-            elseif op isa O.NotWord; cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
-            elseif op isa O.HashTag; cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
-            elseif op isa O.Since;   cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
-            elseif op isa O.Until;   cond("$(T(o.advsearch)).created_at <= $(P(op.ts))")
-            elseif op isa O.From;    cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
-            elseif op isa O.To;      cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
-            elseif op isa O.Mention; cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(op.pubkey)))")
+            if     op isa O.Word;      cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
+            elseif op isa O.NotWord;   cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
+            elseif op isa O.Phrase;    cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
+            elseif op isa O.NotPhrase; cond("not ($(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase))))")
+            elseif op isa O.HashTag;   cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
+            elseif op isa O.Since;     cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
+            elseif op isa O.Until;     cond("$(T(o.advsearch)).created_at <= $(P(op.ts))")
+            elseif op isa O.From;      cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
+            elseif op isa O.To;        cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
+            elseif op isa O.Mention;   cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
             elseif op isa O.Kind
                 cond("$(T(o.advsearch)).kind = $(P(op.kind))")
                 kind = Nostr.Kind(op.kind)
+            elseif op isa O.RepliesToKind
+                # if op.kind == Int(Nostr.TEXT_NOTE)
+                    T("basic_tags btrtk") 
+                    T("events esrtk") 
+                    cond("btrtk.id = $(T(o.advsearch)).id")
+                    cond("btrtk.kind = $(Int(Nostr.TEXT_NOTE))")
+                    cond("btrtk.tag = 'e' and btrtk.arg1 = esrtk.id and esrtk.kind = $(P(op.kind))")
+                # elseif op.kind == Int(Nostr.LONG_FORM_CONTENT)
+                #     T("a_tags atrtk") 
+                #     cond("atrtk.eid = $(T(o.advsearch)).id")
+                #     cond("atrtk.kind = $(Int(Nostr.TEXT_NOTE))")
+                #     cond("atrtk.ref_kind = $(P(op.kind))")
+                # else
+                #     error("unsupported repliestokind operator argument")
+                # end
             elseif op isa O.Filter;  cond("$(T(o.advsearch)).filter_tsv @@ plainto_tsquery('simple', $(P(op.filter)))")
             elseif op isa O.Url;     cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
             elseif op isa O.Orientation
@@ -3673,10 +3761,8 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                                                                                                                         elseif op.emo == ":("; '-'
                                                                                                                         else; error("unexpected emoticon: $(op.emo)")
                                                                                                                         end))")
-            elseif op isa O.MinScore
-                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score >= $(P(op.score))")
-            elseif op isa O.MaxScore
-                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).score <= $(P(op.score))")
+            elseif op isa O.EventStatsField
+                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).$(op.field) $(op.operation) $(P(op.argument))")
             elseif op isa O.MinInteractions
                 cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps >= $(P(op.interactions))")
             elseif op isa O.MaxInteractions
@@ -3691,14 +3777,14 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                     cond("$(T(o.advsearch)).pubkey = scope_pks.pubkey")
                 elseif op.scope in ["myfollowsinteractions", "mynetworkinteractions"]
                     # TODO: zaps
-                    T("basic_tags bt1") 
+                    T("basic_tags btscopeint") 
                     if     op.scope == "myfollowsinteractions"
                         user_pubkey_follows_conds("scope_pks")
                     elseif op.scope == "mynetworkinteractions"
                         user_pubkey_network_conds("scope_pks")
                     end
-                    cond("(bt1.kind = $(Int(Nostr.TEXT_NOTE)) or bt1.kind = $(Int(Nostr.REPOST)) or bt1.kind = $(Int(Nostr.REACTION))) and 
-                         bt1.pubkey = scope_pks.pubkey and bt1.tag = 'e' and bt1.arg1 = $(T(o.advsearch)).id") # TODO reads
+                    cond("btscopeint.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.REPOST)), $(Int(Nostr.REACTION))) and 
+                         btscopeint.pubkey = scope_pks.pubkey and btscopeint.tag = 'e' and btscopeint.arg1 = $(T(o.advsearch)).id") # TODO reads
                 elseif op.scope == "notmyfollows"
                     user_pubkey_follows_conds("scope_pks")
                     cond("not exists (select 1 from scope_pks where scope_pks.pubkey = $(T(o.advsearch)).pubkey)")
@@ -3707,12 +3793,23 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                 end
             elseif op isa O.MinWords
                 cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words >= $(P(op.words))")
+            elseif op isa O.MaxWords
+                cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words <= $(P(op.words))")
             elseif op isa O.MaxChars
                 cond("$(T(o.advsearch)).id = $(T(o.note_length)).eid and $(T(o.note_length)).length <= $(P(op.chars))")
             elseif op isa O.MinLongReplies
                 cond("$(T(o.advsearch)).id = $(T(o.note_stats)).eid and $(T(o.note_stats)).long_replies >= $(P(op.longreplies))")
             elseif op isa O.Lang
                 cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).lang = $(P(op.lang)) and $(T(o.reads)).lang_prob = 1.0")
+            elseif op isa O.Ref
+                T("basic_tags btref") 
+                cond("btref.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.REPOST)), $(Int(Nostr.LONG_FORM_CONTENT)))")
+                cond("btref.arg1 = $(P(op.ref)) and btref.id = $(T(o.advsearch)).id")
+                if     op.ref isa Nostr.EventId;  cond("btref.tag = 'e'")
+                elseif op.ref isa Nostr.PubKeyId; cond("btref.tag = 'p'")
+                end
+            elseif op isa O.ZappedBy
+                cond("$(T(o.zap_receipts)).sender = $(P(op.pubkey)) and $(T(o.zap_receipts)).target_eid = $(T(o.advsearch)).id")
             elseif op isa O.Features
                 for feat in op.features
                     if     feat == "summary"
@@ -3727,24 +3824,41 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
 
         if kind == Nostr.TEXT_NOTE
             select("$(T(o.advsearch)).id")
-            select("$(T(o.advsearch)).created_at as posted_at")
+            orderkey = "$(T(o.advsearch)).created_at"
             cond("$(T(o.advsearch)).created_at >= $(P(since))")
             cond("$(T(o.advsearch)).created_at <= $(P(until))")
             orderby = "$(T(o.advsearch)).created_at"
+
         elseif kind == Nostr.LONG_FORM_CONTENT
             select("$(T(o.advsearch)).id")
-            select("$(T(o.reads)).published_at as posted_at")
+            orderkey = "$(T(o.reads)).published_at"
             cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid")
             cond("$(T(o.reads)).published_at >= $(P(since))")
             cond("$(T(o.reads)).published_at <= $(P(until))")
             orderby = "$(T(o.reads)).published_at"
+
         else
             error("unsupported kind")
         end
 
+        for op in expr.ops
+            if op isa O.OrderBy
+                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id")
+                if op.field == "interactions"
+                    orderby = "($(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps)"
+                else
+                    @assert op.field in ["score", "replies", "zaps", "satszapped"]
+                    cond("$(T(o.event_stats)).$(op.field) > 0")
+                    orderby = "$(T(o.event_stats)).$(op.field)"
+                end
+                orderkey = orderby
+                break
+            end
+        end
+
         "
         $(join(ctes, ", "))
-        select $(join(selects, ", "))
+        select $(join([selects..., "$orderkey as orderkey"], ", "))
         from $(join(tables, ", "))
         where $(join(conds, " and "))
         order by $orderby $order
@@ -3761,18 +3875,10 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         end
     end
 
-    # ("
-    #  select a.id, min(a.posted_at)
-    #  from ($(tosql(expr))) a
-    #  group by a.id
-    #  order by min(a.posted_at) $order
-    #  limit $(P(limit)) offset $(P(offset))
-    #  ", 
-    #  params)
     ("
-     select a.id, a.posted_at
+     select a.id, a.orderkey
      from ($(tosql(expr))) a
-     order by a.posted_at $order
+     order by a.orderkey $order
      ", 
      params)
 end
@@ -3791,8 +3897,8 @@ end
 using Test: @testset, @test
 
 function runtests()
-    @testset "AdvancedSearch" begin
-        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 minlongreplies:11 lang:fra features:feat1,feat2"
+    @testset "AdvancedSearch-Parsing-1" begin
+        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 -\"phraseword3 phraseword4\" #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 minlongreplies:11 lang:fra features:feat1,feat2"
         expr = parse_search_query(input)
         @assert expr isa O.And
         # dump(expr)
@@ -3800,6 +3906,7 @@ function runtests()
                                       (O.Word("word1"), O.Word("word2"), 
                                        O.Phrase("phraseword1 phraseword2"), 
                                        O.NotWord("notword1"), 
+                                       O.NotPhrase("phraseword3 phraseword4"), 
                                        O.HashTag("hashtag1"),
                                        O.Since(1296691200),
                                        O.Until(1643887320),
@@ -3816,7 +3923,7 @@ function runtests()
                                        O.Emoticon(":)"),
                                        O.List("list1"),
                                        O.Question(),
-                                       O.MaxScore(123),
+                                       O.EventStatsField(:score, :(<=), 123),
                                        O.MinInteractions(5),
                                        O.Scope("myfollows"),
                                        O.MinWords(100),
@@ -3826,6 +3933,12 @@ function runtests()
                                       ))
             @test result == expected
         end
+    end
+    @testset "AdvancedSearch-Parsing-2" begin
+        input = "word1 word2 (word3 OR word4)"
+        expr = parse_search_query(input)
+        # dump(expr)
+        @test expr == O.And([O.Word("word1"), O.Word("word2"), O.Or([O.Word("word1"), O.Word("word2")])])
     end
 end
 
