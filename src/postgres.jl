@@ -59,6 +59,10 @@ struct PostgresException <: Exception
     fields::Dict{Char, String}
 end
 
+struct PostgresTransactionAborted <: Exception 
+    res
+end
+
 struct Result
     columns::Vector
     rows::Vector
@@ -697,9 +701,13 @@ function transaction(body::Function, session::Session)
     res = nothing
     try
         res = body(session)
-    catch _
+    catch ex
         execute(session, "rollback")
-        rethrow()
+        if ex isa PostgresTransactionAborted
+            return ex.res
+        else
+            rethrow()
+        end
     end
     execute(session, "commit")
     res
