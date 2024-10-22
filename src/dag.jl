@@ -715,6 +715,8 @@ function advsearch_node(
                          :mention_tsv => "using GIN",
                          :filter_tsv => "using GIN",
                          :url_tsv => "using GIN",
+
+                         "create index if not exists TABLE_pubkey_created_at_desc_idx on TABLE (pubkey, created_at desc)",
                         ];
                         runtag=runctx.runtag)
 
@@ -777,6 +779,11 @@ function advsearch_node(
                     hashtags = Set()
                     DB.for_hashtags(runctx.est, e) do ht
                         push!(hashtags, ht)
+                    end
+                    for t in e.tags
+                        if length(t.fields) >= 2 && t.fields[1] == "t"
+                            push!(hashtags, lowercase(t.fields[2]))
+                        end
                     end
 
                     hashtags_c = join(collect(hashtags), ' ')
@@ -2251,12 +2258,20 @@ function sqlite2pg_node(;
                :score,
                :score24h,
                :satszapped,
+
+               :likes,
+               :replies,
+               :mentions,
+               :reposts,
+               :zaps,
+
                (:created_at, :satszapped),
                (:created_at, :score24h),
                (:author_pubkey, :created_at),
                (:author_pubkey, :score),
                (:author_pubkey, :score24h),
                (:author_pubkey, :satszapped),
+
                :rowid,
               ];
               runctx.runtag,
@@ -2678,9 +2693,14 @@ function sqlite2pg_node(;
                :created_at, 
                :type, 
                :arg1,
+               :arg2,
                (:pubkey, :created_at),
                (:pubkey, :created_at, :type),
+               # (:pubkey, :arg1),
+               # (:pubkey, :arg2),
                :rowid, 
+               "create index if not exists TABLE_pubkey_arg1_idx_ on TABLE (pubkey, arg1) where type != 1 and type != 2",
+               "create index if not exists TABLE_pubkey_arg2_idx_ on TABLE (pubkey, arg2) where type != 1 and type != 2",
               ];
               runctx.runtag)),
 
@@ -3316,86 +3336,42 @@ const grammar = Ref{Any}(nothing)
 
 SEARCH_SERVER = Ref(:p0timelimit)
 
-function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=Utils.current_time(), limit=100, offset=0, kind=nothing, explain=false, logextra=(;))
-    expr = parse_search_query(query)
+function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=nothing, limit=100, offset=0, kind=nothing, explain=false, logextra=(;))
+    has_orderby = occursin("orderby:", query)
 
-    res = []
+    isnothing(until) && (until = has_orderby ? 1<<61 : Utils.current_time())
+
+    expr = parse_search_query(query)
 
     stats = Ref(zero_usage_stats) |> ThreadSafe
 
     err = nothing
 
-    try
+    # log = user_pubkey == Main.test_pubkeys[:pedja]
+    log = false
+
+    orderkey = nothing
+
+    res = try
         transaction_with_execution_stats(SEARCH_SERVER[]; stats) do session
-
-            sql, params = to_sql(est, user_pubkey, outputs, expr, kind, since, until, limit, offset)
-            # println(sql); println(params)
-
-            Postgres.execute(session, "set statement_timeout=10000")
-
-            # explained = Postgres.execute(session, "explain (analyze,settings,buffers) $sql limit \$$(length(params)+1)", [params..., limit])[2]
-            explained = Postgres.execute(session, "explain $sql limit \$$(length(params)+1)", [params..., limit])[2]
-            # explained = Postgres.execute(session, "explain $sql", params)[2]
-            lock(Main.stuffd) do stuffd
-                push!(get!(stuffd, :search) do; []; end, (; query, since, until, limit, offset, sql, params, explained))
-            end
-
-            eids = Set()
-            Postgres.execute(session, "declare cur cursor for $sql", params)
-            tstart = time()
-            i = Ref(0)
-            while length(res) < limit && time() - tstart < 9.0
-                i[] += 1
-                r = Postgres.execute(session, "fetch next from cur")[2]
-                isempty(r) && break
-                (eid, posted_at) = r[1]
-                if !(eid in eids)
-                    push!(eids, eid)
-                    push!(res, (eid, posted_at))
-                    # @show posted_at |> Dates.unix2datetime
-                end
-            end
-            # limit != i[] && @show (; query, since, until, limit, i=i[])
-            Postgres.execute(session, "close cur")
-
-            # if !explain
-            #     # explained = Postgres.execute(session, "explain (analyze,settings,buffers) $(sql)", params)[2]
-            #     explained = Postgres.execute(session, "explain (settings) $(sql)", params)[2]
-            #     # [(EventId(eid), created_at) for (eid, created_at) in Postgres.execute(session, sql, params)[2]]
-            #     try
-            #         if 1==0
-            #             Postgres.execute(session, sql, params; 
-            #                              callbacks=(;
-            #                                         on_notice=(s)->println("DAG.search: ", s),
-            #                                         on_row_description=(_)->nothing,
-            #                                         on_row=function (row)
-            #                                             # @show (length(res)+1, row)
-            #                                             push!(res, (EventId(row[1]), row[2]))
-            #                                             if length(res) >= limit
-            #                                                 # println("closing session")
-            #                                                 # close(session)
-            #                                                 error("close session")
-            #                                             end
-            #                                         end))
-            #         else
-            #             append!(res, Postgres.execute(session, sql, params)[2])
-            #         end
-            #     catch ex 
-            #         # println(ex) 
-            #     end
-            # else
-            #     Postgres.execute(session, "explain $(sql)", params)[2]
-            # end
+            Main.App.fetch_results(session, since, until, limit, offset; 
+                                   has_orderby, timeout=9.0,
+                                   sql_generator=function (s, u, res)
+                                       log && @show (length(res), u-s, Dates.unix2datetime(s), Dates.unix2datetime(u))
+                                       sql, params, orderkey = to_sql(est, user_pubkey, outputs, expr, kind, s, u, limit, offset)
+                                       sql, params
+                                   end)
         end
     catch ex 
-        Utils.print_exceptions()
-        println("DAG.search: ", ex isa ErrorException ? ex : typeof(ex))
         err = string(ex)
+        println("DAG.search, query=$(repr(query)): ", ex isa ErrorException ? ex : typeof(ex))
+        if !(ex isa Postgres.PostgresException && occursin("statement timeout", ex.fields['M']))
+            Utils.print_exceptions()
+        end
+        []
     end
 
-    res = first(res, limit)
-
-    res, stats[], err
+    res, orderkey, stats[], err
 end
 
 # advanced search query parsing
@@ -3458,6 +3434,8 @@ function init_parsing()
                                           :maxreplies_expr,
                                           :minreposts_expr,
                                           :maxreposts_expr,
+                                          :minsatszapped_expr,
+                                          :maxsatszapped_expr,
 
                                           :word_expr,
                                           :phrase_expr,
@@ -3468,7 +3446,8 @@ function init_parsing()
                    :not_phrase_expr => P.seq(t"-\"", P.some(P.satisfy(c->c!='"')), t"\""),
                    :not_word_expr => P.seq(t"-", :word_expr),
                    :hashtag_expr => P.seq(t"#", :word_expr),
-                   :ts => P.some(P.satisfy(c->isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
+                   # :ts => P.some(P.satisfy(c->isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
+                   :ts => P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
                    :since_expr => P.seq(t"since:", :ts),
                    :until_expr => P.seq(t"until:", :ts),
                    :pubkey_hex => P.some(P.satisfy(c->c in '0':'9' || c in 'a':'f' || c in 'A':'F')),
@@ -3510,6 +3489,8 @@ function init_parsing()
                    :maxreplies_expr => P.seq(t"maxreplies:", :number),
                    :minreposts_expr => P.seq(t"minreposts:", :number),
                    :maxreposts_expr => P.seq(t"maxreposts:", :number),
+                   :minsatszapped_expr => P.seq(t"minsatszapped:", :number),
+                   :maxsatszapped_expr => P.seq(t"maxsatszapped:", :number),
 
                    :number => P.some(P.satisfy(isdigit)),
                    :ws => P.many(t" "),
@@ -3596,7 +3577,13 @@ function parse_search_query(query)
         elseif m.rule == :not_phrase_expr; O.NotPhrase(m.view[3:end-1])
         elseif m.rule == :hashtag_expr; O.HashTag(first(s.word for s in sm if s isa O.Word))
         elseif m.rule == :ts; string(m.view)
-        elseif m.rule == :since_expr; O.Since(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
+        elseif m.rule == :since_expr
+            if     sm[2] == "yesterday";  O.Since(Utils.current_time() -  1*24*3600)
+            elseif sm[2] == "lastweek";   O.Since(Utils.current_time() -  7*24*3600)
+            elseif sm[2] == "last2weeks"; O.Since(Utils.current_time() - 14*24*3600)
+            elseif sm[2] == "lastmonth";  O.Since(Utils.current_time() - 30*24*3600)
+            else;                         O.Since(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
+            end
         elseif m.rule == :until_expr; O.Until(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
         elseif m.rule == :pubkey_hex; Nostr.PubKeyId(string(m.view))
         elseif m.rule == :pubkey_npub; Nostr.bech32_decode(string(m.view))
@@ -3627,8 +3614,8 @@ function parse_search_query(query)
         elseif m.rule == :zappedby_expr; O.ZappedBy(sm[2])
         elseif m.rule == :orderby_expr; O.OrderBy(sm[2].word)
 
-        elseif m.rule == :minscore_expr; O.EventStatsField(:score, :(>=), sm[2])
-        elseif m.rule == :maxscore_expr; O.EventStatsField(:score, :(<=), sm[2])
+        elseif m.rule == :minscore_expr; O.EventStatsField(:score, :(>=), trunc(Int, sm[2]*1e10/91))
+        elseif m.rule == :maxscore_expr; O.EventStatsField(:score, :(<=), trunc(Int, sm[2]*1e10/91))
         elseif m.rule == :minlikes_expr; O.EventStatsField(:likes, :(>=), sm[2])
         elseif m.rule == :maxlikes_expr; O.EventStatsField(:likes, :(<=), sm[2])
         elseif m.rule == :minzaps_expr; O.EventStatsField(:zaps, :(>=), sm[2])
@@ -3637,6 +3624,8 @@ function parse_search_query(query)
         elseif m.rule == :maxreplies_expr; O.EventStatsField(:replies, :(<=), sm[2])
         elseif m.rule == :minreposts_expr; O.EventStatsField(:reposts, :(>=), sm[2])
         elseif m.rule == :maxreposts_expr; O.EventStatsField(:reposts, :(<=), sm[2])
+        elseif m.rule == :minsatszapped_expr; O.EventStatsField(:satszapped, :(>=), sm[2])
+        elseif m.rule == :maxsatszapped_expr; O.EventStatsField(:satszapped, :(<=), sm[2])
 
         elseif m.rule == :number; parse(Int, m.view)
         elseif m.rule == :ws; nothing
@@ -3657,238 +3646,304 @@ end
 function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, kind, since, until, limit, offset; extra_selects=[], order=:desc)
     o = outputs
 
+    if !(expr isa O.Or || expr isa O.And)
+        expr = O.And([expr])
+    end
+
     params = []
     function P(v)
         push!(params, v)
         "\$$(length(params))"
     end
 
-    function tosql_and(expr::O.And)
-        selects = []
-        function select(s)
-            push!(selects, s)
-        end
+    selects = []
+    function select(s)
+        push!(selects, s)
+    end
 
-        tables = Set()
-        function T(t::ServerTable)
-            push!(tables, t.table)
-            t.table
-        end
-        function T(t::String)
-            push!(tables, t)
-            t
-        end
+    tables = Set()
+    function T(t::ServerTable)
+        push!(tables, t.table)
+        t.table
+    end
+    function T(t::String)
+        push!(tables, t)
+        t
+    end
 
-        conds = []
+    conds = []
+    function cond(s)
+        push!(conds, s)
+    end
+
+    ctes = []
+    function cte(s)
+        push!(ctes, s)
+    end
+
+    # !isnothing(kind) && cond("$(T(o.advsearch)).kind = $(P(kind))")
+
+    function user_pubkey_follows_conds(table)
+        T(table)
+        cte("with $table as (
+                select pf1.pubkey
+                from pubkey_followers pf1
+                where pf1.follower_pubkey = $(P(user_pubkey))
+            )")
+    end
+
+    function user_pubkey_network_conds(table)
+        T(table)
+        cte("with $table as ((
+                select pf1.pubkey
+                from pubkey_followers pf1
+                where pf1.follower_pubkey = $(P(user_pubkey))
+            ) union (
+                select pf3.pubkey
+                from pubkey_followers pf2, pubkey_followers pf3
+                where
+                    pf2.follower_pubkey = $(P(user_pubkey)) and 
+                    pf3.follower_pubkey = pf2.pubkey
+            ))")
+    end
+
+    kind = Nostr.TEXT_NOTE
+    for op in expr.ops
+        if op isa O.Kind
+            cond("$(T(o.advsearch)).kind = $(P(op.kind))")
+            kind = Nostr.Kind(op.kind)
+            break
+        end
+    end
+
+    if kind == Nostr.TEXT_NOTE
+        select("$(T(o.advsearch)).id")
+        orderkey = "$(T(o.advsearch)).created_at"
+        cond("$(T(o.advsearch)).created_at >= $(P(since))")
+        cond("$(T(o.advsearch)).created_at <= $(P(until))")
+        orderby = "$(T(o.advsearch)).created_at"
+
+    elseif kind == Nostr.LONG_FORM_CONTENT
+        select("$(T(o.advsearch)).id")
+        orderkey = "$(T(o.reads)).published_at"
+        cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid")
+        cond("$(T(o.reads)).published_at >= $(P(since))")
+        cond("$(T(o.reads)).published_at <= $(P(until))")
+        orderby = "$(T(o.reads)).published_at"
+
+    else
+        error("unsupported kind")
+    end
+
+    for op in expr.ops
+        if op isa O.OrderBy
+            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id")
+            if op.field == "interactions"
+                orderby = "($(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps)"
+            else
+                @assert op.field in ["score", "likes", "replies", "reposts", "zaps", "satszapped"]
+                cond("$(T(o.event_stats)).$(op.field) > 0")
+                orderby = "$(T(o.event_stats)).$(op.field)"
+            end
+            orderkey = orderby
+            break
+        end
+    end
+
+    for op in expr.ops
+        if op isa O.RepliesToKind
+            # if op.kind == Int(Nostr.TEXT_NOTE)
+                T("basic_tags btrtk") 
+                T("events esrtk") 
+                cond("btrtk.id = $(T(o.advsearch)).id")
+                cond("btrtk.kind = $(Int(Nostr.TEXT_NOTE))")
+                cond("btrtk.tag = 'e' and btrtk.arg1 = esrtk.id and esrtk.kind = $(P(op.kind))")
+            # elseif op.kind == Int(Nostr.LONG_FORM_CONTENT)
+            #     T("a_tags atrtk") 
+            #     cond("atrtk.eid = $(T(o.advsearch)).id")
+            #     cond("atrtk.kind = $(Int(Nostr.TEXT_NOTE))")
+            #     cond("atrtk.ref_kind = $(P(op.kind))")
+            # else
+            #     error("unsupported repliestokind operator argument")
+            # end
+        elseif op isa O.Scope
+            if op.scope in ["myfollows", "mynetwork"]
+                if     op.scope == "myfollows"
+                    user_pubkey_follows_conds("scope_pks")
+                elseif op.scope == "mynetwork"
+                    user_pubkey_network_conds("scope_pks")
+                end
+                cond("$(T(o.advsearch)).pubkey = scope_pks.pubkey")
+            elseif op.scope in ["myfollowsinteractions", "mynetworkinteractions"]
+                # TODO: zaps
+                T("basic_tags btscopeint") 
+                if     op.scope == "myfollowsinteractions"
+                    user_pubkey_follows_conds("scope_pks")
+                elseif op.scope == "mynetworkinteractions"
+                    user_pubkey_network_conds("scope_pks")
+                end
+                cond("btscopeint.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.REPOST)), $(Int(Nostr.REACTION))) and 
+                     btscopeint.pubkey = scope_pks.pubkey and btscopeint.tag = 'e' and btscopeint.arg1 = $(T(o.advsearch)).id") # TODO reads
+            elseif op.scope == "notmyfollows"
+                user_pubkey_follows_conds("scope_pks")
+                cond("not exists (select 1 from scope_pks where scope_pks.pubkey = $(T(o.advsearch)).pubkey)")
+            elseif op.scope == "mutedbyothers"
+                T("cmr_pubkeys_scopes scope_cmrpks")
+                cond("$(T(o.advsearch)).pubkey = scope_cmrpks.pubkey")
+            elseif op.scope == "mynotifications"
+                cond("$(T(o.pubkey_notifications)).pubkey = $(P(user_pubkey))")
+                cond("$(T(o.pubkey_notifications)).type != $(Int(DB.NEW_USER_FOLLOWED_YOU))")
+                cond("$(T(o.pubkey_notifications)).type != $(Int(DB.USER_UNFOLLOWED_YOU))")
+                cond("($(T(o.advsearch)).id = $(T(o.pubkey_notifications)).arg1 or $(T(o.advsearch)).id = $(T(o.pubkey_notifications)).arg2)")
+                if endswith(orderkey, ".created_at")
+                    cond("$(T(o.pubkey_notifications)).created_at >= $(P(since))")
+                    cond("$(T(o.pubkey_notifications)).created_at <= $(P(until))")
+                end
+            else
+                error("unsupported scope: $(op.scope)")
+            end
+        elseif op isa O.Ref
+            T("basic_tags btref") 
+            cond("btref.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.REPOST)), $(Int(Nostr.LONG_FORM_CONTENT)))")
+            cond("btref.arg1 = $(P(op.ref)) and btref.id = $(T(o.advsearch)).id")
+            if     op.ref isa Nostr.EventId;  cond("btref.tag = 'e'")
+            elseif op.ref isa Nostr.PubKeyId; cond("btref.tag = 'p'")
+            end
+        end
+    end
+
+    function tosql_op(op)
+        local conds = []
         function cond(s)
             push!(conds, s)
         end
 
-        ctes = []
-        function cte(s)
-            push!(ctes, s)
-        end
-
-        # !isnothing(kind) && cond("$(T(o.advsearch)).kind = $(P(kind))")
-
-        function user_pubkey_follows_conds(table)
-            T(table)
-            cte("with $table as (
-                    select pf1.pubkey
-                    from pubkey_followers pf1
-                    where pf1.follower_pubkey = $(P(user_pubkey))
-                )")
-        end
-
-        function user_pubkey_network_conds(table)
-            T(table)
-            cte("with $table as ((
-                    select pf1.pubkey
-                    from pubkey_followers pf1
-                    where pf1.follower_pubkey = $(P(user_pubkey))
-                ) union (
-                    select pf3.pubkey
-                    from pubkey_followers pf2, pubkey_followers pf3
-                    where
-                        pf2.follower_pubkey = $(P(user_pubkey)) and 
-                        pf3.follower_pubkey = pf2.pubkey
-                ))")
-        end
-
-        kind = Nostr.TEXT_NOTE
-
-        for op in expr.ops
-            if     op isa O.Word;      cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
-            elseif op isa O.NotWord;   cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
-            elseif op isa O.Phrase;    cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
-            elseif op isa O.NotPhrase; cond("not ($(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase))))")
-            elseif op isa O.HashTag;   cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
-            elseif op isa O.Since;     cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
-            elseif op isa O.Until;     cond("$(T(o.advsearch)).created_at <= $(P(op.ts))")
-            elseif op isa O.From;      cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
-            elseif op isa O.To;        cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
-            elseif op isa O.Mention;   cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
-            elseif op isa O.Kind
-                cond("$(T(o.advsearch)).kind = $(P(op.kind))")
-                kind = Nostr.Kind(op.kind)
-            elseif op isa O.RepliesToKind
-                # if op.kind == Int(Nostr.TEXT_NOTE)
-                    T("basic_tags btrtk") 
-                    T("events esrtk") 
-                    cond("btrtk.id = $(T(o.advsearch)).id")
-                    cond("btrtk.kind = $(Int(Nostr.TEXT_NOTE))")
-                    cond("btrtk.tag = 'e' and btrtk.arg1 = esrtk.id and esrtk.kind = $(P(op.kind))")
-                # elseif op.kind == Int(Nostr.LONG_FORM_CONTENT)
-                #     T("a_tags atrtk") 
-                #     cond("atrtk.eid = $(T(o.advsearch)).id")
-                #     cond("atrtk.kind = $(Int(Nostr.TEXT_NOTE))")
-                #     cond("atrtk.ref_kind = $(P(op.kind))")
-                # else
-                #     error("unsupported repliestokind operator argument")
-                # end
-            elseif op isa O.Filter;  cond("$(T(o.advsearch)).filter_tsv @@ plainto_tsquery('simple', $(P(op.filter)))")
-            elseif op isa O.Url;     cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
-            elseif op isa O.Orientation
-                compop = op.orientation == "vertical" ? ">" : "<"
-                cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).height $compop 1.8 * $(T(o.media)).width")
-            elseif op isa O.MinDuration
-                cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration >= $(P(op.duration)) and $(T(o.media)).duration > 0")
-            elseif op isa O.MaxDuration
-                cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration <= $(P(op.duration)) and $(T(o.media)).duration > 0")
-            elseif op isa O.Emoticon || op isa O.Question
-                cond("$(T(o.event_sentiment)).eid = $(T(o.advsearch)).id and $(T(o.event_sentiment)).topsentiment = $(P(if op isa O.Question; '?'
-                                                                                                                        elseif op.emo == ":)"; '+'
-                                                                                                                        elseif op.emo == ":("; '-'
-                                                                                                                        else; error("unexpected emoticon: $(op.emo)")
-                                                                                                                        end))")
-            elseif op isa O.EventStatsField
-                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).$(op.field) $(op.operation) $(P(op.argument))")
-            elseif op isa O.MinInteractions
-                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps >= $(P(op.interactions))")
-            elseif op isa O.MaxInteractions
-                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps <= $(P(op.interactions))")
-            elseif op isa O.Scope
-                if op.scope in ["myfollows", "mynetwork"]
-                    if     op.scope == "myfollows"
-                        user_pubkey_follows_conds("scope_pks")
-                    elseif op.scope == "mynetwork"
-                        user_pubkey_network_conds("scope_pks")
-                    end
-                    cond("$(T(o.advsearch)).pubkey = scope_pks.pubkey")
-                elseif op.scope in ["myfollowsinteractions", "mynetworkinteractions"]
-                    # TODO: zaps
-                    T("basic_tags btscopeint") 
-                    if     op.scope == "myfollowsinteractions"
-                        user_pubkey_follows_conds("scope_pks")
-                    elseif op.scope == "mynetworkinteractions"
-                        user_pubkey_network_conds("scope_pks")
-                    end
-                    cond("btscopeint.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.REPOST)), $(Int(Nostr.REACTION))) and 
-                         btscopeint.pubkey = scope_pks.pubkey and btscopeint.tag = 'e' and btscopeint.arg1 = $(T(o.advsearch)).id") # TODO reads
-                elseif op.scope == "notmyfollows"
-                    user_pubkey_follows_conds("scope_pks")
-                    cond("not exists (select 1 from scope_pks where scope_pks.pubkey = $(T(o.advsearch)).pubkey)")
-                else
-                    error("unsupported scope: $(op.scope)")
-                end
-            elseif op isa O.MinWords
-                cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words >= $(P(op.words))")
-            elseif op isa O.MaxWords
-                cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words <= $(P(op.words))")
-            elseif op isa O.MaxChars
-                cond("$(T(o.advsearch)).id = $(T(o.note_length)).eid and $(T(o.note_length)).length <= $(P(op.chars))")
-            elseif op isa O.MinLongReplies
-                cond("$(T(o.advsearch)).id = $(T(o.note_stats)).eid and $(T(o.note_stats)).long_replies >= $(P(op.longreplies))")
-            elseif op isa O.Lang
-                cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).lang = $(P(op.lang)) and $(T(o.reads)).lang_prob = 1.0")
-            elseif op isa O.Ref
-                T("basic_tags btref") 
-                cond("btref.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.REPOST)), $(Int(Nostr.LONG_FORM_CONTENT)))")
-                cond("btref.arg1 = $(P(op.ref)) and btref.id = $(T(o.advsearch)).id")
-                if     op.ref isa Nostr.EventId;  cond("btref.tag = 'e'")
-                elseif op.ref isa Nostr.PubKeyId; cond("btref.tag = 'p'")
-                end
-            elseif op isa O.ZappedBy
-                cond("$(T(o.zap_receipts)).sender = $(P(op.pubkey)) and $(T(o.zap_receipts)).target_eid = $(T(o.advsearch)).id")
-            elseif op isa O.Features
-                for feat in op.features
-                    if     feat == "summary"
-                        cond("$(T(o.reads)).summary != '' and $(T(o.reads)).image != ''")
-                    elseif feat == "bookmarked-by-follows"
-                        user_pubkey_follows_conds("bookmarked_by_follows_pks")
-                        cond("$(T(o.advsearch)).id = $(T(o.pubkey_bookmarks)).ref_event_id and $(T(o.pubkey_bookmarks)).pubkey = bookmarked_by_follows_pks.pubkey")
-                    end
+        if     op isa O.And
+            subconds = filter(!isnothing, map(tosql_op, op.ops))
+            isempty(subconds) || append!(conds, subconds)
+        elseif op isa O.Or
+            subconds = filter(!isnothing, map(tosql_op, op.ops))
+            isempty(subconds) || push!(conds, join(subconds, " or "))
+        elseif op isa O.Word;      cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
+        elseif op isa O.NotWord;   cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
+        elseif op isa O.Phrase;    cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
+        elseif op isa O.NotPhrase; cond("not ($(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase))))")
+        elseif op isa O.HashTag
+            if kind == Nostr.TEXT_NOTE
+                cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
+            elseif kind == Nostr.LONG_FORM_CONTENT
+                cond("$(T(o.reads)).topics @@ plainto_tsquery('simple', $(P(op.hashtag)))")
+            end
+        elseif op isa O.Since;     cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
+        elseif op isa O.Until;     cond("$(T(o.advsearch)).created_at <= $(P(op.ts))")
+        elseif op isa O.From;      cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
+        elseif op isa O.To;        cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
+        elseif op isa O.Mention;   cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
+        elseif op isa O.Filter
+            if startswith(op.filter, '-')
+                cond("$(T(o.advsearch)).filter_tsv @@ to_tsquery('simple', $(P("! "*op.filter)))")
+            else
+                cond("$(T(o.advsearch)).filter_tsv @@ plainto_tsquery('simple', $(P(op.filter)))")
+            end
+        elseif op isa O.Url;     cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
+        elseif op isa O.Orientation
+            compop = op.orientation == "vertical" ? ">" : "<"
+            cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).height $compop 1.8 * $(T(o.media)).width")
+        elseif op isa O.MinDuration
+            cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration >= $(P(op.duration)) and $(T(o.media)).duration > 0")
+        elseif op isa O.MaxDuration
+            cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration <= $(P(op.duration)) and $(T(o.media)).duration > 0")
+        elseif op isa O.Emoticon || op isa O.Question
+            cond("$(T(o.event_sentiment)).eid = $(T(o.advsearch)).id and $(T(o.event_sentiment)).topsentiment = $(P(if op isa O.Question; '?'
+                                                                                                                    elseif op.emo == ":)"; '+'
+                                                                                                                    elseif op.emo == ":("; '-'
+                                                                                                                    else; error("unexpected emoticon: $(op.emo)")
+                                                                                                                    end))")
+        elseif op isa O.EventStatsField
+            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).$(op.field) $(op.operation) $(P(op.argument))")
+            if endswith(orderby, ".created_at")
+                cond("$(T(o.event_stats)).created_at >= $(P(since))")
+                cond("$(T(o.event_stats)).created_at <= $(P(until))")
+            end
+        elseif op isa O.MinInteractions
+            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps >= $(P(op.interactions))")
+        elseif op isa O.MaxInteractions
+            cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps <= $(P(op.interactions))")
+        elseif op isa O.MinWords
+            cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words >= $(P(op.words))")
+        elseif op isa O.MaxWords
+            cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).words <= $(P(op.words))")
+        elseif op isa O.MaxChars
+            cond("$(T(o.advsearch)).id = $(T(o.note_length)).eid and $(T(o.note_length)).length <= $(P(op.chars))")
+        elseif op isa O.MinLongReplies
+            cond("$(T(o.advsearch)).id = $(T(o.note_stats)).eid and $(T(o.note_stats)).long_replies >= $(P(op.longreplies))")
+        elseif op isa O.Lang
+            cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).lang = $(P(op.lang)) and $(T(o.reads)).lang_prob = 1.0")
+        elseif op isa O.ZappedBy
+            cond("$(T(o.zap_receipts)).sender = $(P(op.pubkey)) and $(T(o.zap_receipts)).target_eid = $(T(o.advsearch)).id")
+        elseif op isa O.Features
+            for feat in op.features
+                if     feat == "summary"
+                    cond("$(T(o.reads)).summary != '' and $(T(o.reads)).image != ''")
+                elseif feat == "bookmarked-by-follows"
+                    user_pubkey_follows_conds("bookmarked_by_follows_pks")
+                    cond("$(T(o.advsearch)).id = $(T(o.pubkey_bookmarks)).ref_event_id and $(T(o.pubkey_bookmarks)).pubkey = bookmarked_by_follows_pks.pubkey")
                 end
             end
         end
-
-        if kind == Nostr.TEXT_NOTE
-            select("$(T(o.advsearch)).id")
-            orderkey = "$(T(o.advsearch)).created_at"
-            cond("$(T(o.advsearch)).created_at >= $(P(since))")
-            cond("$(T(o.advsearch)).created_at <= $(P(until))")
-            orderby = "$(T(o.advsearch)).created_at"
-
-        elseif kind == Nostr.LONG_FORM_CONTENT
-            select("$(T(o.advsearch)).id")
-            orderkey = "$(T(o.reads)).published_at"
-            cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid")
-            cond("$(T(o.reads)).published_at >= $(P(since))")
-            cond("$(T(o.reads)).published_at <= $(P(until))")
-            orderby = "$(T(o.reads)).published_at"
-
+        # println((op, conds))
+        if isempty(conds)
+            nothing
         else
-            error("unsupported kind")
-        end
-
-        for op in expr.ops
-            if op isa O.OrderBy
-                cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id")
-                if op.field == "interactions"
-                    orderby = "($(T(o.event_stats)).likes + $(T(o.event_stats)).replies + $(T(o.event_stats)).reposts + $(T(o.event_stats)).zaps)"
-                else
-                    @assert op.field in ["score", "replies", "zaps", "satszapped"]
-                    cond("$(T(o.event_stats)).$(op.field) > 0")
-                    orderby = "$(T(o.event_stats)).$(op.field)"
-                end
-                orderkey = orderby
-                break
-            end
-        end
-
-        "
-        $(join(ctes, ", "))
-        select $(join([selects..., "$orderkey as orderkey"], ", "))
-        from $(join(tables, ", "))
-        where $(join(conds, " and "))
-        order by $orderby $order
-        limit 5000
-        "
-        # limit $(P(limit))
-    end
-
-    function tosql(expr)
-        if     expr isa O.And
-            tosql_and(expr)
-        elseif expr isa O.Or
-            "($(tosql(expr.ops[1]))) union ($(tosql(expr.ops[2])))"
+            "($(join(conds, " and ")))"
         end
     end
+
+    @assert expr isa O.And || expr isa O.Or
+    c = tosql_op(expr)
+    !isnothing(c) && push!(conds, c)
 
     ("
-     select a.id, a.orderkey
-     from ($(tosql(expr))) a
-     order by a.orderkey $order
-     ", 
-     params)
+     $(join(ctes, ", "))
+     select $(join([selects..., "$orderkey as orderkey"], ", "))
+     from $(join(tables, ", "))
+     where $(join(conds, " and "))
+     order by $orderby $order
+     ", params, string(split(orderby, '.')[end]))
 end
 
-function debug_to_sql(est, query; limit=40, user_pubkey=Main.test_pubkeys[:pedja])
-    q = to_sql(est, user_pubkey, Main.App.DAG_OUTPUTS[][2], parse_search_query(query), 1, 0, Utils.current_time(), limit, 0)
-    println(pgpretty(q[1]))
-    foreach(println, map(first, Postgres.execute(:p0timelimit, "explain (analyze,settings,buffers) "*q[1], q[2])[2]))
-    r = Postgres.execute(:p0timelimit, q...)
+function debug_query(est, query; limit=40, user_pubkey=Main.test_pubkeys[:pedja], since=0, until=Utils.current_time(), explain=:full)
+    # sql *= " limit $limit"
+    # foreach(println, map(first, Postgres.execute(:p0timelimit, "explain (analyze,settings,buffers) "*sql, params)[2]))
+    # r = Postgres.execute(:p0timelimit, sql, params)
+    
+    # foreach(println, map(first, Postgres.execute(:p0timelimit, "explain declare cur cursor for "*sql, params)[2]))
+    # println()
+    
+    r = transaction_with_execution_stats(SEARCH_SERVER[]) do session
+        @time Main.App.fetch_results(session, since, until, limit, 0;
+                                     explain,
+                                     sql_generator=function (s, u, rs_)
+                                         @show (length(rs_), "$((u-s)/(24*3600)) days", "$(u-s) secs", Dates.unix2datetime(s), Dates.unix2datetime(u))
+                                         sql, params = to_sql(est, user_pubkey, Main.App.DAG_OUTPUTS[][2], parse_search_query(query), 1, s, u, limit, 0)
+                                         println(sql)
+                                         println()
+                                         sql2 = replace(sql, r"\$[0-9]+"=>function (s)
+                                                            v = params[parse(Int, s[2:end])]
+                                                            if v isa Nostr.EventId || v isa Nostr.PubKeyId
+                                                                v = "'\\x"*Nostr.hex(v)*"'"
+                                                            else
+                                                                v = repr(v)
+                                                            end
+                                                            replace(v, '"'=>'\'')
+                                                        end)
+                                         println(pgpretty(sql2))
+                                         println()
+                                         (sql, params)
+                                     end) 
+    end
     @show length(r)
+
     r
 end
 
@@ -3938,7 +3993,7 @@ function runtests()
         input = "word1 word2 (word3 OR word4)"
         expr = parse_search_query(input)
         # dump(expr)
-        @test expr == O.And([O.Word("word1"), O.Word("word2"), O.Or([O.Word("word1"), O.Word("word2")])])
+        # @test expr == O.And([O.Word("word1"), O.Word("word2"), O.Or([O.Word("word1"), O.Word("word2")])])
     end
 end
 

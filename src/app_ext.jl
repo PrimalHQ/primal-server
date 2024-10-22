@@ -885,16 +885,16 @@ function advanced_search(
 
     if !isnothing(DAG_OUTPUTS[])
         mod, outputs = DAG_OUTPUTS[]
-        tdur = @elapsed res, stats, err = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
+        tdur = @elapsed res, orderby, stats, err = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
 
         d = (; host=gethostname(), query, user_pubkey, stats, reslen=length(res), err, tdur) 
         Postgres.execute(:membership, "insert into advsearch_log values (now(), \$1, \$2::jsonb)", [user_pubkey, JSON.json(d)])
 
-        posts = Tuple{Nostr.EventId, Int}[(Nostr.EventId(eid), orderkey) for (eid, orderkey) in res]
+        posts = Tuple{Nostr.EventId, Int}[(eid, orderkey) for (eid, orderkey) in res]
 
         # eids = Nostr.EventId[eid for (eid, created_at) in posts]
         # vcat(response_messages_for_posts(est, eids; user_pubkey), range(posts, :created_at))
-        enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false)
+        enrich_feed_events_pg(est; posts, user_pubkey, orderby, apply_humaness_check=false)
     else
         [] 
     end

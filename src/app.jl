@@ -2434,7 +2434,10 @@ function mega_feed_directive(
         return dvm_feed(est; dvm_pubkey=s["dvm_pubkey"], dvm_id=s["dvm_id"], kwargs...)
 
     elseif id == "nostr-reads-feed"
-        return advanced_search(est; query="kind:30023 scope:myfollows minwords:100 features:summary", kwargs...)
+        return advanced_search(est; query="kind:30023 scope:myfollowsinteractions minwords:100 features:summary", kwargs...)
+
+    elseif id == "advsearch"
+        return advanced_search(est; skwa..., kwargs...)
 
     elseif id == "reads-feed" || get(s, "kind", "") == "reads"
         minwords = get(s, "minwords", 100)
@@ -2483,9 +2486,6 @@ function mega_feed_directive(
             return search(est; skwa..., kwargs...)
         end
 
-    elseif id == "advsearch"
-        return advanced_search(est; skwa..., kwargs...)
-
     elseif id == "explore-media"
         return advanced_search(est; query="kind:1 filter:image scope:mynetworkinteractions", kwargs...)
         # return advanced_search(est; query="kind:1 filter:image scope:myfollows", kwargs...)
@@ -2513,13 +2513,14 @@ function enrich_feed_events_pg(
         est::DB.CacheStorage; 
         posts::Vector{Tuple{Nostr.EventId, Int}}, 
         user_pubkey=nothing, 
+        orderby="created_at",
         apply_humaness_check=false,
     )
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    q = "select distinct e from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3) f(e) where e is not null"
+    q = "select distinct e from enrich_feed_events(array (select row(decode(a->>0, 'hex'), a->>1)::post from jsonb_array_elements(\$1) x(a)), \$2, \$3, \$4) f(e) where e is not null"
     res = map(first, Postgres.execute(DAG_OUTPUTS_DB[], q,
-                                      [JSON.json([(Nostr.hex(p[1]), p[2]) for p in posts]), user_pubkey, apply_humaness_check])[2])
+                                      [JSON.json([(Nostr.hex(p[1]), p[2]) for p in posts]), user_pubkey, apply_humaness_check, orderby])[2])
 
     elements = []
     for e in Base.Iterators.reverse(res)
@@ -3097,6 +3098,89 @@ function important_notes_i_might_have_missed_feed(
 
     # vcat(response_messages_for_posts(est, collect(map(first, posts)); user_pubkey), range(posts, :created_at))
     enrich_feed_events_pg(est; posts, user_pubkey)
+end
+
+function fetch_results(
+        session,
+        since::Int, until::Int, limit::Int, offset::Int; 
+        has_orderby=false, dt=3600, timeout=9.0, explain=nothing,
+        sql_generator::Function, 
+        accept_result::Function=_->true,
+    )
+    dt_start = dt
+
+    res = []
+    ids = Set()
+
+    tstart = time()
+    tend = tstart + timeout
+
+    t = until
+
+    j = Ref(0)
+    while length(res) < limit + offset && since <= t && time() < tend
+        j[] += 1
+
+        if has_orderby
+            s, u = since, t
+        else
+            s, u = t-dt, t
+        end
+
+        sql, params = sql_generator(s, u, res)
+
+        if !isnothing(explain)
+            for s in map(first, Postgres.execute(session, "explain (analyze,buffers) declare cur no scroll cursor for $sql", params)[2])
+                if explain == :full
+                    println(s)
+                elseif explain == :buffers && occursin("Buffers:", s)
+                    println(s)
+                end
+            end
+            println()
+        end
+
+        timeout = trunc(Int, 1000.0*(tend - time()))
+        timeout < 0 && break
+        Postgres.execute(session, "set statement_timeout=$timeout")
+
+        i = Ref(0)
+        try
+            Postgres.execute(session, "declare cur no scroll cursor for $sql", params)
+            while length(res) < limit + offset && time() < tend
+                r = Postgres.execute(session, "fetch next from cur")[2]
+                isempty(r) && break
+                (id, posted_at, rest...) = r[1]
+                if !(id in ids)
+                    i[] += 1
+                    push!(ids, id)
+                    if accept_result(r[1])
+                        push!(res, r[1])
+                    end
+                    # @show (i[], length(res), posted_at |> Dates.unix2datetime)
+                end
+            end
+        catch ex
+            println("fetch_results: ", ex isa ErrorException ? ex : typeof(ex))
+            if ex isa Postgres.PostgresException && occursin("statement timeout", ex.fields['M'])
+                break
+            else
+                rethrow()
+            end
+        end
+
+        Postgres.execute(session, "close cur")
+
+        if i[] > 0
+            t = res[end][2]
+            dt = dt_start
+        else
+            t -= dt
+            dt *= 4
+        end
+    end
+
+    res[1+offset:end]
 end
 
 end
