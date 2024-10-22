@@ -1021,25 +1021,30 @@ function user_followers(est::DB.CacheStorage; pubkey, limit=200)
     limit <= 1000 || error("limit too big")
     pubkey = cast(pubkey, Nostr.PubKeyId)
     pks = Set{Nostr.PubKeyId}()
-    for pk in follows(est, pubkey)
-        if !isempty(DB.exe(est.pubkey_followers, 
-                           DB.@sql("select 1 from pubkey_followers 
-                                   where pubkey = ?1 and follower_pubkey = ?2
-                                   limit 1"), pubkey, pk))
-            push!(pks, pk)
-        end
-    end
+
     for r in DB.exe(est.pubkey_followers, 
-                    DB.@sql("select follower_pubkey from pubkey_followers 
-                            where pubkey = ?1 
-                            order by follower_pubkey
-                            limit ?2"), pubkey, limit)
+                    DB.@sql("select pf1.follower_pubkey 
+                            from pubkey_followers pf1, pubkey_followers pf2
+                            where 
+                              pf1.pubkey = ?1 and pf2.pubkey = pf1.follower_pubkey and pf2.follower_pubkey = ?1
+                            "), pubkey)
         length(pks) < limit || break
         pk = Nostr.PubKeyId(r[1])
         pk in pks || push!(pks, pk)
     end
 
-    user_infos(est; pubkeys=collect(pks))
+    length(pks) < limit && for r in DB.exe(est.pubkey_followers, 
+                    DB.@sql("select distinct pf.follower_pubkey, pfc.value
+                            from pubkey_followers pf, pubkey_followers_cnt pfc 
+                            where pf.pubkey = ?1 and pf.follower_pubkey = pfc.key
+                            order by pfc.value desc
+                            limit ?2"), pubkey, limit-length(pks))
+        length(pks) < limit || break
+        pk = Nostr.PubKeyId(r[1])
+        pk in pks || push!(pks, pk)
+    end
+
+    user_infos(est; pubkeys=collect(pks), usepgfuncs=true)
 end
 
 function mutual_follows(est::DB.CacheStorage; pubkey, user_pubkey)
