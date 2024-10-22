@@ -837,6 +837,25 @@ CREATE TABLE IF NOT EXISTS trusted_pubkey_followers_cnt (
     PRIMARY KEY (t, pubkey)
 );
 
+CREATE OR REPLACE FUNCTION try_cast_jsonb(a_json text, a_default jsonb) RETURNS jsonb IMMUTABLE PARALLEL SAFE 
+LANGUAGE 'plpgsql' AS $BODY$
+BEGIN
+  BEGIN
+    RETURN a_json::jsonb;
+  EXCEPTION
+    WHEN OTHERS THEN
+       RETURN a_default;
+  END;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION user_has_bio(a_pubkey bytea) RETURNS bool STABLE LANGUAGE 'sql' AS $BODY$
+SELECT coalesce(length(try_cast_jsonb(es.content::text, '{}')->>'about'), 0) > 0
+FROM meta_data md, events es 
+WHERE md.key = a_pubkey AND md.value = es.id
+LIMIT 1
+$BODY$;
+
 CREATE OR REPLACE PROCEDURE record_trusted_pubkey_followers_cnt() 
 LANGUAGE 'plpgsql' AS $BODY$
 DECLARE
@@ -848,7 +867,7 @@ BEGIN
         FROM 
             pubkey_followers pf, pubkey_trustrank tr1, pubkey_trustrank tr2
         WHERE 
-            pf.pubkey = tr1.pubkey AND tr1.rank > 0 AND
+            pf.pubkey = tr1.pubkey AND tr1.rank > 0 AND user_has_bio(tr1.pubkey) AND
             pf.follower_pubkey = tr2.pubkey AND tr2.rank > 0
         GROUP BY pf.pubkey
     )

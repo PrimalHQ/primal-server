@@ -2982,27 +2982,32 @@ function explore_zaps(
         created_after=Utils.current_time()-24*3600,
         user_pubkey=nothing,
     )
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     limit = min(50, limit)
     limit <= 1000 || error("limit too big")
 
     isnothing(until) && (until = 100_000_000_000)
     zaps = map(Tuple, DB.exec(est.zap_receipts, 
-                              DB.@sql("select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats 
-                                      from og_zap_receipts zr, pubkey_trustrank tr
-                                      where 
-                                        zr.amount_sats >= ?1 and zr.amount_sats <= ?2 and zr.created_at >= ?3 and
-                                        zr.sender = tr.pubkey and tr.rank >= ?4
-                                      order by zr.amount_sats desc, zr.event_id asc limit ?5 offset ?6"),
+                              "select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats 
+                                  from og_zap_receipts zr, pubkey_trustrank tr, events es
+                              where 
+                                  zr.amount_sats >= ?1 and zr.amount_sats <= ?2 and zr.created_at >= ?3 and
+                                  zr.sender = tr.pubkey and tr.rank >= ?4 and
+                                  zr.event_id = es.id and es.kind = any ('{$(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.LONG_FORM_CONTENT))}'::int8[])
+                              order by zr.amount_sats desc, zr.event_id asc limit ?5 offset ?6",
                               (since, until, created_after, Main.TrustRank.humaness_threshold[], limit, offset)))
 
     zaps = sort(zaps, by=z->-z[6])[1:min(limit, length(zaps))]
 
-    response_messages_for_zaps(est, zaps; order_by=:amount_sats)
+    res = OrderedSet()
+    union!(res, response_messages_for_zaps(est, zaps; order_by=:amount_sats))
+    union!(res, response_messages_for_posts(est, [Nostr.EventId(z[3]) for z in zaps]; user_pubkey))
+    collect(res)
 end
 
 function explore_people(
         est::DB.CacheStorage;
-        since::Float64=0.0, until::Float64=1000000.0, offset::Int=0, limit::Int=20, 
+        since::Int=0, until::Int=1000000000, offset::Int=0, limit::Int=20, 
         user_pubkey=nothing,
     )
     limit = min(50, limit)
@@ -3021,17 +3026,18 @@ function explore_people(
                                         )
                                         select * from daily_followers_cnt_increases dfi
                                         where 
-                                            dfi.ratio >= $(@P since) and dfi.ratio <= $(@P until) and
-                                            not exists (select 1 from scope_pks where scope_pks.pubkey = dfi.pubkey)
-                                        order by dfi.ratio desc, dfi.pubkey asc limit $(@P limit) offset $(@P offset)"
+                                            dfi.increase >= $(@P since) and dfi.increase <= $(@P until) and
+                                            not exists (select 1 from scope_pks where scope_pks.pubkey = dfi.pubkey) and
+                                            user_has_bio(dfi.pubkey)
+                                        order by dfi.increase desc, dfi.pubkey asc limit $(@P limit) offset $(@P offset)"
                                     end...)[2]
-        push!(res, (Nostr.PubKeyId(pk), ratio, increase, cnt))
+        push!(res, (Nostr.PubKeyId(pk), increase, ratio, cnt))
     end
 
     [[(; kind=Int(USER_FOLLOWER_COUNT_INCREASES), 
-       content=JSON.json(Dict([Nostr.hex(pk)=>(; increase, ratio, count=cnt) for (pk, ratio, increase, cnt) in res])))];
+       content=JSON.json(Dict([Nostr.hex(pk)=>(; increase, ratio, count=cnt) for (pk, increase, ratio, cnt) in res])))];
      user_infos(est; pubkeys=map(first, res)); 
-     range(res, :ratio)]
+     range(res, :increase)]
 end
 
 function explore_media(est::DB.CacheStorage; kwargs...)
