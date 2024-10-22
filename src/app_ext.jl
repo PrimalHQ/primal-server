@@ -1068,7 +1068,7 @@ function get_notifications(
         time_exceeded=()->false,
     )
     # limit <= 1000 || error("limit too big")
-    limit = min(limit, 1000) # iOS app was requesting limit=~13000
+    # limit = min(limit, 1000) # iOS app was requesting limit=~13000
     limit = min(limit, 100)
 
     pubkey = cast(pubkey, Nostr.PubKeyId)
@@ -1091,87 +1091,94 @@ function get_notifications(
                                           ]
     end
 
+    if !isnothing(type)
+        if !(type isa Vector)
+            type = [type]
+        end
+    end
+
+    explain = nothing
+    # explain = :buffers
+
+    rs = 
+    Postgres.transaction(DAG_OUTPUTS_DB[]) do session
+        Postgres.execute(session, "set max_parallel_workers_per_gather = 0")
+        rs = fetch_results(session, since, until, limit, offset; 
+                      timeout=5.0, explain,
+                      sql_generator=function (s, u, rs_)
+                        !isnothing(explain) && @show (length(rs_), u-s, Dates.unix2datetime(s), Dates.unix2datetime(u))
+                        if isnothing(type)
+                            ("select 
+                                (created_at, type, arg1, arg2, arg3, arg4)::text,
+                                created_at, type, arg1, arg2, arg3, arg4
+                             from pubkey_notifications pn
+                             where 
+                                pubkey = \$1 and created_at >= \$2 and created_at <= \$3
+                                and notification_is_visible(type, arg1, arg2)
+                             order by created_at desc",
+                             (pubkey, s, u))
+                        else
+                            type_arr = '{'*join([Int(t) for t in type], ',')*'}'
+                            !isnothing(explain) && @show type_arr
+                            ("select 
+                                (created_at, type, arg1, arg2, arg3, arg4)::text,
+                                created_at, type, arg1, arg2, arg3, arg4
+                             from pubkey_notifications pn
+                             where 
+                                pubkey = \$1 and created_at >= \$2 and created_at <= \$3
+                                and type = any (\$4::int8[])
+                                and notification_is_visible(type, arg1, arg2)
+                             order by created_at desc",
+                             (pubkey, s, u, type_arr))
+                        end
+                    end,
+                    accept_result=function (r)
+                        !isnothing(explain) && println(Dates.unix2datetime(r[2]))
+                        if isnothing(type)
+                            notif_d = DB.notif2namedtuple((r[1], r[2], DB.NotificationType(r[3]),
+                                                           r[4:7]...))
+                            if notif_d.type == DB.USER_UNFOLLOWED_YOU
+                                if !isempty(DB.exe(est.pubkey_followers, DB.@sql("select 1 from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2 limit 1"),
+                                                   pubkey, notif_d.follower))
+                                    return false
+                                end
+                            end
+                        end
+                        true
+                    end)
+        throw(Postgres.PostgresTransactionAborted(rs))
+    end
+    !isnothing(explain) && @show length(rs)
+
     res = []
     res_meta_data = Dict()
 
     pks = Set{Nostr.PubKeyId}()
-    eids = Set{Nostr.EventId}()
+    posts = Tuple{Nostr.EventId, Int}[]
 
-    rs = if isnothing(type)
-        DB.exe(est.pubkey_notifications, 
-               "select pubkey, created_at, type, arg1, arg2, arg3, arg4
-               from pubkey_notifications pn
-               where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
-               and notification_is_visible(type, arg1, arg2)
-               order by created_at desc limit ?4 offset ?5",
-               pubkey, since, until, limit, offset)
-    else
-        if !(type isa Vector)
-            type = [type]
-        end
-        type = '{'*join([Int(t) for t in type], ',')*'}'
-        DB.exe(est.pubkey_notifications, 
-               "select pubkey, created_at, type, arg1, arg2, arg3, arg4
-               from pubkey_notifications pn
-               where pubkey = ?1 and created_at >= ?2 and created_at <= ?3
-               and type = any (?4::int8[])
-               and notification_is_visible(type, arg1, arg2)
-               order by created_at desc limit ?5 offset ?6",
-               pubkey, since, until, type, limit, offset)
-    end
     for r in rs
-        (_, created_at, type, arg1, arg2, arg3, arg4) = r
-
-        notif_d = DB.notif2namedtuple((pubkey, created_at, DB.NotificationType(type),
-                                       arg1, arg2, arg3, arg4))
-
-        if notif_d.type == DB.USER_UNFOLLOWED_YOU
-            if !isempty(DB.exe(est.pubkey_followers, DB.@sql("select 1 from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2 limit 1"),
-                               pubkey, notif_d.follower))
-                continue
-            end
-        end
-
-        is_blocked = false
+        notif_d = DB.notif2namedtuple((r[1], r[2], DB.NotificationType(r[3]),
+                                       r[4:7]...))
 
         for arg in collect(values(notif_d))
             if arg isa Nostr.PubKeyId
                 pk = arg
-                if is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk) #|| !is_trusted_user(est, pk)
-                    is_blocked = true
-                else
-                    push!(pks, pk)
-                    if !haskey(res_meta_data, pk) && pk in est.meta_data && est.meta_data[pk] in est.events
-                        res_meta_data[pk] = est.events[est.meta_data[pk]]
-                    end
+                push!(pks, pk)
+                if !haskey(res_meta_data, pk) && pk in est.meta_data && est.meta_data[pk] in est.events
+                    res_meta_data[pk] = est.events[est.meta_data[pk]]
                 end
             elseif arg isa Nostr.EventId
                 eid = arg
-                if is_hidden(est, user_pubkey, :content, eid) || ext_is_hidden(est, eid)
-                    is_blocked = true
-                else
-                    push!(eids, eid)
-                end
+                push!(posts, (eid, notif_d.created_at))
             end
         end
 
-        if !is_blocked
-            push!(res, (; kind=Int(NOTIFICATION), content=JSON.json(notif_d)))
-        # else
-        #     args = [a for a in r[4:end] if !ismissing(a)]
-        #     wheres = join(["arg$i = ?" for (i, a) in enumerate(args)], " and ")
-        #     wheres = isempty(wheres) ? "" : ("and " * wheres)
-        #     DB.exe(est.pubkey_notifications, 
-        #            "delete from pubkey_notifications where pubkey = ? and created_at = ? and type = ? $wheres",
-        #            pubkey, created_at, type, args...)
-        #     DB.exe(est.pubkey_notification_cnts,
-        #            "update pubkey_notification_cnts set type$(type) = type$(type) - 1 where pubkey = ?1",
-        #            pubkey)
-        end
+        push!(res, (; kind=Int(NOTIFICATION), content=JSON.json(notif_d)))
     end
 
     res = collect(Set(res)) # remove duplicates ??
 
+    # @time "pks" 
     for pk in pks
         push!(res, (;
                     kind=Int(USER_PROFILE),
@@ -1181,8 +1188,12 @@ function get_notifications(
                                       ))))
     end
 
-    append!(res, response_messages_for_posts(est, collect(eids); res_meta_data, user_pubkey, time_exceeded))
-
+    # @time "resp" append!(res, response_messages_for_posts(est, collect(map(first, posts)); res_meta_data, user_pubkey, time_exceeded))
+    
+    # @time "resp" 
+    append!(res, enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false))
+    append!(res, res_meta_data)
+        
     res
 end
 

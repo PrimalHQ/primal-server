@@ -501,11 +501,12 @@ Base.@kwdef struct CacheStorage{SCommons, DBDict, DBSet, MembershipDBDict} <: Ev
                                                      arg3 text,
                                                      arg4 text
                                                    )",
-                                                  "create index if not exists pubkey_notifications_pubkey_idx on pubkey_notifications (pubkey asc)",
+                                                  "create index if not exists pubkey_notifications_pubkey_idx on pubkey_notifications (pubkey)",
                                                   "create index if not exists pubkey_notifications_pubkey_created_at_idx on pubkey_notifications (pubkey asc, created_at desc)",
                                                   "create index if not exists pubkey_notifications_created_at_idx on pubkey_notifications (created_at desc)",
-                                                  "create index if not exists pubkey_notifications_type_idx on pubkey_notifications (type desc)",
-                                                  "create index if not exists pubkey_notifications_arg1_idx on pubkey_notifications (arg1 desc)",
+                                                  "create index if not exists pubkey_notifications_type_idx on pubkey_notifications (type)",
+                                                  "create index if not exists pubkey_notifications_arg1_idx on pubkey_notifications (arg1)",
+                                                  "create index if not exists pubkey_notifications_arg2_idx on pubkey_notifications (arg2)",
                                                  ])
 
     pubkey_notification_cnts_init = "!create table if not exists pubkey_notification_cnts (
