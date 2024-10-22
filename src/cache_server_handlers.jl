@@ -292,6 +292,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 funcall = Symbol(filt[1])
                 if     funcall == :set_primal_protocol
                     client_protocol[ws_id] = filt[2]
+                    sendres([])
                 elseif funcall in App().exposed_functions
                     # println(Main.App.Dates.now(), "  ", funcall)
                     
