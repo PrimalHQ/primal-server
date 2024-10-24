@@ -3337,6 +3337,7 @@ const grammar = Ref{Any}(nothing)
 SEARCH_SERVER = Ref(:p0timelimit)
 
 function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=nothing, limit=100, offset=0, kind=nothing, explain=false, logextra=(;))
+    # @show query
     has_orderby = occursin("orderby:", query)
 
     isnothing(until) && (until = has_orderby ? 1<<61 : Utils.current_time())
@@ -3349,13 +3350,15 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=not
 
     # log = user_pubkey == Main.test_pubkeys[:pedja]
     log = false
+    explain = nothing
+    # explain = :full
 
     orderkey = nothing
 
     res = try
         transaction_with_execution_stats(SEARCH_SERVER[]; stats) do session
             Main.App.fetch_results(session, since, until, limit, offset; 
-                                   has_orderby, timeout=9.0,
+                                   has_orderby, timeout=9.0, explain,
                                    sql_generator=function (s, u, res)
                                        log && @show (length(res), u-s, Dates.unix2datetime(s), Dates.unix2datetime(u))
                                        sql, params, orderkey = to_sql(est, user_pubkey, outputs, expr, kind, s, u, limit, offset)
@@ -3395,6 +3398,7 @@ function init_parsing()
                                           :sub_expr,
                                           :not_phrase_expr,
                                           :not_word_expr,
+                                          :not_hashtag_expr,
                                           :hashtag_expr,
                                           :since_expr,
                                           :until_expr,
@@ -3443,9 +3447,10 @@ function init_parsing()
                                          )), 
                    :word_expr => P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c=='_')||(c=='-'))),
                    :phrase_expr => P.seq(t"\"", P.some(P.satisfy(c->c!='"')), t"\""),
+                   :hashtag_expr => P.seq(t"#", :word_expr),
                    :not_phrase_expr => P.seq(t"-\"", P.some(P.satisfy(c->c!='"')), t"\""),
                    :not_word_expr => P.seq(t"-", :word_expr),
-                   :hashtag_expr => P.seq(t"#", :word_expr),
+                   :not_hashtag_expr => P.seq(t"-#", :word_expr),
                    # :ts => P.some(P.satisfy(c->isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
                    :ts => P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
                    :since_expr => P.seq(t"since:", :ts),
@@ -3507,9 +3512,10 @@ struct Or;       ops; end
 struct And;      ops; end
 struct Word;     word::String; end
 struct Phrase;   phrase::String; end
+struct HashTag;  hashtag::String; end
 struct NotWord;  word::String; end
 struct NotPhrase; phrase::String; end
-struct HashTag;  hashtag::String; end
+struct NotHashTag; hashtag::String; end
 struct Since;    ts::Int; end
 struct Until;    ts::Int; end
 struct From;     pubkey::Nostr.PubKeyId; end
@@ -3573,9 +3579,10 @@ function parse_search_query(query)
         elseif m.rule == :expr; sm[2][2]
         elseif m.rule == :word_expr; O.Word(string(m.view))
         elseif m.rule == :phrase_expr; O.Phrase(m.view[2:end-1])
+        elseif m.rule == :hashtag_expr; O.HashTag(first(s.word for s in sm if s isa O.Word))
         elseif m.rule == :not_word_expr; O.NotWord(first(s.word for s in sm if s isa O.Word))
         elseif m.rule == :not_phrase_expr; O.NotPhrase(m.view[3:end-1])
-        elseif m.rule == :hashtag_expr; O.HashTag(first(s.word for s in sm if s isa O.Word))
+        elseif m.rule == :not_hashtag_expr; O.NotHashTag(m.view[3:end])
         elseif m.rule == :ts; string(m.view)
         elseif m.rule == :since_expr
             if     sm[2] == "yesterday";  O.Since(Utils.current_time() -  1*24*3600)
@@ -3825,14 +3832,20 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             subconds = filter(!isnothing, map(tosql_op, op.ops))
             isempty(subconds) || push!(conds, join(subconds, " or "))
         elseif op isa O.Word;      cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
-        elseif op isa O.NotWord;   cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
         elseif op isa O.Phrase;    cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
-        elseif op isa O.NotPhrase; cond("not ($(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase))))")
         elseif op isa O.HashTag
             if kind == Nostr.TEXT_NOTE
                 cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
             elseif kind == Nostr.LONG_FORM_CONTENT
                 cond("$(T(o.reads)).topics @@ plainto_tsquery('simple', $(P(op.hashtag)))")
+            end
+        elseif op isa O.NotWord;   cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
+        elseif op isa O.NotPhrase; cond("not ($(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase))))")
+        elseif op isa O.NotHashTag
+            if kind == Nostr.TEXT_NOTE
+                cond("not ($(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag))))")
+            elseif kind == Nostr.LONG_FORM_CONTENT
+                cond("not ($(T(o.reads)).topics @@ plainto_tsquery('simple', $(P(op.hashtag))))")
             end
         elseif op isa O.Since;     cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
         elseif op isa O.Until;     cond("$(T(o.advsearch)).created_at <= $(P(op.ts))")
@@ -3845,7 +3858,8 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             else
                 cond("$(T(o.advsearch)).filter_tsv @@ plainto_tsquery('simple', $(P(op.filter)))")
             end
-        elseif op isa O.Url;     cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
+        elseif op isa O.Url
+            cond("$(T(o.advsearch)).url_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
         elseif op isa O.Orientation
             compop = op.orientation == "vertical" ? ">" : "<"
             cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).height $compop 1.8 * $(T(o.media)).width")
@@ -3978,7 +3992,7 @@ function runtests()
                                        O.Emoticon(":)"),
                                        O.List("list1"),
                                        O.Question(),
-                                       O.EventStatsField(:score, :(<=), 123),
+                                       O.EventStatsField(:score, :(<=), 13516483516),
                                        O.MinInteractions(5),
                                        O.Scope("myfollows"),
                                        O.MinWords(100),

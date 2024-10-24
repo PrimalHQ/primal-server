@@ -2492,8 +2492,7 @@ function mega_feed_directive(
         end
 
     elseif id == "explore-media"
-        return advanced_search(est; query="kind:1 filter:image scope:mynetworkinteractions", kwargs...)
-        # return advanced_search(est; query="kind:1 filter:image scope:myfollows", kwargs...)
+        return advanced_search(est; query="kind:1 filter:image scope:mynetworkinteractions -#nsfw", kwargs...)
     elseif id == "explore-zaps"
         return explore_zaps(est; skwa..., kwargs...)
     elseif id == "wide-net-notes"
