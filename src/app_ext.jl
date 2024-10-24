@@ -1190,9 +1190,13 @@ function get_notifications(
 
     # @time "resp" append!(res, response_messages_for_posts(est, collect(map(first, posts)); res_meta_data, user_pubkey, time_exceeded))
     
-    # @time "resp" 
+    # @time "resp" begin
     append!(res, enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false))
-    append!(res, res_meta_data)
+    for md in values(res_meta_data)
+        push!(res, md)
+        append!(res, ext_event_response(est, md))
+    end
+    # end
         
     res
 end
