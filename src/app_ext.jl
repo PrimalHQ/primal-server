@@ -65,6 +65,7 @@ union!(exposed_functions, Set([
                      :trusted_users,
                      :note_mentions,
                      :note_mentions_count,
+                     :get_media_metadata,
                     ]))
 
 union!(exposed_async_functions, Set([
@@ -1157,6 +1158,7 @@ function get_notifications(
     posts = Tuple{Nostr.EventId, Int}[]
 
     for r in rs
+        r[1] = Nostr.hex(pubkey)
         notif_d = DB.notif2namedtuple((r[1], r[2], DB.NotificationType(r[3]),
                                        r[4:7]...))
 
@@ -1317,6 +1319,7 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     res = []
     res_meta_data = collect(values(res_meta_data))
     append!(res, res_meta_data)
+    ext_user_infos(est, res, res_meta_data)
     append!(res, user_scores(est, res_meta_data))
     res
 end
@@ -1446,11 +1449,11 @@ function ext_event_response(est::DB.CacheStorage, e::Nostr.Event)
     [event_media_response(est, e.id); event_preview_response(est, e.id)]
 end
 
-function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
+function get_media_metadata(est::DB.CacheStorage; urls::Vector, eid=nothing)
     resources = []
     root_mt = nothing
     thumbnails = Dict()
-    for (url,) in DB.exe(est.event_media, DB.@sql("select url from event_media where event_id = ?1"), eid)
+    for url in urls
         variants = []
         for (s, a, w, h, mt, dur) in DB.exec(est.media, DB.@sql("select size, animated, width, height, mimetype, duration from media where url = ?1"), (url,))
             push!(variants, (; s=s[1], a, w, h, mt, dur, media_url=Media.cdn_url(url, s, a)))
@@ -1465,8 +1468,13 @@ function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
     res = Dict()
     if !isempty(resources); res[:resources] = resources; end
     if !isempty(thumbnails); res[:thumbnails] = thumbnails; end
-    if !isempty(res); res[:event_id] = eid; end
+    if !isempty(res) && !isnothing(eid); res[:event_id] = eid; end
     isempty(res) ? [] : [(; kind=Int(MEDIA_METADATA), content=JSON.json(res))]
+end
+
+function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)
+    urls = map(first, DB.exe(est.event_media, DB.@sql("select url from event_media where event_id = ?1"), eid))
+    get_media_metadata(est; urls, eid)
 end
 
 function event_preview_response(est::DB.CacheStorage, eid::Nostr.EventId)
