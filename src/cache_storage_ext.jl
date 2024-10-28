@@ -2,6 +2,7 @@
 
 import ..Filterlist
 import ..TrustRank
+import SHA
 
 include("../src/notifications.jl")
 
@@ -436,10 +437,13 @@ end
 
 function notif2namedtuple(notif::Tuple)
     notif_type = notif[3]
-    (; pubkey=notif[1], created_at=notif[2], type=notif[3],
+    nt = (; pubkey=notif[1], created_at=notif[2], type=notif[3],
      [name => v isa ty ? v : ty(v)
       for (v, (name, ty)) in zip(notif[4:end], notification_args[notif_type])
       if !(v isa Missing || v isa Nothing)]...)
+    nt = (; sort(collect(pairs(nt)); by=first)...)
+    nt = (; id = bytes2hex(SHA.sha256(JSON.json(nt))), nt...)
+    nt
 end
 
 function notification(
