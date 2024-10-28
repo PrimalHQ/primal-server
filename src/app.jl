@@ -2444,6 +2444,9 @@ function mega_feed_directive(
     elseif id == "advsearch"
         return advanced_search(est; skwa..., kwargs...)
 
+    # elseif id == "notifications"
+    #     return get_notifications(est; skwa..., kwargs...)
+
     elseif id == "reads-feed" || get(s, "kind", "") == "reads"
         minwords = get(s, "minwords", 100)
         if get(s, "scope", "") == "follows"
@@ -2492,16 +2495,18 @@ function mega_feed_directive(
         end
 
     elseif id == "explore-media"
-        return advanced_search(est; query="kind:1 filter:image scope:mynetworkinteractions -#nsfw", kwargs...)
+        return advanced_search(est; query="kind:1 filter:image scope:mynetworkinteractions -#nsfw features:cdnmedia", kwargs...)
     elseif id == "explore-zaps"
         return explore_zaps(est; skwa..., kwargs...)
     elseif id == "wide-net-notes"
         return wide_net_notes_feed(est; created_after=Utils.current_time()-24*3600, kwargs..., pubkey=kwa[:user_pubkey])
     elseif id == "hall-of-fame-notes"
-        explore(est; timeframe="trending", scope="global", created_after=0, kwargs...)
+        return explore(est; timeframe="trending", scope="global", created_after=0, kwargs...)
     elseif id == "only-tweets"
     elseif id == "bookmarked-notes"
     elseif id == "important-notes-i-might-have-missed"
+    elseif Symbol(id) in exposed_functions
+        return getproperty(@__MODULE__, Symbol(id))(est; skwa..., kwargs...)
     end
 
     []
@@ -3140,11 +3145,17 @@ function fetch_results(
         sql, params = sql_generator(s, u, res)
 
         if !isnothing(explain)
-            for s in map(first, Postgres.execute(session, "explain (analyze,buffers) declare cur no scroll cursor for $sql", params)[2])
-                if explain == :full
+            if explain == :basic
+                for s in map(first, Postgres.execute(session, "explain declare cur no scroll cursor for $sql", params)[2])
                     println(s)
-                elseif explain == :buffers && occursin("Buffers:", s)
-                    println(s)
+                end
+            else
+                for s in map(first, Postgres.execute(session, "explain (analyze,buffers) declare cur no scroll cursor for $sql", params)[2])
+                    if explain == :full
+                        println(s)
+                    elseif explain == :buffers && occursin("Buffers:", s)
+                        println(s)
+                    end
                 end
             end
             println()

@@ -3440,6 +3440,7 @@ function init_parsing()
                                           :maxreposts_expr,
                                           :minsatszapped_expr,
                                           :maxsatszapped_expr,
+                                          :mintrustrank_expr,
 
                                           :word_expr,
                                           :phrase_expr,
@@ -3496,8 +3497,10 @@ function init_parsing()
                    :maxreposts_expr => P.seq(t"maxreposts:", :number),
                    :minsatszapped_expr => P.seq(t"minsatszapped:", :number),
                    :maxsatszapped_expr => P.seq(t"maxsatszapped:", :number),
+                   :mintrustrank_expr => P.seq(t"mintrustrank:", :number),
 
-                   :number => P.some(P.satisfy(isdigit)),
+                   :number => P.first(P.seq(t"-", P.some(P.satisfy(isdigit))),
+                                      P.some(P.satisfy(isdigit))),
                    :ws => P.many(t" "),
                   )
 
@@ -3545,6 +3548,7 @@ struct Ref; ref::Union{Nostr.PubKeyId, Nostr.EventId}; end
 struct ZappedBy; pubkey::Nostr.PubKeyId; end
 struct OrderBy; field::String; end
 struct EventStatsField; field::Symbol; operation::Symbol; argument::Int; end
+struct MinTrustRank; trustrank::Int; end
 struct Features; features::Vector{String}; end
 end
 Base.:(==)(a::O.Features, b::O.Features) = a.features == b.features
@@ -3633,6 +3637,7 @@ function parse_search_query(query)
         elseif m.rule == :maxreposts_expr; O.EventStatsField(:reposts, :(<=), sm[2])
         elseif m.rule == :minsatszapped_expr; O.EventStatsField(:satszapped, :(>=), sm[2])
         elseif m.rule == :maxsatszapped_expr; O.EventStatsField(:satszapped, :(<=), sm[2])
+        elseif m.rule == :mintrustrank_expr; O.MinTrustRank(sm[2])
 
         elseif m.rule == :number; parse(Int, m.view)
         elseif m.rule == :ws; nothing
@@ -3891,6 +3896,8 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             cond("$(T(o.advsearch)).id = $(T(o.note_length)).eid and $(T(o.note_length)).length <= $(P(op.chars))")
         elseif op isa O.MinLongReplies
             cond("$(T(o.advsearch)).id = $(T(o.note_stats)).eid and $(T(o.note_stats)).long_replies >= $(P(op.longreplies))")
+        elseif op isa O.MinTrustRank
+            cond("$(T(o.advsearch)).pubkey = $(T(o.pubkey_trustrank)).pubkey and $(T(o.pubkey_trustrank)).rank >= $(P(10.0^op.trustrank))")
         elseif op isa O.Lang
             cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).lang = $(P(op.lang)) and $(T(o.reads)).lang_prob = 1.0")
         elseif op isa O.ZappedBy
@@ -3902,6 +3909,12 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                 elseif feat == "bookmarked-by-follows"
                     user_pubkey_follows_conds("bookmarked_by_follows_pks")
                     cond("$(T(o.advsearch)).id = $(T(o.pubkey_bookmarks)).ref_event_id and $(T(o.pubkey_bookmarks)).pubkey = bookmarked_by_follows_pks.pubkey")
+                elseif feat == "cdnmedia"
+                    cond("exists (
+                         select 1 
+                         from $(o.event_media.table) cdnmedia_em, $(o.media.table) cdnmedia_m
+                         where $(o.advsearch.table).id = cdnmedia_em.event_id and cdnmedia_em.url = cdnmedia_m.url and cdnmedia_m.size = 'small' and cdnmedia_m.animated = 1
+                         limit 1)")
                 end
             end
         end
@@ -3967,7 +3980,7 @@ using Test: @testset, @test
 
 function runtests()
     @testset "AdvancedSearch-Parsing-1" begin
-        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 -\"phraseword3 phraseword4\" #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 minlongreplies:11 lang:fra features:feat1,feat2"
+        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 -\"phraseword3 phraseword4\" #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? maxscore:123 mininteractions:5 scope:myfollows minwords:100 minlongreplies:11 mintrustrank:-9 lang:fra features:feat1,feat2"
         expr = parse_search_query(input)
         @assert expr isa O.And
         # dump(expr)
@@ -3997,6 +4010,7 @@ function runtests()
                                        O.Scope("myfollows"),
                                        O.MinWords(100),
                                        O.MinLongReplies(11),
+                                       O.MinTrustRank(-9),
                                        O.Lang("fra"),
                                        O.Features(["feat1", "feat2"]),
                                       ))
