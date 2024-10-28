@@ -912,7 +912,7 @@ BEGIN
 END
 $BODY$;
 
-SELECT cron.schedule('record_trusted_pubkey_followers_cnt',                 '* */3 * * *', 'CALL record_trusted_pubkey_followers_cnt()');
+SELECT cron.schedule('record_trusted_pubkey_followers_cnt',                 '0 */3 * * *', 'CALL record_trusted_pubkey_followers_cnt()');
 SELECT cron.schedule('record_trusted_pubkey_followers_cnt_delete_old',      '0 * * * *', $$DELETE FROM trusted_pubkey_followers_cnt WHERE t < NOW() - INTERVAL '2 DAY'$$);
 SELECT cron.schedule('update_user_relative_daily_follower_count_increases', '0 * * * *', 'CALL update_user_relative_daily_follower_count_increases()');
 
