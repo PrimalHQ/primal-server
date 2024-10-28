@@ -1027,6 +1027,8 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
     import_event(est, e; force, disable_daily_stats, relay_url)
 end
 
+BLOCKED_KINDS = [29333]
+
 function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_daily_stats=false, relay_url=nothing)
     est.readonly[] && return false
 
@@ -1035,7 +1037,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     est.verification_enabled && !verify(est, e) && return false
 
     should_import = lock(already_imported_check_lock) do
-        if e.id in est.events || !ext_preimport_check(est, e)
+        if e.kind in BLOCKED_KINDS || e.id in est.events || !ext_preimport_check(est, e)
             false
         else
             # push!(est.event_ids, e.id)
