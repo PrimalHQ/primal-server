@@ -114,6 +114,7 @@ function start(cache_storage::DB.CacheStorage; setup_handlers=true)
             HTTP.register!(router[], path, preview_handler)
         end
 
+        HTTP.register!(router[], "/media-upload", media_upload_handler)
         HTTP.register!(router[], "/media-cache", media_cache_handler)
 
         HTTP.register!(router[], "/link-preview", link_preview_handler)
@@ -467,6 +468,16 @@ function nostr_json_handler(req::HTTP.Request)
     end
 end
 
+function media_upload_handler(req::HTTP.Request)
+    catch_exception(:media_upload_handler, req) do
+        host = Dict(req.headers)["Host"]
+        path, query = split(req.target, '?')
+        args = NamedTuple([Symbol(k)=>v for (k, v) in [split(s, '=') for s in split(query, '&')]])
+        url = string(URIs.unescapeuri(args.u))
+        HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+    end
+end
+
 function media_cache_handler(req::HTTP.Request)
     catch_exception(:media_cache_handler, req) do
         host = Dict(req.headers)["Host"]
@@ -600,7 +611,8 @@ function url_lookup_handler(req::HTTP.Request)
             HTTP.Response(404, "unknown url")
         else
             url = r[1][1]
-            HTTP.Response(302, HTTP.Headers(["Location"=>url]))
+            rurl = "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
+            HTTP.Response(302, HTTP.Headers(["Location"=>rurl]))
         end
     end
 end
