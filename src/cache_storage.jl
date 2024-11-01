@@ -28,7 +28,7 @@ hashfunc(::Type{Nostr.EventId}) = eid->eid.hash[32]
 hashfunc(::Type{Nostr.PubKeyId}) = pk->pk.pk[32]
 hashfunc(::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) = p->p[1].pk[32]
 
-MAX_MESSAGE_SIZE = Ref(300_000) |> ThreadSafe
+MAX_MESSAGE_SIZE = Ref(500_000) |> ThreadSafe
 kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT]]
 
 term_lines = try parse(Int, strip(read(`tput lines`, String))) catch _ 15 end
@@ -1456,9 +1456,6 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
 
                         cond = "receiver = ?1 and (case when ?2::bytea is null then sender is null else sender = ?2 end)"
                         for sender in [nothing, e.pubkey]
-                            # if receiver in [Main.test_pubkeys[:pedja]]
-                            #     @show e
-                            # end
                             if isempty(exe(est.pubkey_directmsgs_cnt, "select * from pubkey_directmsgs_cnt where $cond limit 1", receiver, sender))
                                 exe(est.pubkey_directmsgs_cnt, "insert into pubkey_directmsgs_cnt values (?1, ?2, ?3, ?4, ?5)", receiver, sender, 0, e.created_at, e.id)
                             end
