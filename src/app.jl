@@ -1221,6 +1221,19 @@ function get_directmsg_contacts(
         user_pubkey, relation::Union{String,Symbol}=:any,
         limit=10000, offset=0, since=0, until=trunc(Int, time()),
     )
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+    # if 1==1 && user_pubkey in [Main.test_pubkeys[:pedja], Main.test_pubkeys[:qa], Main.test_pubkeys[:miljan], Main.test_pubkeys[:moysie]]
+        get_directmsg_contacts_2(est; user_pubkey, relation, limit, offset, since, until)
+    # else
+    #     get_directmsg_contacts_1(est; user_pubkey, relation, limit, offset, since, until)
+    # end
+end
+
+function get_directmsg_contacts_1(
+        est::DB.CacheStorage; 
+        user_pubkey, relation::Union{String,Symbol}=:any,
+        limit=10000, offset=0, since=0, until=trunc(Int, time()),
+    )
     limit = min(10000, limit)
     user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
     relation = cast(relation, Symbol)
@@ -1292,6 +1305,94 @@ function get_directmsg_contacts(
      range(d, :latest_at; by=x->x[2][:latest_at])...]
 end
 
+function get_directmsg_contacts_2(
+        est::DB.CacheStorage; 
+        user_pubkey, relation::Union{String,Symbol}=:any,
+        limit=300, offset=0, since=0, until=trunc(Int, time()),
+    )
+    limit = min(300, limit)
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+    relation = cast(relation, Symbol)
+
+    fs = Set(follows(est, user_pubkey))
+    d = Dict{Nostr.PubKeyId, Dict{Symbol, Any}}()
+    function accept_result(r)
+        for (latest_event_id, latest_at, peer, cnt) in [r]
+            peer = Nostr.PubKeyId(peer)
+            
+            is_hidden(est, user_pubkey, :content, peer) && continue
+
+            if relation != :any
+                if     relation == :follows; peer in fs || continue
+                elseif relation == :other;   peer in fs && continue
+                else; error("invalid relation")
+                end
+            end
+            
+            latest_event_id = Nostr.EventId(latest_event_id)
+            if !haskey(d, peer)
+                d[peer] = Dict([:cnt=>cnt, :latest_at=>latest_at, :latest_event_id=>latest_event_id])
+            end
+            if d[peer][:latest_at] < latest_at
+                d[peer][:latest_at] = latest_at
+                d[peer][:latest_event_id] = latest_event_id
+            end
+            if d[peer][:cnt] < cnt
+                d[peer][:cnt] = cnt
+            end
+        end
+
+        length(d) < limit+offset ? true : :done
+    end
+
+    Postgres.transaction(DAG_OUTPUTS_DB[]) do session
+        fetch_results(session, since, until, 10000, offset; timeout=5.0,
+                      sql_generator=function (s, u, rs_)
+                          ("select latest_event_id, latest_at, sender, cnt 
+                           from pubkey_directmsgs_cnt
+                           where receiver = \$1 and sender is not null and latest_at >= \$2 and latest_at <= \$3
+                           order by latest_at desc", 
+                           (user_pubkey, s, u))
+                      end,
+                      accept_result)
+        fetch_results(session, since, until, 10000, offset; timeout=5.0,
+                      sql_generator=function (s, u, rs_)
+                          ("select latest_event_id, latest_at, receiver, 0 
+                           from pubkey_directmsgs_cnt
+                           where sender = \$1 and latest_at >= \$2 and latest_at <= \$3
+                           order by latest_at desc", 
+                           (user_pubkey, since, until))
+                      end,
+                      accept_result)
+    end
+
+    d = sort(collect(d); by=x->-x[2][:latest_at])[offset+1:min(length(d), offset+limit)]
+
+    evts = []
+    mds = []
+    mdextra = []
+    for (peer, p) in d
+        if p[:latest_event_id] in est.events
+            push!(evts, est.events[p[:latest_event_id]])
+        end
+        if peer in est.meta_data
+            mdeid = est.meta_data[peer]
+            if mdeid in est.events
+                md = est.events[mdeid]
+                push!(mds, md)
+                union!(mdextra, ext_event_response(est, md))
+            end
+        end
+    end
+
+    append!(evts, primal_verified_names(est, map(first, d)))
+
+    d = [Nostr.hex(peer)=>p for (peer, p) in d]
+
+    [(; kind=Int(DIRECTMSG_COUNTS), content=JSON.json(Dict(d))), 
+     evts..., mds..., mdextra..., 
+     range(d, :latest_at; by=x->x[2][:latest_at])...]
+end
 
 reset_directmsg_count_lock = ReentrantLock()
 
