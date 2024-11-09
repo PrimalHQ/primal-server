@@ -356,6 +356,20 @@ BEGIN
     END LOOP;
 END $BODY$;
 
+CREATE OR REPLACE FUNCTION public.event_zap_by_zap_receipt_id(a_zap_receipt_id bytea, a_user_pubkey bytea) RETURNS SETOF jsonb 
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$	
+DECLARE
+    r record;
+BEGIN
+    FOR r IN 
+        SELECT zap_receipt_id, created_at, event_id, sender, receiver, amount_sats FROM og_zap_receipts 
+        WHERE zap_receipt_id = a_zap_receipt_id
+    LOOP
+        RETURN QUERY SELECT * FROM zap_response(r, a_user_pubkey);
+    END LOOP;
+END $BODY$;
+
 CREATE OR REPLACE FUNCTION public.response_messages_for_post(
         a_event_id bytea,
         a_user_pubkey bytea,
@@ -575,6 +589,10 @@ BEGIN
                     FOR r IN SELECT value FROM pubkey_followers_cnt WHERE key = e_pubkey LIMIT 1 LOOP
                         user_scores := jsonb_set(user_scores, array[e->>'pubkey'::text], to_jsonb(r.value));
                     END LOOP;
+                END IF;
+
+                IF e_kind = 9735 AND t.is_referenced_event THEN
+                    RETURN QUERY SELECT * FROM event_zap_by_zap_receipt_id(e_id, a_user_pubkey);
                 END IF;
             END;
         END LOOP;
