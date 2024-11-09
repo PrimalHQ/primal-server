@@ -925,39 +925,16 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
     async fn get_bookmarks(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
         let pubkey = hex::decode(fa.kwargs["pubkey"].as_str().ok_or("invalid pubkey")?.to_string())?;
 
-        let e = {
-            let client = &Self::pool_get(&fa.pool).await?;
-            if let Ok(row) = client.query_one("select event_id from bookmarks where pubkey = $1", &[&pubkey]).await {
-                let eid: &[u8] = row.get(0);
-                if let Ok(row) = client.query_one("select * from events where id = $1", &[&eid]).await {
-                    let id: &[u8] = row.get(0);
-                    let pubkey: &[u8] = row.get(1);
-                    let created_at: i64 = row.get(2);
-                    let kind: i64 = row.get(3);
-                    let tags: Value = row.get(4);
-                    let content: &str = row.get(5);
-                    let sig: &[u8] = row.get(6);
-                    Some(json!({
-                        "id": hex::encode(id), 
-                        "pubkey": hex::encode(pubkey), 
-                        "created_at": created_at, 
-                        "kind": kind, 
-                        "tags": tags.clone(),
-                        "content": content.clone(),
-                        "sig": hex::encode(sig), 
-                    }))
-                } else { None }
-            } else { None }
-        };
+        let res = Self::rows_to_vec(
+            &Self::pool_get(&fa.pool).await?.query(
+                "select e::text from get_bookmarks($1) r(e)", 
+                &[&pubkey]).await?);
+        
+        let cw = &mut fa.client_write.lock().await;
+        Self::send_response(fa.subid, cw, &res).await?;
+        Self::send_eose(fa.subid, cw).await?;
 
-        if let Some(e) = e {
-            let cw = &mut fa.client_write.lock().await;
-            Self::send_response(fa.subid, cw, &vec!(e.to_string())).await?;
-            Self::send_eose(fa.subid, cw).await?;
-            return Ok(Handled);
-        }
-
-        Ok(NotHandled)
+        Ok(Handled)
     }
 
     async fn user_infos(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {

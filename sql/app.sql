@@ -834,6 +834,22 @@ BEGIN
 END
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.get_bookmarks(a_pubkey bytea)
+	RETURNS SETOF jsonb
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT get_event_jsonb(event_id) FROM bookmarks WHERE pubkey = a_pubkey;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.content_moderation_filtering(a_results jsonb, a_scope cmr_scope, a_user_pubkey bytea)
+	RETURNS SETOF jsonb
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT e 
+FROM jsonb_array_elements(a_results) r(e) 
+WHERE e->>'pubkey' IS NULL OR NOT is_pubkey_hidden(a_user_pubkey, a_scope, DECODE(e->>'pubkey', 'hex'))
+$BODY$;
+
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER LANGUAGE 'plpgsql' AS $BODY$
 BEGIN
