@@ -1292,6 +1292,7 @@ function get_directmsg_contacts(
      range(d, :latest_at; by=x->x[2][:latest_at])...]
 end
 
+
 reset_directmsg_count_lock = ReentrantLock()
 
 function reset_directmsg_count(est::DB.CacheStorage; event_from_user::Dict, sender, replicated=false)
@@ -3060,16 +3061,18 @@ function explore_topics(est::DB.CacheStorage; user_pubkey=nothing)
 end
 
 function explore_topics_(est::DB.CacheStorage; created_after::Int=Utils.current_time()-1*24*3600)
+    hidden_hashtags = ["nsfw", "sexpervertsyndicate"]
     res = DB.exec(est.event_hashtags, 
                   DB.@sql("select eh.hashtag, count(1) as cnt
                           from event_hashtags eh, events es, pubkey_trustrank tr
                           where 
                               eh.created_at >= ?1 and eh.event_id = es.id and
-                              es.pubkey = tr.pubkey and tr.rank > ?2
+                              es.pubkey = tr.pubkey and tr.rank > ?2 and
+                              not (eh.hashtag = any (?3::varchar[]))
                           group by eh.hashtag
                           order by cnt desc
                           limit 200"), 
-                  (created_after, Main.TrustRank.humaness_threshold[]))
+                  (created_after, Main.TrustRank.humaness_threshold[], "{$(join(hidden_hashtags, ','))}"))
     [(; kind=Int(HASHTAGS_2), content=JSON.json(Dict(res)))]
 end
 

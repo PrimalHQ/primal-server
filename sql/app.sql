@@ -44,7 +44,6 @@ AS $BODY$
 SELECT EXISTS (SELECT 1 FROM deleted_events WHERE event_id = a_event_id)
 $BODY$;
 
-/* TODO: reimplement to use filterlist table */
 CREATE OR REPLACE FUNCTION public.is_pubkey_hidden_by_group(a_user_pubkey bytea, a_scope cmr_scope, a_pubkey bytea, a_cmr_grp cmr_grp, a_fl_grp filterlist_grp) RETURNS bool
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
@@ -75,6 +74,13 @@ BEGIN
         RETURN true;
     END IF;
 
+    IF EXISTS (
+        SELECT 1 FROM lists
+        WHERE pubkey = a_pubkey AND list = 'spam_block'
+    ) THEN
+        RETURN true;
+    END IF;
+
     RETURN 
         is_pubkey_hidden_by_group(a_user_pubkey, a_scope, a_pubkey, 'primal_spam', 'spam') OR
         is_pubkey_hidden_by_group(a_user_pubkey, a_scope, a_pubkey, 'primal_nsfw', 'nsfw');
@@ -87,40 +93,41 @@ AS $BODY$
 SELECT EXISTS (SELECT 1 FROM events WHERE events.id = a_event_id AND is_pubkey_hidden(a_user_pubkey, a_scope, events.pubkey))
 $BODY$;
 
-CREATE OR REPLACE FUNCTION public.user_is_human(a_pubkey bytea) RETURNS bool
+CREATE OR REPLACE FUNCTION public.user_is_human(a_pubkey bytea, a_user_pubkey bytea) RETURNS bool
 LANGUAGE 'sql' STABLE PARALLEL SAFE
 AS $BODY$
 SELECT (
     EXISTS (SELECT 1 FROM pubkey_trustrank ptr WHERE ptr.pubkey = a_pubkey) OR
-    EXISTS (SELECT 1 FROM human_override ho WHERE ho.pubkey = a_pubkey AND ho.is_human)
+    EXISTS (SELECT 1 FROM human_override ho WHERE ho.pubkey = a_pubkey AND ho.is_human) OR
+    EXISTS (SELECT 1 FROM pubkey_followers WHERE pubkey = a_pubkey AND follower_pubkey = a_user_pubkey)
 )
 $BODY$;
 
-CREATE OR REPLACE FUNCTION public.notification_is_visible(type int8, arg1 bytea, arg2 bytea) RETURNS bool
+CREATE OR REPLACE FUNCTION public.notification_is_visible(type int8, arg1 bytea, arg2 bytea, a_user_pubkey bytea) RETURNS bool
 LANGUAGE 'sql' STABLE PARALLEL SAFE
 AS $BODY$
 SELECT
     CASE type
-    WHEN 1 THEN user_is_human(arg1)
-    WHEN 2 THEN user_is_human(arg1)
+    WHEN 1 THEN user_is_human(arg1, a_user_pubkey)
+    WHEN 2 THEN user_is_human(arg1, a_user_pubkey)
 
-    WHEN 3 THEN user_is_human(arg2)
-    WHEN 4 THEN user_is_human(arg2)
-    WHEN 5 THEN user_is_human(arg2)
-    WHEN 6 THEN user_is_human(arg2)
+    WHEN 3 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 4 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 5 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 6 THEN user_is_human(arg2, a_user_pubkey)
 
-    WHEN 7 THEN user_is_human(arg2)
-    /* WHEN 8 THEN user_is_human(arg3) */
+    WHEN 7 THEN user_is_human(arg2, a_user_pubkey)
+    /* WHEN 8 THEN user_is_human(arg3, a_user_pubkey) */
 
-    WHEN 101 THEN user_is_human(arg2)
-    WHEN 102 THEN user_is_human(arg2)
-    WHEN 103 THEN user_is_human(arg2)
-    WHEN 104 THEN user_is_human(arg2)
+    WHEN 101 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 102 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 103 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 104 THEN user_is_human(arg2, a_user_pubkey)
 
-    /* WHEN 201 THEN user_is_human(arg3) */
-    /* WHEN 202 THEN user_is_human(arg3) */
-    /* WHEN 203 THEN user_is_human(arg3) */
-    /* WHEN 204 THEN user_is_human(arg3) */
+    /* WHEN 201 THEN user_is_human(arg3, a_user_pubkey) */
+    /* WHEN 202 THEN user_is_human(arg3, a_user_pubkey) */
+    /* WHEN 203 THEN user_is_human(arg3, a_user_pubkey) */
+    /* WHEN 204 THEN user_is_human(arg3, a_user_pubkey) */
     END CASE
 $BODY$;
 
@@ -498,7 +505,15 @@ BEGIN
                     pubkeys := array_append(pubkeys, e_pubkey);
                 END IF;
 
-                IF a_apply_humaness_check AND NOT user_is_human(e_pubkey) THEN
+                IF a_apply_humaness_check AND NOT user_is_human(e_pubkey, a_user_pubkey) THEN
+                    CONTINUE;
+                END IF;
+
+                IF e_kind = 6 AND (
+                    EXISTS (SELECT 1 FROM basic_tags WHERE id = e_id AND tag = 'p' AND is_pubkey_hidden(a_user_pubkey, 'content', arg1))
+                    OR
+                    EXISTS (SELECT 1 FROM basic_tags WHERE id = e_id AND tag = 'e' AND event_is_deleted(arg1))
+                ) THEN
                     CONTINUE;
                 END IF;
 

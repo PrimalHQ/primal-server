@@ -1115,9 +1115,9 @@ function get_notifications(
                              from pubkey_notifications pn
                              where 
                                 pubkey = \$1 and created_at >= \$2 and created_at <= \$3
-                                and notification_is_visible(type, arg1, arg2)
+                                and notification_is_visible(type, arg1, arg2, \$4)
                              order by created_at desc",
-                             (pubkey, s, u))
+                             (pubkey, s, u, user_pubkey))
                         else
                             type_arr = '{'*join([Int(t) for t in type], ',')*'}'
                             !isnothing(explain) && @show type_arr
@@ -1128,9 +1128,9 @@ function get_notifications(
                              where 
                                 pubkey = \$1 and created_at >= \$2 and created_at <= \$3
                                 and type = any (\$4::int8[])
-                                and notification_is_visible(type, arg1, arg2)
+                                and notification_is_visible(type, arg1, arg2, \$5)
                              order by created_at desc",
-                             (pubkey, s, u, type_arr))
+                             (pubkey, s, u, type_arr, user_pubkey))
                         end
                     end,
                     accept_result=function (r)
