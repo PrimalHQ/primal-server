@@ -42,6 +42,7 @@ function ext_init(est::CacheStorage)
                                             display_name tsvector,
                                             displayName tsvector,
                                             nip05 tsvector,
+                                            nip16 tsvector,
                                             primary key (pubkey)
                                             )",
                                             # "create index if not exists user_search_pubkey_idx on user_search (pubkey)",
@@ -50,6 +51,7 @@ function ext_init(est::CacheStorage)
                                             "create index if not exists user_search_display_name_idx on user_search using GIN (display_name)",
                                             "create index if not exists user_search_displayName_idx on user_search using GIN (displayName)",
                                             "create index if not exists user_search_nip05_idx on user_search using GIN (nip05)",
+                                            "create index if not exists user_search_nip16_idx on user_search using GIN (nip16)",
                                             ])
 ##
     est.dyn[:reported] = est.params.MembershipDBDict(Nostr.PubKeyId, Bool, "reported"; connsel=est.pqconnstr,
@@ -573,7 +575,7 @@ end
 
 update_user_search_exceptions = CircularBuffer(100) |> ThreadSafe
 function update_user_search(est::CacheStorage, pubkey::Nostr.PubKeyId)
-    get(est.pubkey_followers_cnt, pubkey, 0) >= 3 || return false
+    get(est.pubkey_followers_cnt, pubkey, 0) >= 1 || return false
     exec(est.dyn[:user_search], @sql("delete from user_search where pubkey = ?1"), (pubkey,))
     try
         mdid = est.meta_data[pubkey]
@@ -588,9 +590,10 @@ function update_user_search(est::CacheStorage, pubkey::Nostr.PubKeyId)
                                          to_tsvector('simple', ?4), 
                                          to_tsvector('simple', ?5), 
                                          to_tsvector('simple', ?6), 
-                                         to_tsvector('simple', ?7) 
+                                         to_tsvector('simple', ?7),
+                                         to_tsvector('simple', ?8) 
                                          )"), 
-             (pubkey, mdid, [get(c, a, nothing) for a in ["name", "username", "display_name", "displayName", "nip05"]]...))
+             (pubkey, mdid, [get(c, a, nothing) for a in ["name", "username", "display_name", "displayName", "nip05", "lud16"]]...))
     catch ex push!(update_user_search_exceptions, (; t=time(), ex, pubkey)) end
     true
 end
@@ -820,5 +823,12 @@ function import_filterlists(est::CacheStorage)
             end
         end
     end
+end
+
+function get_trusted_followers_count(est::CacheStorage, pubkey::Nostr.PubKeyId)
+    Postgres.execute(est.dbargs.connsel, 
+                     "select count(1) from pubkey_followers pf, pubkey_trustrank tr 
+                     where pf.pubkey = \$1 and pf.follower_pubkey = tr.pubkey and tr.rank > 0",
+                     [pubkey])[2][1][1]
 end
 

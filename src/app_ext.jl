@@ -1297,9 +1297,10 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
                                          username @@ to_tsquery('simple', ?2) or
                                          display_name @@ to_tsquery('simple', ?3) or
                                          displayName @@ to_tsquery('simple', ?4) or
-                                         nip05 @@ to_tsquery('simple', ?5)
+                                         nip05 @@ to_tsquery('simple', ?5) or
+                                         lud16 @@ to_tsquery('simple', ?6)
                                          "),
-                                 (q, q, q, q, q))
+                                 (q, q, q, q, q, q))
                 pk = Nostr.PubKeyId(pk)
                 res[pk] = est.pubkey_followers_cnt[pk]
             end
