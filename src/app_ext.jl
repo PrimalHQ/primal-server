@@ -884,6 +884,30 @@ function advanced_search(
     isempty(query) && error("query is empty")
     limit = min(100, limit)
 
+    if occursin("!contentmoderationdemofeed:", query)
+        if startswith(query, "kind:1 ")
+            query = replace(string(query[8:end]), '"'=>"")
+        end
+        ps = map(string, split(query, ':'))
+        fn = abspath(dirname(RECOMMENDED_READS_FILE[])*"/demo-feed.json")
+        posts = Tuple{Nostr.EventId, Int}[(Nostr.bech32_decode(s), Dates.datetime2unix(Dates.DateTime(replace(t, ' '=>'T'))))
+                                          for (s, t) in JSON.parse(read(fn, String))[ps[2]]]
+        d = Dict(posts)
+        res = enrich_feed_events_pg(est; posts, user_pubkey)
+        res1 = []
+        res2 = []
+        for e in res
+            if e["kind"] == 1
+                e["created_at"] = d[Nostr.EventId(e["id"])]
+                push!(res1, e)
+            else
+                push!(res2, e)
+            end
+        end
+        # res1 = sort(res1; by=e->e["created_at"])
+        return [res1; res2]
+    end
+
     if !isnothing(DAG_OUTPUTS[])
         mod, outputs = DAG_OUTPUTS[]
         tdur = @elapsed res, orderby, stats, err = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
