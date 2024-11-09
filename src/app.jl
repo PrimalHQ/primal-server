@@ -977,13 +977,13 @@ end
 function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
     res_primal_names = Dict()
     for pk in pubkeys
-        for name in Main.InternalServices.nostr_json_query_by_pubkey(pk)
+        for name in Main.InternalServices.nostr_json_query_by_pubkey(pk; default_name=true)
             res_primal_names[pk] = name
             break
         end
     end
     [(; kind=USER_PRIMAL_NAMES, 
-         content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names])))]
+      content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names])))]
 end
 
 function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, apply_humaness_check=false)

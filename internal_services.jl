@@ -362,9 +362,14 @@ function nostr_json_query_by_name(name::String)
         [Nostr.PubKeyId(pk) for (pk,) in DB.exec(verified_users[], DB.@sql("select pubkey from verified_users where lower(name) = lower(?1)"), (name,))]
     end
 end
-function nostr_json_query_by_pubkey(pubkey::Nostr.PubKeyId)
+function nostr_json_query_by_pubkey(pubkey::Nostr.PubKeyId; default_name=false)
     lock(nostr_json_query_lock) do 
-        [name for (name,) in DB.exec(verified_users[], DB.@sql("select name from verified_users where pubkey = ?1"), (pubkey,))]
+        q = if default_name
+            DB.@sql("select name from verified_users where pubkey = ?1 and default_name = true")
+        else
+            DB.@sql("select name from verified_users where pubkey = ?1")
+        end
+        [name for (name,) in DB.exec(verified_users[], q, (pubkey,))]
     end
 end
 
