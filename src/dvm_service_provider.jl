@@ -20,7 +20,7 @@ NIP90_JOB_FEEDBACK=7000
 
 PRIMAL_DVM_KEYPAIR_SALT = Ref{Any}(nothing)
 
-RELAY_URLS = ["ws://192.168.14.7:7777", "wss://relay.damus.io", "wss://nostr.mom"]
+RELAY_URLS = ["ws://192.168.18.7:7777", "wss://relay.damus.io", "wss://nostr.mom"]
 # RELAY_URLS = ["ws://192.168.14.7:7777", "wss://nostr.mom"]
 
 clients = []
@@ -39,7 +39,7 @@ end
 function stop()
     @assert !isempty(clients)
     for client in clients
-        close(client)
+        try close(client) catch ex; println(ex); end
     end
     empty!(clients)
     nothing
@@ -56,18 +56,75 @@ function connect_client(relay_url)
                        end)
 end
 
+FEEDS = [
+         ("primal-dvm-0", :active,
+          "Trending on Primal 4h",
+          "Global trending notes in the past 4 hours",
+          "https://m.primal.net/LsXL.png",
+          "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":4}",
+          false),
+         ("primal-dvm-1", :deleted,
+          "Trending 4h Notes on Primal",
+          "Trending notes on Primal posted in the last four hours",
+          "",
+          "",
+          false),
+         ("primal-dvm-2", :active,
+          "Trending on Primal 24h",
+          "Global trending notes in the past 24 hours",
+          "https://m.primal.net/LsDT.png",
+          "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":24}",
+          false),
+         ("primal-dvm-3", :deleted,
+          "Nostr Topic Reads",
+          "Nostr Topic Reads",
+          "",
+          "",
+          true),
+         ("primal-dvm-4", :deleted,
+          "Bitcoin Topic Reads",
+          "Bitcoin Topic Reads",
+          "",
+          "",
+          false),
+         ("primal-dvm-5", :deleted,
+          "Linux Topic Reads - deletion test",
+          "Linux Topic Reads - deletion test",
+          "",
+          "",
+          false),
+         ("primal-dvm-6", :active,
+          "Trending on Primal 1h",
+          "Global trending notes in the past hour",
+          "https://m.primal.net/LsDO.png",
+          "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":1}",
+          false),
+         ("primal-dvm-7", :active,
+          "Trending on Primal 12h",
+          "Global trending notes in the past 12 hours",
+          "https://m.primal.net/LsDc.png",
+          "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":12}",
+          false),
+         ("primal-dvm-8", :active,
+          "Trending on Primal 48h",
+          "Global trending notes in the past 48 hours",
+          "https://m.primal.net/LsDf.png",
+          "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":48}",
+          false),
+         ("primal-dvm-9", :active,
+          "Trending on Primal 7d",
+          "Global trending notes in the past 7 days",
+          "https://m.primal.net/LsDh.png",
+          "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":168}",
+          false),
+        ]
+
 function on_connect(client)
     println("dvm: connected to $(client.relay_url)")
 
     hinfo = (;
              amount="free",
              personalized=false,
-             picture="https://m.primal.net/Jtrn.png",
-             image="https://m.primal.net/Jtrn.png",
-             # picture="https://primal.net/assets/logo_fire-409917ad.svg",
-             # image="https://primal.net/assets/logo_fire-409917ad.svg",
-             # picture="https://primal.net/assets/primal_qr-b407e7d8.png",
-             # image="https://primal.net/assets/primal_qr-b407e7d8.png",
              cashuAccepted=false,
              nip90Params=(;
                           max_results=(;
@@ -81,36 +138,10 @@ function on_connect(client)
              # subscription=true,
             )
 
-    for (feed_id, state, name, about, verifiedonly) in 
-        [
-         ("primal-dvm-0", :active,
-          "Trending 4h Notes on Primal",
-          "Trending notes on Primal posted in the last four hours",
-          false),
-         ("primal-dvm-1", :deleted,
-          "Trending 4h Notes on Primal",
-          "Trending notes on Primal posted in the last four hours",
-          false),
-         ("primal-dvm-2", :active,
-          "Trending 24h Notes on Primal",
-          "Trending notes on Primal posted in the last day",
-          true),
-         ("primal-dvm-3", :active,
-          "Nostr Topic Reads",
-          "Nostr Topic Reads",
-          true),
-         ("primal-dvm-4", :active,
-          "Bitcoin Topic Reads",
-          "Bitcoin Topic Reads",
-          false),
-         ("primal-dvm-5", :deleted,
-          "Linux Topic Reads - deletion test",
-          "Linux Topic Reads - deletion test",
-          false),
-        ]
+    for (feed_id, state, name, about, image, spec, verifiedonly) in FEEDS
         seckey, pubkey = Nostr.generate_keypair(; seckey=SHA.sha256([PRIMAL_DVM_KEYPAIR_SALT[]; collect(transcode(UInt8, feed_id))]))
         keypairs[feed_id] = (; seckey, pubkey, verifiedonly)
-        created_at = trunc(Int, datetime2unix(DateTime("2024-08-09T19:03"))) # bump when any feed is updated
+        created_at = trunc(Int, datetime2unix(DateTime("2024-11-04T15:00"))) # bump when any feed is updated
         eact = Nostr.Event(seckey, pubkey,
                            created_at,
                            NIP89_HANDLER_INFORMATION,
@@ -118,7 +149,10 @@ function on_connect(client)
                             for t in [["d", feed_id],
                                       ["k", "$NIP90_NOSTR_CONTENT_DISCOVERY_REQUEST"],
                                      ]],
-                           JSON.json((; hinfo..., name, about, (verifiedonly ? [:subscription=>verifiedonly] : [])...)))
+                           JSON.json((; hinfo..., 
+                                      name, about, picture=image, image, 
+                                      primal_spec=spec,
+                                      (verifiedonly ? [:subscription=>verifiedonly] : [])...)))
         edel = Nostr.Event(seckey, pubkey,
                            created_at,
                            Int(Nostr.EVENT_DELETION),
@@ -133,6 +167,7 @@ function on_connect(client)
         else; error("invalid DVM feed state: $state")
         end
         NostrClient.send(client, e; timeout=(5.0, "dvm: handler info event ack for $(client.relay_url)")) do m, done
+            # @show (client.relay_url, m)
             m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) handler info event for feed $feed_id failed")
             done(:ok)
         end
@@ -222,26 +257,16 @@ function handle_request(client, m)
         send(re)
         []
     else
-        res = 
-        if      feed_id == "primal-dvm-0"
-            hours = 4
-            Main.App.with_analytics_cache(Main.cache_storage, user_pubkey, :trending, (:explore_global_trending, (; hours))) do
-                Main.App.explore(Main.cache_storage; timeframe="trending", scope="global", limit, created_after=trunc(Int, time()-hours*3600), user_pubkey)
+        res = []
+        ok = false
+        for (fid, state, _, _, _, spec, verifiedonly) in FEEDS
+            if state == :active && feed_id == fid
+                append!(res, Main.App.mega_feed_directive(Main.cache_storage; spec, user_pubkey))
+                ok = true
+                break
             end
-        elseif feed_id == "primal-dvm-2"
-            hours = 24
-            Main.App.with_analytics_cache(Main.cache_storage, user_pubkey, :trending, (:explore_global_trending, (; hours))) do
-                Main.App.explore(Main.cache_storage; timeframe="trending", scope="global", limit, created_after=trunc(Int, time()-hours*3600), user_pubkey)
-            end
-        elseif feed_id == "primal-dvm-3"
-            Main.App.long_form_content_feed(Main.cache_storage; topic="nostr", limit, user_pubkey)
-        elseif feed_id == "primal-dvm-4"
-            Main.App.long_form_content_feed(Main.cache_storage; topic="bitcoin", limit, user_pubkey)
-        elseif feed_id == "primal-dvm-5"
-            Main.App.long_form_content_feed(Main.cache_storage; topic="linux", limit, user_pubkey)
-        else
-            return
         end
+        ok || return
 
         [e.id for e in res if e.kind == 1 || e.kind == 30023 || e.kind == 10030023]
     end

@@ -2713,7 +2713,7 @@ function dvm_feed(
     dvm_pubkey = cast(dvm_pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    @show (dvm_pubkey, dvm_id)
+    # @show (dvm_pubkey, dvm_id)
 
     function response(eids)
         posts = Tuple{Nostr.EventId, Int}[]
@@ -2749,7 +2749,14 @@ function dvm_feed(
         end
     end
 
-    relays = Main.DVMFeedChecker.RELAYS
+    relays = Set(Main.DVMFeedChecker.RELAYS)
+    if !isnothing(user_pubkey)
+        for t in App.get_user_relays(est; pubkey=user_pubkey)[1].tags
+            length(t) >= 2 && t[1] == "r" && push!(relays, t[2])
+        end
+    end
+    relays = collect(relays)
+    display(relays)
                     
     req_id = UUIDs.uuid4()
 
@@ -3132,8 +3139,9 @@ function fetch_results(
 
     t = until
 
+    done = Ref(false)
     j = Ref(0)
-    while length(res) < limit + offset && since <= t && time() < tend
+    while length(res) < limit + offset && since <= t && time() < tend && !done[]
         j[] += 1
 
         if has_orderby
@@ -3168,14 +3176,17 @@ function fetch_results(
         i = Ref(0)
         try
             Postgres.execute(session, "declare cur no scroll cursor for $sql", params)
-            while length(res) < limit + offset && time() < tend
+            while length(res) < limit + offset && time() < tend && !done[]
                 r = Postgres.execute(session, "fetch next from cur")[2]
                 isempty(r) && break
                 (id, posted_at, rest...) = r[1]
                 if !(id in ids)
                     i[] += 1
                     push!(ids, id)
-                    if accept_result(r[1])
+                    ar = accept_result(r[1])
+                    if ar == :done
+                        done[] = true
+                    elseif ar == true
                         push!(res, r[1])
                     end
                     # @show (i[], length(res), posted_at |> Dates.unix2datetime)
@@ -3191,6 +3202,8 @@ function fetch_results(
         end
 
         Postgres.execute(session, "close cur")
+
+        done[] && break
 
         if i[] > 0
             t = res[end][2]

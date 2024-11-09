@@ -22,7 +22,7 @@ RELAYS = [
           "wss://relay.damus.io/",
           "wss://nostr.mom/",
           "wss://nos.lol/",
-          "ws://192.168.14.7:7777", 
+          "ws://192.168.18.7:7777", 
          ]
 
 const RUN_PERIOD = Ref(600)
