@@ -885,24 +885,24 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
     async fn scored(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
         let selector = fa.kwargs["selector"].as_str().unwrap();
 
+        let user_pubkey = 
+            if let Some(v) = fa.kwargs["user_pubkey"].as_str() {
+                hex::decode(v.to_string()).ok()
+            } else { fa.state.lock().await.primal_pubkey.clone() };
+
         let mut k = String::from("precalculated_analytics_");
         k.push_str(selector);
 
-        let r = {
-            let row = &Self::pool_get(&fa.pool).await?.query_one(
-                "select value::text from cache where key = $1", 
-                &[&k]).await?;
-            serde_json::from_str::<Value>(row.get(0))
-        };
+        let res = Self::rows_to_vec(
+            &Self::pool_get(&fa.pool).await?.query(
+                "select f.e::text from cache c, content_moderation_filtering(c.value, 'content', $2) f(e) where c.key = $1",
+                &[&k, &user_pubkey]).await?);
 
-        if let Ok(Value::Array(arr)) = r {
-            let cw = &mut fa.client_write.lock().await;
-            Self::send_response(fa.subid, cw, &arr.into_iter().map(|e| e.to_string()).collect()).await?;
-            Self::send_eose(fa.subid, cw).await?;
-            return Ok(Handled);
-        }
+        let cw = &mut fa.client_write.lock().await;
+        Self::send_response(fa.subid, cw, &res).await?;
+        Self::send_eose(fa.subid, cw).await?;
 
-        Ok(NotHandled)
+        Ok(Handled)
     }
 
     async fn get_default_app_settings(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
