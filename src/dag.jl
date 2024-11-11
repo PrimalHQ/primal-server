@@ -562,15 +562,16 @@ function mkviews!(outputs::NamedTuple; schema=:public)
 
     server = first(collect(servers))
 
-    function exe(q)
+    function exe(q, args=[])
         # println(q)
-        Postgres.execute(server, q)
+        Postgres.execute(server, q, args)
     end
 
     exe("create schema if not exists $schema")
 
     for (k, st) in pairs(outputs)
         k in PROTECTED_TABLES && continue
+        isempty(exe("select * from pg_tables where schemaname = \$1 and tablename = \$2", ["public", k])) || continue
         exe("drop view if exists $schema.$k")
         exe("create view $schema.$k as (select * from public.$(st.table))")
     end
