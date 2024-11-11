@@ -187,6 +187,8 @@ enum Commands {
     Run {
         #[arg(short, long)]
         port: i32,
+        #[arg(short, long)]
+        backend_addr: String,
     },
     Req {
         #[arg(short, long)]
@@ -361,7 +363,7 @@ async fn main() -> Result<(), Error> {
     }
 
     match &cli.command {
-        Some(Commands::Run { port }) => {
+        Some(Commands::Run { port, backend_addr }) => {
             {
                 let state = state.clone();
 
@@ -404,7 +406,7 @@ async fn main() -> Result<(), Error> {
                     Ok((stream, _)) => {
                         let pool = pool.clone();
                         let membership_pool = membership_pool.clone();
-                        tokio::spawn(accept_websocket_connection(stream, state.clone(), pool, membership_pool));
+                        tokio::spawn(accept_websocket_connection(stream, state.clone(), pool, membership_pool, backend_addr.to_string()));
                     },
                     Err(err) => {
                         println!("accept loop: {:?}", err);
@@ -534,7 +536,7 @@ fn incr(x: &AtomicI64) { incr_by(x, 1); }
 fn decr(x: &AtomicI64) { incr_by(x, -1); }
 
 #[named]
-async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>, pool: Pool, membership_pool: Pool) {
+async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>, pool: Pool, membership_pool: Pool, backend_addr: String) {
     let conn_id = {
         let mut state = state.lock().await;
         state.conn_index += 1;
@@ -558,7 +560,7 @@ async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>
     // info!("new ws connection: {}", _addr);
     incr(&state.lock().await.stats.connections);
 
-    let (ws_stream_backend, _) = tokio_tungstenite::connect_async("ws://127.0.0.1:8817/").await.expect("can't connect");
+    let (ws_stream_backend, _) = tokio_tungstenite::connect_async(backend_addr).await.expect("can't connect");
     let (backend_write, mut backend_read) = ws_stream_backend.split();
 
     let arc_backend_write = Arc::new(Mutex::new(backend_write));
@@ -730,8 +732,8 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                             ReqHandlers::get_bookmarks(&fa).await
                         } else if funcall == "user_infos" {
                             ReqHandlers::user_infos(&fa).await
-                        } else if funcall == "server_name" {
-                            ReqHandlers::server_name(&fa).await
+                        // } else if funcall == "server_name" {
+                        //     ReqHandlers::server_name(&fa).await
                         } else if funcall == "get_notifications_seen" {
                             ReqHandlers::get_notifications_seen(&fa).await
                         } else if funcall == "feed" {
