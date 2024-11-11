@@ -1855,7 +1855,7 @@ end
 
 server_index() = Int(Sockets.getipaddr().host >> 8 & 0xff)-10
 function server_name(est::DB.CacheStorage)
-    [(; content=JSON.json(server_index()))]
+    [(; content=JSON.json((; server=server_index(), node=Main.NODEIDX)))]
 end
 
 REPLICATE_TO_SERVERS = []
