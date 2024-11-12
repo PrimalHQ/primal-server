@@ -42,7 +42,7 @@ function ext_init(est::CacheStorage)
                                             display_name tsvector,
                                             displayName tsvector,
                                             nip05 tsvector,
-                                            nip16 tsvector,
+                                            lud16 tsvector,
                                             primary key (pubkey)
                                             )",
                                             # "create index if not exists user_search_pubkey_idx on user_search (pubkey)",
@@ -51,7 +51,7 @@ function ext_init(est::CacheStorage)
                                             "create index if not exists user_search_display_name_idx on user_search using GIN (display_name)",
                                             "create index if not exists user_search_displayName_idx on user_search using GIN (displayName)",
                                             "create index if not exists user_search_nip05_idx on user_search using GIN (nip05)",
-                                            "create index if not exists user_search_nip16_idx on user_search using GIN (nip16)",
+                                            "create index if not exists user_search_lud16_idx on user_search using GIN (lud16)",
                                             ])
 ##
     est.dyn[:reported] = est.params.MembershipDBDict(Nostr.PubKeyId, Bool, "reported"; connsel=est.pqconnstr,
