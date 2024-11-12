@@ -732,8 +732,8 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                             ReqHandlers::get_bookmarks(&fa).await
                         } else if funcall == "user_infos" {
                             ReqHandlers::user_infos(&fa).await
-                        // } else if funcall == "server_name" {
-                        //     ReqHandlers::server_name(&fa).await
+                        } else if funcall == "server_name" {
+                            ReqHandlers::server_name(&fa).await
                         } else if funcall == "get_notifications_seen" {
                             ReqHandlers::get_notifications_seen(&fa).await
                         } else if funcall == "feed" {
@@ -752,6 +752,7 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                             handled = true;
                             let cw = &mut client_write.lock().await;
                             ReqHandlers::send_notice(subid, cw, s.as_str()).await;
+                            ReqHandlers::send_eose(subid, cw).await;
                         },
                         Err(err) => {
                             handled = false;
@@ -996,9 +997,9 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
 
         let cw = &mut fa.client_write.lock().await;
         Self::send_response(fa.subid, cw, &vec!(e.to_string())).await;
-        Self::send_eose(fa.subid, cw).await;
-        
-        Ok(Handled)
+        // Self::send_eose(fa.subid, cw).await;
+        // Ok(Handled)
+        Ok(NotHandled)
     }
 
     async fn get_app_releases(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
