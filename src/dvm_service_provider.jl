@@ -56,75 +56,84 @@ function connect_client(relay_url)
                        end)
 end
 
+##
+DVMServiceProvider.eval(quote
 FEEDS = [
          ("primal-dvm-0", :active,
           "Trending on Primal 4h",
           "Global trending notes in the past 4 hours",
           "https://m.primal.net/LsXL.png",
           "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":4}",
-          false),
+          false, false),
          ("primal-dvm-1", :deleted,
           "Trending 4h Notes on Primal",
           "Trending notes on Primal posted in the last four hours",
           "",
           "",
-          false),
+          false, false),
          ("primal-dvm-2", :active,
           "Trending on Primal 24h",
           "Global trending notes in the past 24 hours",
           "https://m.primal.net/LsDT.png",
           "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":24}",
-          false),
+          false, false),
          ("primal-dvm-3", :deleted,
           "Nostr Topic Reads",
           "Nostr Topic Reads",
           "",
           "",
-          true),
+          true, false),
          ("primal-dvm-4", :deleted,
           "Bitcoin Topic Reads",
           "Bitcoin Topic Reads",
           "",
           "",
-          false),
+          false, false),
          ("primal-dvm-5", :deleted,
           "Linux Topic Reads - deletion test",
           "Linux Topic Reads - deletion test",
           "",
           "",
-          false),
+          false, false),
          ("primal-dvm-6", :active,
           "Trending on Primal 1h",
           "Global trending notes in the past hour",
           "https://m.primal.net/LsDO.png",
           "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":1}",
-          false),
+          false, false),
          ("primal-dvm-7", :active,
           "Trending on Primal 12h",
           "Global trending notes in the past 12 hours",
           "https://m.primal.net/LsDc.png",
           "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":12}",
-          false),
+          false, false),
          ("primal-dvm-8", :active,
           "Trending on Primal 48h",
           "Global trending notes in the past 48 hours",
           "https://m.primal.net/LsDf.png",
           "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":48}",
-          false),
+          false, false),
          ("primal-dvm-9", :active,
           "Trending on Primal 7d",
           "Global trending notes in the past 7 days",
           "https://m.primal.net/LsDh.png",
           "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":168}",
-          false),
+          false, false),
+         ("primal-dvm-10", :active,
+          "Bitcoin Reads",
+          "Bitcoin-related long form notes",
+          "https://m.primal.net/LzCI.png",
+          "{\"id\":\"reads-topic-bitcoin\"}",
+          false, false),
         ]
+end)
+##
 
 function on_connect(client)
     println("dvm: connected to $(client.relay_url)")
 
     hinfo = (;
              amount="free",
-             personalized=false,
              cashuAccepted=false,
              nip90Params=(;
                           max_results=(;
@@ -138,10 +147,10 @@ function on_connect(client)
              # subscription=true,
             )
 
-    for (feed_id, state, name, about, image, spec, verifiedonly) in FEEDS
+    for (feed_id, state, name, about, image, spec, verifiedonly, personalized) in FEEDS
         seckey, pubkey = Nostr.generate_keypair(; seckey=SHA.sha256([PRIMAL_DVM_KEYPAIR_SALT[]; collect(transcode(UInt8, feed_id))]))
         keypairs[feed_id] = (; seckey, pubkey, verifiedonly)
-        created_at = trunc(Int, datetime2unix(DateTime("2024-11-04T15:00"))) # bump when any feed is updated
+        created_at = trunc(Int, datetime2unix(DateTime("2024-11-10T01:00"))) # bump when any feed is updated
         eact = Nostr.Event(seckey, pubkey,
                            created_at,
                            NIP89_HANDLER_INFORMATION,
@@ -152,6 +161,7 @@ function on_connect(client)
                            JSON.json((; hinfo..., 
                                       name, about, picture=image, image, 
                                       primal_spec=spec,
+                                      personalized,
                                       (verifiedonly ? [:subscription=>verifiedonly] : [])...)))
         edel = Nostr.Event(seckey, pubkey,
                            created_at,
@@ -259,21 +269,29 @@ function handle_request(client, m)
     else
         res = []
         ok = false
-        for (fid, state, _, _, _, spec, verifiedonly) in FEEDS
+        for (fid, state, _, _, _, spec, verifiedonly, personalized) in FEEDS
             if state == :active && feed_id == fid
-                append!(res, Main.App.mega_feed_directive(Main.cache_storage; spec, user_pubkey))
+                append!(res, Main.App.mega_feed_directive(Main.cache_storage; spec, user_pubkey, limit=50))
                 ok = true
                 break
             end
         end
         ok || return
 
-        [e.id for e in res if e.kind == 1 || e.kind == 30023 || e.kind == 10030023]
+        if isempty(res)
+            []
+        else
+            if res[1] isa Dict
+                [Nostr.EventId(e["id"]) for e in res if e["kind"] == 1 || e["kind"] == 30023]
+            else
+                [e.id for e in res if e.kind == 1 || e.kind == 30023]
+            end
+        end
     end
 
     # @show (feed_id, length(eids))
 
-    isempty(eids) && return
+    # isempty(eids) && return
 
     content = JSON.json([["e", Nostr.hex(eid)] for eid in eids]) 
 
