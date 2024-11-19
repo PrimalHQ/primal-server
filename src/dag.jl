@@ -2024,43 +2024,32 @@ function update_user_search_node(;
         human_override::ServerTable,
         runctx::RunCtx,
         version=1,
+        since=max(runctx.since, current_time() - 3*24*3600),
     )
     step = 1*24*3600
 
-    process_segments("update_user_search/1"; runctx, step) do t1, t2
+    process_segments(["update_user_search/1", human_override]; runctx, step, since) do t1, t2
         transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
-            pex(q, args=[]) = Postgres.execute(session1, q, args)[2]
-            rank = pex("select humaness_threshold_trustrank()")[1][1]
-            peids = Nostr.EventId[]
-            for r in pex("
+            for (pk, added_at) in Postgres.execute(session1, "
                     select 
-                        es.* 
+                        ho.pubkey, ho.added_at
                     from 
-                        $(events.table) es
+                        $(human_override.table) ho
                     where 
-                        es.imported_at >= \$1 and es.imported_at <= \$2 and
-                        es.kind = $(Int(Nostr.TEXT_NOTE))
-                    order by es.id
-                    ", [t1, t2])
+                        ho.added_at >= to_timestamp(\$1) and ho.added_at <= to_timestamp(\$2)
+                    order by ho.pubkey
+                    ", [t1, t2])[2]
                 yield()
                 runctx.running[] || break
-                e = event_from_row(r)
-                isempty(pex("select 1 from $(pubkey_trustrank.table) where pubkey = \$1 and rank >= \$2", [e.pubkey, rank])) && continue
-                if !isnothing(local parent_eid = DB.parse_parent_eid(runctx.est, e))
-                    if length(e.content) >= 600
-                        push!(peids, parent_eid)
-                    end
-                end
-            end
-            for peid in sort(peids)
-                pex("insert into $(note_stats.table) values (\$1, 0) on conflict do nothing", [peid])
-                pex("update $(note_stats.table) set long_replies = long_replies + 1 where eid = \$1", [peid])
+                pk = Nostr.PubKeyId(pk)
+                Main.DB.update_user_search(runctx.est, pk)
             end
         end
     end
 
-    (; note_stats)
+    (; )
 end
+
 function postgres_dbtable_code_from_sqlite(source, destname::String)
     columns = []
     indexes = []
