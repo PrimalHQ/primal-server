@@ -296,6 +296,43 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         end
         return (; title, description, image, url, twitter_card)
 
+    elseif !isnothing(local md = begin
+                          md = nothing
+                          m = match(r"^/([^/]*)/(.*)", path)
+                          if !isnothing(m)
+                              name, identifier = string(m[1]), string(m[2])
+                              pubkey = nothing
+                              for pk in nostr_json_query_by_name(name)
+                                  pubkey = pk
+                                  break
+                              end
+                              if !isnothing(pubkey)
+                                  kind = 30023
+                                  for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                                        DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                                        (pubkey, kind, identifier))
+                                      eid = Nostr.EventId(eid)
+                                      if eid in cache_storage.events
+                                          e = cache_storage.events[eid]
+                                          naddr = Bech32.nip19_encode_naddr(kind, pubkey, identifier)
+                                          url = "https://$(host)/e/$(naddr)"
+                                          for t in e.tags
+                                              if length(t.fields) >= 2
+                                                  t.fields[1] == "title" && (title = t.fields[2])
+                                                  t.fields[1] == "summary" && (description = t.fields[2])
+                                                  t.fields[1] == "image" && (image = t.fields[2])
+                                              end
+                                          end
+                                          twitter_card = "summary_large_image"
+                                          md = (; title, description, image, url, twitter_card)
+                                      end
+                                  end
+                              end
+                          end
+                          md
+                      end)
+        return md
+
     elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
         return (; 
                 title="Download Primal apps and source code", 
@@ -334,7 +371,13 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
     return nothing
 end
 
-index_html_reading = Utils.Throttle(; period=5.0, t=0)
+index_htmls = Dict([host=>(; 
+                           throttle=Utils.Throttle(; period=5.0, t=0), 
+                           index_html=Ref(""), 
+                           index_doc=Ref{Any}(nothing),
+                           index_elems=Dict{Symbol, EzXML.Node}(),
+                          )
+                    for host in ["primal.net", "dev.primal.net"]])
 index_html = Ref("")
 index_doc = Ref{Any}(nothing)
 index_elems = Dict{Symbol, EzXML.Node}()
@@ -375,12 +418,14 @@ end
 
 function preview_handler(req::HTTP.Request)
     lock(index_lock) do
-        dochtml = index_html[]
+        host = Dict(req.headers)["Host"]
+        h = index_htmls[host]
+        dochtml = h.index_html[]
         try
-            host = Dict(req.headers)["Host"]
-            index_html_reading() do
-                index_html[] = read("$(APP_ROOT[])/index.html", String)
-                index_doc[] = doc = EzXML.parsehtml(index_html[])
+            h.throttle() do
+                index_dir = host == "primal.net" ? "/var/www/dev.primal.net" : "/mnt/ppr0/var/www/dev.primal.net"
+                h.index_html[] = read("$(index_dir)/index.html", String)
+                h.index_doc[] = doc = EzXML.parsehtml(h.index_html[])
                 for e in EzXML.findall("/html/head/meta", doc)
                     if haskey(e, "property") && startswith(e["property"], "og:")
                         # index_defaults[Symbol(e["property"][4:end])] = e["content"]
@@ -435,7 +480,7 @@ function preview_handler(req::HTTP.Request)
                     end
                 end
 
-                eltitle = EzXML.findall("/html/head/title", index_doc[])[1]
+                eltitle = EzXML.findall("/html/head/title", h.index_doc[])[1]
                 for el in EzXML.nodes(eltitle)
                     EzXML.unlink!(el)
                 end
@@ -445,7 +490,7 @@ function preview_handler(req::HTTP.Request)
                 s = strip(mels.title * ": " * s)
                 EzXML.link!(eltitle, EzXML.TextNode(s))
 
-                dochtml = string(index_doc[])
+                dochtml = string(h.index_doc[])
             end
         catch ex
             push!(exceptions, (:preview_handler, time(), ex, req))
@@ -612,7 +657,7 @@ function url_lookup_handler(req::HTTP.Request)
         host = Dict(req.headers)["Host"]
         spath = splitext(string(split(req.target, '/')[end]))[1]
         r = DB.exec(short_urls[], DB.@sql("select url from short_urls where path = ?1 limit 1"), (spath,))
-        if isnothing(r)
+        if isempty(r)
             HTTP.Response(404, "unknown url")
         else
             url = r[1][1]
