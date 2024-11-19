@@ -38,7 +38,7 @@ mutable struct Client
                      Dict{String, Any}(), Dict{Nostr.EventId, Any}(),
                      on_notice,
                      true, [])
-        client.listener_task = errormonitor(@async listener(client))
+        client.listener_task = @async listener(client)
         client
     end
 end

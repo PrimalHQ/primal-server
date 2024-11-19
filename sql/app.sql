@@ -24,6 +24,7 @@ CREATE OR REPLACE FUNCTION public.c_USER_FOLLOWER_COUNTS() RETURNS int LANGUAGE 
 CREATE OR REPLACE FUNCTION public.c_EVENT_RELAYS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000141';
 CREATE OR REPLACE FUNCTION public.c_LONG_FORM_METADATA() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000144';
 CREATE OR REPLACE FUNCTION public.c_USER_PRIMAL_NAMES() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000158';
+CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_LEGEND_CUSTOMIZATION() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000168';
 /* CREATE OR REPLACE FUNCTION public.c_COLLECTION_ORDER() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000161'; */
 
 -- types
@@ -765,7 +766,17 @@ DECLARE
     r jsonb;
 BEGIN
     SELECT json_object_agg(ENCODE(pubkey, 'hex'), name) INTO r FROM verified_users WHERE pubkey = ANY(a_pubkeys) and default_name;
-	RETURN NEXT jsonb_build_object('kind', c_USER_PRIMAL_NAMES(), 'content', r::text);
+    IF r IS NOT NULL THEN
+        RETURN NEXT jsonb_build_object('kind', c_USER_PRIMAL_NAMES(), 'content', r::text);
+    END IF;
+
+    SELECT json_object_agg(
+        ENCODE(pubkey, 'hex'), 
+        jsonb_build_object('style', style, 'custom_badge', custom_badge, 'avatar_glow', avatar_glow))
+    INTO r FROM membership_legend_customization WHERE pubkey = ANY(a_pubkeys);
+    IF r IS NOT NULL THEN
+        RETURN NEXT jsonb_build_object('kind', c_MEMBERSHIP_LEGEND_CUSTOMIZATION(), 'content', r::text);
+    END IF;
 END
 $BODY$;
 
@@ -964,4 +975,10 @@ $BODY$;
 SELECT cron.schedule('record_trusted_pubkey_followers_cnt',                 '0 */3 * * *', 'CALL record_trusted_pubkey_followers_cnt()');
 SELECT cron.schedule('record_trusted_pubkey_followers_cnt_delete_old',      '0 * * * *', $$DELETE FROM trusted_pubkey_followers_cnt WHERE t < NOW() - INTERVAL '2 DAY'$$);
 SELECT cron.schedule('update_user_relative_daily_follower_count_increases', '0 * * * *', 'CALL update_user_relative_daily_follower_count_increases()');
+
+CREATE TABLE IF NOT EXISTS public.vars (
+	"name" varchar NOT NULL,
+	value jsonb NULL,
+	CONSTRAINT vars_pk PRIMARY KEY (name)
+);
 

@@ -4,11 +4,18 @@ import ..PushGatewayExporter
 
 periodic_pushgw = Throttle(; period=15.0)
 periodic_notification_counts = Throttle(; period=1.0)
+periodic_rebroadcasting_status = Throttle(; period=3.0)
 
 function ext_periodic()
     periodic_notification_counts() do
         MetricsLogger.log(r->(; funcall=:broadcast_notification_counts)) do
             broadcast_notification_counts()
+        end
+    end
+
+    periodic_rebroadcasting_status() do
+        MetricsLogger.log(r->(; funcall=:broadcast_rebroadcasting_status)) do
+            broadcast_rebroadcasting_status()
         end
     end
 
@@ -90,6 +97,23 @@ function broadcast_notification_counts()
                         end
                         return true
                     end
+                end
+            end
+        end
+    end
+end
+
+function broadcast_rebroadcasting_status()
+    with_broadcast(:broadcast_rebroadcasting_status) do conn, subid, filt
+        if haskey(filt, "cache")
+            filt = filt["cache"]
+            if length(filt) >= 2
+                if filt[1] == "rebroadcasting_status"
+                    event_from_user = filt[2]["event_from_user"]
+                    for d in Base.invokelatest(App().membership_content_rebroadcast_status, est(); event_from_user)
+                        @async send(conn, JSON.json(["EVENT", subid, d]))
+                    end
+                    return true
                 end
             end
         end

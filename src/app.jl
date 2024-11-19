@@ -74,11 +74,25 @@ exposed_functions = Set([:feed,
                          :explore_topics,
 
                          :set_last_time_user_was_online,
+
+                         :client_config,
+
+                         :membership_media_management_stats,
+                         :membership_media_management_uploads,
+                         :membership_media_management_delete,
+                         :membership_recovery_contact_lists,
+                         :membership_recover_contact_list,
+                         :membership_content_stats,
+                         :membership_content_backup,
+                         :membership_content_rebroadcast_start,
+                         :membership_content_rebroadcast_cancel,
+                         :membership_content_rebroadcast_status,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
                                :directmsg_count,
                                :directmsg_count_2,
+                               :rebroadcasting_status,
                               ])
 
 EVENT_STATS=10_000_100
@@ -119,6 +133,14 @@ USER_PRIMAL_NAMES=10_000_158
 DVM_FEED_METADATA=10_000_159
 
 # COLLECTION_ORDER=10_000_161
+
+SHOW_PRIMAL_SUPPORT=10_000_162
+MEMBERSHIP_MEDIA_MANAGEMENT_STATS=10_000_163
+MEMBERSHIP_MEDIA_MANAGEMENT_UPLOADS=10_000_164
+MEMBERSHIP_RECOVERY_CONTACT_LISTS=10_000_165
+MEMBERSHIP_CONTENT_STATS=10_000_166
+MEMBERSHIP_CONTENT_REBROADCAST_STATUS=10_000_167
+MEMBERSHIP_LEGEND_CUSTOMIZATION=10_000_168
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -976,14 +998,23 @@ end
 
 function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
     res_primal_names = Dict()
+    res_legend_customization = Dict()
     for pk in pubkeys
         for name in Main.InternalServices.nostr_json_query_by_pubkey(pk; default_name=true)
             res_primal_names[pk] = name
-            break
+        end
+        for (_, style, custom_badge, avatar_glow) in Postgres.execute(:membership, "select * from membership_legend_customization where pubkey = \$1", [pk])[2]
+            res_legend_customization[pk] = (; style, custom_badge, avatar_glow)
         end
     end
-    [(; kind=USER_PRIMAL_NAMES, 
-      content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names])))]
+    res = []
+    if !isempty(res_primal_names)
+        push!(res, (; kind=USER_PRIMAL_NAMES, content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names]))))
+    end
+    if !isempty(res_legend_customization)
+        push!(res, (; kind=MEMBERSHIP_LEGEND_CUSTOMIZATION, content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_legend_customization]))))
+    end
+    res
 end
 
 function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, apply_humaness_check=false)
@@ -1154,6 +1185,7 @@ function user_profile_followed_by(est::DB.CacheStorage; pubkey, user_pubkey, lim
 
     res = []
     res_mds = []
+    pks = Nostr.PubKeyId[]
     for r in Postgres.execute(DAG_OUTPUTS_DB[],
                               pgparams() do P "
                                   select 
@@ -1177,12 +1209,14 @@ function user_profile_followed_by(est::DB.CacheStorage; pubkey, user_pubkey, lim
                 md = est.events[mdid]
                 push!(res, md)
                 push!(res_mds, md)
+                push!(pks, pk)
                 append!(res, ext_event_response(est, md))
             end
         end
     end
 
     append!(res, user_scores(est, res_mds))
+    append!(res, primal_verified_names(est, pks))
 
     res
 end
@@ -2609,6 +2643,10 @@ function mega_feed_directive(
     elseif id == "important-notes-i-might-have-missed"
     elseif Symbol(id) in exposed_functions
         return getproperty(@__MODULE__, Symbol(id))(est; skwa..., kwargs...)
+    else
+        for f in try JSON.parse(read(ADVANCED_FEEDS_FILE[], String)) catch _; [] end
+            f["id"] == id && return mega_feed_directive(est; spec=f["specification"], kwargs...)
+        end
     end
 
     []
@@ -2858,7 +2896,7 @@ function dvm_feed(
         end
     end
     relays = collect(relays)
-    display(relays)
+    # display(relays)
                     
     req_id = UUIDs.uuid4()
 
@@ -3319,6 +3357,283 @@ function fetch_results(
     end
 
     res[1+offset:end]
+end
+
+function content_moderation_repo_file(filename::String)::String
+    abspath(dirname(RECOMMENDED_READS_FILE[])*"/"*filename)
+end
+
+function client_config(est::DB.CacheStorage)
+    d = try JSON.parse(read(content_moderation_repo_file("client-config.json"), String)) catch _; nothing end
+    [(; kind=Int(SHOW_PRIMAL_SUPPORT), content=JSON.json(d))]
+end
+
+function membership_event_from_user(event_from_user::Dict)
+    if event_from_user["pubkey"] == Nostr.hex(Main.test_pubkeys[:pedja])
+        (; 
+         pubkey=Nostr.PubKeyId(event_from_user["pubkey"]),
+         content=get(event_from_user, "content", nothing),
+        )
+    else
+        parse_event_from_user(event_from_user)
+    end
+end
+
+function membership_media_management_stats(est::DB.CacheStorage; event_from_user::Dict)
+    e = membership_event_from_user(event_from_user)
+
+    image = 0
+    video = 0
+    other = 0
+
+    for (upload_type, cnt, size) in Postgres.execute(:membership, "select * from membership_media_management_stats(\$1)", [e.pubkey])[2]
+        if     upload_type == "video"; video += size
+        elseif upload_type == "image"; image += size
+        elseif upload_type == "other"; other += size
+        end
+    end
+
+    max_storage = Postgres.execute(:membership, "
+                                   select mt.max_storage 
+                                   from memberships ms, membership_tiers mt
+                                   where ms.pubkey = \$1 and ms.tier = mt.tier",
+                                   [e.pubkey])[2][1][1]
+    free = max_storage - (image + video + other)
+
+    [(; kind=Int(MEMBERSHIP_MEDIA_MANAGEMENT_STATS), content=JSON.json((; video, image, other, free)))]
+end
+
+function membership_media_management_uploads(
+        est::DB.CacheStorage; 
+        event_from_user::Dict,
+        since::Int=0, until::Int=1<<62, limit::Int=20, offset::Int=0
+    )
+    e = membership_event_from_user(event_from_user)
+
+    res = []
+    urls = []
+    us = []
+    for (url, size, mimetype, created_at) in 
+        Postgres.execute(:membership, 
+                         "select 'https://m.primal.net/' || su.path || su.ext, mu.size, mu.mimetype, mu.created_at
+                         from media_uploads mu, short_urls su
+                         where mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and su.url = 'https://media.primal.net' || mu.path
+                         order by mu.created_at desc
+                         limit \$4 offset \$5", 
+                         [e.pubkey, since, until, limit, offset])[2]
+        push!(us, (url, created_at))
+        push!(res, (; url, size, mimetype, created_at))
+        push!(urls, url)
+    end
+
+    [(; kind=Int(MEMBERSHIP_MEDIA_MANAGEMENT_UPLOADS), content=JSON.json(res)); get_media_metadata(est; urls); range(us, :created_at)]
+end
+
+function membership_media_management_delete(est::DB.CacheStorage; event_from_user::Dict)
+    e = membership_event_from_user(event_from_user)
+
+    surl = JSON.parse(e.content)["url"]
+
+    spath, ext = splitext(URIs.parse_uri(surl).path[2:end])
+
+    url = Postgres.execute(:membership, 
+                           "select url from short_urls where path = \$1 and ext = \$2 ", 
+                           [spath, ext])[2][1][1]
+
+    path = string(URIs.parse_uri(url).path)
+
+    path, size = Postgres.execute(:membership, 
+                                  "select path, size from media_uploads where pubkey = \$1 and path = \$2 ", 
+                                  [e.pubkey, path])[2][1]
+
+    fp, _ = splitext(path)
+
+    @assert !isempty(fp)
+
+    hosts = ["ppr1", "ppr6", "ppr31", "ppr32"]
+    oks = [try 
+               run(Cmd(["ssh", h, "ls -1 /var/www/cdn$(fp)* | xargs -n1 rm"])).exitcode == 0
+           catch ex
+               # println("membership_media_management_delete: ", ex)
+               false
+           end
+           for h in hosts]
+    @show oks
+
+    Postgres.execute(:membership, "delete from media_uploads where pubkey = \$1 and path = \$2", 
+                     [e.pubkey, path])
+
+    Postgres.execute(:membership, "delete from short_urls where path = \$1 and ext = \$2",
+                     [spath, ext])
+
+    Postgres.execute(:membership, "update from memberships set used_storage = used_storage - \$2 where pubkey = \$1", 
+                     [e.pubkey, size])
+
+    []
+end
+
+function membership_recovery_contact_lists(
+        est::DB.CacheStorage; 
+        event_from_user::Dict,
+        since::Int=0, until::Int=Utils.current_time(), limit::Int=20, offset::Int=0
+    )
+    e = membership_event_from_user(event_from_user)
+
+    since = max(since, Utils.current_time()-90*24*3600)
+
+    es = []
+    for (_, eid, created_at) in Postgres.execute(:p0timelimit, "
+                                                 with cls as (
+                                                     select created_at/(24*3600)::int8 as day, id, created_at, jsonb_array_length(tags) as follows
+                                                     from events where pubkey = \$1 and kind = 3 and created_at >= \$2 and created_at <= \$3
+                                                 )
+                                                 select distinct on (day) day*24*3600, id, created_at
+                                                 from cls order by day, follows desc, id
+                                                 limit \$4 offset \$5", 
+                                                 [e.pubkey, since, until, limit, offset])[2]
+        push!(es, (Nostr.EventId(eid), created_at))
+    end
+
+    res = []
+    for (eid, _) in es
+        eid in est.events && push!(res, est.events[eid])
+    end
+
+    [res; range(es, :created_at)]
+end
+
+function membership_recover_contact_list(est::DB.CacheStorage; event_from_user::Dict)
+    e = membership_event_from_user(event_from_user)
+
+    @show eid = JSON.parse(e.content)["event_id"]
+
+    []
+end
+
+function membership_content_stats(est::DB.CacheStorage; event_from_user::Dict)
+    e = membership_event_from_user(event_from_user)
+
+    res = []
+    for (kind, cnt) in Postgres.execute(:p0timelimit, "
+                                              select kind, count(1) as cnt from events where pubkey = \$1
+                                              group by kind order by cnt desc",
+                                              [e.pubkey])[2]
+        push!(res, (; kind, cnt))
+    end
+
+    [(; kind=Int(MEMBERSHIP_CONTENT_STATS), content=JSON.json(res))]
+end
+
+function membership_content_backup(est::DB.CacheStorage; event_from_user::Dict, kinds=nothing, since=0, limit=100000)
+    e = membership_event_from_user(event_from_user)
+    limit = min(100000, limit)
+    get_user_events(est; e.pubkey, kinds, since, limit)[1]
+end
+
+function get_user_events(est::DB.CacheStorage; pubkey::Nostr.PubKeyId, kinds=nothing, since=0, limit=100000, countonly=false)
+    contentsel = countonly ? "''" : "content"
+    q, qargs = if isnothing(kinds)
+        "select id, pubkey, created_at, kind, tags, $contentsel, sig from events where pubkey = \$1 and created_at >= \$2 order by created_at asc limit \$3", [pubkey, since, limit]
+    else
+        kindsarr = "{$(join(kinds, ','))}"
+        "select id, pubkey, created_at, kind, tags, $contentsel, sig from events where pubkey = \$1 and created_at >= \$2 and kind = any (\$3::text::int8[]) order by created_at asc limit \$4", [pubkey, since, kindsarr, limit]
+    end
+    rs = Postgres.execute(:p0timelimit, q, qargs)[2]
+
+    rescnt = 0
+    last_created_at = 0
+    res = Nostr.Event[]
+    re = Dict()
+    for r in rs
+        e = event_from_row(r)
+        last_created_at = max(last_created_at, e.created_at)
+        if e.kind == 0 || e.kind == 3 || (e.kind >= 10000 && e.kind < 20000)
+            re[(e.pubkey, e.kind)] = e
+        elseif e.kind >= 30000 && e.kind < 40000
+            id = parametrized_replaceable_event_identifier(e)
+            re[(e.pubkey, e.kind, id)] = e
+        else
+            rescnt += 1
+            countonly || push!(res, e)
+        end
+    end
+
+    countonly || append!(res, values(re))
+
+    countonly ? (last_created_at, length(re) + rescnt) : (sort(res; by=e->e.created_at), length(res))
+end
+
+function membership_content_rebroadcast_start(est::DB.CacheStorage; event_from_user::Dict, kinds=nothing)
+    e = membership_event_from_user(event_from_user)
+
+    if !isempty(Postgres.execute(:membership, "
+                                 select 1 from event_rebroadcasting 
+                                 where pubkey = \$1 and started_at is not null and finished_at is null", 
+                                 [e.pubkey])[2])
+        error("rebroadcasting already started")
+    end
+
+    d = JSON.parse(e.content)
+    relays = if haskey(d, "relays")
+        d["relays"]
+    else
+        relays = Set()
+        for t in App.get_user_relays(est; e.pubkey)[1].tags
+            if     length(t) == 2 && t[1] == "r"
+                push!(relays, t[2])
+            elseif length(t) == 3 && t[1] == "r" && t[3] == "write"
+                push!(relays, t[2])
+            end
+        end
+        collect(relays)
+    end
+
+    event_count = 0
+    since = 0
+    while true
+        yield()
+        last_created_at, cnt = get_user_events(est; e.pubkey, kinds, since, limit=10000, countonly=true)
+        since == last_created_at && break
+        since = last_created_at
+        event_count += cnt
+    end
+
+    Postgres.execute(:membership, "delete from event_rebroadcasting where pubkey = \$1", [e.pubkey])
+    Postgres.execute(:membership, "insert into event_rebroadcasting values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)",
+                     [e.pubkey, Dates.now(), missing, 0, 0, event_count, JSON.json(relays), "started", JSON.json(kinds), missing, 0])
+
+    membership_content_rebroadcast_status(est; event_from_user)
+end
+
+function membership_content_rebroadcast_cancel(est::DB.CacheStorage; event_from_user::Dict)
+    e = membership_event_from_user(event_from_user)
+
+    Postgres.execute(:membership, "update event_rebroadcasting set finished_at = now(), status = 'canceled' where pubkey = \$1 and finished_at is null", 
+                     [e.pubkey])
+
+    membership_content_rebroadcast_status(est; event_from_user)
+end
+
+function membership_content_rebroadcast_status(est::DB.CacheStorage; event_from_user::Dict)
+    e = membership_event_from_user(event_from_user)
+
+    r = Postgres.execute(:membership, "
+                         select started_at, finished_at, event_idx, event_count, status, kinds
+                         from event_rebroadcasting where pubkey = \$1", [e.pubkey])[2]
+    isempty(r) && return []
+
+    started_at, finished_at, event_idx, event_count, status, kinds = r[1]
+
+    running = !ismissing(started_at) && ismissing(finished_at)
+
+    res =
+    if running
+        (; running, kinds, status, progress=min(1.0, Float64(event_idx) / event_count))
+    else
+        (; running, kinds, status, progress=0.0)
+    end
+
+    [(; kind=Int(MEMBERSHIP_CONTENT_REBROADCAST_STATUS), content=JSON.json(res))]
 end
 
 end
