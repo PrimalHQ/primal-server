@@ -239,9 +239,11 @@ function override_runtag(node_func::Function, runtag)
 end
 
 function default_pipeline(targetserver, xn, o)
-    o.events = ServerTable(:postgres, targetserver, "event")
+    o.events           = ServerTable(:postgres, targetserver, "event")
     o.pubkey_trustrank = ServerTable(:postgres, targetserver, "pubkey_trustrank")
     o.pubkey_bookmarks = ServerTable(:postgres, targetserver, "pubkey_bookmarks")
+    o.human_override   = ServerTable(:postgres, targetserver, "human_override")
+
     xn(basic_tags_node, o.events)
     # xn(events_simplified_node, o.events)
     # xn(event_stats_node, o.events, o.events_simplified)
@@ -256,6 +258,9 @@ function default_pipeline(targetserver, xn, o)
     xn(event_mentions_node, o.events, o.parametrized_replaceable_events)
     xn(note_length_node; o.events)
     xn(note_stats_node; o.events, o.pubkey_trustrank)
+    xn(update_user_search_node; o.human_override)
+
+    # xn(event_sentiment_node; o.events, o.pubkey_trustrank)
 end
 
 function sqlite2pg_pipeline(targetserver, xn, o)
@@ -1593,45 +1598,46 @@ end
 # end
 
 function get_sentiments(sequences::Vector{String})
-    JSON.parse(String(HTTP.request("POST", "http://192.168.15.1:5010/classify", ["Content-Type"=>"application/json"], 
+    JSON.parse(String(HTTP.request("POST", "http://192.168.50.1:5010/classify", ["Content-Type"=>"application/json"], 
                                    JSON.json((; sequences, labels=["positive", "negative", "question", "neutral"])); 
                                    retry=false, connect_timeout=5, read_timeout=5).body))
 end
 
-function event_sentiment_node(
+function event_sentiment_node(;
         events::ServerTable,
-        event_created_at::ServerTable;
+        pubkey_trustrank::ServerTable,
         runctx::RunCtx,
         version=1,
-        since = max(runctx.since, current_time() - 30*24*3600),
-        until = min(runctx.until, current_time()),
+        since=max(runctx.since, current_time() - 1800),
+        until=min(runctx.until, current_time()),
     )
 
     event_sentiment = dbtable(:postgres, runctx.targetserver, "event_sentiment", version, 
-                            [
-                             events,
-                            ],
-                            [
-                             (:eid,       EventId),
-                             (:model,     String),
+                              [
+                               events,
+                               pubkey_trustrank,
+                              ],
+                              [
+                               (:eid,       EventId),
+                               (:model,     String),
 
-                             (:topsentiment, Char), # + - 0 ?
+                               (:topsentiment, Char), # + - 0 ?
 
-                             (:positive_prob, Float64),
-                             (:negative_prob, Float64),
-                             (:question_prob, Float64),
-                             (:neutral_prob, Float64),
+                               (:positive_prob, Float64),
+                               (:negative_prob, Float64),
+                               (:question_prob, Float64),
+                               (:neutral_prob, Float64),
 
-                             (:imported_at, Int),
+                               (:imported_at, Int),
 
-                             "primary key (eid, model)",
-                            ],
-                            [
-                             :topsentiment,
-                            ];
-                            runtag=runctx.runtag)
+                               "primary key (eid, model)",
+                              ],
+                              [
+                               :topsentiment,
+                              ];
+                              runtag=runctx.runtag)
 
-    process_segments(event_sentiment; runctx, step=24*3600, sequential=true,
+    process_segments(event_sentiment; runctx, step=24*3600, sequential=false,
                      since, until,
                     ) do t1, t2
         transaction_with_execution_stats(events.server; runctx.stats) do session1
@@ -1639,14 +1645,14 @@ function event_sentiment_node(
 
             rs = Postgres.pex(session1, "
                               SELECT
-                                  events.*
+                                  es.*
                               FROM
-                                  $(events.table) events,
-                                  $(event_created_at.table) event_created_at
+                                  $(events.table) es,
+                                  $(pubkey_trustrank.table) tr
                               WHERE 
-                                  events.imported_at >= ?1 AND events.imported_at <= ?2 AND 
-                                  events.kind = $(Int(Nostr.TEXT_NOTE)) AND
-                                  events.id = event_created_at.event_id
+                                  es.imported_at >= ?1 AND es.imported_at <= ?2 AND 
+                                  es.pubkey = tr.pubkey AND
+                                  es.kind = $(Int(Nostr.TEXT_NOTE))
                               ", [t1, t2])
 
             cnt = 0
@@ -1660,33 +1666,34 @@ function event_sentiment_node(
                     continue
                 end
 
-                ok = false
-                for w in [
-                          "primal",
-                          Nostr.bech32_encode(Main.test_pubkeys[:miljan]),
-                          "npub12vkcxr0luzwp8e673v29eqjhrr7p9vqq8asav85swaepclllj09sylpugg", # primal@primal.net
-                         ]
-                    if occursin(w, lowercase(e.content))
-                        ok = true
-                        break
-                    end
-                end
-                for w in [
-                          "https://m.primal.net",
-                          "https://primal.net",
-                          "https://primal.b-cdn.net",
-                         ]
-                    if occursin(w, lowercase(e.content))
-                        ok = false
-                        break
-                    end
-                end
-                ok || continue
+                # ok = false
+                # for w in [
+                #           "primal",
+                #           Nostr.bech32_encode(Main.test_pubkeys[:miljan]),
+                #           "npub12vkcxr0luzwp8e673v29eqjhrr7p9vqq8asav85swaepclllj09sylpugg", # primal@primal.net
+                #          ]
+                #     if occursin(w, lowercase(e.content))
+                #         ok = true
+                #         break
+                #     end
+                # end
+                # for w in [
+                #           "https://m.primal.net",
+                #           "https://primal.net",
+                #           "https://primal.b-cdn.net",
+                #          ]
+                #     if occursin(w, lowercase(e.content))
+                #         ok = false
+                #         break
+                #     end
+                # end
+                # ok || continue
 
-                s = join(first(filter(!isempty, map(string, split(e.content))), 100), ' ')
+                # s = join(first(filter(!isempty, map(string, split(e.content))), 100), ' ')
+                s = e.content
                 isempty(s) && continue
 
-                @show s
+                # @show s
                 res = get_sentiments([s])[1]
                 nt = NamedTuple(zip(map(Symbol, res["labels"]), res["scores"]))
                 toplabel = res["labels"][argmax(res["scores"])]
@@ -1699,7 +1706,7 @@ function event_sentiment_node(
                 end
 
                 push!(event_sentiment_pgt, (e.id,
-                                            "facebook/bart-large-mnli",
+                                            res["model"],
                                             tl,
 
                                             nt.positive,
@@ -1715,7 +1722,7 @@ function event_sentiment_node(
         end
     end
 
-    (; event_sentiment, event_created_at)
+    (; event_sentiment)
 end
 
 function pubkey_media_cnt_node(
@@ -2013,6 +2020,47 @@ function note_stats_node(;
     (; note_stats)
 end
 
+function update_user_search_node(;
+        human_override::ServerTable,
+        runctx::RunCtx,
+        version=1,
+    )
+    step = 1*24*3600
+
+    process_segments("update_user_search/1"; runctx, step) do t1, t2
+        transaction_with_execution_stats(runctx.targetserver; runctx.stats) do session1
+            pex(q, args=[]) = Postgres.execute(session1, q, args)[2]
+            rank = pex("select humaness_threshold_trustrank()")[1][1]
+            peids = Nostr.EventId[]
+            for r in pex("
+                    select 
+                        es.* 
+                    from 
+                        $(events.table) es
+                    where 
+                        es.imported_at >= \$1 and es.imported_at <= \$2 and
+                        es.kind = $(Int(Nostr.TEXT_NOTE))
+                    order by es.id
+                    ", [t1, t2])
+                yield()
+                runctx.running[] || break
+                e = event_from_row(r)
+                isempty(pex("select 1 from $(pubkey_trustrank.table) where pubkey = \$1 and rank >= \$2", [e.pubkey, rank])) && continue
+                if !isnothing(local parent_eid = DB.parse_parent_eid(runctx.est, e))
+                    if length(e.content) >= 600
+                        push!(peids, parent_eid)
+                    end
+                end
+            end
+            for peid in sort(peids)
+                pex("insert into $(note_stats.table) values (\$1, 0) on conflict do nothing", [peid])
+                pex("update $(note_stats.table) set long_replies = long_replies + 1 where eid = \$1", [peid])
+            end
+        end
+    end
+
+    (; note_stats)
+end
 function postgres_dbtable_code_from_sqlite(source, destname::String)
     columns = []
     indexes = []
@@ -3345,6 +3393,14 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=not
 
     expr = parse_search_query(query)
 
+    if expr isa O.And && any("1" in op.features for op in expr.ops if op isa O.PAS)
+        if  isnothing(user_pubkey) || 
+            user_pubkey == Nostr.PubKeyId("532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb") || # primal pubkey
+            isempty(Postgres.execute(:membership, "select 1 from memberships where pubkey = \$1 and tier != 'free' limit 1", [user_pubkey])[2])
+            limit = min(5, limit)
+        end
+    end
+
     stats = Ref(zero_usage_stats) |> ThreadSafe
 
     err = nothing
@@ -3443,6 +3499,8 @@ function init_parsing()
                                           :maxsatszapped_expr,
                                           :mintrustrank_expr,
 
+                                          :pas_expr,
+
                                           :word_expr,
                                           :phrase_expr,
 
@@ -3500,6 +3558,8 @@ function init_parsing()
                    :maxsatszapped_expr => P.seq(t"maxsatszapped:", :number),
                    :mintrustrank_expr => P.seq(t"mintrustrank:", :number),
 
+                   :pas_expr => P.seq(t"pas:", P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c in "-_,")))),
+
                    :number => P.first(P.seq(t"-", P.some(P.satisfy(isdigit))),
                                       P.some(P.satisfy(isdigit))),
                    :ws => P.many(t" "),
@@ -3551,6 +3611,7 @@ struct OrderBy; field::String; end
 struct EventStatsField; field::Symbol; operation::Symbol; argument::Int; end
 struct MinTrustRank; trustrank::Int; end
 struct Features; features::Vector{String}; end
+struct PAS; features::Vector{String}; end
 end
 Base.:(==)(a::O.Features, b::O.Features) = a.features == b.features
 
@@ -3564,6 +3625,15 @@ function parse_search_query(query)
             println((m.rule, m.view, sm))
             dump(sm)
             println()
+        end
+
+        function score(v)
+            v /= 100.0
+            v = max(0.0, min(1.0, v))
+            lock(Main.App.trending_24h_scores) do trending_24h_scores
+                i = trunc(Int, 1+(length(trending_24h_scores)-1)*v)
+                trending_24h_scores[i]
+            end
         end
         
         if     m.rule == :input; sm[2]
@@ -3626,8 +3696,8 @@ function parse_search_query(query)
         elseif m.rule == :zappedby_expr; O.ZappedBy(sm[2])
         elseif m.rule == :orderby_expr; O.OrderBy(sm[2].word)
 
-        elseif m.rule == :minscore_expr; O.EventStatsField(:score, :(>=), trunc(Int, sm[2]*1e10/91))
-        elseif m.rule == :maxscore_expr; O.EventStatsField(:score, :(<=), trunc(Int, sm[2]*1e10/91))
+        elseif m.rule == :minscore_expr; O.EventStatsField(:score, :(>=), score(sm[2]))
+        elseif m.rule == :maxscore_expr; O.EventStatsField(:score, :(<=), score(sm[2]))
         elseif m.rule == :minlikes_expr; O.EventStatsField(:likes, :(>=), sm[2])
         elseif m.rule == :maxlikes_expr; O.EventStatsField(:likes, :(<=), sm[2])
         elseif m.rule == :minzaps_expr; O.EventStatsField(:zaps, :(>=), sm[2])
@@ -3639,6 +3709,8 @@ function parse_search_query(query)
         elseif m.rule == :minsatszapped_expr; O.EventStatsField(:satszapped, :(>=), sm[2])
         elseif m.rule == :maxsatszapped_expr; O.EventStatsField(:satszapped, :(<=), sm[2])
         elseif m.rule == :mintrustrank_expr; O.MinTrustRank(sm[2])
+
+        elseif m.rule == :pas_expr; O.PAS(map(string, split(sm[2][1][2], ',')))
 
         elseif m.rule == :number; parse(Int, m.view)
         elseif m.rule == :ws; nothing
@@ -3874,11 +3946,17 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         elseif op isa O.MaxDuration
             cond("$(T(o.event_media)).event_id = $(T(o.advsearch)).id and $(T(o.event_media)).url = $(T(o.media)).url and $(T(o.media)).duration <= $(P(op.duration)) and $(T(o.media)).duration > 0")
         elseif op isa O.Emoticon || op isa O.Question
-            cond("$(T(o.event_sentiment)).eid = $(T(o.advsearch)).id and $(T(o.event_sentiment)).topsentiment = $(P(if op isa O.Question; '?'
-                                                                                                                    elseif op.emo == ":)"; '+'
-                                                                                                                    elseif op.emo == ":("; '-'
-                                                                                                                    else; error("unexpected emoticon: $(op.emo)")
-                                                                                                                    end))")
+            # cond("$(T(o.event_sentiment)).eid = $(T(o.advsearch)).id and $(T(o.event_sentiment)).topsentiment = $(P(if op isa O.Question; '?'
+            #                                                                                                         elseif op.emo == ":)"; '+'
+            #                                                                                                         elseif op.emo == ":("; '-'
+            #                                                                                                         else; error("unexpected emoticon: $(op.emo)")
+            #                                                                                                         end))")
+            tbl = "event_sentiment_1_d3d7a00a54"
+            cond("$(T(tbl)).eid = $(T(o.advsearch)).id and $(T(tbl)).topsentiment = $(P(if op isa O.Question; '?'
+                                                                                        elseif op.emo == ":)"; '+'
+                                                                                        elseif op.emo == ":("; '-'
+                                                                                        else; error("unexpected emoticon: $(op.emo)")
+                                                                                        end))")
         elseif op isa O.EventStatsField
             cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id and $(T(o.event_stats)).$(op.field) $(op.operation) $(P(op.argument))")
             if endswith(orderby, ".created_at")

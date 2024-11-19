@@ -256,8 +256,10 @@ function scored_content(
         time_exceeded=()->false,
         usepgfuncs=false,
         apply_humaness_check=false,
+        limit2=nothing,
     )
     limit = min(50, limit)
+    isnothing(limit2) || (limit = limit2)
     if timeframe != :popular
         created_after = max(trunc(Int, time()-7*24*3600), created_after)
     end
@@ -516,11 +518,25 @@ function precalculate_analytics(est::DB.CacheStorage)
         "mostzapped_1h",
        ]
         kinds = [Int(Nostr.SET_METADATA), Int(Nostr.TEXT_NOTE), REFERENCED_EVENT, MEDIA_METADATA]
-        r = [e for e in scored_(est; selector) if e.kind in kinds]
+        res = scored_(est; selector)
+        r = [e for e in res if e.kind in kinds]
         est.dyn[:cache]["precalculated_analytics_$selector"] = r
     end
     est.dyn[:cache]["precalculated_analytics_explore_topics"] = explore_topics_(est)
+
+    update_trending_24h_scores(est)
+
     nothing
+end
+
+trending_24h_scores = [] |> ThreadSafe
+function update_trending_24h_scores(est::DB.CacheStorage)
+    lock(trending_24h_scores) do trending_24h_scores
+        res = explore(est; timeframe="trending", scope="global", limit2=1000, created_after=trunc(Int, time()-24*3600), user_pubkey=nothing) 
+        rs = sort([JSON.parse(e.content)["score24h"] for e in res if e.kind == EVENT_STATS])
+        empty!(trending_24h_scores)
+        append!(trending_24h_scores, rs)
+    end
 end
 
 function app_settings(body::Function, est::DB.CacheStorage, event_from_user::Dict)
@@ -889,7 +905,7 @@ function advanced_search(
             query = replace(string(query[8:end]), '"'=>"")
         end
         ps = map(string, split(query, ':'))
-        fn = abspath(dirname(RECOMMENDED_READS_FILE[])*"/demo-feed.json")
+        fn = content_moderation_repo_file("demo-feed.json")
         posts = Tuple{Nostr.EventId, Int}[(Nostr.bech32_decode(s), Dates.datetime2unix(Dates.DateTime(replace(t, ' '=>'T'))))
                                           for (s, t) in JSON.parse(read(fn, String))[ps[2]]]
         d = Dict(posts)

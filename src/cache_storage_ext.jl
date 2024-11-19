@@ -575,7 +575,9 @@ end
 
 update_user_search_exceptions = CircularBuffer(100) |> ThreadSafe
 function update_user_search(est::CacheStorage, pubkey::Nostr.PubKeyId)
-    get(est.pubkey_followers_cnt, pubkey, 0) >= 1 || return false
+    if !ext_is_human(est, pubkey) && get(est.pubkey_followers_cnt, pubkey, 0) < 1
+        return false
+    end
     exec(est.dyn[:user_search], @sql("delete from user_search where pubkey = ?1"), (pubkey,))
     try
         mdid = est.meta_data[pubkey]
