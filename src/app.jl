@@ -856,6 +856,7 @@ function thread_view(est::DB.CacheStorage;
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     is_user_blocked(est.events[event_id].pubkey, :csam) && return []
+
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
     if usepgfuncs
@@ -3378,7 +3379,8 @@ function client_config(est::DB.CacheStorage)
 end
 
 function membership_event_from_user(event_from_user::Dict)
-    if event_from_user["pubkey"] == Nostr.hex(Main.test_pubkeys[:pedja])
+    if event_from_user["pubkey"] in [
+                                    ]
         (; 
          pubkey=Nostr.PubKeyId(event_from_user["pubkey"]),
          content=get(event_from_user, "content", nothing),
@@ -3484,24 +3486,25 @@ end
 function membership_recovery_contact_lists(
         est::DB.CacheStorage; 
         event_from_user::Dict,
-        since::Int=0, until::Int=Utils.current_time(), limit::Int=20, offset::Int=0
+        kwargs...
     )
     e = membership_event_from_user(event_from_user)
-
-    since = max(since, Utils.current_time()-90*24*3600)
 
     es = []
     for (_, eid, created_at) in Postgres.execute(:p0timelimit, "
                                                  with cls as (
                                                      select created_at/(24*3600)::int8 as day, id, created_at, jsonb_array_length(tags) as follows
-                                                     from events where pubkey = \$1 and kind = 3 and created_at >= \$2 and created_at <= \$3
+                                                     from events where pubkey = \$1 and kind = 3
                                                  )
                                                  select distinct on (day) day*24*3600, id, created_at
-                                                 from cls order by day, follows desc, id
-                                                 limit \$4 offset \$5", 
-                                                 [e.pubkey, since, until, limit, offset])[2]
+                                                 from cls 
+                                                 order by day desc, follows desc, id
+                                                 limit 30
+                                                 ",
+                                                 [e.pubkey])[2]
         push!(es, (Nostr.EventId(eid), created_at))
     end
+    # es = sort(es; by=x->-x[2])
 
     res = []
     for (eid, _) in es
@@ -3608,8 +3611,8 @@ function membership_content_rebroadcast_start(est::DB.CacheStorage; event_from_u
     end
 
     Postgres.execute(:membership, "delete from event_rebroadcasting where pubkey = \$1", [e.pubkey])
-    Postgres.execute(:membership, "insert into event_rebroadcasting values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11)",
-                     [e.pubkey, Dates.now(), missing, 0, 0, event_count, JSON.json(relays), "started", JSON.json(kinds), missing, 0])
+    Postgres.execute(:membership, "insert into event_rebroadcasting values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14)",
+                     [e.pubkey, Dates.now(), missing, 0, 0, event_count, JSON.json(relays), "started", JSON.json(kinds), missing, 0, missing, missing, 0])
 
     membership_content_rebroadcast_status(est; event_from_user)
 end
@@ -3627,17 +3630,17 @@ function membership_content_rebroadcast_status(est::DB.CacheStorage; event_from_
     e = membership_event_from_user(event_from_user)
 
     r = Postgres.execute(:membership, "
-                         select started_at, finished_at, event_idx, event_count, status, kinds
+                         select started_at, finished_at, event_idx_intermediate, event_count, status, kinds
                          from event_rebroadcasting where pubkey = \$1", [e.pubkey])[2]
     isempty(r) && return []
 
-    started_at, finished_at, event_idx, event_count, status, kinds = r[1]
+    started_at, finished_at, event_idx_intermediate, event_count, status, kinds = r[1]
 
     running = !ismissing(started_at) && ismissing(finished_at)
 
     res =
     if running
-        (; running, kinds, status, progress=min(1.0, Float64(event_idx) / event_count))
+        (; running, kinds, status, progress=min(1.0, Float64(event_idx_intermediate) / event_count))
     else
         (; running, kinds, status, progress=0.0)
     end

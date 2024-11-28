@@ -52,13 +52,13 @@ function run_rebroadcasting()
     funcname = "run_rebroadcasting"
 
     rs = Postgres.execute(:membership, "
-                          select pubkey, event_created_at, kinds, target_relays, batchhash
+                          select pubkey, event_created_at, kinds, target_relays, batchhash, event_idx
                           from event_rebroadcasting 
                           where started_at is not null and finished_at is null")[2]
     asyncmap(rs; ntasks=TASKS[]) do r
-        (pubkey, since, kinds, relays, pbatchhash) = r
+        (pubkey, since, kinds, relays, pbatchhash, event_idx) = r
         pubkey = Nostr.PubKeyId(pubkey)
-        @tr (; pubkey, since, kinds, relays, pbatchhash)
+        @tr (; pubkey, since, kinds, relays, pbatchhash, event_idx)
         # @show (:rebroadcasting, pubkey, Dates.unix2datetime(since))
         try
             (events, cnt) = Main.App.get_user_events(Main.cache_storage; pubkey, since, limit=BATCH_SIZE[], kinds)
@@ -67,7 +67,13 @@ function run_rebroadcasting()
                 Postgres.execute(:membership, "update event_rebroadcasting set finished_at = now(), status = 'finished fine' where pubkey = \$1", 
                                  [pubkey])
             else
-                res = broadcast_events(relays, events)
+                intidx = Ref(0)
+                res = broadcast_events(relays, events;
+                                       on_first_accept=function (e)
+                                           intidx[] += 1
+                                           Postgres.execute(:membership, "update event_rebroadcasting set event_idx_intermediate = \$2 where pubkey = \$1", 
+                                                            [pubkey, event_idx+intidx[]])
+                                       end)
                 @tr res
                 Postgres.execute(:membership, "update event_rebroadcasting set last_batch_status = \$2 where pubkey = \$1", 
                                  [pubkey, JSON.json(res, 2)])
@@ -77,55 +83,64 @@ function run_rebroadcasting()
                 end
             end
         catch _
-            bio = IOBuffer()
-            Utils.print_exceptions(bio)
-            Postgres.execute(:membership, "update event_rebroadcasting set exception = \$2, finished_at = now() where pubkey = \$1", 
-                             [pubkey, String(take!(bio))])
+            Postgres.execute(:membership, "update event_rebroadcasting set exception = \$2, finished_at = now(), status = 'failed' where pubkey = \$1", 
+                             [pubkey, Utils.get_exceptions()])
             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         end
     end
 end
 
-function broadcast_events(relays::Vector, events::Vector{Nostr.Event}; timeout=TIMEOUT[])
+function broadcast_events(
+        relays::Vector, events::Vector{Nostr.Event}; 
+        timeout=TIMEOUT[], 
+        on_first_accept::Function=(e::Nostr.Event)->nothing,
+    )
     funcname = "broadcast_events"
 
     cond = Condition()
 
     cnts = (; 
-            relays_done = Ref(0),
-            per_eid     = Dict{Nostr.EventId, Int}(),
-            sends       = Ref(0),
-            duplicates  = Ref(0),
-            success     = Ref(false),
+            relays_started = Ref(0),
+            relays_done    = Ref(0),
+            per_eid        = Dict{Nostr.EventId, Int}(),
+            sends          = Ref(0),
+            duplicates     = Ref(0),
+            success        = Ref(false),
            ) |> Utils.ThreadSafe
 
-    function on_connect(client)
-        # println((:on_connect, client.relay_url))
-        for e in events
-            # println(e.id)
-            @tr (:event, (; client.relay_url, e.id, e.pubkey, e.created_at))
-            NostrClient.send(client, e; 
-                             on_response=function (m)
-                                 # @show m
-                                 @tr (:response, (; client.relay_url, e.id, e.pubkey, e.created_at, m))
-                                 try
-                                     if m[1] == "OK"
-                                         eid = Nostr.EventId(m[2])
-                                         lock(cnts) do cnts
-                                             cnts.sends[] += 1
-                                             m[3] || (cnts.duplicates[] += 1)
-                                             cnts.per_eid[eid] = get(cnts.per_eid, eid, 0) + 1
+    function handle_connection(client)
+        lock(cnts) do cnts
+            cnts.relays_started[] += 1
+        end
+        try
+            for e in events
+                @tr (:event, (; client.relay_url, e.id, e.pubkey, e.created_at))
+                NostrClient.send(client, e; 
+                                 on_response=function (m)
+                                     # @show m
+                                     @tr (:response, (; client.relay_url, e.id, e.pubkey, e.created_at, m))
+                                     try
+                                         if m[1] == "OK"
+                                             eid = Nostr.EventId(m[2])
+                                             lock(cnts) do cnts
+                                                 cnts.sends[] += 1
+                                                 m[3] || (cnts.duplicates[] += 1)
+                                                 haskey(cnts.per_eid, eid) || on_first_accept(e)
+                                                 cnts.per_eid[eid] = get(cnts.per_eid, eid, 0) + 1
+                                             end
                                          end
+                                     catch _
+                                         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
                                      end
-                                 catch _
-                                     PRINT_EXCEPTIONS[] && Utils.print_exceptions()
-                                 end
-                             end)
-            sleep(1.0/EVENT_RATE[])
+                                 end)
+                sleep(1.0/EVENT_RATE[])
+            end
+        catch _
+            @tr (:event, (; client.relay_url, exception=Utils.get_exceptions()))
         end
         lock(cnts) do cnts
             cnts.relays_done[] += 1
-            if cnts.relays_done[] == length(relays)
+            if cnts.relays_done[] == cnts.relays_started[]
                 notify(cond, cnts)
             end
         end
@@ -140,7 +155,7 @@ function broadcast_events(relays::Vector, events::Vector{Nostr.Event}; timeout=T
     for relay_url in relays
         push!(clients, NostrClient.Client(relay_url;
                                           on_connect=(client)->@async try
-                                              on_connect(client)
+                                              @tr handle_connection(client)
                                           catch _
                                               PRINT_EXCEPTIONS[] && Utils.print_exceptions()
                                           end))
@@ -154,14 +169,15 @@ function broadcast_events(relays::Vector, events::Vector{Nostr.Event}; timeout=T
             lock(cnts) do cnts
                 res.success[] = length(cnts.per_eid) == length(events)
                 (; 
-                 success     = cnts.success[],
-                 relays      = length(relays),
-                 relays_done = cnts.relays_done[],
-                 events      = length(events),
-                 events_done = length(cnts.per_eid),
-                 sends       = cnts.sends[],
-                 duplicates  = cnts.duplicates[],
-                 per_eid     = Dict([Nostr.hex(eid)=>cnt for (eid, cnt) in cnts.per_eid]),
+                 success        = cnts.success[],
+                 relays         = length(relays),
+                 relays_started = cnts.relays_started[],
+                 relays_done    = cnts.relays_done[],
+                 events         = length(events),
+                 events_done    = length(cnts.per_eid),
+                 sends          = cnts.sends[],
+                 duplicates     = cnts.duplicates[],
+                 per_eid        = Dict([Nostr.hex(eid)=>cnt for (eid, cnt) in cnts.per_eid]),
                 )
             end
         end

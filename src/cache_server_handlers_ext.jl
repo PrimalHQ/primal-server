@@ -4,7 +4,7 @@ import ..PushGatewayExporter
 
 periodic_pushgw = Throttle(; period=15.0)
 periodic_notification_counts = Throttle(; period=1.0)
-periodic_rebroadcasting_status = Throttle(; period=3.0)
+periodic_rebroadcasting_status = Throttle(; period=2.0)
 
 function ext_periodic()
     periodic_notification_counts() do

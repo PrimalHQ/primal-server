@@ -10,6 +10,7 @@ import ..Nostr
 
 CONNECT_TIMEOUT = Ref(10)
 READ_TIMEOUT = Ref(120)
+PROXY = Ref{Any}(nothing)
 
 mutable struct Client
     relay_url
@@ -140,32 +141,35 @@ end
 
 function listener(client::Client)
     while client.listener_running[]
-        HTTP.WebSockets.open(client.relay_url; retry=false, connect_timeout=CONNECT_TIMEOUT[], readtimeout=READ_TIMEOUT[]) do ws
-            try
-                client.ws = ws
-                client.on_connect(client) # don't block!
-                for s in ws
-                    client.listener_running[] || break
-                    msg = JSON.parse(s)
-                    try
-                        Base.invokelatest(handle_message, client, msg)
-                    catch _
-                        if client.log_exceptions
-                            bio = IOBuffer()
-                            Utils.print_exceptions(bio)
-                            push!(client.exceptions, (; t=Dates.now(), exception=String(take!(bio))))
+        try
+            HTTP.WebSockets.open(client.relay_url; retry=false, connect_timeout=CONNECT_TIMEOUT[], readtimeout=READ_TIMEOUT[], proxy=PROXY[]) do ws
+                try
+                    client.ws = ws
+                    client.on_connect(client) # don't block!
+                    for s in ws
+                        client.listener_running[] || break
+                        msg = JSON.parse(s)
+                        try
+                            Base.invokelatest(handle_message, client, msg)
+                        catch _
+                            client.log_exceptions && push!(client.exceptions, (; t=Dates.now(), exception=Utils.get_exceptions()))
                         end
                     end
+                catch ex
+                    # println("listener inner: ", typeof(ex))
+                    ex isa EOFError || ex isa HTTP.WebSockets.WebSocketError || rethrow(ex)
+                finally
+                    try client.on_disconnect(client) catch _ end
+                    try close(ws) catch _ end
                 end
-            catch ex
-                ex isa EOFError || rethrow(ex)
-            finally
-                try client.on_disconnect(client) catch _ end
-                try close(ws) catch _ end
             end
+        catch ex
+            # println("listener outter: ", typeof(ex))
+            break
         end
         sleep(0.2)
     end
+    try close(client) catch _ end
 end
 
 function Base.close(client::Client, subid::String)
