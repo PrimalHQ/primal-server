@@ -3386,7 +3386,7 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=not
         if  isnothing(user_pubkey) || 
             user_pubkey == Nostr.PubKeyId("532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb") || # primal pubkey
             isempty(Postgres.execute(:membership, "select 1 from memberships where pubkey = \$1 and tier != 'free' limit 1", [user_pubkey])[2])
-            limit = min(5, limit)
+            limit = min(20, limit)
         end
     end
 
