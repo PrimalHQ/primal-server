@@ -811,6 +811,7 @@ function feed_2(
                                                            (pubkey, since, until, Int(include_replies), limit, offset))))
                 end
             elseif notes == :authored
+                is_user_blocked(pubkey, :csam) && return []
                 if usepgfuncs
                     q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null order by e->>'created_at' desc"
                     res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
@@ -854,6 +855,7 @@ function thread_view(est::DB.CacheStorage;
     event_id = cast(event_id, Nostr.EventId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
+    is_user_blocked(est.events[event_id].pubkey, :csam) && return []
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
     if usepgfuncs
@@ -1128,11 +1130,18 @@ end
 
 blocked_user_profiles = Set{Nostr.PubKeyId}() |> ThreadSafe
 
+function is_user_blocked(pubkey::Nostr.PubKeyId, grp)::Bool
+    pubkey in blocked_user_profiles && return true
+    isempty(Postgres.execute(:p0, "select 1 from filterlist where grp = \$2 and target_type = 'pubkey' and target = \$1 and blocked limit 1", 
+                             [pubkey, grp])[2]) || return true
+    false
+end
+
 function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    pubkey in blocked_user_profiles && return []
+    is_user_blocked(pubkey, :csam) && return []
 
     est.auto_fetch_missing_events && DB.fetch_user_metadata(est, pubkey)
 

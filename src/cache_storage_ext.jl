@@ -805,8 +805,7 @@ function add_human_override(est::CacheStorage, pubkey::Nostr.PubKeyId, is_human:
 end
 
 function import_filterlists(est::CacheStorage)
-    Postgres.transaction(est.dbargs.connsel) do sess
-        Postgres.execute(sess, "delete from filterlist")
+    Postgres.transaction(:membership) do sess
         ns = names(Filterlist; all=true)
         for ty in [:pubkey, :event]
             for (b, grp) in [
@@ -819,7 +818,8 @@ function import_filterlists(est::CacheStorage)
                 if n in ns
                     println(n)
                     for v in collect(getproperty(Filterlist, n))
-                        Postgres.execute(sess, "insert into filterlist values (\$1, \$2::filterlist_target, \$3, \$4::filterlist_grp)", [v, ty, b == :blocked, grp])
+                        Postgres.execute(sess, "insert into filterlist values (\$1, \$2::filterlist_target, \$3, \$4::filterlist_grp, \$5) on conflict do nothing", 
+                                         [v, ty, b == :blocked, grp, Utils.current_time()])
                     end
                 end
             end

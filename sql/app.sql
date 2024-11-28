@@ -31,7 +31,7 @@ CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_LEGEND_CUSTOMIZATION() RETURNS in
 
 CREATE TYPE cmr_scope AS ENUM ('content', 'trending');
 CREATE TYPE cmr_grp AS ENUM ('primal_spam', 'primal_nsfw');
-CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw');
+CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw', 'csam');
 CREATE TYPE filterlist_target AS ENUM ('pubkey', 'event');
 CREATE TYPE media_size AS ENUM ('original', 'small', 'medium', 'large');
 CREATE TYPE response_messages_for_post_res AS (e jsonb, is_referenced_event bool);
@@ -662,16 +662,22 @@ CREATE OR REPLACE FUNCTION public.feed_user_authored(
         a_user_pubkey bytea, 
         a_apply_humaness_check bool) 
 	RETURNS SETOF jsonb
-    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
-SELECT * FROM enrich_feed_events(
-    ARRAY (
-        select (pe.event_id, pe.created_at)::post
-        from pubkey_events pe
-        where pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and pe.is_reply = a_include_replies
-        order by pe.created_at desc limit a_limit offset a_offset
-    ),
-    a_user_pubkey, a_apply_humaness_check)
+BEGIN
+    IF EXISTS (SELECT 1 FROM filterlist WHERE grp = 'csam' AND target_type = 'pubkey' AND target = a_pubkey AND blocked LIMIT 1) THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT * FROM enrich_feed_events(
+        ARRAY (
+            select (pe.event_id, pe.created_at)::post
+            from pubkey_events pe
+            where pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and pe.is_reply = a_include_replies
+            order by pe.created_at desc limit a_limit offset a_offset
+        ),
+        a_user_pubkey, a_apply_humaness_check);
+END
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.long_form_content_feed(
@@ -818,6 +824,11 @@ CREATE OR REPLACE FUNCTION public.thread_view(
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
+    IF  EXISTS (SELECT 1 FROM filterlist WHERE grp = 'csam' AND target_type = 'event' AND target = a_event_id AND blocked LIMIT 1) OR
+        EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = a_event_id AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp = 'csam' AND fl.blocked LIMIT 1)
+    THEN
+        RETURN;
+    END IF;
     IF NOT is_event_hidden(a_user_pubkey, 'content', a_event_id) AND NOT event_is_deleted(a_event_id) AND 
         NOT EXISTS (SELECT 1 FROM filterlist WHERE target = a_event_id AND target_type = 'event' AND grp = 'spam' AND blocked)
     THEN
