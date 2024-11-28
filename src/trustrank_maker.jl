@@ -40,9 +40,14 @@ function make(
         output_filename="../tr_sorted.jls", 
         nip05_verification=false,
         iterations=20,
-        running=Utils.PressEnterToStop())
+        running=Utils.PressEnterToStop(),
+        mdeids=nothing)
     ##
-    mdeids = collect(values(cache_storage.meta_data))
+    if isnothing(mdeids)
+        # mdeids = collect(values(cache_storage.meta_data))
+        mdeids = [Nostr.EventId(eid) for (eid,) in Main.Postgres.execute(:p0, "select value from meta_data")[2]]
+    end
+    @show length(mdeids)
     ##
     function iterate_mdeids(body, desc="")
         i = Ref(0) |> ThreadSafe
@@ -237,6 +242,14 @@ function make(
      users,
      tr_sorted,
     )
+end
+
+function write_to_text_file(filename, tr_sorted)
+    open(filename, "w+") do f
+        for (pk, rank) in tr_sorted
+            println(f, "$(Nostr.hex(pk))  $rank")
+        end
+    end
 end
 
 end
