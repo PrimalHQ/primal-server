@@ -188,6 +188,12 @@ function print_exceptions(io=stdout)
     end
 end
 
+function get_exceptions()
+    bio = IOBuffer()
+    print_exceptions(bio)
+    String(take!(bio))
+end
+
 export ThreadSafe
 struct ThreadSafe{T}
     wrapped::T   # TODO rename to wrappee?
