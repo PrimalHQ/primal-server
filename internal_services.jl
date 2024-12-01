@@ -9,6 +9,7 @@ import ..Nostr
 import ..Bech32
 import ..DB
 import ..Media
+import ..Postgres
 
 PORT = Ref(14000)
 
@@ -663,7 +664,24 @@ function url_lookup_handler(req::HTTP.Request)
             HTTP.Response(404, "unknown url")
         else
             url = r[1][1]
-            rurl = "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
+            h = splitext(splitpath(url)[end])[1]
+            rurl = 
+            if !isempty(local rs = Postgres.execute(:p0, "
+                                                    select media_url 
+                                                    from media_storage ms, media_storage_priority msp
+                                                    where ms.h = \$1 and ms.storage_provider = msp.storage_provider
+                                                    order by msp.priority desc limit 1", 
+                                                    [h])[2])
+                url2 = rs[1][1]
+                u = URIs.parse_uri(url2)
+                if u.host == "media.primal.net"
+                    "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url2))"
+                else
+                    url2
+                end
+            else
+                "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
+            end
             HTTP.Response(302, HTTP.Headers(["Location"=>rurl]))
         end
     end

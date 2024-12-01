@@ -63,10 +63,10 @@ end
 function pull_media(src, dst)
     LOG[] && println(@__MODULE__, ": --------")
     for (tblsrc, tbldst, ty) in [
-                                 (:(Main.cache_storage.ext[].media), :(Main.cache_storage.media), Nothing),
-                                 (:(Main.cache_storage.ext[].event_media), :(Main.cache_storage.event_media), Nostr.EventId),
-                                 (:(Main.cache_storage.ext[].preview), :(Main.cache_storage.preview), Nothing),
-                                 (:(Main.cache_storage.ext[].event_preview), :(Main.cache_storage.event_preview), Nothing),
+                                 (:(Main.cache_storage.media), :(Main.cache_storage.media), Nothing),
+                                 (:(Main.cache_storage.event_media), :(Main.cache_storage.event_media), Nostr.EventId),
+                                 (:(Main.cache_storage.preview), :(Main.cache_storage.preview), Nothing),
+                                 (:(Main.cache_storage.event_preview), :(Main.cache_storage.event_preview), Nothing),
                                  (:(Main.cache_storage.dyn[:video_thumbnails]), :(Main.cache_storage.dyn[:video_thumbnails]), Nothing),
                                 ]
         tblsrcname = rex_(src, :(($tblsrc).table))
@@ -89,7 +89,7 @@ function pull_media(src, dst)
             yield()
             r = i:min(i+n-1, mr2)
             progress[] = (tbldstname, r.start, mr2)
-            q = "select *, rowid from $tblsrcname where rowid >= $(r.start) and rowid <= $(r.stop)"
+            q = "select * from $tblsrcname where rowid >= $(r.start) and rowid <= $(r.stop)"
             for row in rex_(src, :(DB.exec($tblsrc, $q)))
                 qi = "insert into $tbldstname values ($(join(["?$i" for i in 1:length(row)], ','))) on conflict do nothing"
                 if ty == Nothing
