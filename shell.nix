@@ -66,12 +66,19 @@ mkShell {
     cargo-pgrx pgrx install -c $pg_config
   '';
 
-  setup_pg_cron = pkgs.writeShellScript "setup_pg_cron.sh" ''
+  setup_pg_extensions = pkgs.writeShellScript "setup_pg_extensions.sh" ''
     PGDIR="$(cat pgdir)"
     PGOUTS="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)"
     set -ex
-    cp -v ${pkgs.postgresql15Packages.pg_cron}/lib/* $PGOUTS/lib/lib/
-    cp -v ${pkgs.postgresql15Packages.pg_cron}/share/postgresql/extension/* $PGOUTS/out/share/postgresql/extension/
+    for d in \
+      ${pkgs.postgresql15Packages.pg_cron} \
+      ${pkgs.postgresql15Packages.pgsql-http} \
+      ${pkgs.postgresql15Packages.pgvector} \
+    ; do
+      chmod u+w -R $PGOUTS/
+      cp -v $d/lib/* $PGOUTS/lib/lib/
+      cp -v $d/share/postgresql/extension/* $PGOUTS/out/share/extension/
+    done
   '';
 
   start_postgres = pkgs.writeShellScript "start_postgres.sh" ''
