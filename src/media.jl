@@ -8,15 +8,18 @@ using DataStructures: CircularBuffer
 import HTTP
 import EzXML
 import Gumbo, Cascadia
+import Base64
 
 import ..Utils
 using ..Utils: ThreadSafe
 import ..DB
+import ..Postgres
+using ..Tracing: @ti, @tc, @td, @tr
 
 PRINT_EXCEPTIONS = Ref(false)
 
 MEDIA_PATH = Ref("/mnt/ppr1/var/www/cdn/cache")
-MEDIA_PATHS = Dict{Symbol, Vector{String}}()
+MEDIA_PATHS = Dict{Symbol, Vector}()
 MEDIA_PATHS[:cache] = ["/mnt/ppr1/var/www/cdn/cache"]
 MEDIA_URL_ROOT = Ref("https://media.primal.net/cache")
 # MEDIA_TMP_DIR  = Ref("/tmp/primalmedia")
@@ -61,7 +64,7 @@ function clean_url(url::String)
     string(URIs.URI(; [p=>getproperty(u, p) for p in propertynames(u) if !(p in [:fragment, :uri])]...))
 end
 
-function download(est::DB.CacheStorage, url::String; proxy=MEDIA_PROXY[])::Vector{UInt8}
+function download(est::DB.CacheStorage, url::String; proxy=MEDIA_PROXY[], timeout=2)::Vector{UInt8}
     try
         DB.incr(est, :media_downloads)
         # res = UInt8[]
@@ -75,7 +78,7 @@ function download(est::DB.CacheStorage, url::String; proxy=MEDIA_PROXY[])::Vecto
         #         append!(res, d)
         #     end
         # end
-        res = HTTP.get(url; readtimeout=2, connect_timeout=2, headers=downloader_headers, proxy, verbose=0, retry=true).body
+        res = HTTP.get(url; readtimeout=timeout, connect_timeout=timeout, headers=downloader_headers, proxy, verbose=0, retry=true).body
         # res = fetch(Threads.@spawn HTTP.get(url; readtimeout=2, connect_timeout=2, headers=downloader_headers, proxy, verbose=0, retry=true).body)
         DB.incr(est, :media_downloaded_bytes; by=length(res))
         res
@@ -105,27 +108,30 @@ all_variants = [(size, animated)
                 for size in [:original, :small, :medium, :large]
                 for animated in [true, false]]
 
-make_media_url(mi::MediaImport, ext::String) = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
+# make_media_url(mi::MediaImport, ext::String) = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
 
-function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector=all_variants; key=(;), proxy=MEDIA_PROXY[], sync=false)
-    lock(sync ? ReentrantLock() : media_variants_lock) do
-        variants = Dict{Tuple{Symbol, Bool}, String}()
+function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector=all_variants, key=(;), proxy=MEDIA_PROXY[], sync=false)
+    sync || @show (sync, url)
+    funcname = "media_variants"
+    @tr "media_variants_lock" url variant_specs key proxy sync lock(sync ? ReentrantLock() : media_variants_lock) do
+        variants = Dict{Tuple{Symbol, Bool}, String}() |> ThreadSafe
 
         k = (; key..., url, type=:original)
         mi = MediaImport(; key=k)
-        if !isfile(mi.path)
-            if !haskey(media_tasks, k)
+
+        if @tr url k mi.h isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2])
+            if @tr url k :original !haskey(media_tasks, k)
                 media_tasks[k] = 
                 let k=k
                     tsk = @task task_wrapper(est, k, max_download_duration, downloads_per_period) do
-                        try
-                            push!(media_variants_log, (Dates.now(), k))
-                            data = download(est, clean_url(url); proxy)
-                            media_import((_)->data, k)
-                            media_variants(est, url, variant_specs; key, proxy, sync)
+                        @tr "media_task_download_original" url k proxy try
+                            data = download(est, (@tr url k clean_url(url)); proxy)
+                            @tr url k length(data)
+                            @tr url k media_import((_)->data, k)
+                            @tr url k media_variants(est, url; variant_specs, key, proxy, sync)
                         finally
-                            delete!(media_tasks, k)
                             update_media_queue_executor_taskcnt(-1)
+                            delete!(media_tasks, k)
                         end
                     end
                     if sync
@@ -142,19 +148,22 @@ function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector
         end
         @label cont
 
-        !isfile(mi.path) && return nothing
+        rs = Postgres.execute(:p0, "select media_url, ext from media_storage where h = \$1 limit 1", [mi.h])[2]
+        (@tr url mi.h isempty(rs)) && return nothing
+        orig_media_url, ext = rs[1]
+        @tr url orig_media_url ext ()
 
-        original_lnk = readlink(mi.path)
-        _, ext = splitext(original_lnk)
+        orig_data = download(est, orig_media_url; proxy)
+        @tr url orig_media_url length(orig_data) ()
 
         ext == ".bin" && return nothing
 
-        original_mi = mi
+        # original_mi = mi
 
         variant_missing = false
         for (size, animated) in variant_specs
             if size == :original
-                variants[(size, animated)] = make_media_url(original_mi, ext)
+                variants[(size, animated)] = orig_media_url
                 continue
             end
             convopts = []
@@ -173,31 +182,34 @@ function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector
             append!(convopts, ["-vf", isempty(MEDIA_SSH_COMMAND[]) ? join(filters, ',') : '"'*join(filters, ',')*'"'])
             k = (; key..., url, type=:resized, size, animated)
             mi = MediaImport(; key=k)
-            if !isfile(mi.path)
-                if !haskey(media_tasks, k)
+            rs = Postgres.execute(:p0, "select media_url from media_storage where h = \$1 limit 1", [mi.h])[2]
+            if @tr url k mi.h :variant isempty(rs)
+                if @tr k :variant !haskey(media_tasks, k)
                     media_tasks[k] = 
-                    let k=k, mi=mi, convopts=convopts
+                    let k=k, mi=mi, convopts=convopts, size=size, animated=animated, variants=variants
                         tsk = @task task_wrapper(est, k, max_task_duration, tasks_per_period) do
-                            try
-                                push!(media_variants_log, (Dates.now(), k))
+                            @tr "media_task_processing_variant" url k try
                                 mkpath(MEDIA_TMP_DIR[])
                                 outfn = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext)"
                                 logfile = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext).log"
-                                cmd = Cmd([MEDIA_SSH_COMMAND[]..., "nice", "ionice", "-c3", "ffmpeg", "-y", "-i", original_mi.path, convopts..., outfn])
+                                cmd = Cmd([MEDIA_SSH_COMMAND[]..., "nice", "ionice", "-c3", "ffmpeg", "-y", "-i", "-", convopts..., outfn])
                                 try
-                                    run(pipeline(cmd, stdin=devnull, stdout=logfile, stderr=logfile))
+                                    @tr url k cmd run(pipeline(cmd, stdin=IOBuffer(orig_data), stdout=logfile, stderr=logfile))
                                 catch _
                                     DB.incr(est, :media_processing_errors)
                                     rethrow()
                                 end
-                                fn = stat(original_mi.path).size <= stat(outfn).size ? original_mi.path : outfn
-                                # fn = outfn #!!!
-                                media_import((_)->read(fn), k)
-                                rm(outfn)
-                                rm(logfile)
+                                # fn = stat(original_mi.path).size <= stat(outfn).size ? original_mi.path : outfn
+                                fn = outfn #!!!
+                                @tr url k fn (_, _, murl) = media_import((_)->read(fn), k)
+                                variants[(size, animated)] = murl
+                                try rm(outfn) catch _ end
+                                try rm(logfile) catch _ end
+                                nothing
                             finally
-                                delete!(media_tasks, k)
                                 update_media_queue_executor_taskcnt(-1)
+                                delete!(media_tasks, k)
+                                nothing
                             end
                         end
                         if sync
@@ -211,45 +223,115 @@ function media_variants(est::DB.CacheStorage, url::String, variant_specs::Vector
                     end
                 end
                 variant_missing = true
+            else
+                variants[(size, animated)] = rs[1][1]
             end
             @label cont2
-            variants[(size, animated)] = make_media_url(mi, ext)
         end
         variant_missing && return nothing
 
-        variants
+        variants.wrapped
     end
 end
 
 function media_import(fetchfunc::Union{Function,Nothing}, key; media_path::Symbol=:cache)
+    funcname = "media_import"
+
+    external =
+    if key isa NamedTuple && haskey(key, :type) && key.type == "member_upload" && haskey(key, :pubkey)
+        Main.App.use_external_storage(key.pubkey)
+    else
+        true
+    end
+    @tr key external ()
+    # @show (; external, key)
+
     rs = []
     excs = []
+    failed = []
     for mp in MEDIA_PATHS[media_path]
         try
-            push!(rs, media_import(fetchfunc, key, mp))
+            if     mp[1] == :local && !external
+                r = media_import_local(fetchfunc, key, mp[2:end]...)
+                push!(rs, r)
+            elseif mp[1] == :s3
+                r = media_import_s3(fetchfunc, key, mp[2:end]...)
+                push!(rs, r)
+            end
         catch ex
+            println("media_import to $media_path for key $key: ", typeof(ex))
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
             push!(excs, ex)
+            ex isa Base.IOError && push!(failed, mp)
         end
     end
+    @tr key external rs ()
+    # filter!(mp->!(mp in failed), MEDIA_PATHS[media_path])
     isempty(rs) ? throw(excs[1]) : rs[1]
 end
 
-function media_import(fetchfunc::Union{Function,Nothing}, key, media_path::String)
+function media_import_local(fetchfunc::Union{Function,Nothing}, key, host::String, media_path::String)
+    funcname = "media_import_local"
+    @tr key host media_path ()
     mi = MediaImport(; key, media_path)
-    if !isfile(mi.path)
+    rs = Postgres.execute(:p0, "select h, ext, media_url from media_storage where storage_provider = \$1 and h = \$2 limit 1",
+                          [host, mi.h])[2]
+    if @tr key mi.h isempty(rs)
         data = fetchfunc(key)
         mkpath(mi.dirpath)
-        open(mi.path*".key.tmp", "w+") do f; write(f, mi.k); end
-        mv(mi.path*".key.tmp", mi.path*".key"; force=true)
-        open(mi.path*".tmp", "w+") do f; write(f, data); end
-        mt = chomp(read(`file -b --mime-type $(mi.path*".tmp")`, String))
+        rnd = bytes2hex(rand(UInt8, 12))
+        open(mi.path*".key.tmp-$rnd", "w+") do f; write(f, mi.k); end
+        mv(mi.path*".key.tmp-$rnd", mi.path*".key"; force=true)
+        open(mi.path*".tmp-$rnd", "w+") do f; write(f, data); end
+        mt = string(chomp(read(`file -b --mime-type $(mi.path*".tmp-$rnd")`, String)))
         ext = get(mimetype_ext, mt, ".bin")
-        mv(mi.path*".tmp", mi.path*ext; force=true)
-        islink(mi.path) && rm(mi.path)
-        symlink("$(mi.h)$(ext)", mi.path)
+        mv(mi.path*".tmp-$rnd", mi.path*ext; force=true)
+        symlink("$(mi.h)$(ext)", "$(mi.path).tmp-$rnd")
+        try 
+            mv("$(mi.path).tmp-$rnd", mi.path; force=true)
+        catch ex
+            if ex isa ArgumentError
+                try rm("$(mi.path).tmp-$rnd") catch _ end
+            else
+                rethrow()
+            end
+        end
+        p = "$(splitpath(media_path)[end])/$(mi.subdir)/$(mi.h)"
+        @tr key mi.h url = "https://media.primal.net/"*p*ext
+        Postgres.execute(:p0, "insert into media_storage values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) on conflict do nothing",
+                         [url, host, Utils.current_time(), mi.k, mi.h, ext, mt, length(data)])
+        lnk = readlink(mi.path)
+    else
+        lnk = "$(rs[1][1])$(rs[1][2])"
+        url = rs[1][3]
     end
-    lnk = readlink(mi.path)
-    (mi, lnk)
+    @tr key lnk url ()
+    @tr (mi, lnk, url)
+end
+
+function media_import_s3(fetchfunc::Union{Function,Nothing}, key, provider, dir)
+    funcname = "media_import_s3"
+    @tr key provider dir ()
+    mi = MediaImport(; key, media_path="s3:"*dir)
+    p = "$dir/$(mi.subdir)/$(mi.h)"
+    rs = Postgres.execute(:p0, "select h, ext, media_url from media_storage where storage_provider = \$1 and h = \$2 limit 1",
+                          [provider, mi.h])[2]
+    if @tr key mi.h isempty(rs)
+        data = fetchfunc(key)
+        mt = parse_mimetype(data)
+        ext = get(mimetype_ext, mt, ".bin")
+        s3_upload(provider, p*ext, data, mt)
+        u = URIs.parse_uri(Main.S3_CONFIGS[provider].endpoint)
+        @tr key mi.h url = "https://primaldata."*u.host*"/"*p*ext
+        Postgres.execute(:p0, "insert into media_storage values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) on conflict do nothing",
+                         [url, provider, Utils.current_time(), mi.k, mi.h, ext, mt, length(data)])
+        lnk = mi.h*ext
+    else
+        lnk = "$(rs[1][1])$(rs[1][2])"
+        url = rs[1][3]
+    end
+    @tr key lnk url ()
+    @tr (mi, lnk, url)
 end
 
 media_processing_channel_lock = ReentrantLock()
@@ -313,9 +395,9 @@ function parse_image_dimensions(data::Vector{UInt8})
     m = mktemp() do fn, io
         write(io, data)
         close(io)
-        match(r", ([0-9]+)x([0-9]+), ", read(pipeline(`file $fn`; stdin=devnull), String))
+        match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file $fn`; stdin=devnull), String))
     end
-    isnothing(m) ? nothing : (parse(Int, m[1]), parse(Int, m[2]))
+    isnothing(m) ? nothing : (parse(Int, m[1]), parse(Int, m[2]), try parse(Float64, m[3]) catch _ 0.0 end)
 end
 
 function parse_mimetype(data::Vector{UInt8})
@@ -447,7 +529,7 @@ function fetch_resource_metadata_(url; proxy=MEDIA_PROXY[])
 end
 
 import Conda
-# Conda.add(["beautifulsoup4", "requests", "html5lib"]) # FIXME
+#Conda.add(["beautifulsoup4", "requests", "html5lib", "boto3"]) # FIXME
 function fetch_resource_metadata(url; proxy=MEDIA_PROXY[]) 
     proxy = isnothing(proxy) ? "null" : proxy
     r = try
@@ -455,11 +537,11 @@ function fetch_resource_metadata(url; proxy=MEDIA_PROXY[])
     catch _
         (; mimetype="", title="", image="", description="", icon_url="")
     end
-    # @show (:fetch_resource_metadata, url, r)
     r
 end
 
 function image_category(img_path)
+    return ("", 1.0)
     try
         fn = "/home/pr"*img_path
         r = JSON.parse(String(HTTP.request("POST", "http://192.168.15.1:5000/classify";
@@ -506,12 +588,87 @@ function strip_metadata(data::Vector{UInt8})
     end
 end
 
-function is_image_rotated(fn::String)
-    for s in readlines(pipeline(exiftool(["-t", fn])))
+function is_image_rotated(data::Vector{UInt8})
+    for s in readlines(pipeline(exiftool(["-t", "-"]; stdin=IOBuffer(data))))
         k, v = split(s, '\t')
         k == "Orientation" && v == "Rotate 90 CW" && return true
     end
     false
+end
+
+function image_query(imgdata::Vector{UInt8}, query::String; num_predict=1024)
+    try
+        req = (;
+               model="llama3.2-vision",
+               keep_alive="30m",
+               options=(; num_predict),
+               messages=[
+                         (;
+                          role="user",
+                          content=query,
+                          images=[Base64.base64encode(imgdata)]
+                         ),
+                        ])
+
+        s = String(HTTP.request("POST", "http://192.168.50.1:11434/api/chat";
+                                headers=["Content-Type"=>"application/json"],
+                                body=JSON.json(req), retry=false,
+                                readtimeout=30, connect_timeout=30).body)
+        res = []
+        for s1 in split(s, '\n')
+            # println(s1)
+            r = JSON.parse(s1)
+            r["done"] && break
+            m = r["message"]
+            m["role"] != "assistant" && break
+            push!(res, m["content"])
+        end
+        join(res)
+    catch _
+        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        nothing
+    end
+end
+
+function s3_call(provider::Symbol, req, data=UInt8[]; proxy=MEDIA_PROXY[])
+    iob = IOBuffer()
+    println(iob, JSON.json(req))
+    write(iob, data)
+    seek(iob, 0)
+    timeout = trunc(Int, length(data)/(512*1024)) + 10
+    try
+        JSON.parse(read(pipeline(`nice timeout $timeout $(Conda.ROOTENV)/bin/python primal-server/s3.py`, stdin=iob), String))
+    catch _
+        # println("s3_call failed: ", JSON.json(req))
+        rethrow()
+    end
+end
+
+function s3_upload(provider::Symbol, object::String, data::Vector{UInt8}, content_type::String; proxy=MEDIA_PROXY[])
+    req = (; operation="upload", object, content_type, Main.S3_CONFIGS[provider]...)
+    r = s3_call(provider, req, data; proxy)
+    @assert r["status"]
+    nothing
+end
+
+function s3_check(provider::Symbol, object::String; proxy=MEDIA_PROXY[])
+    req = (; operation="check", object, Main.S3_CONFIGS[provider]...)
+    r = s3_call(provider, req; proxy)
+    r["exists"]
+end
+
+function s3_get(provider::Symbol, object::String; proxy=MEDIA_PROXY[])::Vector{UInt8}
+    req = (; operation="get", object, Main.S3_CONFIGS[provider]...)
+    iob = IOBuffer()
+    println(iob, JSON.json(req))
+    seek(iob, 0)
+    read(pipeline(`nice timeout 10 $(Conda.ROOTENV)/bin/python primal-server/s3.py`, stdin=iob))
+end
+
+function s3_delete(provider::Symbol, object::String; proxy=MEDIA_PROXY[])
+    req = (; operation="delete", object, Main.S3_CONFIGS[provider]...)
+    r = s3_call(provider, req; proxy)
+    @assert r["status"]
 end
 
 end

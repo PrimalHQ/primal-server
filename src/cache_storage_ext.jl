@@ -4,6 +4,8 @@ import ..Filterlist
 import ..TrustRank
 import SHA
 
+using ..Tracing: @ti, @tc, @td, @tr
+
 include("../src/notifications.jl")
 
 function notification_counter_update(est, notif)
@@ -275,14 +277,17 @@ video_exts = [".mp4", ".mov"]
 audio_exts = [".wav", ".mp3", ".aac", ".flac", ".ogg"]
 
 function import_note_urls(est::CacheStorage, e::Nostr.Event)
+    funcname = "import_note_urls"
+    DB.ext_is_human(est, e.pubkey; threshold=0.0) || return
     for_urls(est, e) do url
         _, ext = splitext(lowercase(url))
         if any((startswith(ext, ext2) for ext2 in image_exts))
-            DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true), (:large, true)]))
+            # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true), (:large, true), (:small, true)]))
+            DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, Main.Media.all_variants))
         elseif any((startswith(ext, ext2) for ext2 in video_exts))
-            DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true)]))
+            DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true)]))
         else
-            DOWNLOAD_PREVIEWS[] && Media.media_queue(@task import_preview(est, e.id, url))
+            DOWNLOAD_PREVIEWS[] && Main.Media.media_queue(@task @ti @tr e.id url import_preview(est, e.id, url))
         end
     end
 end
@@ -305,9 +310,9 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
         end
     end
 
-    if get(TrustRank.pubkey_rank, e.pubkey, 0.0) > TrustRank.external_resources_threshold[]
+    # if ext_is_human(est, e.pubkey; threshold=TrustRank.external_resources_threshold[])
         import_note_urls(est, e)
-    end
+    # end
 
     if ext_is_human(est, e.pubkey)
         for_hashtags(est, e) do hashtag
@@ -325,13 +330,17 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
 end
 
 function ext_long_form_note(est::CacheStorage, e::Nostr.Event)
+    funcname = "ext_long_form_note"
+
+    # DB.ext_is_human(est, e.pubkey; threshold=0.0) || return
+
     import_note_urls(est, e)
 
     for t in e.tags
         if length(t.fields) >= 2 && t.fields[1] == "image"
             url = t.fields[2]
-            @show (e.id, t)
-            DOWNLOAD_MEDIA[] && Media.media_queue(@task import_media(est, e.id, url, [(:original, true), (:large, true)]))
+            # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true), (:large, true)]))
+            DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, Main.Media.all_variants))
         end
     end
 end
@@ -386,15 +395,15 @@ function ext_is_hidden(est::CacheStorage, pubkey::Nostr.PubKeyId)
     pubkey in Filterlist.access_pubkey_blocked_spam
 end
 
-function ext_is_human(est::CacheStorage, pubkey::Nostr.PubKeyId)
+function ext_is_human(est::CacheStorage, pubkey::Nostr.PubKeyId; threshold=TrustRank.humaness_threshold[])
     if pubkey in est.dyn[:human_override]
         return est.dyn[:human_override][pubkey]
     end
-    isempty(TrustRank.pubkey_rank) || get(TrustRank.pubkey_rank, pubkey, 0.0) > TrustRank.humaness_threshold[]
+    !isempty(Postgres.execute(:p0, "select 1 from pubkey_trustrank where pubkey = \$1 and rank > \$2 limit 1", [pubkey, threshold])[2])
 end
 
 function is_trusted_user(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
-    get(TrustRank.pubkey_rank, pubkey, 0.0) > 0.0 || get(est.dyn[:human_override], pubkey, false)
+    ext_is_human(est, pubkey; threshold=0.0)
 end
 
 # TODO refactor event scoring to use scheduled_hooks to expire scores
@@ -650,148 +659,6 @@ function for_urls(body::Function, est::CacheStorage, e::Nostr.Event)
     e.kind == Int(Nostr.TEXT_NOTE) || return
     for m in eachmatch(re_url, e.content)
         body(String(m.match))
-    end
-end
-
-MEDIA_SERVER = Ref("https://primal.b-cdn.net")
-
-import URIs
-import HTTP
-
-function media_url(url, size, anim)
-    "$(MEDIA_SERVER[])/media-cache?s=$(size)&a=$(anim)&u=$(URIs.escapeuri(url))"
-end
-
-import_media_lock = ReentrantLock()
-function import_media(est::CacheStorage, eid::Nostr.EventId, url::String, variant_specs::Vector)
-    try
-        catch_exception(est, :import_media, eid, url) do
-            push!(Main.stuff, (:import_media, :entry, (; eid, url)))
-            dldur = @elapsed (r = Main.Media.media_variants(est, url, variant_specs; sync=true))
-            isnothing(r) && return
-            lock(import_media_lock) do
-                if isempty(exe(est.event_media, @sql("select 1 from event_media where event_id = ?1 and url = ?2"), eid, url))
-                    exe(est.event_media, @sql("insert into event_media values (?1, ?2)"),
-                        eid, url)
-                end
-            end
-            for ((size, anim), media_url) in r
-                lock(import_media_lock) do
-                    if isempty(exe(est.media, @sql("select 1 from media where url = ?1 and size = ?2 and animated = ?3 limit 1"), url, size, anim))
-                        fn = abspath(Main.Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(media_url).path)
-                        mimetype = try
-                            String(chomp(read(pipeline(`file -b --mime-type $fn`; stdin=devnull), String)))
-                        catch _
-                            "application/octet-stream"
-                        end
-                        ftype = split(mimetype, '/')[1]
-                        m = if ftype == "image"
-                            try match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file -b $fn`; stdin=devnull), String))
-                            catch _ nothing end
-                        elseif ftype == "video"
-                            try match(r"([0-9]+)x([0-9]+)x([0-9.]+)", read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of csv=s=x:p=0 $fn`; stdin=devnull), String))
-                            catch _ nothing end
-                        else
-                            nothing
-                        end
-                        # @show (:import_media, url, dldur, stat(fn).size, fn, m)
-                        if !isnothing(m)
-                            width, height = parse(Int, m[1]), parse(Int, m[2])
-                            duration = try parse(Float64, m[3]) catch _ 0.0 end
-
-                            # duration > 0 && @show (; eid, url, duration)
-
-                            category, category_prob = "", 1.0
-                            try
-                                if ftype == "image"
-                                    category, category_prob = Main.Media.image_category(fn)
-                                    size == :original && anim && ext_media_import(est, eid, url, string(URIs.parse_uri(media_url).path), read(fn))
-                                    if Main.Media.is_image_rotated(fn)
-                                        width, height = height, width
-                                    end
-                                elseif ftype == "video"
-                                    # @show (:video, url, fn)
-                                    if !isnothing(local d = try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull, stdout=`convert - -`)) catch _ end)
-                                        (mi, lnk) = Main.Media.media_import((_)->d, (; url, type=:video_thumbnail))
-                                        thumbnail_media_url = Main.Media.make_media_url(mi, ".png")
-                                        thumb_fn = abspath(Main.Media.MEDIA_PATH[] * "/.." * URIs.parse_uri(thumbnail_media_url).path)
-                                        if isempty(exe(est.dyn[:video_thumbnails], @sql("select 1 from video_thumbnails where video_url = ?1 limit 1"), url))
-                                            exe(est.dyn[:video_thumbnails], @sql("insert into video_thumbnails values (?1, ?2)"),
-                                                url, thumbnail_media_url)
-                                        end
-                                        Main.Media.media_queue(@task import_media(est, eid, thumbnail_media_url, Main.Media.all_variants))
-                                        category, category_prob = Main.Media.image_category(thumb_fn)
-                                        size == :original && anim && ext_media_import(est, eid, url, string(URIs.parse_uri(media_url).path), read(thumb_fn))
-                                        # @show (:video, (; url, fn, thumb_fn, thumbnail_media_url, eid, category, category_prob))
-                                    end
-                                end
-                            catch _
-                                Utils.print_exceptions()
-                            end
-
-                            exe(est.media, @sql("insert into media values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
-                                url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob, duration)
-                            push!(Main.stuff, (:import_media, :insert, (; eid, url)))
-                        end
-                    end
-                    @async begin HTTP.get(Main.Media.cdn_url(url, size, anim); readtimeout=15, connect_timeout=5).body; nothing; end
-                    # @async begin @show (HTTP.get((@show Main.Media.cdn_url(url, size, anim)); readtimeout=15, connect_timeout=5).body |> length); nothing; end
-                end
-            end
-        end
-    finally
-        Main.Media.update_media_queue_executor_taskcnt(-1)
-    end
-end
-
-import_preview_lock = ReentrantLock()
-function import_preview(est::CacheStorage, eid::Nostr.EventId, url::String)
-    try
-        catch_exception(est, :import_preview, eid, url) do
-            push!(Main.stuff, (:import_preview, :entry, (; eid, url, link="https://primal.net/e/$(Nostr.hex(eid))")))
-            # @show (:import_preview, url, "https://primal.net/e/$(Nostr.hex(eid))")
-            if isempty(exe(est.preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
-                # @show (:import_preview, :download, url)
-                dldur = @elapsed (r = begin
-                                      r = Main.Media.fetch_resource_metadata(url)
-                                      # @show (url, r)
-                                      if !isempty(r.image)
-                                          # push!(Main.stuff, @show (:import_preview, :image, (; eid, url, r.image)))
-                                          try 
-                                              import_media(est, eid, r.image, Main.Media.all_variants) 
-                                              @async begin HTTP.get(Main.Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
-                                          catch _ end
-                                      end
-                                      # if !isempty(r.icon_url)
-                                      #     try
-                                      #         import_media(est, eid, r.icon_url, [(:original, true)]) 
-                                      #         @async begin HTTP.get(Main.Media.cdn_url(r.icon_url, :o, true); readtimeout=15, connect_timeout=5).body; nothing; end
-                                      #     catch _ end
-                                      # end
-                                      r
-                                  end)
-                lock(import_preview_lock) do
-                    # @show (:import_preview, :check, url)
-                    if isempty(exe(est.preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
-                        category = ""
-                        push!(Main.stuff, (:import_preview, :insert, (; eid, url)))
-                        exe(est.preview, @sql("insert into preview values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
-                            url, trunc(Int, time()), dldur, r.mimetype, category, 1.0,
-                            r.title, r.description, r.image, r.icon_url)
-                    end
-                end
-            end
-            lock(import_preview_lock) do
-                if !isempty(exe(est.preview, @sql("select 1 from preview where url = ?1 limit 1"), url))
-                    if isempty(exe(est.event_preview, @sql("select 1 from event_preview where event_id = ?1 and url = ?2 limit 1"), eid, url))
-                        exe(est.event_preview, @sql("insert into event_preview values (?1, ?2)"),
-                            eid, url)
-                    end
-                end
-            end
-        end
-    finally
-        Main.Media.update_media_queue_executor_taskcnt(-1)
     end
 end
 

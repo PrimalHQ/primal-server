@@ -1993,6 +1993,7 @@ function iterate_events_in_file(body::Function, filename::String; pos=0, cond=e-
 end
 
 include("cache_storage_ext.jl")
+include("cache_storage_media.jl")
 
 function sendtolog(tag, fc; server=:p7)
    Postgres.execute(server, "insert into log values (\$1, \$2, \$3, \$4, \$5)",

@@ -22,6 +22,7 @@ exceptions = CircularBuffer(200)
 est = Ref{Any}(nothing)
 
 pex(query::String, params=[]) = Postgres.execute(DB[], replace(query, '?'=>'$'), params)
+pex(server::Symbol, query::String, params=[]) = Postgres.execute(server, replace(query, '?'=>'$'), params)
 
 function catch_exception(body::Function, handler::Symbol, args...)
     try
@@ -74,14 +75,22 @@ end
 
 function find_blob(req_target)
     h, ext = splitext(req_target[2:end])
+    h = lowercase(h)
     sha256 = hex2bytes(h)
     # mimetype = mimetype_for_ext(ext)
     # if isnothing(mimetype); mimetype = "application/octet-stream"; end
-    for (mimetype, path, pubkey) in pex("select mimetype, path, pubkey from media_uploads where sha256 = ?1 limit 1", [sha256])[2]
+    for (mimetype, path, pubkey, key) in pex("select mimetype, path, pubkey, key::varchar from media_uploads where sha256 = ?1 limit 1", [sha256])[2]
+        for (media_url, mimetype, storage_provider) in pex(:p0, "select media_url, content_type, storage_provider from media_storage where key::jsonb->>'sha256' = ?1 limit 1", [h])[2]
+            storage_provider = Symbol(storage_provider)
+            return (; media_url, storage_provider, path, mimetype, sha256, pubkey=Nostr.PubKeyId(pubkey))
+        end
         for mp in Main.Media.MEDIA_PATHS[Main.App.UPLOADS_DIR[]]
-            filepath = join(split(mp, '/')[1:end-1], '/') * path
-            try isfile(filepath) && return (; filepath, path, mimetype, sha256, pubkey=Nostr.PubKeyId(pubkey))
-            catch _ end
+            if mp[1] == :local
+                filepath = join(split(mp[3], '/')[1:end-1], '/') * path
+                media_url = "https://media.primal.net$path"
+                try isfile(filepath) && return (; media_url, storage_provider=nothing, filepath, path, mimetype, sha256, pubkey=Nostr.PubKeyId(pubkey))
+                catch _ end
+            end
         end
     end
     nothing
@@ -144,8 +153,7 @@ function blossom_handler(req::HTTP.Request)
             elseif !isnothing(match(r"^/[0-9a-fA-F]{64}", req.target))
                 r = find_blob(req.target)
                 if !isnothing(r)
-                    # return HTTP.Response(200, response_headers(r.mimetype), read(r.filepath))
-                    return HTTP.Response(302, response_headers(r.mimetype; extra=["Location"=>"https://primal.b-cdn.net/media-cache?s=o&a=1&u=https://media.primal.net$(r.path)"]), "redirecting")
+                    return HTTP.Response(302, response_headers(r.mimetype; extra=["Location"=>"https://primal.b-cdn.net/media-cache?s=o&a=1&u=$(URIs.escapeuri(r.media_url))"]), "redirecting")
                 else
                     return HTTP.Response(404, response_headers("text/plain"), "not found")
                 end
@@ -166,15 +174,15 @@ function blossom_handler(req::HTTP.Request)
                 pex("delete from media_uploads where pubkey = ?1 and sha256 = ?2", [e.pubkey, r.sha256])
                 if isempty(pex("select 1 from media_uploads where sha256 = ?1 limit 1", [r.sha256])[2])
                     # @show (:rm, r.path)
-                    for mp in Main.Media.MEDIA_PATHS[Main.App.UPLOADS_DIR[]]
-                        filepath = join(split(mp, '/')[1:end-1], '/') * r.path
-                        try 
-                            if isfile(filepath)
-                                rm(filepath) 
-                                # @show (:rm_ok, filepath)
+                    if haskey(Main.S3_CONFIGS, r.storage_provider)
+                        Main.Media.s3_delete(r.storage_provider, r.path)
+                    else
+                        for mp in Main.Media.MEDIA_PATHS[Main.App.UPLOADS_DIR[]]
+                            if mp[1] == :local
+                                filepath = join(split(mp[3], '/')[1:end-1], '/') * r.path
+                                try isfile(filepath) && rm(filepath) 
+                                catch ex println(ex) end
                             end
-                        catch ex
-                            println(ex)
                         end
                     end
                 end
@@ -185,6 +193,7 @@ function blossom_handler(req::HTTP.Request)
 
         elseif req.method == "PUT"
             e = check_action(req, "upload")
+            # push!(Main.stuff, (:blossomupload, req))
             data = collect(req.body)
             r = JSON.parse([x for x in Main.App.import_upload_2(est[], e.pubkey, data) 
                                   if x.kind == Int(Main.App.UPLOADED_2)][1].content)

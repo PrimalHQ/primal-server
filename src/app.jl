@@ -2543,6 +2543,7 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
 end
 
 include("app_ext.jl")
+include("app_media.jl")
 
 # function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end
 # function ext_user_profile(est::DB.CacheStorage, pubkey); (;); end
