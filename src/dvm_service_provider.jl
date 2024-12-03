@@ -17,11 +17,16 @@ NIP89_HANDLER_INFORMATION=31990
 NIP90_NOSTR_CONTENT_DISCOVERY_REQUEST=5300
 NIP90_NOSTR_CONTENT_DISCOVERY_RESULT=6300
 NIP90_JOB_FEEDBACK=7000
+NIP65_RELAY_LIST_METADATA=10002
 
 PRIMAL_DVM_KEYPAIR_SALT = Ref{Any}(nothing)
 
-RELAY_URLS = ["ws://192.168.18.7:7777", "wss://relay.damus.io", "wss://nostr.mom"]
-# RELAY_URLS = ["ws://192.168.14.7:7777", "wss://nostr.mom"]
+RELAY_URLS = [
+              "wss://relay.primal.net",
+              "wss://nos.lol",
+              "wss://relay.snort.social",
+              "wss://strfry.iris.to",
+             ]
 
 clients = []
 keypairs = Dict{String, NamedTuple}()
@@ -256,6 +261,14 @@ function on_connect(client)
                                                       ["a", "$(NIP89_HANDLER_INFORMATION):$(Nostr.hex(pubkey)):$(feed_id)"],
                                                      ]],
                            "")
+        enip65 = Nostr.Event(seckey, pubkey,
+                             Utils.current_time(),
+                             NIP65_RELAY_LIST_METADATA,
+                             [Nostr.TagAny(t) 
+                              for t in [["r", url] 
+                                        for url in RELAY_URLS 
+                                        if !occursin("192.168.", url)]],
+                             "")
         e = 
         if     state == :active; eact
         elseif state == :deleted; edel
@@ -264,6 +277,12 @@ function on_connect(client)
         NostrClient.send(client, e; timeout=(5.0, "dvm: handler info event ack for $(client.relay_url)")) do m, done
             # @show (client.relay_url, m)
             m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) handler info event for feed $feed_id failed")
+            # println((:okinfo, feed_id, pubkey, client.relay_url, m))
+            done(:ok)
+        end
+        NostrClient.send(client, enip65; timeout=(5.0, "dvm: nip65 relay meta data event ack for $(client.relay_url)")) do m, done
+            m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) nip65 relay meta data event for feed $feed_id failed")
+            # println((:oknip65, feed_id, pubkey, client.relay_url, m))
             done(:ok)
         end
 
@@ -323,7 +342,8 @@ function handle_request(client, m)
                      [e.id, e.created_at, e.pubkey, feed_id])
 
     function send(re)
-        errormonitor(@async Main.App.broadcast_event_to_relays_async(re; relays=RELAY_URLS))
+        errormonitor(@async Main.App.broadcast_event_to_relays_async(re; relays))
+        # errormonitor(@async Main.App.broadcast_event_to_relays_async(re; relays=RELAY_URLS))
         # errormonitor(@async Main.App.broadcast_event_to_relays_async(re; relays=[client.relay_url]))
         # NostrClient.send(client, re; timeout=5.0) do m, done
         #     m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) for feed $feed_id failed")
