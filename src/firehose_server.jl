@@ -7,8 +7,8 @@ import JSON
 import ..Utils
 using ..Utils: ThreadSafe, wait_for
 
-const HOST = Ref("127.0.0.1")
-const PORT = Ref(9000)
+const HOST::Ref{String} = Ref("127.0.0.1")
+const PORT::Ref{Int} = Ref(9000)
 
 const PRINT_EXCEPTIONS = Ref(true)
 
@@ -26,7 +26,7 @@ const latest_exceptions = ThreadSafe(CircularBuffer(50))
 
 const message_processors = ThreadSafe(SortedDict{Symbol, Function}())
 
-isactive() = !isnothing(server[])
+isactive()::Bool = !isnothing(server[])
 
 function start()
     @assert isempty(connections)
@@ -93,7 +93,7 @@ function stop()
     @info "stopped message firehose server on port $(PORT[])"
 end
 
-function start_reader_task(sock)
+function start_reader_task(sock::TCPSocket)
     errormonitor(@async begin
                      while isactive() && isopen(sock) && isreadable(sock)
                          s = readline(sock)
@@ -126,7 +126,7 @@ function start_reader_task(sock)
                  end)
 end
 
-function broadcast(msgs::Vector{String}) # it's better to use broadcast_via_channel
+function broadcast(msgs::Vector{String})::Nothing # it's better to use broadcast_via_channel
     lock(latest_sent_messages) do lmsgs
         for msg in msgs
             push!(lmsgs, msg)
