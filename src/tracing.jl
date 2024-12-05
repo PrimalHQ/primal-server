@@ -95,18 +95,20 @@ function tr(exprs)
 
     val = gensym()
     t0 = gensym()
+    tbefore = gensym()
     depth = gensym()
 
     handle_assignment(expr) do expr
         :(let $t0 = time()
+              $tbefore = Dates.now()
               $depth = get(task_local_storage(), :tracing_depth, 0)
               try
                   let $val = @td $(esc(expr))
-                      ENABLED[] && log_trace(@__MODULE__, try $(esc(:funcname)) catch _ nothing end, $label, $val; duration=time()-$t0, depth=$depth, extra=$extra)
+                      ENABLED[] && log_trace(@__MODULE__, try $(esc(:funcname)) catch _ nothing end, $label, $val; t=$tbefore, duration=time()-$t0, depth=$depth, extra=$extra)
                       $val
                   end
               catch ex
-                  ENABLED[] && log_trace(@__MODULE__, try $(esc(:funcname)) catch _ nothing end, $label, ex; duration=time()-$t0, depth=$depth, extra=$extra, exception=true)
+                  ENABLED[] && log_trace(@__MODULE__, try $(esc(:funcname)) catch _ nothing end, $label, ex; t=$tbefore, duration=time()-$t0, depth=$depth, extra=$extra, exception=true)
                   rethrow()
               end
           end)
@@ -152,7 +154,11 @@ macro named(expr)
     Base.esc(res)
 end
 
-function log_trace(mod::Module, funcname, expr::String, value; duration=missing, depth=missing, extra=missing, exception=false)
+function log_trace(
+        mod::Module, funcname, expr::String, value; 
+        table="trace",
+        t=Dates.now(), duration=missing, depth=missing, extra=missing, exception=false)
+
     if exception
         bio = IOBuffer()
         Utils.print_exceptions(bio)
@@ -178,7 +184,7 @@ function log_trace(mod::Module, funcname, expr::String, value; duration=missing,
                   funcname, missing, missing,
                   expr,
                   try JSON.json(value) catch _ JSON.json(string(value)) end,
-                  Dates.now(),
+                  t,
                   exception,
                   duration,
                   depth,
@@ -186,7 +192,7 @@ function log_trace(mod::Module, funcname, expr::String, value; duration=missing,
                   ismissing(context) ? missing : context,
                   task_ptr,
                  ]
-        Postgres.execute(:p7, "insert into trace values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14, \$15, \$16, default, \$17)",
+        Postgres.execute(:p7, "insert into $table values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14, \$15, \$16, default, \$17)",
                          params)
         isnothing(log) || push!(log, params)
     catch ex
