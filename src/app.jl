@@ -1014,8 +1014,8 @@ function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
         for (_, style, custom_badge, avatar_glow) in Postgres.execute(:membership, "select * from membership_legend_customization where pubkey = \$1", [pk])[2]
             res_legend_customization[pk] = (; style, custom_badge, avatar_glow)
         end
-        for (cohort_1, cohort_2, tier) in Postgres.execute(:membership, "select cohort_1, cohort_2, tier from memberships where pubkey = \$1", [pk])[2]
-            res_cohorts[pk] = (; cohort_1, cohort_2, tier)
+        for (cohort_1, cohort_2, tier, valid_until) in Postgres.execute(:membership, "select cohort_1, cohort_2, tier, valid_until from memberships where pubkey = \$1 and tier != 'free'", [pk])[2]
+            res_cohorts[pk] = (; cohort_1, cohort_2, tier, expires_on=ismissing(valid_until) ? nothing : trunc(Int, Dates.datetime2unix(valid_until)))
         end
     end
     res = []
