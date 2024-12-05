@@ -3490,7 +3490,7 @@ function membership_media_management_delete(est::DB.CacheStorage; event_from_use
     Postgres.execute(:membership, "delete from short_urls where path = \$1 and ext = \$2",
                      [spath, ext])
 
-    Postgres.execute(:membership, "update from memberships set used_storage = used_storage - \$2 where pubkey = \$1", 
+    Postgres.execute(:membership, "update memberships set used_storage = used_storage - \$2 where pubkey = \$1", 
                      [e.pubkey, size])
 
     []
