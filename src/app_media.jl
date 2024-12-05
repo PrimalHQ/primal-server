@@ -26,24 +26,26 @@ categorized_uploads = Ref{Any}(nothing)
 function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
     funcname = "import_upload_2"
 
+    tbefore, tstart = Dates.now(), time()
+
     if !isempty(DB.exec(categorized_uploads[], "select 1 from categorized_uploads where sha256 = ?1 and type = 'blocked' limit 1", (SHA.sha256(data),)))
         error("blocked content")
     end
 
-    data = Media.strip_metadata(data)
+    @tr pubkey @elapsed (data = Media.strip_metadata(data))
 
-    sha256 = SHA.sha256(data)
+    @tr pubkey sha256 = SHA.sha256(data)
     key = (; type="member_upload", pubkey, sha256=bytes2hex(sha256))
 
     new_import = Ref(false)
-    (mi, lnk, murl) = Media.media_import(function (_)
+    (mi, lnk, murl) = @tr pubkey Media.media_import(function (_)
                                              new_import[] = true
                                              data
-                                         end, key; media_path=UPLOADS_DIR[])
-    @tr mi lnk murl ()
-    @show (mi, lnk, murl)
+                                         end, key; media_path=UPLOADS_DIR[], pubkey)
+    @tr key mi lnk murl new_import[] ()
+    @show (pubkey ,mi, lnk, murl)
 
-    if new_import[]
+    @tr key murl if new_import[]
         if isempty(DB.exec(Main.InternalServices.memberships[], "select 1 from memberships where pubkey = ?1 limit 1", (pubkey,)))
             tier = isempty(DB.exec(Main.InternalServices.verified_users[], "select 1 from verified_users where pubkey = ?1 limit 1", (pubkey,))) ? "free" : "premium"
             DB.exec(Main.InternalServices.memberships[], "insert into memberships values (?1, ?2, ?3, ?4, ?5)", (pubkey, tier, missing, missing, 0))
@@ -71,9 +73,9 @@ function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vec
         end
     end
 
-    wh = Media.parse_image_dimensions(data)
+    @tr key murl wh = Media.parse_image_dimensions(data)
     width, height = isnothing(wh) ? (0, 0) : wh
-    mimetype = Media.parse_mimetype(data)
+    @tr key murl mimetype = Media.parse_mimetype(data)
 
     if isempty(DB.exe(est.media_uploads, DB.@sql("select 1 from media_uploads where pubkey = ?1 and key = ?2 limit 1"), pubkey, JSON.json(key)))
         DB.exe(est.media_uploads, DB.@sql("insert into media_uploads values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"), 
@@ -89,11 +91,12 @@ function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vec
                sha256)
     end
 
-    @tr murl surl = Main.InternalServices.url_shortening(murl)
+    @tr key murl surl = Main.InternalServices.url_shortening(murl)
 
-    if splitext(surl)[2] in [".jpg", ".png", ".gif", ".mp4", ".mov", ".webp"]
-        try
-            @tr surl DB.import_media(est, nothing, surl, Media.all_variants)
+    if length(data) < 10*1024^2 && splitext(surl)[2] in [".jpg", ".png", ".gif", ".mp4", ".mov", ".webp"]
+        @async try
+            # @tr key murl surl DB.import_media(est, nothing, surl, [(:original, true)])
+            @tr key murl surl DB.import_media(est, nothing, surl, Media.all_variants)
             # r = Media.media_variants(est, surl; variant_specs=Media.all_variants, sync=true, proxy=nothing)
             # DB.DOWNLOAD_MEDIA[] && Media.media_queue(@task @ti @tr surl DB.import_media(est, nothing, surl, Media.all_variants))
             # @sync for ((size, anim), media_url) in r
@@ -104,7 +107,10 @@ function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vec
         end
     end
 
-    @tr [
+    try Main.Tracing.log_trace(@__MODULE__, funcname, "done", nothing; table="tracekeep", t=tbefore, duration=time()-tstart, extra=(; pubkey, surl, size=length(data)))
+    catch _ Utils.print_exceptions() end
+
+    @show @tr [
      (; kind=Int(UPLOADED_2), content=JSON.json((; sha256=bytes2hex(sha256)))),
      (; kind=Int(UPLOADED), content=surl),
     ]

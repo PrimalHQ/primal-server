@@ -124,8 +124,9 @@ function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector
                 media_tasks[k] = 
                 let k=k
                     tsk = @task task_wrapper(est, k, max_download_duration, downloads_per_period) do
-                        @tr "media_task_download_original" url k proxy try
-                            data = download(est, (@tr url k clean_url(url)); proxy)
+                        @tr "import original and variants" url k proxy try
+                            data = nothing
+                            @tr url k @elapsed (data = download(est, (@tr url k clean_url(url)); proxy))
                             @tr url k length(data)
                             @tr url k media_import((_)->data, k)
                             @tr url k media_variants(est, url; variant_specs, key, proxy, sync)
@@ -153,8 +154,9 @@ function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector
         orig_media_url, ext = rs[1]
         @tr url orig_media_url ext ()
 
-        orig_data = download(est, orig_media_url; proxy)
-        @tr url orig_media_url length(orig_data) ()
+        orig_data = nothing
+        @tr @elapsed (orig_data = download(est, orig_media_url; proxy))
+        @tr url orig_media_url length(orig_data)
 
         ext == ".bin" && return nothing
 
@@ -234,12 +236,16 @@ function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector
     end
 end
 
-function media_import(fetchfunc::Union{Function,Nothing}, key; media_path::Symbol=:cache)
+function media_import(fetchfunc::Union{Function,Nothing}, key; media_path::Symbol=:cache, pubkey=nothing)
     funcname = "media_import"
 
+    if isnothing(pubkey) && key isa NamedTuple && haskey(key, :type) && key.type == "member_upload" && haskey(key, :pubkey)
+        pubkey = key.pubkey
+    end
+
     external =
-    if key isa NamedTuple && haskey(key, :type) && key.type == "member_upload" && haskey(key, :pubkey)
-        Main.App.use_external_storage(key.pubkey)
+    if !isnothing(pubkey)
+        Main.App.use_external_storage(pubkey)
     else
         true
     end
@@ -252,10 +258,10 @@ function media_import(fetchfunc::Union{Function,Nothing}, key; media_path::Symbo
     for mp in MEDIA_PATHS[media_path]
         try
             if     mp[1] == :local && !external
-                r = media_import_local(fetchfunc, key, mp[2:end]...)
+                @tr key r = media_import_local(fetchfunc, key, mp[2:end]...)
                 push!(rs, r)
-            elseif mp[1] == :s3
-                r = media_import_s3(fetchfunc, key, mp[2:end]...)
+            elseif mp[1] == :s3    # && external
+                @tr key r = media_import_s3(fetchfunc, key, mp[2:end]...)
                 push!(rs, r)
             end
         catch ex
