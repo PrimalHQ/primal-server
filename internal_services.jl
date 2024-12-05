@@ -444,7 +444,7 @@ function preview_handler(req::HTTP.Request)
                     el = EzXML.ElementNode("meta")
                     el["property"] = "og:$(k)"
                     EzXML.link!(head, el)
-                    index_elems[k] = el
+                    h.index_elems[k] = el
                 end
                 
                 el = EzXML.ElementNode("meta")
@@ -455,12 +455,12 @@ function preview_handler(req::HTTP.Request)
                 el = EzXML.ElementNode("meta")
                 el["name"] = "twitter:card"
                 EzXML.link!(head, el)
-                index_elems[:twitter_card] = el
+                h.index_elems[:twitter_card] = el
 
                 el = EzXML.ElementNode("meta")
                 el["name"] = "twitter:image"
                 EzXML.link!(head, el)
-                index_elems[:twitter_image] = el
+                h.index_elems[:twitter_image] = el
 
                 for e in EzXML.findall("/html/head/script", doc) # WARN needed to run client app in browser
                     EzXML.link!(e, EzXML.TextNode(" "))
@@ -477,9 +477,9 @@ function preview_handler(req::HTTP.Request)
                     end
                     v = strip(v)
                     if !isempty(v)
-                        index_elems[k]["content"] = v
+                        h.index_elems[k]["content"] = v
                     else
-                        delete!(index_elems[k], "content")
+                        delete!(h.index_elems[k], "content")
                     end
                 end
 
