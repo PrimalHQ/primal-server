@@ -665,21 +665,18 @@ RECOMMENDED_USERS_FILE = Ref("recommended-users.json")
 function get_recommended_users(est::DB.CacheStorage)
     isfile(RECOMMENDED_USERS_FILE[]) || return []
 
-    res_meta_data = Set()
+    pubkeys = Set{Nostr.PubKeyId}()
     for (pk, _) in JSON.parse(read(RECOMMENDED_USERS_FILE[], String))
         pk = Nostr.PubKeyId(pk)
         if pk in est.meta_data
-            eid = est.meta_data[pk]
-            if eid in est.events
-                push!(res_meta_data, est.events[eid])
-            end
+            push!(pubkeys, pk)
         end
     end
+    pubkeys = collect(pubkeys)
 
     res = []
-    res_meta_data = collect(values(res_meta_data))
-    append!(res, res_meta_data)
-    append!(res, user_scores(est, res_meta_data))
+    append!(res, user_infos(est; pubkeys))
+    append!(res, user_scores(est, pubkeys))
     res
 end
 
@@ -1230,6 +1227,8 @@ function get_notifications(
         append!(res, ext_event_response(est, md))
     end
     # end
+    
+    append!(res, primal_verified_names(est, collect(keys(res_meta_data))))
         
     res
 end
@@ -1353,6 +1352,7 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     append!(res, res_meta_data)
     ext_user_infos(est, res, res_meta_data)
     append!(res, user_scores(est, res_meta_data))
+    append!(res, primal_verified_names(est, [e.pubkey for e in res_meta_data]))
     res
 end
 

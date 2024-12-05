@@ -141,6 +141,7 @@ MEMBERSHIP_RECOVERY_CONTACT_LISTS=10_000_165
 MEMBERSHIP_CONTENT_STATS=10_000_166
 MEMBERSHIP_CONTENT_REBROADCAST_STATUS=10_000_167
 MEMBERSHIP_LEGEND_CUSTOMIZATION=10_000_168
+MEMBERSHIP_COHORTS=10_000_169
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -948,10 +949,13 @@ function network_stats(est::DB.CacheStorage)
     end
 end
 
-function user_scores(est::DB.CacheStorage, res_meta_data)
-    d = Dict([(Nostr.hex(e.pubkey), get(est.pubkey_followers_cnt, e.pubkey, 0))
-              for e in collect(res_meta_data)])
+function user_scores(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
+    d = Dict([(Nostr.hex(pubkey), get(est.pubkey_followers_cnt, pubkey, 0))
+              for pubkey in pubkeys])
     isempty(d) ? [] : [(; kind=Int(USER_SCORES), content=JSON.json(d))]
+end
+function user_scores(est::DB.CacheStorage, res_meta_data)
+    user_scores(est, Nostr.PubKeyId[e.pubkey for e in collect(res_meta_data)])
 end
 
 function contact_list(est::DB.CacheStorage; pubkey, extended_response=true)
@@ -999,9 +1003,10 @@ function user_infos(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, app
     end
 end
 
-function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
+function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
     res_primal_names = Dict()
     res_legend_customization = Dict()
+    res_cohorts = Dict()
     for pk in pubkeys
         for name in Main.InternalServices.nostr_json_query_by_pubkey(pk; default_name=true)
             res_primal_names[pk] = name
@@ -1009,13 +1014,19 @@ function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKe
         for (_, style, custom_badge, avatar_glow) in Postgres.execute(:membership, "select * from membership_legend_customization where pubkey = \$1", [pk])[2]
             res_legend_customization[pk] = (; style, custom_badge, avatar_glow)
         end
+        for (cohort_1, cohort_2, tier) in Postgres.execute(:membership, "select cohort_1, cohort_2, tier from memberships where pubkey = \$1", [pk])[2]
+            res_cohorts[pk] = (; cohort_1, cohort_2, tier)
+        end
     end
     res = []
     if !isempty(res_primal_names)
         push!(res, (; kind=USER_PRIMAL_NAMES, content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names]))))
     end
     if !isempty(res_legend_customization)
-        push!(res, (; kind=MEMBERSHIP_LEGEND_CUSTOMIZATION, content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_legend_customization]))))
+        push!(res, (; kind=MEMBERSHIP_LEGEND_CUSTOMIZATION, content=JSON.json(Dict([Nostr.hex(pk)=>r for (pk, r) in res_legend_customization]))))
+    end
+    if !isempty(res_cohorts)
+        push!(res, (; kind=MEMBERSHIP_COHORTS, content=JSON.json(Dict([Nostr.hex(pk)=>r for (pk, r) in res_cohorts]))))
     end
     res
 end
@@ -1734,6 +1745,7 @@ function response_messages_for_zaps(est, zaps; kinds=nothing, order_by=:created_
     res_meta_data = collect(values(res_meta_data))
     append!(res, res_meta_data)
     append!(res, user_scores(est, res_meta_data))
+    append!(res, primal_verified_names(est, [e.pubkey for e in res_meta_data]))
     ext_user_infos(est, res, res_meta_data)
 
     res_ = []
@@ -2730,6 +2742,7 @@ function response_messages_for_dvm_feeds(est::DB.CacheStorage, eids::Vector{Nost
                         push!(res, e)
 
                         append!(res, user_infos(est; pubkeys=[e.pubkey]))
+                        append!(res, primal_verified_names(est, [e.pubkey]))
 
                         likes = Postgres.execute(DAG_OUTPUTS_DB[], 
                                                  "select count(1) from a_tags where kind = 7 and ref_kind = 31990 and ref_pubkey = \$1 and ref_identifier = \$2",
@@ -3470,7 +3483,6 @@ function membership_media_management_delete(est::DB.CacheStorage; event_from_use
                false
            end
            for h in hosts]
-    @show oks
 
     Postgres.execute(:membership, "delete from media_uploads where pubkey = \$1 and path = \$2", 
                      [e.pubkey, path])
