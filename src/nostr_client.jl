@@ -30,7 +30,7 @@ mutable struct Client
             relay_url; 
             subid_prefix="", 
             on_connect=(_)->nothing, on_disconnect=(_)->nothing,
-            on_notice=()->nothing,
+            on_notice=(_)->nothing,
         )
         client = new(relay_url, subid_prefix, 
                      ReentrantLock(),

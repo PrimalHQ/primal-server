@@ -22,6 +22,7 @@ NIP65_RELAY_LIST_METADATA=10002
 PRIMAL_DVM_KEYPAIR_SALT = Ref{Any}(nothing)
 
 RELAY_URLS = [
+              "wss://relay.damus.io",
               "wss://relay.primal.net",
               "wss://nos.lol",
               "wss://relay.snort.social",
