@@ -770,6 +770,7 @@ function parse_bolt11(b::String)
 end
 
 MAX_SATSZAPPED = Ref(1_100_000)
+TRUSTED_ZAPPERS = Set{Nostr.PubKeyId}()
 
 re_hashref = r"\#\[([0-9]*)\]"
 re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
@@ -1244,25 +1245,29 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             end
             if amount_sats > 0 && !isnothing(description) && !isnothing(zapped_pk)
                 zapper_ok = Ref(false)
-                catch_exception(est, :zapper_check) do # TODO: move to bg task
-                    if zapped_pk in est.meta_data
-                        mdeid = est.meta_data[zapped_pk]
-                        if mdeid in est.events
-                            md = est.events[mdeid]
-                            d = JSON.parse(md.content)
-                            if !isnothing(local lnurl =
-                                          if haskey(d, "lud16")
-                                              name, domain = split(strip(d["lud16"]), '@')
-                                              "https://$(domain)/.well-known/lnurlp/$name"
-                                          elseif haskey(d, "lud06")
-                                              String(Bech32.decode("lnurl", d["lud06"]))
-                                          else
-                                              nothing
-                                          end)
-                                dd = JSON.parse(String(HTTP.request("GET", lnurl;
-                                                                    retry=false, connect_timeout=10, readtimeout=10, proxy=Main.PROXY).body))
-                                if haskey(dd, "nostrPubkey")
-                                    zapper_ok[] = Nostr.PubKeyId(dd["nostrPubkey"]) == e.pubkey
+                if e.pubkey in TRUSTED_ZAPPERS
+                    zapper_ok[] = true
+                else
+                    catch_exception(est, :zapper_check) do # TODO: move to bg task
+                        if zapped_pk in est.meta_data
+                            mdeid = est.meta_data[zapped_pk]
+                            if mdeid in est.events
+                                md = est.events[mdeid]
+                                d = JSON.parse(md.content)
+                                if !isnothing(local lnurl =
+                                              if haskey(d, "lud16")
+                                                  name, domain = split(strip(d["lud16"]), '@')
+                                                  "https://$(domain)/.well-known/lnurlp/$name"
+                                              elseif haskey(d, "lud06")
+                                                  String(Bech32.decode("lnurl", d["lud06"]))
+                                              else
+                                                  nothing
+                                              end)
+                                    dd = JSON.parse(String(HTTP.request("GET", lnurl;
+                                                                        retry=false, connect_timeout=10, readtimeout=10, proxy=Main.PROXY).body))
+                                    if haskey(dd, "nostrPubkey")
+                                        zapper_ok[] = Nostr.PubKeyId(dd["nostrPubkey"]) == e.pubkey
+                                    end
                                 end
                             end
                         end
