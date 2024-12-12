@@ -773,8 +773,8 @@ function user_profile_scored_media_thumbnails(est::DB.CacheStorage; pubkey, limi
             SELECT
                 event_stats.event_id
             FROM
-                prod.event_stats,
-                prod.event_media
+                event_stats,
+                event_media
             WHERE 
                 event_stats.author_pubkey = \$1 AND event_stats.event_id = event_media.event_id
             ORDER BY
@@ -1791,8 +1791,8 @@ register_cache_function(:empty_analytics_cache,
 
 function ext_user_profile(est::DB.CacheStorage, pubkey)
     total_zap_count, total_satszapped = !isempty(local r = DB.exe(est.pubkey_zapped, DB.@sql("select zaps, satszapped from pubkey_zapped where pubkey = ?1"), pubkey)) ? r[1] : (0, 0)
-    media_count = !isempty(local r = Postgres.execute(DAG_OUTPUTS_DB[], "select cnt from prod.pubkey_media_cnt where pubkey = \$1 limit 1", [pubkey])[2]) ? r[1][1] : 0
-    content_zap_count = !isempty(local r = Postgres.execute(DAG_OUTPUTS_DB[], "select cnt from prod.pubkey_content_zap_cnt where pubkey = \$1 limit 1", [pubkey])[2]) ? r[1][1] : 0
+    media_count = !isempty(local r = Postgres.execute(DAG_OUTPUTS_DB[], "select cnt from pubkey_media_cnt where pubkey = \$1 limit 1", [pubkey])[2]) ? r[1][1] : 0
+    content_zap_count = !isempty(local r = Postgres.execute(DAG_OUTPUTS_DB[], "select cnt from pubkey_content_zap_cnt where pubkey = \$1 limit 1", [pubkey])[2]) ? r[1][1] : 0
     (;
      total_zap_count,
      total_satszapped,
@@ -1917,8 +1917,8 @@ function note_mentions(
                           pubkey_notifications.arg1, 
                           pubkey_notifications.arg2
                       FROM
-                          prod.reads_versions,
-                          prod.pubkey_notifications
+                          reads_versions,
+                          pubkey_notifications
                       WHERE 
                           reads_versions.pubkey = $(@P pubkey) AND 
                           reads_versions.identifier = $(@P identifier) AND 
@@ -1957,7 +1957,7 @@ function ext_long_form_event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
 
     cols, rows = Postgres.execute(DAG_OUTPUTS_DB[], "
                                   select likes, zaps, satszapped, replies, 0 as mentions, reposts, 0 as score, 0 as score24h 
-                                  from prod.reads where latest_eid = \$1 limit 1", [eid])
+                                  from reads where latest_eid = \$1 limit 1", [eid])
     isempty(rows) && return []
 
     es = [Symbol(k)=>v for (k, v) in zip(cols, rows[1])]
