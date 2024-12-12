@@ -1104,7 +1104,8 @@ function get_notifications(
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     type_group = castmaybe(type_group, Symbol)
 
-    if     type_group == :all; nothing
+    type =
+    if     type_group == :all;  nothing
     elseif type_group == :zaps; type = [
                                         DB.YOUR_POST_WAS_ZAPPED,
                                        ]
@@ -1163,6 +1164,8 @@ function get_notifications(
                     end,
                     accept_result=function (r)
                         !isnothing(explain) && println(Dates.unix2datetime(r[2]))
+                        created_at = r[2]
+                        (created_at < since || created_at > until) && return false
                         if isnothing(type)
                             notif_d = DB.notif2namedtuple((r[1], r[2], DB.NotificationType(r[3]),
                                                            r[4:7]...))
