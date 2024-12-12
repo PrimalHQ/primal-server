@@ -516,6 +516,7 @@ BEGIN
                 e_id bytea := DECODE(e->>'id', 'hex');
                 e_kind int8 := e->>'kind';
                 e_pubkey bytea := DECODE(e->>'pubkey', 'hex');
+                read_eid bytea;
             BEGIN
                 IF e_pubkey IS NOT NULL THEN
                     pubkeys := array_append(pubkeys, e_pubkey);
@@ -569,6 +570,16 @@ BEGIN
                 IF e_kind = 0 OR e_kind = 1 OR e_kind = 6 THEN
                     RETURN QUERY SELECT * FROM event_media_response(e_id);
                     RETURN QUERY SELECT * FROM event_preview_response(e_id);
+                END IF;
+                IF e_kind = 30023 THEN
+                    FOR read_eid IN 
+                        SELECT rv.eid 
+                        FROM reads rs, reads_versions rv 
+                        WHERE rs.latest_eid = e_id AND rs.pubkey = rv.pubkey AND rs.identifier = rv.identifier
+                    LOOP
+                        RETURN QUERY SELECT * FROM event_media_response(read_eid);
+                        RETURN QUERY SELECT * FROM event_preview_response(read_eid);
+                    END LOOP;
                 END IF;
 
                 IF e_kind = 30023 THEN
