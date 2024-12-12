@@ -390,8 +390,13 @@ BEGIN
     END IF;
 
 	e := get_event(a_event_id);
-    
-    IF event_is_deleted(e.id) OR is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey) THEN
+
+    IF EXISTS (
+        SELECT 1 FROM pubkey_followers pf 
+        WHERE pf.follower_pubkey = a_user_pubkey AND e.pubkey = pf.pubkey
+    ) THEN
+        -- user follows publisher
+    ELSIF event_is_deleted(e.id) OR is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey) THEN
         RETURN;
     END IF;
 
