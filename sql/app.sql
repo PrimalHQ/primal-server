@@ -804,7 +804,9 @@ BEGIN
     SELECT json_object_agg(
         ENCODE(pubkey, 'hex'), 
         jsonb_build_object('cohort_1', cohort_1, 'cohort_2', cohort_2, 'tier', tier, 'expires_on', extract(epoch from valid_until)::int8))
-    INTO r FROM memberships WHERE pubkey = ANY(a_pubkeys) AND tier != 'free';
+    INTO r FROM memberships WHERE pubkey = ANY(a_pubkeys) AND 
+    (tier = 'premium' or tier = 'premium-legend')
+    ;
     IF r IS NOT NULL THEN
         RETURN NEXT jsonb_build_object('kind', c_MEMBERSHIP_COHORTS(), 'content', r::text);
     END IF;
