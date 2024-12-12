@@ -781,7 +781,7 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
     elseif e.kind == Int(Nostr.REPOST)
         try JSON.parse(e.content)["content"] catch _ return end
     else
-        return
+        ""
     end
     mentiontags = Set()
     for m in eachmatch(re_hashref, e.content)
