@@ -10,6 +10,7 @@ mkShell {
     gawk
     postgresql_15
     # ephemeralpg
+    python3
 
     glibc.dev
     cargo
@@ -18,19 +19,6 @@ mkShell {
     rustc
     lldb
   ];
-
-  # start_julia = ''
-  #   julia --project -t8 -L pkg.jl
-  # '';
-
-  # start_primal_server = pkgs.writeShellScript "start_primal_server.sh" ''
-  #   set -ex
-  #   export PRIMALSERVER_RELAYS='few-relays.txt'
-  #   export PRIMALSERVER_PGCONNSTR="$(cat pgurl)"
-  #   export PRIMALSERVER_AUTO_FETCH_MISSING_EVENTS="1"
-  #   export LD_LIBRARY_PATH=".:$(pwd):$LD_LIBRARY_PATH"
-  #   julia --project -t8 -L pkg.jl -L load.jl -L start.jl
-  # '';
 
   setup_postgres = pkgs.writeShellScript "setup_postgres.sh" ''
     set -ex
@@ -62,7 +50,9 @@ mkShell {
     PGDIR="$(cat pgdir)"
     PGBINDIR="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)/out/bin"
     pg_config="$(find $PGBINDIR -name pg_config)"
+    cp -r $PGDIR/postgresql-15.8/outputs/out/* $PGDIR/postgresql-15.8/outputs/lib/
     cd pg_primal
+    cargo-pgrx pgrx init --pg15 $pg_config
     cargo-pgrx pgrx install -c $pg_config
   '';
 
@@ -98,16 +88,28 @@ mkShell {
     pg_ctl -w -D $(cat pgdata) stop -m i
   '';
 
+  init_postgres_schema = pkgs.writeShellScript "init_postgres_schema.sh" ''
+    set -x
+    psql -h127.0.0.1 -p54017 primal1 < sql/schemas/membership.sql
+    psql -h127.0.0.1 -p54017 primal1 < sql/schemas/cache.sql
+    psql -h127.0.0.1 -p54017 primal1 < sql/app.sql
+    psql -h127.0.0.1 -p54017 primal1 < sql/utils.sql
+  '';
+
   connect_to_postgres = pkgs.writeShellScript "connect_to_postgres.sh" ''
     psql -h127.0.0.1 -p54017 primal1
   '';
 
   patch_pgwire = pkgs.writeShellScript "patch_pgwire.sh" ''
-    cd ws-connector/pgwire && patch -p1 ../pgwire.diff
+    cd ws-connector/pgwire && patch -p1 < ../pgwire.patch
   '';
 
   build_wsconn = pkgs.writeShellScript "build_wsconn.sh" ''
-    RUSTFLAGS="-Awarnings --cfg tokio_unstable --cfg tokio_taskdump" cargo build "$@"
+    cd ws-connector && RUSTFLAGS="-Awarnings --cfg tokio_unstable --cfg tokio_taskdump" cargo build "$@"
+  '';
+
+  start_primal_server = pkgs.writeShellScript "start_primal_server.sh" ''
+    julia --project -t6 -L pkg.jl -L start.jl
   '';
 
   shellHook = ''

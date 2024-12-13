@@ -1,5 +1,6 @@
 
 
+SELECT pg_catalog.set_config('search_path', '', false);
 
 DROP TRIGGER update_cache_updated_at ON public.cache;
 DROP INDEX public.zap_receipts_1_9fe40119b2_target_eid_idx;
@@ -679,6 +680,7 @@ CREATE FUNCTION public.c_zap_event() RETURNS integer
 CREATE FUNCTION public.content_moderation_filtering(a_results jsonb, a_scope public.cmr_scope, a_user_pubkey bytea) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
+SELECT e 
 FROM jsonb_array_elements(a_results) r(e) 
 WHERE e->>'pubkey' IS NULL OR NOT is_pubkey_hidden(a_user_pubkey, a_scope, DECODE(e->>'pubkey', 'hex'))
 $$;
@@ -982,6 +984,7 @@ $$;
 CREATE FUNCTION public.event_is_deleted(a_event_id bytea) RETURNS boolean
     LANGUAGE sql STABLE
     AS $$
+SELECT EXISTS (SELECT 1 FROM deleted_events WHERE event_id = a_event_id)
 $$;
 
 
@@ -1183,6 +1186,7 @@ $$;
 CREATE FUNCTION public.feed_user_follows(a_pubkey bytea, a_since bigint, a_until bigint, a_include_replies bigint, a_limit bigint, a_offset bigint, a_user_pubkey bytea, a_apply_humaness_check boolean) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
+SELECT * FROM enrich_feed_events(
     ARRAY (
         SELECT r
         FROM user_follows_posts(
@@ -1200,6 +1204,7 @@ $$;
 CREATE FUNCTION public.get_bookmarks(a_pubkey bytea) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
+SELECT get_event_jsonb(event_id) FROM bookmarks WHERE pubkey = a_pubkey;
 $$;
 
 
@@ -1265,6 +1270,7 @@ CREATE FUNCTION public.humaness_threshold_trustrank() RETURNS real
 CREATE FUNCTION public.is_event_hidden(a_user_pubkey bytea, a_scope public.cmr_scope, a_event_id bytea) RETURNS boolean
     LANGUAGE sql STABLE
     AS $$
+SELECT EXISTS (SELECT 1 FROM events WHERE events.id = a_event_id AND is_pubkey_hidden(a_user_pubkey, a_scope, events.pubkey))
 $$;
 
 
@@ -1396,6 +1402,7 @@ $$;
 CREATE FUNCTION public.notification_is_hidden(type bigint, arg1 bytea, arg2 bytea) RETURNS boolean
     LANGUAGE sql STABLE PARALLEL SAFE
     AS $$
+SELECT 
     CASE type
     WHEN 1 THEN user_is_human(arg1)
     WHEN 2 THEN user_is_human(arg1)
@@ -1595,9 +1602,9 @@ BEGIN
 
     FOR pk IN 
         (
-            SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag = 'p'
+            SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag in ('p', 'P')
         ) UNION (
-            SELECT argpubkey FROM event_mentions em WHERE em.eid = a_event_id AND tag = 'p'
+            SELECT argpubkey FROM event_mentions em WHERE em.eid = a_event_id AND tag in ('p', 'P')
         )
     LOOP
         RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE pk = meta_data.key;
@@ -1803,6 +1810,7 @@ $$;
 CREATE FUNCTION public.user_has_bio(a_pubkey bytea) RETURNS boolean
     LANGUAGE sql STABLE
     AS $$
+SELECT coalesce(length(try_cast_jsonb(es.content::text, '{}')->>'about'), 0) > 0
 FROM meta_data md, events es 
 WHERE md.key = a_pubkey AND md.value = es.id
 LIMIT 1
@@ -1836,6 +1844,7 @@ $$;
 CREATE FUNCTION public.user_infos(a_pubkeys text[]) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
+SELECT * FROM user_infos(ARRAY (SELECT DECODE(UNNEST(a_pubkeys), 'hex')))
 $$;
 
 
@@ -1843,6 +1852,7 @@ $$;
 CREATE FUNCTION public.user_is_human(a_pubkey bytea) RETURNS boolean
     LANGUAGE sql STABLE PARALLEL SAFE
     AS $$
+SELECT (
     EXISTS (SELECT 1 FROM pubkey_trustrank ptr WHERE ptr.pubkey = a_pubkey) OR
     EXISTS (SELECT 1 FROM human_override ho WHERE ho.pubkey = a_pubkey AND ho.is_human)
 )
@@ -1853,6 +1863,7 @@ $$;
 CREATE FUNCTION public.user_is_human(a_pubkey bytea, a_user_pubkey bytea) RETURNS boolean
     LANGUAGE sql STABLE PARALLEL SAFE
     AS $$
+SELECT (
     EXISTS (SELECT 1 FROM pubkey_trustrank ptr WHERE ptr.pubkey = a_pubkey) OR
     EXISTS (SELECT 1 FROM human_override ho WHERE ho.pubkey = a_pubkey AND ho.is_human) OR
     EXISTS (SELECT 1 FROM pubkey_followers WHERE pubkey = a_pubkey AND follower_pubkey = a_user_pubkey)
@@ -1864,6 +1875,7 @@ $$;
 CREATE FUNCTION public.wsconntasks(a_port bigint DEFAULT 14001) RETURNS TABLE(tokio_task bigint, task bigint, trace character varying)
     LANGUAGE sql STABLE
     AS $$
+SELECT * FROM dblink(format('host=127.0.0.1 port=%s', a_port), 'select * from tasks;') AS t(tokio_task int8, task int8, trace varchar)
 $$;
 
 

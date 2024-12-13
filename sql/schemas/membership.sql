@@ -118,39 +118,6 @@ CREATE TYPE public.filterlist_target AS ENUM (
 
 
 
-CREATE FUNCTION public.c_membership_media_management() RETURNS integer
-    LANGUAGE sql IMMUTABLE PARALLEL SAFE
-    AS $$SELECT 10000163$$;
-
-
-
-CREATE FUNCTION public.membership_media_management_stats(a_pubkey bytea) RETURNS TABLE(upload_type text, cnt bigint, size bigint)
-    LANGUAGE sql
-    AS $$
-select
-	upload_type,
-	count(1) as cnt,
-	sum(size) as size
-from (
-	select
-		(case
-			when upload_type in ('video', 'image') then upload_type
-			else 'other'
-		end) as upload_type,
-		size
-	from (
-		select split_part(mimetype, '/', 1) as upload_type, size
-		from media_uploads mu
-		where mu.pubkey = a_pubkey
-	) a) b
-group by upload_type
-order by size desc;
-
-$$;
-
-
-
-
 
 CREATE TABLE public.advsearch_log (
     t timestamp without time zone NOT NULL,
@@ -676,6 +643,39 @@ CREATE INDEX verified_users_name ON public.verified_users USING btree (name);
 
 
 CREATE INDEX verified_users_pubkey ON public.verified_users USING btree (pubkey);
+
+
+
+CREATE FUNCTION public.c_membership_media_management() RETURNS integer
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$SELECT 10000163$$;
+
+
+
+CREATE FUNCTION public.membership_media_management_stats(a_pubkey bytea) RETURNS TABLE(upload_type text, cnt bigint, size bigint)
+    LANGUAGE sql
+    AS $$
+select
+	upload_type,
+	count(1) as cnt,
+	sum(size) as size
+from (
+	select
+		(case
+			when upload_type in ('video', 'image') then upload_type
+			else 'other'
+		end) as upload_type,
+		size
+	from (
+		select split_part(mimetype, '/', 1) as upload_type, size
+		from media_uploads mu
+		where mu.pubkey = a_pubkey
+	) a) b
+group by upload_type
+order by size desc;
+
+$$;
+
 
 
 

@@ -9,29 +9,37 @@ Primal Server includes caching, membership, discovery and media caching services
 
 ### Usage
 
-Start postgres in the background:
+Setup database server:
+
+    nix develop -c sh -c '$setup_postgres $PWD/var/pg $PWD/var/pgdata'
+
+Setup pg_primal (Primal database extension):
+
+    nix develop -c sh -c '$setup_pg_primal'
+
+Setup other database extensions:
+
+    nix develop -c sh -c '$setup_pg_extensions'
+
+Start database in the background:
 
     nix develop -c sh -c '$start_postgres'
 
-Running the server:
+Initialize database schema:
+
+    nix develop -c sh -c '$init_postgres_schema'
+
+Running the Primal server:
 
     nix develop -c sh -c '$start_primal_server'
 
-To connect to postgres from REPL:
+Connect to database:
 
-    run(`$(ENV["connect_to_postgres"])`)
-
-To safely stop the server process:
-
-    Fetching.stop(); close(cache_storage); exit()
-
-To stop postgres:
-
-    nix develop -c sh -c '$stop_postgres'
+    nix develop -c sh -c '$connect_to_postgres'
 
 ### API requests
 
-Read `app.jl` for list of all supported arguments.
+Read `app_*.jl` for list of all supported arguments.
 
 Examples:
 
