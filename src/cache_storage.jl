@@ -226,6 +226,7 @@ Base.@kwdef struct CacheStorage{SCommons, DBDict, DBSet, MembershipDBDict} <: Ev
     verification_enabled = true
 
     auto_fetch_missing_events = false
+    disable_trustrank = false
 
     event_processors = SortedDict{Symbol, Function}() |> ThreadSafe
 
@@ -771,6 +772,7 @@ end
 
 MAX_SATSZAPPED = Ref(1_100_000)
 TRUSTED_ZAPPERS = Set{Nostr.PubKeyId}()
+VERIFY_ZAPPERS = Ref(true)
 
 re_hashref = r"\#\[([0-9]*)\]"
 re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
@@ -948,6 +950,7 @@ fetch_requests_periodic = Throttle(; period=2.0)
 FETCH_REQUEST_DURATION = Ref(60)
 
 function fetch(filter)
+    # @show (:fetch, filter)
     lock(fetch_requests) do fetch_requests
         haskey(fetch_requests, filter) && return
         Fetching.fetch(filter)
@@ -972,11 +975,11 @@ function fetch_user_metadata(est::CacheStorage, pubkey::Nostr.PubKeyId)
 end
 
 function fetch_event(est::CacheStorage, eid::Nostr.EventId)
-    # eid in est.event_ids || fetch((; ids=[eid]))
+    eid in est.events || fetch((; ids=[eid]))
 end
 
 function fetch_missing_events(est::CacheStorage, e::Nostr.Event)
-    est.auto_fetch_missing_events && catch_exception(est, msg) do
+    est.auto_fetch_missing_events && catch_exception(est, e) do
         for tag in e.tags
             if length(tag.fields) >= 2
                 if tag.fields[1] == "e"
@@ -1072,6 +1075,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         incr(est, :pubkeys)
         exe(est.pubkey_followers_cnt, @sql("insert into pubkey_followers_cnt (key, value) values (?1,  ?2) on conflict do nothing"), e.pubkey, 0)
         est.auto_fetch_missing_events && fetch_user_metadata(est, e.pubkey)
+        est.disable_trustrank && exec(est.pubkey_followers_cnt, @sql("insert into pubkey_trustrank values (?1,  ?2) on conflict do nothing"), (e.pubkey, 1.0))
         ext_pubkey(est, e)
     end
 
@@ -1245,7 +1249,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             end
             if amount_sats > 0 && !isnothing(description) && !isnothing(zapped_pk)
                 zapper_ok = Ref(false)
-                if e.pubkey in TRUSTED_ZAPPERS
+                if !VERIFY_ZAPPERS[] || e.pubkey in TRUSTED_ZAPPERS
                     zapper_ok[] = true
                 else
                     catch_exception(est, :zapper_check) do # TODO: move to bg task

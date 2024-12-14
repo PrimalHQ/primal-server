@@ -21,7 +21,9 @@ include("ws_conn_unblocker.jl")
 directory="$(STORAGEPATH)/primalnode$(NODEIDX)/cache"
 
 Postgres.SESSIONS_PER_POOL[] = 5
-Postgres.servers[:p0] = Postgres.Server(; connstr=Postgres.PGConnStr("host=127.0.0.1 port=54017 dbname=primal1 user=pr", ["set statement_timeout=10000"]))
+for s in [:p0, :membership, :p0timelimit]
+    Postgres.servers[s] = Postgres.Server(; connstr=Postgres.PGConnStr("host=127.0.0.1 port=54017 dbname=primal1 user=pr", ["set statement_timeout=10000"]))
+end
 Postgres.maintain_connection_pools()
 
 SCmns = DB.StorageCommons{(args...; kwargs...)->Dict()}
@@ -32,7 +34,10 @@ cache_storage = DB.CacheStorage{SCmns, DB.PSQLDict, DB.PSQLSet, DB.PSQLDict}(;
                                 dbargs,
                                 commons = SCmns(; dbargs=(; rootdirectory="$directory/db")),
                                 pqconnstr,
-                                events = DB.mkevents(dbargs; init_queries=[]))
+                                events = DB.mkevents(dbargs; init_queries=[]),
+                                auto_fetch_missing_events = true,
+                                disable_trustrank = true,
+                               )
 
 CacheServer.HOST[] = get(ENV, "PRIMALSERVER_HOST", "0.0.0.0")
 CacheServer.PORT[] = 8800+NODEIDX
@@ -40,6 +45,30 @@ CacheServer.PORT[] = 8800+NODEIDX
 DB.init(cache_storage)
 
 InternalServices.PORT[] = 14000+NODEIDX
+
+DB.VERIFY_ZAPPERS[] = false
+
+App.DAG_OUTPUTS_DB[] = :p0
+DAG.PROCESS_SEGMENTS_TASKS[] = 6
+DAGRunner.PRINT_EXCEPTIONS[] = true
+function cache_storage_ready(cache_storage)
+    cache_storage.commons.gc_task[].period[] = 300
+    cache_storage.commons.gc_task[].full[] = false
+    DAG.init()
+    global DAG_20240803_1 = DAG
+    DAGRunner.register(:DAG_20240803_1;
+                       est=cache_storage, runtag=:dev30,
+                       targetserver=:p0,
+                       pipeline=DAG_20240803_1.default_pipeline,
+                       opts=(; usethreads=false),
+                       onsuccessful=function(m)
+                           outputs = m.successful[end].result.outputs
+                           App.DAG_OUTPUTS[] = (Main.DAG, outputs)
+                       end)
+    # return
+    DAGRunner.start()
+    # DVMFeedChecker.start()
+end
 
 ## start
 
@@ -90,3 +119,4 @@ end
 DB.ext_is_human(est::DB.CacheStorage, pubkey::Nostr.PubKeyId) = true
 DB.is_trusted_user(est::DB.CacheStorage, pubkey::Nostr.PubKeyId) = true
 
+cache_storage_ready(cache_storage)

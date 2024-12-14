@@ -299,7 +299,7 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
           )
     r = catch_exception(:compile_content_moderation_rules, (; pubkey)) do
         settings = ext_user_get_settings(est, pubkey)
-        (isnothing(settings) || !settings["applyContentModeration"]) && return cmr
+        (isnothing(settings) || !get(settings, "applyContentModeration", false)) && return cmr
 
         eids = Set{Nostr.EventId}()
 
@@ -2595,6 +2595,11 @@ function mega_feed_directive(
     skwa = [Symbol(k)=>v for (k, v) in s if !(k in ["id", "kind"])]
 
     # @show (s, kwa)
+    
+    if haskey(kwargs, :user_pubkey) && est.auto_fetch_missing_events 
+        user_pubkey = cast(kwargs[:user_pubkey], Nostr.PubKeyId)
+        DB.fetch_user_metadata(est, user_pubkey)
+    end
 
     id = get(s, "id", "")
 
@@ -3663,6 +3668,14 @@ function membership_content_rebroadcast_status(est::DB.CacheStorage; event_from_
     end
 
     [(; kind=Int(MEMBERSHIP_CONTENT_REBROADCAST_STATUS), content=JSON.json(res))]
+end
+
+function fetch_content(est::DB.CacheStorage, pubkey::Nostr.PubKeyId; withfollows=true, days=7)
+    DB.fetch_user_metadata(est, pubkey)
+    pks = [pubkey]
+    withfollows && append!(pks, follows(est, pubkey))
+    DB.fetch((; kinds=[0], authors=pks))
+    DB.fetch((; since=Utils.current_time()-days*24*3600, kinds=DB.kindints, authors=pks))
 end
 
 end

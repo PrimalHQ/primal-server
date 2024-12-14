@@ -29,13 +29,15 @@ Initialize database schema:
 
     nix develop -c sh -c '$init_postgres_schema'
 
-Running the Primal server:
+Start the Primal server:
 
     nix develop -c sh -c '$start_primal_server'
 
-Connect to database:
+Finally, open any Primal application and on network settings screen connect to cache server at:
 
-    nix develop -c sh -c '$connect_to_postgres'
+    ws://127.0.0.1:8801
+
+Enjoy self-hosted Nostr cache server.
 
 ### API requests
 
