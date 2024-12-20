@@ -74,11 +74,23 @@ function response_headers(content_type="application/json"; extra=[])
 end
 
 function find_blob(req_target)
+    r = find_upload(req_target)
+    isnothing(r) || return r
+
     h, ext = splitext(req_target[2:end])
     h = lowercase(h)
     sha256 = hex2bytes(h)
-    # mimetype = mimetype_for_ext(ext)
-    # if isnothing(mimetype); mimetype = "application/octet-stream"; end
+    for (media_url, mimetype, storage_provider) in pex(:p0, "select media_url, content_type, storage_provider from media_storage where key::jsonb->>'sha256' = ?1 limit 1", [h])[2]
+        storage_provider = Symbol(storage_provider)
+        return (; media_url, storage_provider, mimetype, sha256)
+    end
+    nothing
+end
+
+function find_upload(req_target)
+    h, ext = splitext(req_target[2:end])
+    h = lowercase(h)
+    sha256 = hex2bytes(h)
     for (mimetype, path, pubkey, key) in pex("select mimetype, path, pubkey, key::varchar from media_uploads where sha256 = ?1 limit 1", [sha256])[2]
         for (media_url, mimetype, storage_provider) in pex(:p0, "select media_url, content_type, storage_provider from media_storage where key::jsonb->>'sha256' = ?1 limit 1", [h])[2]
             storage_provider = Symbol(storage_provider)
@@ -169,7 +181,7 @@ function blossom_handler(req::HTTP.Request)
 
         elseif req.method == "DELETE"
             e = check_action(req, "delete")
-            r = find_blob(req.target)
+            r = find_upload(req.target)
             if !isnothing(r)
                 pex("delete from media_uploads where pubkey = ?1 and sha256 = ?2", [e.pubkey, r.sha256])
                 if isempty(pex("select 1 from media_uploads where sha256 = ?1 limit 1", [r.sha256])[2])
@@ -195,7 +207,7 @@ function blossom_handler(req::HTTP.Request)
             e = check_action(req, "upload")
             # push!(Main.stuff, (:blossomupload, req))
             data = collect(req.body)
-            r = JSON.parse([x for x in Main.App.import_upload_2(est[], e.pubkey, data) 
+            r = JSON.parse([x for x in Main.App.import_upload_2(est[], e.pubkey, data; strip_metadata=false) 
                                   if x.kind == Int(Main.App.UPLOADED_2)][1].content)
             sha256 = hex2bytes(r["sha256"])
             for (mimetype, created_at, path, size) in pex("select mimetype, created_at, path, size from media_uploads where sha256 = ?1", [sha256])[2]
