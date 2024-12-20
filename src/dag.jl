@@ -897,7 +897,7 @@ function basic_tags_node(
                     where 
                         imported_at >= \$1 and imported_at <= \$2 and 
                         jsonb_array_length(tags) < 50
-                ) a where (t->>0 = 'p' or t->>0 = 'e') and t->>1 ~* '^[0-9a-f]{64}\$'
+                ) a where t->>0 in ('p', 'P', 'e') and t->>1 ~* '^[0-9a-f]{64}\$'
             ) b on conflict do nothing
             "
                         # (kind = $(Int(Nostr.TEXT_NOTE)) or kind = $(Int(Nostr.REACTION)) or kind = $(Int(Nostr.REPOST)) or kind = $(Int(Nostr.ZAP_RECEIPT)) or kind = 9802) and

@@ -775,7 +775,8 @@ TRUSTED_ZAPPERS = Set{Nostr.PubKeyId}()
 VERIFY_ZAPPERS = Ref(true)
 
 re_hashref = r"\#\[([0-9]*)\]"
-re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
+# re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
+re_mention = r"((note|npub|naddr|nevent|nprofile)1\w+)\b"
 
 function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkeys_in_content=true, resolve_parametrized_replaceable_events=true)
     content =
@@ -1040,6 +1041,8 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
 
     est.verification_enabled && !verify(est, e) && return false
 
+    e.id in est.deleted_events && return false
+
     should_import = lock(already_imported_check_lock) do
         if e.kind in BLOCKED_KINDS || e.id in est.events || !ext_preimport_check(est, e)
             false
@@ -1050,7 +1053,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         end
     end
 
-    e.kind in kindints || (30000 <= e.kind < 40000) || return false
+    e.kind in kindints || (10000 <= e.kind < 20000) || (30000 <= e.kind < 40000) || return false
 
     (force || should_import) || return false
 
@@ -1203,6 +1206,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
                             if de.pubkey == e.pubkey
                                 incr(est, :eventdeletions)
                                 est.deleted_events[eid] = e.id
+                                eid in est.events && delete!(est.events, eid)
                             end
                         end
                     end
@@ -1334,6 +1338,16 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         end
     end
 
+    catch_exception(est, e.id) do
+        if 10000 <= e.kind < 20000
+            lock(parameterized_replaceable_list_lock) do
+                DB.exec(est.dyn[:parametrized_replaceable_events],
+                        @sql("insert into replaceable_events values (?1,?2,?3) on conflict (pubkey, kind) do update set event_id = ?3"),
+                        (e.pubkey, e.kind, e.id))
+            end
+        end
+    end
+    
     catch_exception(est, e.id) do
         if 30000 <= e.kind < 40000
             for tag in e.tags

@@ -423,9 +423,9 @@ BEGIN
 
     FOR pk IN 
         (
-            SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag = 'p'
+            SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag in ('p', 'P')
         ) UNION (
-            SELECT argpubkey FROM event_mentions em WHERE em.eid = a_event_id AND tag = 'p'
+            SELECT argpubkey FROM event_mentions em WHERE em.eid = a_event_id AND tag in ('p', 'P')
         )
     LOOP
         RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE pk = meta_data.key;
