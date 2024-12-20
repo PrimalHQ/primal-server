@@ -239,8 +239,8 @@ function mon(dt=1.0)
                             :chars_sent]]'
         prevs == nothing && (prevs = tots)
         bio = IOBuffer()
-        Utils.clear_screen(bio)
-        Utils.move_cursor(1, 1)
+        #Utils.clear_screen(bio)
+        #Utils.move_cursor(1, 1)
         println(bio, "msgcnts: ", [f.message_count[] for f in values(fetchers)]')
         println(bio, 
                 count([f.message_count[] > 0 for f in values(fetchers)]'), "/", 
