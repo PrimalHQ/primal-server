@@ -626,6 +626,7 @@ BEGIN
 
     IF pubkeys != '{}' THEN
         RETURN QUERY SELECT * FROM primal_verified_names(pubkeys);
+        RETURN QUERY SELECT * FROM user_blossom_servers(pubkeys);
     END IF;
 
 	RETURN NEXT jsonb_build_object(
@@ -813,6 +814,19 @@ BEGIN
 END
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.user_blossom_servers(a_pubkeys bytea[])
+	RETURNS SETOF jsonb
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    eid bytea;
+BEGIN
+    FOR eid IN SELECT event_id FROM replaceable_events WHERE pubkey = ANY(a_pubkeys) and kind = 10063 LOOP
+        RETURN NEXT get_event_jsonb(eid);
+    END LOOP;
+END
+$BODY$;
+
 CREATE OR REPLACE FUNCTION public.user_infos(a_pubkeys text[])
 	RETURNS SETOF jsonb
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
@@ -839,6 +853,7 @@ BEGIN
 	RETURN NEXT jsonb_build_object('kind', c_USER_FOLLOWER_COUNTS(), 'content', r::text);
 
     RETURN QUERY SELECT * FROM primal_verified_names(a_pubkeys);
+    RETURN QUERY SELECT * FROM user_blossom_servers(a_pubkeys);
 END
 $BODY$;
 
