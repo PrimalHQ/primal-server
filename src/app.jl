@@ -1115,7 +1115,7 @@ function events(
         est::DB.CacheStorage; 
         event_ids::Vector=[], extended_response::Bool=false, user_pubkey=nothing,
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
-        idsonly=false,
+        idsonly=false, usepgfuncs=true,
     )
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
@@ -1140,7 +1140,30 @@ function events(
         end
         sort(res.wrapped; by=e->e.created_at)
     else
-        response_messages_for_posts(est, event_ids; user_pubkey)
+        if usepgfuncs
+            res = []
+            posts = Tuple{Nostr.EventId, Int}[]
+            for eid in event_ids
+                e = est.events[eid]
+                push!(posts, (eid, e.created_at))
+                if e.kind == Int(Nostr.ZAP_RECEIPT)
+                    try
+                        for t in e.tags
+                            if t.fields[1] == "description"
+                                pk = Nostr.PubKeyId(JSON.parse(t.fields[2])["pubkey"])
+                                if pk in est.meta_data
+                                    md = est.events[est.meta_data[pk]]
+                                    push!(res, md)
+                                end
+                            end
+                        end
+                    catch _ end
+                end
+            end
+            [res; enrich_feed_events_pg(est; posts, user_pubkey)]
+        else
+            response_messages_for_posts(est, event_ids; user_pubkey)
+        end
     end
 end
 
