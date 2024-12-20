@@ -449,6 +449,22 @@ $BODY$;
 
 -- feeds
 
+CREATE OR REPLACE FUNCTION public.referenced_event_is_note(a_event_id bytea)
+    RETURNS bool
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+select
+    case 
+        when es.kind = 1 then true
+        when es.kind = 6 then exists (
+            select 1 from basic_tags bt, events es2
+            where bt.id = a_event_id and bt.tag = 'e' and bt.arg1 = es2.id and es2.kind = 1)
+        else false
+    end
+from events es
+where es.id = a_event_id
+$BODY$;
+
 CREATE OR REPLACE FUNCTION public.user_follows_posts(
         a_pubkey bytea,
         a_since bigint,
@@ -473,7 +489,8 @@ WHERE
 	(
 		pe.is_reply = 0 OR
 		pe.is_reply = a_include_replies
-	)
+	) 
+    AND referenced_event_is_note(pe.event_id)
 ORDER BY
 	pe.created_at DESC
 LIMIT
@@ -690,8 +707,11 @@ BEGIN
     RETURN QUERY SELECT * FROM enrich_feed_events(
         ARRAY (
             select (pe.event_id, pe.created_at)::post
-            from pubkey_events pe
-            where pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and pe.is_reply = a_include_replies
+            from 
+                pubkey_events pe
+            where 
+                pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and pe.is_reply = a_include_replies and
+                referenced_event_is_note(pe.event_id)
             order by pe.created_at desc limit a_limit offset a_offset
         ),
         a_user_pubkey, a_apply_humaness_check);
