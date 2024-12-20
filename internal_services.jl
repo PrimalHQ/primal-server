@@ -348,8 +348,8 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
     elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
         return (; 
                 title="Primal", 
-                description="The Social Bitcoin Wallet",
-                image=("https://$host/images/primal-link-preview.jpg",),
+                description="Discover the best of Nostr",
+                image=("https://$host/public/primal-link-preview.jpg",),
                 url="https://$host/",
                 twitter_card = "summary_large_image",
                 twitter_image = "https://$host/images/twitter-hero.jpg")
@@ -357,8 +357,8 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
     elseif !isnothing(local m = match(r"^/landing$", path)) && 1==1
         return (; 
                 title="Primal", 
-                description="The Social Bitcoin Wallet",
-                image="https://primal.net/images/primal-link-preview.jpg",
+                description="Discover the best of Nostr",
+                image=("https://$host/public/primal-link-preview.jpg",),
                 url="https://primal.net/",
                 twitter_card = "summary_large_image",
                 twitter_image = "https://primal.net/images/twitter-hero.jpg")
