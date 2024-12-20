@@ -55,12 +55,13 @@ function stop()
     Utils.wait_for(()->istaskdone(task[]))
 end
 
-function run_dvm_checks()
+function run_dvm_checks(randomized_delays=true)
     est = Main.cache_storage
     goodcnt = Ref(0)
     badcnt = Ref(0)
     asyncmap(Main.App.get_dvm_feeds_all(est); ntasks=8) do eid
         running[] || return
+        randomized_delays && sleep(rand()*RUN_PERIOD[]*0.8)
         eid in est.events || return
         e = est.events[eid]
         if e.kind == 31990
