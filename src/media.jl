@@ -64,9 +64,31 @@ function clean_url(url::String)
     string(URIs.URI(; [p=>getproperty(u, p) for p in propertynames(u) if !(p in [:fragment, :uri])]...))
 end
 
-function download(est::DB.CacheStorage, url::String; proxy=MEDIA_PROXY[], timeout=2)::Vector{UInt8}
+function download(est::DB.CacheStorage, url::String; proxy=MEDIA_PROXY[], timeout=10)::Vector{UInt8}
+    funcname = "download"
     try
         DB.incr(est, :media_downloads)
+
+        if startswith(url, "https://m.primal.net")
+            timeout = 600
+        end
+        # size = nothing
+        # try
+        #     r = HTTP.head(url; readtimeout=timeout, connect_timeout=timeout, headers=downloader_headers, proxy, verbose=0, retry=true)
+        #     for (k, v) in r.headers
+        #         if lowercase(string(k)) == "content-length"
+        #             size = parse(Int, string(v))
+        #         end
+        #     end
+        # catch _
+        #     PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        # end
+
+        # timeout = isnothing(size) ? 10 : 10+trunc(Int, size/(256*1024))
+        # @tr url timeout size/1024/1024 ()
+
+        @tr url timeout ()
+        
         # res = UInt8[]
         # chunksize = 512*1024
         # HTTP.open("GET", url; readtimeout=10, connect_timeout=5, headers=downloader_headers, proxy) do fin
@@ -404,6 +426,28 @@ function parse_image_dimensions(data::Vector{UInt8})
         match(r", ([0-9]+) ?x ?([0-9]+)(, |$)", read(pipeline(`file $fn`; stdin=devnull), String))
     end
     isnothing(m) ? nothing : (parse(Int, m[1]), parse(Int, m[2]), try parse(Float64, m[3]) catch _ 0.0 end)
+end
+
+function parse_video_dimensions(data::Vector{UInt8})
+    res = nothing
+    try 
+        width = height = duration = rotation = 0
+        for s in split(read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream -`; stdin=IOBuffer(data)), String), '\n')
+            ps = split(s, '=')
+            if length(ps) == 2
+                if     ps[1] == "width";    width    = parse(Int, ps[2])
+                elseif ps[1] == "height";   height   = parse(Int, ps[2])
+                elseif ps[1] == "duration"; duration = parse(Float64, ps[2])
+                elseif ps[1] == "rotation"; rotation = parse(Int, ps[2])
+                end
+            end
+        end
+        if rotation == 90 || rotation == -90 || rotation == 270
+            width, height = height, width
+        end
+        res = (width, height, duration)
+    catch _ end
+    res
 end
 
 function parse_mimetype(data::Vector{UInt8})

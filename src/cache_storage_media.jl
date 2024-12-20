@@ -41,11 +41,7 @@ function import_media(est::CacheStorage, eid::Union{Nostr.EventId, Nothing}, url
                         @tr m = if ftype == "image"
                             Main.Media.parse_image_dimensions(data)
                         elseif ftype == "video"
-                            try 
-                                let m = match(r"([0-9]+)x([0-9]+)x([0-9.]+)", read(pipeline(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of csv=s=x:p=0 -`; stdin=IOBuffer(data)), String))
-                                    (parse(Int, m[1]), parse(Int, m[2]), try parse(Float64, m[3]) catch _ 0.0 end)
-                                end
-                            catch _ nothing end
+                            Main.Media.parse_video_dimensions(data)
                         else
                             nothing
                         end

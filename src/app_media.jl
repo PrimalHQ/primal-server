@@ -23,7 +23,7 @@ MEDIA_UPLOAD_PATH = Ref("incoming")
 
 categorized_uploads = Ref{Any}(nothing)
 
-function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8})
+function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vector{UInt8}; strip_metadata=true)
     funcname = "import_upload_2"
 
     tbefore, tstart = Dates.now(), time()
@@ -32,7 +32,9 @@ function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vec
         error("blocked content")
     end
 
-    @tr pubkey @elapsed (data = Media.strip_metadata(data))
+    if strip_metadata
+        @tr pubkey @elapsed (data = Media.strip_metadata(data))
+    end
 
     @tr pubkey sha256 = SHA.sha256(data)
     key = (; type="member_upload", pubkey, sha256=bytes2hex(sha256))
@@ -91,7 +93,15 @@ function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vec
                sha256)
     end
 
-    @tr key murl surl = Main.InternalServices.url_shortening(murl)
+    surl = Main.InternalServices.url_shortening(murl)
+    try
+        if pubkey in [Main.test_pubkeys[:pedja], Main.test_pubkeys[:qa], Main.test_pubkeys[:moysie]]
+            ext = splitext(surl)[2]
+            surl = "https://blossom.primal.net/$(bytes2hex(sha256))$(ext)"
+        end
+    catch _ Utils.print_exceptions() end
+
+    @tr key murl surl ()
 
     if length(data) < 10*1024^2 && splitext(surl)[2] in [".jpg", ".png", ".gif", ".mp4", ".mov", ".webp"]
         @async try
@@ -159,14 +169,17 @@ function check_upload_id(ulid)
 end
 
 function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
+    funcname = "upload_chunk"
+
     # push!(Main.stuff, (:upload_chunk, event_from_user))
 
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
-    is_upload_blocked(e.pubkey) && error("upload blocked")
+    @tr e.pubkey (is_upload_blocked(e.pubkey) && error("upload blocked"))
 
     c = JSON.parse(e.content)
-    ulid = check_upload_id(c["upload_id"])
+    @tr e.pubkey ulid = check_upload_id(c["upload_id"])
+    @tr e.pubkey c["file_length"] c["offset"]
 
     lock(active_uploads) do active_uploads
         if !haskey(active_uploads, ulid)
@@ -193,20 +206,22 @@ function upload_chunk(est::DB.CacheStorage; event_from_user::Dict)
 end
 
 function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
+    funcname = "upload_complete"
+
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
-    is_upload_blocked(e.pubkey) && error("upload blocked")
+    @tr e.pubkey (is_upload_blocked(e.pubkey) && error("upload blocked"))
 
-    c = JSON.parse(e.content)
+    @tr e.pubkey c = JSON.parse(e.content)
     ulid = check_upload_id(c["upload_id"])
 
-    fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
+    @tr e.pubkey fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
     c["file_length"] == stat(fn).size || error("incorrect upload size")
 
     data = read(fn)
     c["sha256"] == bytes2hex(SHA.sha256(data)) || error("incorrect sha256")
 
-    res = import_upload(est, e.pubkey, data)
+    @tr res = import_upload(est, e.pubkey, data)
     rm(fn)
 
     lock(active_uploads) do active_uploads
@@ -219,13 +234,15 @@ function upload_complete(est::DB.CacheStorage; event_from_user::Dict)
 end
 
 function upload_cancel(est::DB.CacheStorage; event_from_user::Dict)
+    funcname = "upload_cancel"
+
     # push!(Main.stuff, (:upload_cancel, (; event_from_user)))
 
     e = parse_event_from_user(event_from_user)
     e.kind == Int(UPLOAD_CHUNK) || error("invalid event kind")
-    is_upload_blocked(e.pubkey) && error("upload blocked")
+    @tr e.pubkey (is_upload_blocked(e.pubkey) && error("upload blocked"))
 
-    c = JSON.parse(e.content)
+    @tr e.pubkey c = JSON.parse(e.content)
     ulid = check_upload_id(c["upload_id"])
 
     fn = "$(MEDIA_UPLOAD_PATH[])/$(Nostr.hex(e.pubkey))_$(ulid)"
