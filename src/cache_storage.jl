@@ -1092,8 +1092,11 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             is_pubkey_event = true
             for tag in e.tags
                 if length(tag.fields) >= 2 && tag.fields[1] == "e"
-                    is_reply = !(length(tag.fields) >= 4 && (tag.fields[4] == "mention" || tag.fields[4] == "highlight"))
-                    break
+                    # is_reply = !(length(tag.fields) >= 4 && (tag.fields[4] == "mention" || tag.fields[4] == "highlight"))
+                    if length(tag.fields) >= 4 && tag.fields[4] == "root"
+                        is_reply = true
+                        break
+                    end
                 end
             end
         elseif e.kind == Int(Nostr.REPOST)
