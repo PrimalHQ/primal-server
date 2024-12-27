@@ -192,7 +192,7 @@ function content_refs_resolved(e::Nostr.Event)
     replace(c, DB.re_mention => function (r)
                 # prefix = "nostr:npub"
                 # startswith(r, prefix) || return r
-                if !isnothing(local pk = Bech32.nip19_decode_wo_tlv(r[7:end]))
+                if !isnothing(local pk = Bech32.nip19_decode_wo_tlv(r))
                     try
                         c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
                         return "@"*mdtitle(c)
