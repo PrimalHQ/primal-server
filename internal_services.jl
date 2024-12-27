@@ -247,6 +247,16 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
 
     elseif !isnothing(local m = match(r"^/(thread|e)/(.*)", path))
         eid = string(m[2])
+        if startswith(eid, "nevent")
+            for x in Bech32.nip19_decode(eid)
+                if x[2] isa Nostr.EventId
+                    eid = x[2]
+                    break
+                end
+            end
+        else
+            try eid = Bech32.nip19_decode(eid) catch _ end
+        end
         try eid = Bech32.nip19_decode(eid) catch _ end
         isnothing(eid) && (eid = try Nostr.EventId(eid) catch _ end)
         if eid isa Nostr.EventId
