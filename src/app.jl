@@ -1004,35 +1004,42 @@ function user_infos(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, app
 end
 
 function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
-    res_primal_names = Dict()
-    res_legend_customization = Dict()
-    res_cohorts = Dict()
-    for pk in pubkeys
-        for name in Main.InternalServices.nostr_json_query_by_pubkey(pk; default_name=true)
-            res_primal_names[pk] = name
-        end
-        for (_, style, custom_badge, avatar_glow) in Postgres.execute(:membership, "select * from membership_legend_customization where pubkey = \$1", [pk])[2]
-            res_legend_customization[pk] = (; style, custom_badge, avatar_glow)
-        end
-        for (cohort_1, cohort_2, tier, valid_until) in Postgres.execute(:membership, "
-                                                                        select cohort_1, cohort_2, tier, valid_until 
-                                                                        from memberships where 
-                                                                        pubkey = \$1 and (tier = 'premium' or tier = 'premium-legend')
-                                                                        ", [pk])[2]
-            res_cohorts[pk] = (; cohort_1, cohort_2, tier, expires_on=ismissing(valid_until) ? nothing : trunc(Int, Dates.datetime2unix(valid_until)))
-        end
-    end
+    pks = '{'*join([Nostr.hex(pk) for pk in pubkeys], ',')*'}'
     res = []
-    if !isempty(res_primal_names)
-        push!(res, (; kind=USER_PRIMAL_NAMES, content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names]))))
-    end
-    if !isempty(res_legend_customization)
-        push!(res, (; kind=MEMBERSHIP_LEGEND_CUSTOMIZATION, content=JSON.json(Dict([Nostr.hex(pk)=>r for (pk, r) in res_legend_customization]))))
-    end
-    if !isempty(res_cohorts)
-        push!(res, (; kind=MEMBERSHIP_COHORTS, content=JSON.json(Dict([Nostr.hex(pk)=>r for (pk, r) in res_cohorts]))))
-    end
-    res
+    append!(res, map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from primal_verified_names(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])))
+    append!(res, map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from  user_blossom_servers(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])))
+    return res
+
+    # res_primal_names = Dict()
+    # res_legend_customization = Dict()
+    # res_cohorts = Dict()
+    # for pk in pubkeys
+    #     for name in Main.InternalServices.nostr_json_query_by_pubkey(pk; default_name=true)
+    #         res_primal_names[pk] = name
+    #     end
+    #     for (_, style, custom_badge, avatar_glow) in Postgres.execute(:membership, "select * from membership_legend_customization where pubkey = \$1", [pk])[2]
+    #         res_legend_customization[pk] = (; style, custom_badge, avatar_glow)
+    #     end
+    #     for (cohort_1, cohort_2, tier, valid_until) in Postgres.execute(:membership, "
+    #                                                                     select cohort_1, cohort_2, tier, valid_until 
+    #                                                                     from memberships where 
+    #                                                                     pubkey = \$1 and (tier = 'premium' or tier = 'premium-legend')
+    #                                                                     ", [pk])[2]
+    #         res_cohorts[pk] = (; cohort_1, cohort_2, tier, expires_on=ismissing(valid_until) ? nothing : trunc(Int, Dates.datetime2unix(valid_until)))
+    #     end
+    # end
+
+    # res = []
+    # if !isempty(res_primal_names)
+    #     push!(res, (; kind=USER_PRIMAL_NAMES, content=JSON.json(Dict([Nostr.hex(pk)=>name for (pk, name) in res_primal_names]))))
+    # end
+    # if !isempty(res_legend_customization)
+    #     push!(res, (; kind=MEMBERSHIP_LEGEND_CUSTOMIZATION, content=JSON.json(Dict([Nostr.hex(pk)=>r for (pk, r) in res_legend_customization]))))
+    # end
+    # if !isempty(res_cohorts)
+    #     push!(res, (; kind=MEMBERSHIP_COHORTS, content=JSON.json(Dict([Nostr.hex(pk)=>r for (pk, r) in res_cohorts]))))
+    # end
+    # res
 end
 
 function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, apply_humaness_check=false)
@@ -2334,7 +2341,8 @@ function long_form_content_thread_view(
     hidden = is_hidden(est, user_pubkey, :content, event_id) || ext_is_hidden(est, event_id) || event_id in est.deleted_events
     hidden && return []
 
-    push!(res, est.events[event_id])
+    e = est.events[event_id]
+    push!(res, e)
 
     union!(res, thread_view_parents(est; event_id, user_pubkey))
 
@@ -2344,9 +2352,9 @@ function long_form_content_thread_view(
                     user_pubkey)
     
     if usepgfuncs
-        union!(res, enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check))
+        union!(res, enrich_feed_events_pg(est; posts=[(e.id, e.created_at); posts], user_pubkey, apply_humaness_check))
     else
-        reids = [reid for (reid, _) in posts]
+        reids = [reid for (reid, _) in [(e.id, e.created_at); posts]]
         union!(res, [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)])
     end
 

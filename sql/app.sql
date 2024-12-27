@@ -544,7 +544,7 @@ BEGIN
                     pubkeys := array_append(pubkeys, e_pubkey);
                 END IF;
 
-                IF a_apply_humaness_check AND NOT user_is_human(e_pubkey, a_user_pubkey) THEN
+                IF a_apply_humaness_check AND e_kind != 0 AND NOT user_is_human(e_pubkey, a_user_pubkey) THEN
                     CONTINUE;
                 END IF;
 
@@ -582,7 +582,9 @@ BEGIN
 
                     FOR r IN SELECT * FROM event_relay WHERE event_id = e_id LOOP
                         relay_url := r.relay_url;
-                        SELECT dest INTO relay_url FROM relay_url_map WHERE src = relay_url LIMIT 1;
+                        FOR r IN SELECT dest FROM relay_url_map WHERE src = relay_url LIMIT 1 LOOP
+                            relay_url := r.dest;
+                        END LOOP;
                         IF NOT (relay_url IS null) THEN
                             relays := jsonb_set(relays, array[(e->>'id')::text], to_jsonb(relay_url));
                         END IF;
