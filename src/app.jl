@@ -146,6 +146,8 @@ MEMBERSHIP_COHORTS=10_000_169
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
+safekind(e) = e isa Dict ? e["kind"] : e.kind
+
 PRINT_EXCEPTIONS = Ref(false)
 exceptions = CircularBuffer(200)
 
@@ -538,13 +540,13 @@ function response_messages_for_posts(
 
         if include_top_zaps
             union!(res, [e for e in event_zaps_by_satszapped(est; event_id=eid, limit=5, user_pubkey)
-                         if e.kind != Int(RANGE) && e.kind != Int(Nostr.TEXT_NOTE) && e.kind != Int(Nostr.LONG_FORM_CONTENT)])
+                         if safekind(e) != Int(RANGE) && safekind(e) != Int(Nostr.TEXT_NOTE) && safekind(e) != Int(Nostr.LONG_FORM_CONTENT)])
             # 1==1 && if user_pubkey == Main.test_pubkeys[:qa]
                 e.kind == Int(Nostr.LONG_FORM_CONTENT) && for t in e.tags
                     if length(t.fields) >= 2 && t.fields[1] == "d"
                         identifier = t.fields[2]
                         union!(res, [e for e in event_zaps_by_satszapped(est; pubkey=e.pubkey, identifier, limit=5, user_pubkey)
-                                     if e.kind != Int(RANGE) && e.kind != Int(Nostr.TEXT_NOTE) && e.kind != Int(Nostr.LONG_FORM_CONTENT)])
+                                     if safekind(e) != Int(RANGE) && safekind(e) != Int(Nostr.TEXT_NOTE) && safekind(e) != Int(Nostr.LONG_FORM_CONTENT)])
                         break
                     end
                 end

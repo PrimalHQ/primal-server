@@ -508,9 +508,17 @@ function precalculate_analytics(est::DB.CacheStorage)
         "mostzapped_4h",
         "mostzapped_1h",
        ]
-        kinds = [Int(Nostr.SET_METADATA), Int(Nostr.TEXT_NOTE), REFERENCED_EVENT, MEDIA_METADATA]
+        kinds = [
+                 Int(Nostr.SET_METADATA), 
+                 Int(Nostr.TEXT_NOTE), 
+                 REFERENCED_EVENT, 
+                 MEDIA_METADATA,
+                 USER_PRIMAL_NAMES,
+                 MEMBERSHIP_LEGEND_CUSTOMIZATION,
+                 MEMBERSHIP_COHORTS,
+                ]
         res = scored_(est; selector)
-        r = [e for e in res if e.kind in kinds]
+        r = [e for e in res if safekind(e) in kinds]
         est.dyn[:cache]["precalculated_analytics_$selector"] = r
     end
     est.dyn[:cache]["precalculated_analytics_explore_topics"] = explore_topics_(est)
@@ -524,7 +532,7 @@ trending_24h_scores = [] |> ThreadSafe
 function update_trending_24h_scores(est::DB.CacheStorage)
     lock(trending_24h_scores) do trending_24h_scores
         res = explore(est; timeframe="trending", scope="global", limit2=1000, created_after=trunc(Int, time()-24*3600), user_pubkey=nothing) 
-        rs = sort([JSON.parse(e.content)["score24h"] for e in res if e.kind == EVENT_STATS])
+        rs = sort([JSON.parse(e.content)["score24h"] for e in res if safekind(e) == EVENT_STATS])
         empty!(trending_24h_scores)
         append!(trending_24h_scores, rs)
     end
