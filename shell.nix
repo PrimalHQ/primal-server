@@ -8,7 +8,7 @@ mkShell {
     secp256k1
     gcc
     gawk
-    postgresql_15
+    postgresql_16
     # ephemeralpg
     python3
 
@@ -18,6 +18,11 @@ mkShell {
     rustfmt
     rustc
     lldb
+
+    jdk
+    maven
+    openssl
+    krb5
   ];
 
   setup_postgres = pkgs.writeShellScript "setup_postgres.sh" ''
@@ -32,10 +37,10 @@ mkShell {
     mkdir -p $PGDATA
 
     cd $PGDIR
-    drv=$(nix-store --query --deriver ${postgresql_15})
+    drv=$(nix-store --query --deriver ${postgresql_16})
     export SHELL=${bashInteractive}/bin/bash
     nix develop $drv --unpack
-    cd postgresql-*
+    cd postgresql-16.*
     nix develop $drv --configure
     nix develop $drv --build
     nix develop $drv --install
@@ -43,27 +48,35 @@ mkShell {
     mkdir -p $PGDATA
     initdb -D $PGDATA
     cp -v ${./sql/postgresql.conf} $PGDATA/postgresql.conf
+    cat >> $PGDATA/pg_hba.conf <<EOF
+host    all             all             192.168.0.0/16            trust
+host    replication     all             192.168.0.0/16            trust
+EOF
   '';
 
   setup_pg_primal = pkgs.writeShellScript "setup_pg_primal.sh" ''
     set -ex
     PGDIR="$(cat pgdir)"
-    PGBINDIR="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)/out/bin"
+    PGBINDIR="$(find $PGDIR/postgresql-16.* -type d -name outputs | grep -v tmp_install)/out/bin"
     pg_config="$(find $PGBINDIR -name pg_config)"
-    cp -r $PGDIR/postgresql-15.8/outputs/out/* $PGDIR/postgresql-15.8/outputs/lib/
+    cp -r $PGDIR/postgresql-16.*/outputs/out/* $PGDIR/postgresql-16.*/outputs/lib/
     cd pg_primal
-    cargo-pgrx pgrx init --pg15 $pg_config
+    cargo-pgrx pgrx init --pg16 $pg_config
     cargo-pgrx pgrx install -c $pg_config
   '';
 
   setup_pg_extensions = pkgs.writeShellScript "setup_pg_extensions.sh" ''
     PGDIR="$(cat pgdir)"
-    PGOUTS="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)"
+    PGOUTS="$(find $PGDIR/postgresql-16.* -type d -name outputs | grep -v tmp_install)"
     set -ex
     for d in \
-      ${pkgs.postgresql15Packages.pg_cron} \
-      ${pkgs.postgresql15Packages.pgsql-http} \
-      ${pkgs.postgresql15Packages.pgvector} \
+      ${pkgs.postgresql16Packages.pg_cron} \
+      ${pkgs.postgresql16Packages.pgsql-http} \
+      ${pkgs.postgresql16Packages.pg_relusage} \
+      ${pkgs.postgresql16Packages.pg_hint_plan} \
+      ${pkgs.postgresql16Packages.plv8} \
+      ${pkgs.postgresql16Packages.pgvector} \
+      ${pkgs.postgresql16Packages.age} \
     ; do
       chmod u+w -R $PGOUTS/
       cp -v $d/lib/* $PGOUTS/lib/lib/
@@ -71,9 +84,28 @@ mkShell {
     done
   '';
 
+  setup_pl_java = pkgs.writeShellScript "setup_pl_java.sh" ''
+    set -ex
+    PGDIR="$(cat pgdir)"
+    PGBINDIR="$(find $PGDIR/postgresql-16.* -type d -name outputs | grep -v tmp_install)/out/bin"
+    pg_config="$(find $PGBINDIR -name pg_config)"
+    export PATH="$(dirname $pg_config):$PATH"
+
+    [ -e pljava ] || git clone https://github.com/tada/pljava.git
+    cd pljava
+    git checkout -b V1_6_8 V1_6_8 || true
+    mvn clean install
+
+    java -Dpgconfig.sysconfdir=$PGDIR/etc -jar pljava-packaging/target/pljava-pg16.jar
+
+    PGDATA="$(cat ../pgdata)"
+    echo "pljava.libjvm_location = '${jdk}/lib/openjdk/lib/server/libjvm.so'" >> $PGDATA/postgresql.conf
+    echo "pljava.vmoptions = '-Djava.security.manager=allow'" >> $PGDATA/postgresql.conf
+  '';
+
   start_postgres = pkgs.writeShellScript "start_postgres.sh" ''
     PGDIR="$(cat pgdir)"
-    PGBINDIR="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)/out/bin"
+    PGBINDIR="$(find $PGDIR/postgresql-16.* -type d -name outputs | grep -v tmp_install)/out/bin"
     export PATH="$PGBINDIR:$PATH"
     set -ex
     pg_ctl -w -D $(cat pgdata) start
@@ -82,7 +114,7 @@ mkShell {
 
   stop_postgres = pkgs.writeShellScript "stop_postgres.sh" ''
     PGDIR="$(cat pgdir)"
-    PGBINDIR="$(find $PGDIR/ -type d -name outputs | grep -v tmp_install)/out/bin"
+    PGBINDIR="$(find $PGDIR/postgresql-16.* -type d -name outputs | grep -v tmp_install)/out/bin"
     export PATH="$PGBINDIR:$PATH"
     set -ex
     pg_ctl -w -D $(cat pgdata) stop -m i
