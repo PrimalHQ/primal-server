@@ -30,7 +30,9 @@ function import_from(
     Threads.@threads for eids_chunk in collect(Iterators.partition(map(Nostr.hex, missing_eids), 100))
         running[] || break
         yield()
-        es = Main.rex(from..., :([Main.cache_storage.events[Nostr.EventId(eid)] for eid in $(eids_chunk)]))
+        es = Main.rex(from..., :([Main.cache_storage.events[Nostr.EventId(eid)]
+                                  for eid in $(eids_chunk)
+                                  if Nostr.EventId(eid) in Main.cache_storage.events]))
         for e in es
             running[] || break
             DB.incr(i)
