@@ -2026,7 +2026,7 @@ function get_user_relays(est::DB.CacheStorage; pubkey)
             end
         end
     end
-    push!(res, (; kind=Int(USER_RELAYS), tags=sort(collect(relays))))
+    push!(res, (; kind=Int(USER_RELAYS), pubkey, tags=sort(collect(relays))))
     res
 end
 
