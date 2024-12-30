@@ -51,6 +51,7 @@ exposed_functions = Set([:feed,
                          :is_hidden_by_content_moderation,
                          :user_of_ln_address,
                          :get_user_relays,
+                         :get_user_relays_2,
                          :get_bookmarks,
                          :get_highlights,
                          :long_form_content_feed,
@@ -1005,11 +1006,18 @@ function user_infos(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, app
     end
 end
 
+function castnamedtuple(d)
+    if     d isa NamedTuple; d
+    elseif d isa Dict; d["kind"] < 10_000_000 ? Nostr.Event(d) : (; [Symbol(k)=>v for (k, v) in d]...)
+    else; error("invalid argument")
+    end
+end
+        
 function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
     pks = '{'*join([Nostr.hex(pk) for pk in pubkeys], ',')*'}'
     res = []
-    append!(res, map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from primal_verified_names(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])))
-    append!(res, map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from  user_blossom_servers(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])))
+    append!(res, [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from primal_verified_names(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])])
+    append!(res, [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from  user_blossom_servers(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])])
     return res
 
     # res_primal_names = Dict()
@@ -1044,12 +1052,12 @@ function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
     # res
 end
 
-function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=false, apply_humaness_check=false)
+function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=true, apply_humaness_check=false)
     pubkeys = [pk isa Nostr.PubKeyId ? pk : Nostr.PubKeyId(pk) for pk in pubkeys]
 
     if usepgfuncs
-        return map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from user_infos(\$1::text[])", 
-                                       ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}']))
+        return [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from user_infos(\$1::text[])", 
+                                                           ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}'])]
     end
 
     res_meta_data = Dict() |> ThreadSafe
@@ -2022,6 +2030,14 @@ function get_user_relays(est::DB.CacheStorage; pubkey)
     res
 end
 
+function get_user_relays_2(est::DB.CacheStorage; pubkeys)
+    res = []
+    for pk in pubkeys
+        append!(res, get_user_relays(est; pubkey=pk))
+    end
+    res
+end
+
 function get_bookmarks(est::DB.CacheStorage; pubkey)
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     res = []
@@ -2336,7 +2352,9 @@ function long_form_content_thread_view(
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    event_id = parametrized_replaceable_event(est; pubkey, kind, identifier, extended_response=false)[1].id
+    rs = parametrized_replaceable_event(est; pubkey, kind, identifier, extended_response=false)
+    isempty(rs) && return []
+    event_id = rs[1].id
 
     res = OrderedSet()
 
