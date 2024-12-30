@@ -303,9 +303,9 @@ async fn main() -> Result<(), Error> {
         state.app_releases = Some(std::fs::read_to_string(format!("{}/app-releases.json", cli.content_moderation_root)).unwrap());
     }
 
-    let management_pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 4);
-    let pool            = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16);
-    let membership_pool = make_dbconn_pool("192.168.11.7", 5432, "primal", "primal", 16);
+    let management_pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 4, None);
+    let pool            = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16, Some(30000));
+    let membership_pool = make_dbconn_pool("192.168.11.7", 5432, "primal", "primal", 16, None);
 
     {
         let mut state = state.lock().await;
@@ -445,12 +445,16 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn make_dbconn_pool(host: &str, port: u16, username: &str, dbname: &str, size: usize) -> Pool {
+fn make_dbconn_pool(host: &str, port: u16, username: &str, dbname: &str, size: usize, statement_timeout: Option<i64>) -> Pool {
     let mut pg_config = tokio_postgres::Config::new();
     pg_config.host(host);
     pg_config.port(port);
     pg_config.user(username);
     pg_config.dbname(dbname);
+    pg_config.application_name("wsconn");
+    if let Some(timeout) = statement_timeout {
+        pg_config.options(format!("--statement_timeout={}", timeout));
+    }
     let mgr_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     };
@@ -740,6 +744,8 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                             ReqHandlers::feed(&fa).await
                         } else if funcall == "mega_feed_directive" {
                             ReqHandlers::mega_feed_directive(&fa).await
+                        // } else if funcall == "ttt" {
+                        //     ReqHandlers::ttt(&fa).await
                         } else {
                             Ok(NotHandled)
                         }
@@ -1220,6 +1226,13 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         }
 
         Ok(NotHandled)
+    }
+
+    async fn ttt(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
+        dbg!(fa.kwargs);
+        let res = Self::rows_to_vec(&Self::pool_get(&fa.pool).await?.query("select pg_sleep(3)", &[]).await?);
+        dbg!(res);
+        Ok(Handled)
     }
 }
 
