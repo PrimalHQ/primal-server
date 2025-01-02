@@ -61,8 +61,8 @@ struct Stats {
 struct State {
     stats: Stats,
 
-    default_app_settings: Option<String>,
-    app_releases: Option<String>,
+    default_app_settings_filename: String,
+    app_releases_filename: String,
 
     srv_name: Option<String>,
 
@@ -275,8 +275,8 @@ async fn main() -> Result<(), Error> {
             connections: AtomicI64::new(0),
         },
 
-        default_app_settings: None,
-        app_releases: None,
+        default_app_settings_filename: format!("{}/default-settings.json", cli.content_moderation_root),
+        app_releases_filename: format!("{}/app-releases.json", cli.content_moderation_root),
 
         srv_name: Some(cli.servername),
 
@@ -296,12 +296,6 @@ async fn main() -> Result<(), Error> {
         tasks: HashMap::new(),
         conns: HashMap::new(),
     }));
-
-    {
-        let mut state = state.lock().await;
-        state.default_app_settings = Some(std::fs::read_to_string(format!("{}/default-settings.json", cli.content_moderation_root)).unwrap());
-        state.app_releases = Some(std::fs::read_to_string(format!("{}/app-releases.json", cli.content_moderation_root)).unwrap());
-    }
 
     let management_pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 4, None);
     let pool            = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16, Some(30000));
@@ -919,10 +913,12 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
 
         const PRIMAL_SETTINGS: i64 = 10000103;
 
+        let default_app_settings = std::fs::read_to_string(fa.state.lock().await.default_app_settings_filename.clone()).unwrap();
+
         let e = json!({
             "kind": PRIMAL_SETTINGS,
             "tags": [["d", client]],
-            "content": fa.state.lock().await.default_app_settings.clone().unwrap(),
+            "content": default_app_settings,
         });
         let cw = &mut fa.client_write.lock().await;
         Self::send_response(fa.subid, cw, &vec!(e.to_string())).await?;
@@ -1011,9 +1007,11 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
     async fn get_app_releases(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
         const APP_RELEASES: i64 = 10000138;
 
+        let app_releases = std::fs::read_to_string(fa.state.lock().await.app_releases_filename.clone()).unwrap();
+
         let e = json!({
             "kind": APP_RELEASES, 
-            "content": fa.state.lock().await.app_releases.clone().unwrap(),
+            "content": app_releases,
         });
 
         let cw = &mut fa.client_write.lock().await;
