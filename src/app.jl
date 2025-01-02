@@ -1733,6 +1733,13 @@ function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false
             if DB.import_msg_into_storage(msg, est)
                 cnt[] += 1
             end
+            try
+                o = DAG_OUTPUTS[][2]
+                Main.DAG.import_basic_tags(DAG_OUTPUTS_DB[], o.events, o.basic_tags, e.created_at, e.created_at)
+                Main.DAG.import_event_mentions(est, o.event_mentions, e)
+            catch ex
+                println("import_events: import_event_mentions error: $ex")
+            end
             ext_import_event(est, e)
             add_human_override(e.pubkey, true, "import_events")
         catch _ 

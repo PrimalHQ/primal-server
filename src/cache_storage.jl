@@ -1429,10 +1429,15 @@ function import_contact_list(est::CacheStorage, e::Nostr.Event; notifications=tr
 
     if !newonly
         if haskey(est.contact_lists, e.pubkey)
-            for tag in est.events[est.contact_lists[e.pubkey]].tags
-                if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                    follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
-                    is_trusted_user(est, follow_pubkey) && push!(old_follows, follow_pubkey)
+            if e.pubkey in est.contact_lists
+                clid = est.contact_lists[e.pubkey]
+                if clid in est.events
+                    for tag in est.events[clid].tags
+                        if length(tag.fields) >= 2 && tag.fields[1] == "p"
+                            follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
+                            is_trusted_user(est, follow_pubkey) && push!(old_follows, follow_pubkey)
+                        end
+                    end
                 end
             end
         end

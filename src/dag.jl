@@ -851,6 +851,23 @@ function advsearch_node(
     (; advsearch)
 end
 
+function import_basic_tags(connsel, events::ServerTable, basic_tags::ServerTable, since, until)
+    insert_q = "
+    insert into $(basic_tags.table)
+        (id, pubkey, created_at, kind, tag, arg1, arg3, imported_at)
+    select * from (
+        select id, pubkey, created_at, kind, t->>0 as tag, decode(t->>1, 'hex') as arg1, coalesce(t->>3, '') as arg3, imported_at from (
+            select id, pubkey, created_at, kind, jsonb_array_elements(tags) as t, imported_at from $(events.table)
+            where 
+                imported_at >= \$1 and imported_at <= \$2 and 
+                jsonb_array_length(tags) < 50
+        ) a where t->>0 in ('p', 'P', 'e') and t->>1 ~* '^[0-9a-f]{64}\$'
+    ) b on conflict do nothing
+    "
+        # (kind = $(Int(Nostr.TEXT_NOTE)) or kind = $(Int(Nostr.REACTION)) or kind = $(Int(Nostr.REPOST)) or kind = $(Int(Nostr.ZAP_RECEIPT)) or kind = 9802) and
+    Postgres.execute(connsel, insert_q, [since, until])
+end
+
 function basic_tags_node(
         events::ServerTable;
         runctx::RunCtx,
@@ -888,21 +905,7 @@ function basic_tags_node(
 
     process_segments(basic_tags; runctx, step=24*3600) do t1, t2
         transaction_with_execution_stats(events.server; runctx.stats) do session1
-            insert_q = "
-            insert into $(basic_tags.table)
-                (id, pubkey, created_at, kind, tag, arg1, arg3, imported_at)
-            select * from (
-                select id, pubkey, created_at, kind, t->>0 as tag, decode(t->>1, 'hex') as arg1, coalesce(t->>3, '') as arg3, imported_at from (
-                    select id, pubkey, created_at, kind, jsonb_array_elements(tags) as t, imported_at from $(events.table)
-                    where 
-                        imported_at >= \$1 and imported_at <= \$2 and 
-                        jsonb_array_length(tags) < 50
-                ) a where t->>0 in ('p', 'P', 'e') and t->>1 ~* '^[0-9a-f]{64}\$'
-            ) b on conflict do nothing
-            "
-                        # (kind = $(Int(Nostr.TEXT_NOTE)) or kind = $(Int(Nostr.REACTION)) or kind = $(Int(Nostr.REPOST)) or kind = $(Int(Nostr.ZAP_RECEIPT)) or kind = 9802) and
-            runctx.explain && runctx.log(display_to_string(Postgres.execute(session1, "explain $(insert_q)", [t1, t2])[2]))
-            Postgres.execute(session1, insert_q, [t1, t2])
+            import_basic_tags(session1, events, basic_tags, t1, t2)
         end
     end
 
@@ -1870,9 +1873,9 @@ function import_event_mentions(est::DB.CacheStorage, event_mentions::ServerTable
             Postgres.execute(connsel, "
                              insert into $(event_mentions.table)
                              values (\$1, \$2, \$3, \$4, \$5, \$6)
+                             on conflict do nothing
                              ",
                              [e.id, tag[1], argeid, argpubkey, argkind, argid])
-                             # on conflict (eid, tag, argeid, argpubkey, argkind, argid) do nothing
         end
     end
 end
@@ -1897,11 +1900,10 @@ function event_mentions_node(
                               (:argpubkey, (PubKeyId, "")),
                               (:argkind, (Int, "")),
                               (:argid, (String, "")),
-
-                              # "primary key (eid, tag, argeid, argpubkey, argkind, argid)",
                              ],
                              [
                               :eid,
+                              # "create unique index if not exists TABLE_unique on TABLE (eid, tag, argeid, argpubkey, argkind, argid) nulls not distinct",
                              ];
                              runtag=runctx.runtag)
 
