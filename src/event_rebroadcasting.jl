@@ -1,8 +1,8 @@
 module EventRebroadcasting
 
-import ..Dates
-import ..JSON
-import ..SHA
+import Dates
+import JSON
+import SHA
 
 import ..Utils
 import ..Nostr
