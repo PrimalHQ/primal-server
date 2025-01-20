@@ -9,10 +9,148 @@ import Sockets
 using ..Utils
 import ..Utils
 import ..Nostr
+import ..DB
 import ..Fetching
+import ..Postgres
+using ..Tracing: @tr
 
 PROXY = Ref{Any}(nothing)
 TIMEOUT = Ref(10)
+
+PRINT_EXCEPTIONS = Ref(false)
+LOG = Ref(false)
+
+exceptions_lock = ReentrantLock()
+
+const cache_storage = Ref{Any}(nothing)
+const RUN_PERIOD = Ref(3600)
+const task = Ref{Any}(nothing)
+const running = Ref(true)
+
+function start(est::DB.CacheStorage)
+    cache_storage[] = est
+
+    @assert isnothing(task[]) || istaskdone(task[])
+
+    @tr running[] = true
+
+    task[] = 
+    Base.errormonitor(@async while running[]
+                          try
+                              Base.invokelatest(run_make)
+                          catch _
+                              PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+                          end
+                          Utils.active_sleep(RUN_PERIOD[], running)
+                      end)
+
+    nothing
+end
+
+function stop()
+    @assert !isnothing(task[])
+    @tr running[] = false
+    Utils.wait_for(()->istaskdone(task[]))
+end
+
+function make_2(
+        cache_storage; 
+        output_filename="../tr_sorted.jls", 
+        iterations=20,
+        running=Utils.PressEnterToStop())
+
+    users = Dict() |> ThreadSafe
+    visited = Set{Nostr.PubKeyId}() |> ThreadSafe
+    function visit_user(pubkey::Nostr.PubKeyId)
+        running[] || return
+        pubkey in visited && return
+        push!(visited, pubkey)
+        try
+            follows = Set{Nostr.PubKeyId}()
+            if pubkey in cache_storage.contact_lists
+                for tag in cache_storage.events[cache_storage.contact_lists[pubkey]].tags
+                    if length(tag.fields) >= 2 && tag.fields[1] == "p"
+                        if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                            push!(follows, pk)
+                            lock(users) do users
+                                get!(users, pk) do; Set{Nostr.PubKeyId}(); end
+                            end
+                        end
+                    end
+                end
+            end
+            users[pubkey] = follows
+            # @show length(users)
+        catch ex
+            # println(ex)
+            # rethrow()
+        end
+    end
+
+    verified_pubkeys = [Nostr.PubKeyId(pubkey) for (pubkey,) in Postgres.execute(:membership, "select pubkey from verified_users where default_name")[2]]
+
+    Threads.@threads for pk in verified_pubkeys
+        visit_user(pk)
+    end
+    @show length(users)
+    
+    while true
+        yield(); running[] || break
+        nusers1 = length(users)
+        Threads.@threads for pk in collect(keys(users))
+            visit_user(pk)
+        end
+        nusers2 = length(users)
+        @show (nusers1, nusers2)
+        nusers1 == nusers2 && break
+    end
+    println()
+    users = users.wrapped
+    for (pk, follows) in users; delete!(follows, pk); end
+    println("number of users: ", length(users))
+    println("avg number of follows: ", sum([length(follows) for (_, follows) in users]; init=0)/length(users))
+    ##
+    ui = Dict([pk=>i for (i, pk) in enumerate(keys(users))])
+    iu = [pk for (_, pk) in enumerate(keys(users))]
+    d = [pk in verified_pubkeys ? 1.0 : 0.0 for pk in keys(ui)]
+    d /= sum(d)
+    tr = d
+    a = 0.85
+    delta = NaN
+    #
+    for i in 1:iterations
+        yield(); running[] || break
+        energy = sum(tr)
+        println("$i/$iterations  E:$energy  D:$delta    \r")
+        tr_ = [0.0 for pk in keys(ui)]
+        for (j, (pk, follows)) in enumerate(users)
+            j % 1000 == 0 && yield()
+            for f in follows
+                tr_[ui[f]] += a * tr[ui[pk]] / length(follows)
+            end
+            tr_[ui[pk]] += (1-a) * d[ui[pk]]
+        end
+        delta = sum(abs.(tr_ - tr))
+        tr = tr_
+    end
+    println()
+    #
+    tr_sorted = sort([(pk, t) for (pk, t) in collect(zip(keys(users), tr)) if t > 0]; by=t->-t[2])
+    ##
+    serialize(output_filename, tr_sorted)
+    ##
+    (;
+     users,
+     tr_sorted,
+    )
+end
+
+function run_make()
+    r = make_2(cache_storage[]; running=Ref(true))
+    Main.TrustRank.load(Dict(r.tr_sorted))
+end
+
+# ---------------------------------------------- #
 
 function check_nip05(pubkey, domain, name)
     try

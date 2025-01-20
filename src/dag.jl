@@ -758,10 +758,10 @@ function advsearch_node(
                     select ev1.id, ev2.pubkey 
                     from 
                         ($events_q) as ev1,
-                        ($events_q) as ev2,
+                        $(events.table) as ev2,
                         $(basic_tags.table) bt1
                     where
-                        ev1.id = bt1.id and bt1.arg3 = 'reply' and bt1.arg1 = ev2.id
+                        ev1.id = bt1.id and bt1.arg3 in ('reply', 'root') and bt1.arg1 = ev2.id
                     ", [t1, t2])[2]
 
                 replies = Dict(EventId(eid)=>PubKeyId(pk) for (eid, pk) in rs)
@@ -1838,6 +1838,12 @@ function parse_zap_receipt(tags::Vector)
                 receiver = PubKeyId(t[2])
             elseif t[1] == "P"
                 sender = PubKeyId(t[2])
+            elseif t[1] == "a"
+                kind, pubkey, identifier = map(string, split(t[2], ':'))
+                for r in Postgres.execute(MAIN_SERVER[], "select event_id from parametrized_replaceable_events where kind = \$1 and pubkey = \$2 and identifier = \$3 limit 1",
+                                          [kind, Nostr.PubKeyId(pubkey), identifier])[2]
+                    eid = EventId(r[1])
+                end
             elseif t[1] == "bolt11"
                 if !isnothing(local amount = DB.parse_bolt11(t[2]))
                     if amount <= DB.MAX_SATSZAPPED[]

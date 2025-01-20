@@ -5,9 +5,11 @@ using Printf, Dates
 import YAML
 import URIs
 using DataStructures: CircularBuffer, SortedDict
+import Sockets
 
 import ..Utils
 using ..Utils
+import ..Postgres
 
 SAVE_MESSAGES = Ref(true)
 PROXY_URI = Ref{Union{String,Nothing}}(nothing)
@@ -318,6 +320,58 @@ function fetch(filter)
             end
         end
     end
+end
+
+PRINT_EXCEPTIONS = Ref(true)
+relays_from_db_task = Ref{Any}(nothing)
+relays_from_db_running = Ref(false)
+relays_from_db_updated_at = Ref(0)
+function start_relays_from_db()
+    @assert isnothing(relays_from_db_task[])
+    relays_from_db_updated_at[] = 0
+    relays_from_db_running[] = true
+    relays_from_db_task[] = Base.errormonitor(@async while relays_from_db_running[]
+                                                  try
+                                                      Base.invokelatest(monitor_relays_from_db)
+                                                  catch _
+                                                      PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+                                                  end
+                                                  sleep(1)
+                                              end)
+    nothing
+end
+function stop_relays_from_db()
+    @assert !isnothing(relays_from_db_task[])
+    relays_from_db_running[] = false
+    wait(relays_from_db_task[])
+    relays_from_db_task[] = nothing
+    nothing
+end
+function monitor_relays_from_db()
+    t = Utils.current_time()
+    cnt = Ref(0)
+    for (relay_url,) in Postgres.execute(:p0, "select relay_url from fetcher_relays where updated_at >= \$1", [Dates.unix2datetime(relays_from_db_updated_at[])])[2]
+        length(relay_url) > 300 && continue
+        u = try
+            URIs.parse_uri(relay_url)
+        catch ex
+            println(ex)
+            continue
+        end
+        if !isnothing(local ip = try Sockets.IPv4(u.host) catch _ end)
+            ip0 = Int((ip.host >> 24) & 0xff)
+            ip1 = Int((ip.host >> 16) & 0xff)
+            if (ip0, ip1) == (192, 168) || ip0 == 10 || ip0 == 127
+                continue
+            end
+        end
+        if !(relay_url in relays)
+            push!(relays, relay_url)
+            cnt[] += 1
+        end
+    end
+    relays_from_db_updated_at[] = t
+    cnt[] > 0 && update_fetchers!(relays)
 end
 
 end

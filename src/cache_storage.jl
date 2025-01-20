@@ -1091,7 +1091,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         if e.kind == Int(Nostr.TEXT_NOTE)
             is_pubkey_event = true
             for tag in e.tags
-                if length(tag.fields) >= 2 && tag.fields[1] == "e"
+                if length(tag.fields) >= 2 && (tag.fields[1] == "e" || tag.fields[1] == "a")
                     # is_reply = !(length(tag.fields) >= 4 && (tag.fields[4] == "mention" || tag.fields[4] == "highlight"))
                     if length(tag.fields) >= 4 && tag.fields[4] == "root"
                         is_reply = true
@@ -1154,10 +1154,11 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             end
         elseif e.kind == Int(Nostr.CONTACT_LIST)
             track_user_stats(est, e.pubkey) do
-                if !haskey(est.contact_lists, e.pubkey) || (e.created_at > est.events[est.contact_lists[e.pubkey]].created_at)
+                if !haskey(est.contact_lists, e.pubkey) || !haskey(est.events, est.contact_lists[e.pubkey]) || (e.created_at > est.events[est.contact_lists[e.pubkey]].created_at)
                     import_contact_list(est, e)
                 end
             end
+            update_fetcher_relays(est, e.pubkey; source_event_id=e.id)
             # try
             #     for relay_url in collect(keys(JSON.parse(e.content)))
             #         register_relay(est, relay_url)
@@ -1331,6 +1332,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             if !haskey(est.dyn[:relay_list_metadata], e.pubkey) || est.events[est.dyn[:relay_list_metadata][e.pubkey]].created_at < e.created_at
                 est.dyn[:relay_list_metadata][e.pubkey] = e.id
             end
+            update_fetcher_relays(est, e.pubkey; source_event_id=e.id)
         elseif e.kind == Int(Nostr.BOOKMARKS)
             if !haskey(est.dyn[:bookmarks], e.pubkey) || est.events[est.dyn[:bookmarks][e.pubkey]].created_at < e.created_at
                 est.dyn[:bookmarks][e.pubkey] = e.id
@@ -1435,7 +1437,7 @@ function import_contact_list(est::CacheStorage, e::Nostr.Event; notifications=tr
                     for tag in est.events[clid].tags
                         if length(tag.fields) >= 2 && tag.fields[1] == "p"
                             follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
-                            is_trusted_user(est, follow_pubkey) && push!(old_follows, follow_pubkey)
+                            push!(old_follows, follow_pubkey)
                         end
                     end
                 end
@@ -1449,7 +1451,7 @@ function import_contact_list(est::CacheStorage, e::Nostr.Event; notifications=tr
     for tag in e.tags
         if length(tag.fields) >= 2 && tag.fields[1] == "p"
             follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
-            is_trusted_user(est, follow_pubkey) && push!(new_follows, follow_pubkey)
+            push!(new_follows, follow_pubkey)
         end
     end
 
@@ -1457,19 +1459,21 @@ function import_contact_list(est::CacheStorage, e::Nostr.Event; notifications=tr
         follow_pubkey in old_follows && continue
         exe(est.pubkey_followers, @sql("insert into pubkey_followers (pubkey, follower_pubkey, follower_contact_list_event_id) values (?1, ?2, ?3)"),
             follow_pubkey, e.pubkey, e.id)
-        exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = value + 1 where key = ?1"),
-            follow_pubkey)
-        notifications && notification(est, follow_pubkey, e.created_at, NEW_USER_FOLLOWED_YOU, e.pubkey)
+        if is_trusted_user(est, e.pubkey)
+            exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = value + 1 where key = ?1"),
+                follow_pubkey)
+            notifications && notification(est, follow_pubkey, e.created_at, NEW_USER_FOLLOWED_YOU, e.pubkey)
+        end
     end
     for follow_pubkey in old_follows
         follow_pubkey in new_follows && continue
-        # exe(est.pubkey_followers, @sql("delete from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2 and follower_contact_list_event_id = ?3"),
-        #     follow_pubkey, e.pubkey, est.contact_lists[e.pubkey])
         exe(est.pubkey_followers, @sql("delete from pubkey_followers where pubkey = ?1 and follower_pubkey = ?2"),
             follow_pubkey, e.pubkey)
-        exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = value - 1 where key = ?1"),
-            follow_pubkey)
-        notifications && notification(est, follow_pubkey, e.created_at, USER_UNFOLLOWED_YOU, e.pubkey)
+        if is_trusted_user(est, e.pubkey)
+            exe(est.pubkey_followers_cnt, @sql("update pubkey_followers_cnt set value = greatest(0, value - 1) where key = ?1"),
+                follow_pubkey)
+            notifications && notification(est, follow_pubkey, e.created_at, USER_UNFOLLOWED_YOU, e.pubkey)
+        end
     end
 end
 
@@ -1952,6 +1956,14 @@ function recent_events_init(est::CacheStorage; days=2, running=Utils.PressEnterT
         end
     end
     length(rs)
+end
+
+function update_fetcher_relays(est::CacheStorage, pubkey::Nostr.PubKeyId; source_event_id=nothing)
+    relay_urls = [t[2] for t in Main.App.get_user_relays(est; pubkey)[1].tags]
+    for relay_url in relay_urls
+        Postgres.execute(:p0, "insert into fetcher_relays values (\$1, \$2, \$3) on conflict do nothing", 
+                         [relay_url, Dates.now(), source_event_id])
+    end
 end
 
 function import_messages(est::CacheStorage, filename::String; pos=0, cond=e->true, running=Utils.PressEnterToStop())
