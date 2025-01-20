@@ -2959,12 +2959,17 @@ function dvm_feed(
     end
 
     einfo = nothing
+    einfo_relay_url = nothing
     for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
                           DB.@sql("select event_id from parametrized_replaceable_events where kind = ?1 and pubkey = ?2 and identifier = ?3"), 
                           (dvm_kind, dvm_pubkey, dvm_id))
         eid = Nostr.EventId(eid)
         if eid in est.events
             einfo = est.events[eid]
+            for (relay_url,) in DB.exec(est.dyn[:event_relay], DB.@sql("select relay_url from event_relay where event_id = ?1 limit 1"), (eid,))
+                einfo_relay_url = relay_url
+                break
+            end
             break
         end
     end
@@ -2981,14 +2986,14 @@ function dvm_feed(
         end
     end
 
-    relays = Set(Main.DVMFeedChecker.RELAYS)
-    if !isnothing(user_pubkey)
-        for t in App.get_user_relays(est; pubkey=user_pubkey)[1].tags
-            length(t) >= 2 && t[1] == "r" && push!(relays, t[2])
-        end
-    end
-    relays = collect(relays)
-    # display(relays)
+    relays = collect(Main.DVMFeedChecker.RELAYS)
+    !isnothing(einfo_relay_url) && push!(relays, einfo_relay_url)
+    # if !isnothing(user_pubkey)
+    #     for t in App.get_user_relays(est; pubkey=user_pubkey)[1].tags
+    #         length(t) >= 2 && t[1] == "r" && push!(relays, t[2])
+    #     end
+    # end
+    relays = collect(Set(relays))
                     
     req_id = UUIDs.uuid4()
 

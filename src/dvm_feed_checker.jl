@@ -17,12 +17,13 @@ DVM_REQUESTER_PUBKEY = Ref{Any}(nothing)
 RELAYS = [
           "wss://nostr.bitcoiner.social/",
           "wss://relay.nostr.bg/",
-          "wss://nostr.oxtr.dev/",
-          "wss://nostr.fmt.wiz.biz/",
-          "wss://relay.damus.io/",
+          # "wss://nostr.oxtr.dev/",
+          # "wss://nostr.fmt.wiz.biz/",
+          # "wss://relay.damus.io/",
           "wss://nostr.mom/",
           "wss://nos.lol/",
-          "ws://192.168.18.7:7777", 
+          # "ws://192.168.18.7:7777", 
+          "wss://relay.primal.net", 
          ]
 
 const RUN_PERIOD = Ref(600)
