@@ -431,6 +431,9 @@ end
 
 function preview_handler(req::HTTP.Request)
     lock(index_lock) do
+        if startswith(req.target, "/search/")
+            return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain"]), "not found")
+        end
         host = Dict(req.headers)["Host"]
         h = index_htmls[host]
         dochtml = h.index_html[]
