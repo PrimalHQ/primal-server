@@ -56,11 +56,11 @@ function import_upload_2(est::DB.CacheStorage, pubkey::Nostr.PubKeyId, data::Vec
         max_storage, = DB.exec(Main.InternalServices.membership_tiers[], "select max_storage from membership_tiers where tier = ?1", (tier,))[1]
 
         used_storage += length(data)
-        if used_storage > max_storage
-            @show (:insufficient_storage, pubkey)
-            error("insufficient storage available")
-            rm(mi.path)
-        end
+        # if used_storage > max_storage
+        #     @show (:insufficient_storage, pubkey)
+        #     error("insufficient storage available")
+        #     rm(mi.path)
+        # end
 
         DB.exec(Main.InternalServices.memberships[], "update memberships set used_storage = ?2 where pubkey = ?1",
                 (pubkey, used_storage))

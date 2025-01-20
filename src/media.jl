@@ -55,6 +55,10 @@ mimetype_ext = Dict([
     "image/vnd.microsoft.icon" => ".ico",
     "text/plain" => ".txt",
     "application/json" => ".json",
+
+    "text/html" => ".html",
+    "text/javascript" => ".js",
+    "application/wasm" => ".wasm",
 ])
 ##
 downloader_headers = ["User-Agent"=>"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"]
@@ -132,8 +136,8 @@ all_variants = [(size, animated)
 
 # make_media_url(mi::MediaImport, ext::String) = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
 
-function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector=all_variants, key=(;), proxy=MEDIA_PROXY[], sync=false)
-    sync || @show (sync, url)
+function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector=all_variants, key=(;), proxy=MEDIA_PROXY[], sync=false, already_imported=false)
+    # sync || @show (sync, url)
     funcname = "media_variants"
     @tr "media_variants_lock" url variant_specs key proxy sync lock(sync ? ReentrantLock() : media_variants_lock) do
         variants = Dict{Tuple{Symbol, Bool}, String}() |> ThreadSafe
@@ -141,7 +145,7 @@ function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector
         k = (; key..., url, type=:original)
         mi = MediaImport(; key=k)
 
-        if @tr url k mi.h isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2])
+        if @tr url k mi.h already_imported (isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2]) && !already_imported)
             if @tr url k :original !haskey(media_tasks, k)
                 media_tasks[k] = 
                 let k=k
@@ -177,8 +181,6 @@ function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector
         @tr url orig_media_url ext ()
 
         orig_data = nothing
-        @tr @elapsed (orig_data = download(est, orig_media_url; proxy))
-        @tr url orig_media_url length(orig_data)
 
         ext == ".bin" && return nothing
 
@@ -207,8 +209,12 @@ function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector
             k = (; key..., url, type=:resized, size, animated)
             mi = MediaImport(; key=k)
             rs = Postgres.execute(:p0, "select media_url from media_storage where h = \$1 limit 1", [mi.h])[2]
-            if @tr url k mi.h :variant isempty(rs)
+            if @tr url k mi.h already_imported :variant (isempty(rs) && !already_imported)
                 if @tr k :variant !haskey(media_tasks, k)
+                    if isnothing(orig_data)
+                        @tr @elapsed (orig_data = download(est, orig_media_url; proxy))
+                        @tr url orig_media_url length(orig_data)
+                    end
                     media_tasks[k] = 
                     let k=k, mi=mi, convopts=convopts, size=size, animated=animated, variants=variants
                         tsk = @task task_wrapper(est, k, max_task_duration, tasks_per_period) do
@@ -248,7 +254,9 @@ function media_variants(est::DB.CacheStorage, url::String; variant_specs::Vector
                 end
                 variant_missing = true
             else
-                variants[(size, animated)] = rs[1][1]
+                if !isempty(rs)
+                    variants[(size, animated)] = rs[1][1]
+                end
             end
             @label cont2
         end

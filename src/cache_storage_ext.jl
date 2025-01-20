@@ -653,10 +653,11 @@ function for_hashtags(body::Function, est::CacheStorage, e::Nostr.Event)
     end
 end
 
-re_url = r"https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)"
+# re_url = r"https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)"
+re_url = r"https?:\/\/(www\.)?[-\pL0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-\pL0-9()@:%_\+.~#?&//=]*)"
 
 function for_urls(body::Function, est::CacheStorage, e::Nostr.Event)
-    e.kind == Int(Nostr.TEXT_NOTE) || return
+    # e.kind in [Int(Nostr.TEXT_NOTE), Int(Nostr.LONG_FORM_CONTENT)] || return
     for m in eachmatch(re_url, e.content)
         body(String(m.match))
     end

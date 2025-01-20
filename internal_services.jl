@@ -12,11 +12,14 @@ import ..Media
 import ..Postgres
 
 PORT = Ref(14000)
+PORT2 = Ref(24000)
 
 PRINT_EXCEPTIONS = Ref(true)
 
 server = Ref{Any}(nothing)
 router = Ref{Any}(nothing)
+server2 = Ref{Any}(nothing)
+router2 = Ref{Any}(nothing)
 
 exceptions = CircularBuffer(200)
 
@@ -98,6 +101,9 @@ function start(cache_storage::DB.CacheStorage; setup_handlers=true)
     router[] = HTTP.Router()
     server[] = HTTP.serve!(router[], "0.0.0.0", PORT[])
 
+    router2[] = HTTP.Router()
+    server2[] = HTTP.serve!(router2[], "0.0.0.0", PORT2[])
+
     if setup_handlers
         HTTP.register!(router[], "POST", "/collect_metadata", function (req::HTTP.Request)
                            pubkeys = JSON.parse(String(req.body))
@@ -128,6 +134,8 @@ function start(cache_storage::DB.CacheStorage; setup_handlers=true)
         HTTP.register!(router[], "/api", api_handler)
 
         HTTP.register!(router[], "/api/suggestions", suggestions_handler)
+
+        HTTP.register!(router2[], "/purge-media", purge_media_handler)
     end
 
     nothing
@@ -548,6 +556,7 @@ function media_cache_handler(req::HTTP.Request)
     catch_exception(:media_cache_handler, req) do
         host = Dict(req.headers)["Host"]
         path, query = split(req.target, '?')
+
         args = NamedTuple([Symbol(k)=>v for (k, v) in [split(s, '=') for s in split(query, '&')]])
         variant = if !haskey(args, :s)
             (:original, true)
@@ -565,16 +574,27 @@ function media_cache_handler(req::HTTP.Request)
               else error("invalid animated")
               end)
         end
-        send_content = !(haskey(args, :c) && args.c == "0")
-        # send_content = 1==1
+
+        # send_content = !(haskey(args, :c) && args.c == "0")
+        send_content = false
+
         url = string(URIs.unescapeuri(args.u))
-        variants = variant == (:original, true) ? [variant] : Media.all_variants
-        tr = @elapsed (r = Media.media_variants(est[], url, variants; sync=true))
-        # println("$tr  $query")
+
+        if     variant[1] == :small;  variant = (:medium, variant[2])
+        elseif variant[1] == :medium; variant = (:large,  variant[2])
+        end
+
+        variant_specs = variant == (:original, true) ? [variant] : Media.all_variants
+        # @show (url, variant_specs)
+
+        tr = @elapsed (r = Media.media_variants(est[], url; variant_specs, sync=true, already_imported=true))
+        # println("$tr  $query  $(isnothing(r))")
+
         if isnothing(r)
             HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
         else
             resurl = r[variant]
+            # @show (send_content, resurl)
             if !send_content
                 HTTP.Response(302, HTTP.Headers(["Location"=>resurl, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
             else
@@ -594,7 +614,7 @@ function media_cache_handler(req::HTTP.Request)
                     rm(p)
                 end
 
-                r = Media.media_variants(est[], url, variants; sync=true)
+                r = Media.media_variants(est[], url; variant_specs, sync=true, already_imported=true)
                 if isnothing(r)
                     HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
                 else
@@ -768,6 +788,75 @@ function suggestions_handler(req::HTTP.Request)
                suggestions=[(; group, members=[(; name, pubkey) for (pubkey, name) in ms])
                             for (group, ms) in d])
         HTTP.Response(200, api_headers, JSON.json(res))
+    end
+end
+
+function purge_media_handler(req::HTTP.Request)
+    catch_exception(:purge_media_handler, req) do
+        r = JSON.parse(String(req.body))
+        purge_media(Nostr.PubKeyId(r["pubkey"]), r["url"])
+        HTTP.Response(200, api_headers, "ok")
+    end
+end
+
+BUNNY_API_KEY = Ref{Any}(nothing)
+
+function bunny_purge()
+    @assert HTTP.request("POST", "https://api.bunny.net/pullzone/1425721/purgeCache", ["AccessKey"=>BUNNY_API_KEY[]]).status == 204
+end
+
+function purge_media(pubkey::Nostr.PubKeyId, surl::String)
+    # @show (:purge_media, pubkey, surl)
+    function purge(url)
+        path = string(URIs.parse_uri(url).path)
+
+        for mps in values(Main.Media.MEDIA_PATHS)
+            for mp in mps
+                if mp[1] == :local
+                    filepath = join(split(mp[3], '/')[1:end-1], '/') * path
+                    # @show (:rmlocal, filepath)
+                    try isfile(filepath) && rm(filepath) 
+                    catch ex println(ex) end
+                elseif mp[1] == :s3
+                    # @show (:rms3, Media.s3_check(mp[2], path[2:end]), path)
+                    try Media.s3_delete(mp[2], path[2:end])
+                    catch ex println(ex) end
+                end
+            end
+        end
+    end
+
+    spath, ext = splitext(URIs.parse_uri(surl).path[2:end])
+
+    for (url,) in Postgres.execute(:p0, "select media_url from media where url = \$1", [surl])[2]
+        # @show url
+        purge(url)
+    end
+    for (url,) in Postgres.execute(:p0, "select thumbnail_url from video_thumbnails where video_url = \$1", [surl])[2]
+        # @show url
+        purge(url)
+    end
+
+    for (url,) in Postgres.execute(:membership,
+                                   "select url from short_urls where path = \$1 and ext = \$2 ",
+                                   [spath, ext])[2]
+        # @show url
+        purge(url)
+
+        path = string(URIs.parse_uri(url).path)
+
+        path, size = Postgres.execute(:membership,
+                                      "select path, size from media_uploads where pubkey = \$1 and path = \$2 ",
+                                      [pubkey, path])[2][1]
+
+        Postgres.execute(:membership, "delete from media_uploads where pubkey = \$1 and path = \$2",
+                         [pubkey, path])
+
+        Postgres.execute(:membership, "delete from short_urls where path = \$1 and ext = \$2",
+                         [spath, ext])
+
+        Postgres.execute(:membership, "update memberships set used_storage = used_storage - \$2 where pubkey = \$1",
+                         [pubkey, size])
     end
 end
 

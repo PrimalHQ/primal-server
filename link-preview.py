@@ -2,6 +2,8 @@ import sys
 import os
 import json
 import subprocess
+import traceback
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,6 +32,17 @@ if os.environ.get("DEBUG", "") == "1": print(soup)
 
 mimetype = "text/html"
 title = image = description = ""
+
+for ee in soup.html.head.find_all('link'):
+    try:
+        e = ee.attrs
+        if "rel" in e and "href" in e:
+            if len(e["rel"]) == 1 and e["rel"][0] == "icon":
+                u = urlparse(url)
+                image = u.scheme+"://"+u.netloc+e["href"]
+    except:
+        traceback.print_exc()
+
 for ee in soup.html.head.find_all('meta'):
     e = ee.attrs
     if "property" in e and "content" in e:
@@ -42,7 +55,13 @@ for ee in soup.html.head.find_all('meta'):
         elif prop == "twitter:image:src": image = e["content"]
 
     elif "name" in e and "content" in e:
-        if e["name"] == "description": description = e["content"]
+        if   e["name"] == "description": description = e["content"]
+        elif e["name"] == "og:title": title = e["content"]
+        elif e["name"] == "og:image": image = e["content"]
+        elif e["name"] == "og:description": description = e["content"]
+        elif e["name"] == "twitter:title": title = e["content"]
+        elif e["name"] == "twitter:description": description = e["content"]
+        elif e["name"] == "twitter:image:src": image = e["content"]
 
 icon_url = ""
 # for ee in soup.html.head.find_all('link'):
