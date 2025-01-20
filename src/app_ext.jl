@@ -313,7 +313,7 @@ function scored_content(
                 # q = "with a as materialized (select author_pubkey, event_id, $field from event_stats $q_wheres) select * from a order by $field desc limit ?1 offset ?2"
                 q = "select author_pubkey, event_id, $field from event_stats $q_wheres order by $field desc limit ?1 offset ?2"
             end
-            # @show (q, (n, offset))
+            # println(q); @show (n, offset)
             pkseen = Set{Nostr.PubKeyId}()
             for (pk, eid, v) in DB.exec(est.event_stats, q, (n, offset))
                 pk = Nostr.PubKeyId(pk)
