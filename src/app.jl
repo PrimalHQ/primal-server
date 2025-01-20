@@ -3527,44 +3527,14 @@ function membership_media_management_uploads(
     [(; kind=Int(MEMBERSHIP_MEDIA_MANAGEMENT_UPLOADS), content=JSON.json(res)); get_media_metadata(est; urls); range(us, :created_at)]
 end
 
+MEDIA_SERVER_HOST = Ref("")
+
 function membership_media_management_delete(est::DB.CacheStorage; event_from_user::Dict)
     e = membership_event_from_user(event_from_user)
 
     surl = JSON.parse(e.content)["url"]
 
-    spath, ext = splitext(URIs.parse_uri(surl).path[2:end])
-
-    url = Postgres.execute(:membership, 
-                           "select url from short_urls where path = \$1 and ext = \$2 ", 
-                           [spath, ext])[2][1][1]
-
-    path = string(URIs.parse_uri(url).path)
-
-    path, size = Postgres.execute(:membership, 
-                                  "select path, size from media_uploads where pubkey = \$1 and path = \$2 ", 
-                                  [e.pubkey, path])[2][1]
-
-    fp, _ = splitext(path)
-
-    @assert !isempty(fp)
-
-    hosts = ["ppr1", "ppr6", "ppr31", "ppr32"]
-    oks = [try 
-               run(Cmd(["ssh", h, "ls -1 /var/www/cdn$(fp)* | xargs -n1 rm"])).exitcode == 0
-           catch ex
-               # println("membership_media_management_delete: ", ex)
-               false
-           end
-           for h in hosts]
-
-    Postgres.execute(:membership, "delete from media_uploads where pubkey = \$1 and path = \$2", 
-                     [e.pubkey, path])
-
-    Postgres.execute(:membership, "delete from short_urls where path = \$1 and ext = \$2",
-                     [spath, ext])
-
-    Postgres.execute(:membership, "update memberships set used_storage = used_storage - \$2 where pubkey = \$1", 
-                     [e.pubkey, size])
+    String(HTTP.request("POST", "$(MEDIA_SERVER_HOST[])/purge-media", [], JSON.json((; e.pubkey, url=surl))).body) == "ok" || error("deletion failed")
 
     []
 end
