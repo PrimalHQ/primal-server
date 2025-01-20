@@ -815,7 +815,7 @@ function feed_2(
                                                            (pubkey, since, until, Int(include_replies), limit, offset))))
                 end
             elseif notes == :authored
-                is_user_blocked(pubkey, :csam) && return []
+                (is_user_blocked(pubkey, :csam) || is_user_blocked(pubkey, :impersonation)) && return []
                 if usepgfuncs
                     q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null order by e->>'created_at' desc"
                     res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
@@ -859,7 +859,7 @@ function thread_view(est::DB.CacheStorage;
     event_id = cast(event_id, Nostr.EventId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    is_user_blocked(est.events[event_id].pubkey, :csam) && return []
+    (is_user_blocked(est.events[event_id].pubkey, :csam) || is_user_blocked(est.events[event_id].pubkey, :impersonation)) && return []
 
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
@@ -1197,7 +1197,7 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    is_user_blocked(pubkey, :csam) && return []
+    (is_user_blocked(pubkey, :csam) || is_user_blocked(pubkey, :impersonation)) && return []
 
     est.auto_fetch_missing_events && DB.fetch_user_metadata(est, pubkey)
 
@@ -1420,6 +1420,7 @@ function get_directmsg_contacts_2(
             peer = Nostr.PubKeyId(peer)
             
             is_hidden(est, user_pubkey, :content, peer) && continue
+            (is_user_blocked(peer, :csam) || is_user_blocked(peer, :impersonation)) && continue
 
             if relation != :any
                 if     relation == :follows; peer in fs || continue
@@ -1729,6 +1730,7 @@ function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false
     for e in events
         e = Nostr.Event(e)
         try
+            add_human_override(e.pubkey, true, "import_events")
             msg = JSON.json([time(), nothing, ["EVENT", "", e]])
             if DB.import_msg_into_storage(msg, est)
                 cnt[] += 1
@@ -1741,7 +1743,6 @@ function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false
                 println("import_events: import_event_mentions error: $ex")
             end
             ext_import_event(est, e)
-            add_human_override(e.pubkey, true, "import_events")
         catch _ 
             errcnt[] += 1
         end

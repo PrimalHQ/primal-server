@@ -32,7 +32,7 @@ CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_COHORTS() RETURNS int LANGUAGE sq
 
 CREATE TYPE cmr_scope AS ENUM ('content', 'trending');
 CREATE TYPE cmr_grp AS ENUM ('primal_spam', 'primal_nsfw');
-CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw', 'csam');
+CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw', 'csam', 'impersonation');
 CREATE TYPE filterlist_target AS ENUM ('pubkey', 'event');
 CREATE TYPE media_size AS ENUM ('original', 'small', 'medium', 'large');
 CREATE TYPE response_messages_for_post_res AS (e jsonb, is_referenced_event bool);
@@ -544,7 +544,7 @@ BEGIN
                     pubkeys := array_append(pubkeys, e_pubkey);
                 END IF;
 
-                IF a_apply_humaness_check AND e_kind != 0 AND NOT user_is_human(e_pubkey, a_user_pubkey) THEN
+                IF a_apply_humaness_check AND NOT t.is_referenced_event AND e_kind != 0 AND NOT user_is_human(e_pubkey, a_user_pubkey) THEN
                     CONTINUE;
                 END IF;
 
@@ -702,7 +702,7 @@ CREATE OR REPLACE FUNCTION public.feed_user_authored(
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
-    IF EXISTS (SELECT 1 FROM filterlist WHERE grp = 'csam' AND target_type = 'pubkey' AND target = a_pubkey AND blocked LIMIT 1) THEN
+    IF EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'pubkey' AND target = a_pubkey AND blocked LIMIT 1) THEN
         RETURN;
     END IF;
 
@@ -888,8 +888,8 @@ CREATE OR REPLACE FUNCTION public.thread_view(
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
-    IF  EXISTS (SELECT 1 FROM filterlist WHERE grp = 'csam' AND target_type = 'event' AND target = a_event_id AND blocked LIMIT 1) OR
-        EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = a_event_id AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp = 'csam' AND fl.blocked LIMIT 1)
+    IF  EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'event' AND target = a_event_id AND blocked LIMIT 1) OR
+        EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = a_event_id AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)
     THEN
         RETURN;
     END IF;
