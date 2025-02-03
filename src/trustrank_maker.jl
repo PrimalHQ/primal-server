@@ -90,6 +90,7 @@ function make_2(
     verified_pubkeys = [Nostr.PubKeyId(pubkey) for (pubkey,) in Postgres.execute(:membership, "select pubkey from verified_users where default_name")[2]]
 
     Threads.@threads for pk in verified_pubkeys
+        yield()
         visit_user(pk)
     end
     @show length(users)
@@ -98,6 +99,7 @@ function make_2(
         yield(); running[] || break
         nusers1 = length(users)
         Threads.@threads for pk in collect(keys(users))
+            yield()
             visit_user(pk)
         end
         nusers2 = length(users)
