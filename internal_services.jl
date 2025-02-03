@@ -180,6 +180,8 @@ function get_image_links(content)
     urls
 end
 
+re_mention = r"\b(nostr:)?((note|npub|naddr|nevent|nprofile)1\w+)\b"
+
 function content_refs_resolved(e::Nostr.Event)
     cache_storage = est[]
     c = replace(e.content, DB.re_hashref => function (r)
@@ -197,9 +199,9 @@ function content_refs_resolved(e::Nostr.Event)
                 end
                 ""
             end)
-    replace(c, DB.re_mention => function (r)
-                # prefix = "nostr:npub"
-                # startswith(r, prefix) || return r
+    replace(c, re_mention => function (r)
+                r = string(r)
+                if startswith(r, "nostr:"); r = r[7:end]; end
                 if !isnothing(local pk = Bech32.nip19_decode_wo_tlv(r))
                     try
                         c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
@@ -689,12 +691,17 @@ function url_shortening_handler(req::HTTP.Request)
 end
 
 function url_lookup_handler(req::HTTP.Request)
+    headers = HTTP.Headers([
+                            "Access-Control-Allow-Origin"=>"*",
+                            "Access-Control-Allow-Methods"=>"*",
+                            "Access-Control-Allow-Headers"=>"*"
+                           ])
     catch_exception(:url_lookup_handler, req) do
         host = Dict(req.headers)["Host"]
         spath = splitext(string(split(req.target, '/')[end]))[1]
         r = DB.exec(short_urls[], DB.@sql("select url from short_urls where path = ?1 limit 1"), (spath,))
         if isempty(r)
-            HTTP.Response(404, "unknown url")
+            HTTP.Response(404, headers, "unknown url")
         else
             url = r[1][1]
             h = splitext(splitpath(url)[end])[1]
@@ -715,7 +722,7 @@ function url_lookup_handler(req::HTTP.Request)
             else
                 "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
             end
-            HTTP.Response(302, HTTP.Headers(["Location"=>rurl]))
+            HTTP.Response(302, HTTP.Headers([headers..., "Location"=>rurl]))
         end
     end
 end
