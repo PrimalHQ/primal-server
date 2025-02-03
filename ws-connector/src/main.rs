@@ -712,6 +712,7 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                         client_write,
                     };
                     let reqstatus = {
+                        dbg!(funcall);
                         if funcall == "set_primal_protocol" {
                             if kwargs["compression"] == "zlib" {
                                 let cw = &mut client_write.lock().await;
@@ -1393,12 +1394,59 @@ impl PgWireHandlerFactory for WSConnHandlerFactory {
 mod tests {
     use super::*;
 
+    // #[test]
+    // fn test_1() {
+    //     let e = json!({
+    //         "key1": "value1", 
+    //     });
+    //     println!("{:?}", e["key1"] == "value1");
+    // }
+
     #[test]
-    fn test_1() {
-        let e = json!({
-            "key1": "value1", 
+    fn test_2() {
+        let state = Arc::new(Mutex::new(State {
+            stats: Stats {
+                recvmsgcnt: AtomicI64::new(0),
+                sendmsgcnt: AtomicI64::new(0),
+                proxyreqcnt: AtomicI64::new(0),
+                handlereqcnt: AtomicI64::new(0),
+                connections: AtomicI64::new(0),
+            },
+
+            default_app_settings_filename: "default-settings.json".to_string(),
+            app_releases_filename: "app-releases.json".to_string(),
+            srv_name: None,
+
+            primal_pubkey: None,
+
+            shutting_down: false,
+
+            logging_enabled: false,
+            idle_connection_timeout: 600,
+            log_sender_batch_size: 100,
+
+            logtx: None,
+
+            run: 0,
+            task_index: 0,
+            conn_index: 0,
+            tasks: HashMap::new(),
+            conns: HashMap::new(),
+        }));
+        let client_write = Arc::new(Mutex::new(MessageSink {
+            use_zlib: false,
+            sink: Vec::new(),
+        }));
+        let pool            = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16, Some(30000));
+        let membership_pool = make_dbconn_pool("192.168.11.7", 5432, "primal", "primal", 16, None);
+        let msg = Message::text("[\"REQ\",\"subid\",{\"cache\":[\"server_name\",{}]}]");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            handle_req(&state, &msg, &client_write, &pool, &membership_pool).await;
+            let msgs = client_write.lock().await.sink.clone();
+            dbg!(&msgs);
+            assert!(msgs.len() > 0);
         });
-        println!("{:?}", e["key2"] == "value2");
     }
 }
 
