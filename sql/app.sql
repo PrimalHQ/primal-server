@@ -579,7 +579,9 @@ BEGIN
                     END IF;
 
                     RETURN QUERY SELECT * FROM event_action_cnt(e_id, a_user_pubkey);
+                END IF;
 
+                IF e_kind = 1 OR e_kind = 30023 OR e_kind = 0 THEN
                     FOR r IN SELECT * FROM event_relay WHERE event_id = e_id LOOP
                         relay_url := r.relay_url;
                         FOR r IN SELECT dest FROM relay_url_map WHERE src = relay_url LIMIT 1 LOOP
@@ -626,6 +628,8 @@ BEGIN
                     FOR r IN SELECT value FROM pubkey_followers_cnt WHERE key = e_pubkey LIMIT 1 LOOP
                         user_scores := jsonb_set(user_scores, array[e->>'pubkey'::text], to_jsonb(r.value));
                     END LOOP;
+                    -- RETURN QUERY SELECT get_event_jsonb(value) FROM contact_lists WHERE key = e_pubkey LIMIT 1; -- bugs prod ios app
+                    -- RETURN QUERY SELECT get_event_jsonb(event_id) FROM relay_list_metadata WHERE pubkey = e_pubkey LIMIT 1;
                 END IF;
 
                 IF e_kind = 9735 AND t.is_referenced_event THEN
@@ -818,7 +822,16 @@ BEGIN
 
     SELECT json_object_agg(
         ENCODE(pubkey, 'hex'), 
-        jsonb_build_object('style', style, 'custom_badge', custom_badge, 'avatar_glow', avatar_glow))
+        jsonb_build_object(
+            'style', case when style = '' then null else style end,
+            'custom_badge', custom_badge, 
+            'avatar_glow', avatar_glow,
+            'in_leaderboard', in_leaderboard,
+            'current_shoutout', case when current_shoutout = '' or current_shoutout is null then 'Supporter of open networks and open source builders'
+                                else current_shoutout
+                                end,
+            'legend_since', extract(epoch from legend_since)::int8
+    ))
     INTO r FROM membership_legend_customization WHERE pubkey = ANY(a_pubkeys);
     IF r IS NOT NULL THEN
         RETURN NEXT jsonb_build_object('kind', c_MEMBERSHIP_LEGEND_CUSTOMIZATION(), 'content', r::text);

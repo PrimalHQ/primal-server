@@ -88,6 +88,8 @@ exposed_functions = Set([:feed,
                          :membership_content_rebroadcast_start,
                          :membership_content_rebroadcast_cancel,
                          :membership_content_rebroadcast_status,
+
+                         :membership_legends_leaderboard,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -143,6 +145,7 @@ MEMBERSHIP_CONTENT_STATS=10_000_166
 MEMBERSHIP_CONTENT_REBROADCAST_STATUS=10_000_167
 MEMBERSHIP_LEGEND_CUSTOMIZATION=10_000_168
 MEMBERSHIP_COHORTS=10_000_169
+MEMBERSHIP_LEGEND_LEADERBOARD=10_000_170
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -3702,6 +3705,26 @@ function membership_content_rebroadcast_status(est::DB.CacheStorage; event_from_
     end
 
     [(; kind=Int(MEMBERSHIP_CONTENT_REBROADCAST_STATUS), content=JSON.json(res))]
+end
+
+function membership_legends_leaderboard(est::DB.CacheStorage; order_by="donated_btc", limit=100)
+    order_by in ["donated_btc", "last_donation"] || error("invalid order_by")
+    limit = min(limit, 500)
+    res = []
+    rs = []
+    for (pubkey, last_donation, donated_btc) in 
+        Postgres.execute(:membership, "
+                         select pubkey, last_donation, donated_btc from legends
+                         where donated_btc > 0
+                         order by $order_by desc limit \$1
+                         ", [limit])[2]
+        pubkey = Nostr.PubKeyId(pubkey)
+        push!(rs, (; pubkey, donated_btc=string(donated_btc), last_donation=trunc(Int, Dates.datetime2unix(last_donation))))
+        append!(res, user_infos(est; pubkeys=[pubkey]))
+        append!(res, primal_verified_names(est, [pubkey]))
+    end
+    push!(res, (; kind=Int(MEMBERSHIP_LEGEND_LEADERBOARD), content=JSON.json(rs)))
+    res
 end
 
 function fetch_content(est::DB.CacheStorage, pubkey::Nostr.PubKeyId; withfollows=true, days=7)
