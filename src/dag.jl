@@ -3832,6 +3832,9 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         end
     end
 
+    cond("NOT EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'event' AND target = $(T(o.advsearch)).id AND blocked LIMIT 1)")
+    cond("NOT EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = $(T(o.advsearch)).id AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)")
+
     for op in expr.ops
         if op isa O.RepliesToKind
             # if op.kind == Int(Nostr.TEXT_NOTE)

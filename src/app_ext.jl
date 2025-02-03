@@ -1461,13 +1461,28 @@ function is_hidden_on_primal_nsfw(est::DB.CacheStorage, user_pubkey, scope::Symb
     false
 end
 
-function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+function __ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
     if haskey(cmr.groups, :primal_spam) && pubkey in Filterlist.access_pubkey_blocked_spam && !(pubkey in Filterlist.access_pubkey_unblocked_spam)
         scopes = cmr.groups[:primal_spam].scopes
         return (isempty(scopes) ? true : scope in scopes)
     end
     # if haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
     if haskey(cmr.groups, :primal_nsfw) && pubkey in Filterlist.access_pubkey_blocked_nsfw && !(pubkey in Filterlist.access_pubkey_unblocked_nsfw)
+        scopes = cmr.groups[:primal_nsfw].scopes
+        return (isempty(scopes) ? true : scope in scopes)
+    end
+    false
+end
+function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+    # @show (user_pubkey, scope, pubkey)
+    if haskey(cmr.groups, :primal_spam) && ((pubkey in Filterlist.access_pubkey_blocked_spam && !(pubkey in Filterlist.access_pubkey_unblocked_spam)) ||
+                                            !isempty(Postgres.execute(:p0, "select 1 from filterlist where grp = 'spam' and target_type = 'pubkey' and target = \$1 and blocked limit 1", [pubkey])[2]))
+        scopes = cmr.groups[:primal_spam].scopes
+        return (isempty(scopes) ? true : scope in scopes)
+    end
+    # if haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
+    if haskey(cmr.groups, :primal_nsfw) && ((pubkey in Filterlist.access_pubkey_blocked_nsfw && !(pubkey in Filterlist.access_pubkey_unblocked_nsfw)) ||
+                                            !isempty(Postgres.execute(:p0, "select 1 from filterlist where grp = 'nsfw' and target_type = 'pubkey' and target = \$1 and blocked limit 1", [pubkey])[2]))
         scopes = cmr.groups[:primal_nsfw].scopes
         return (isempty(scopes) ? true : scope in scopes)
     end
