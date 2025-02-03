@@ -17,6 +17,7 @@ mkShell {
     cargo-pgrx
     rustfmt
     rustc
+    rust-analyzer
     lldb
 
     jdk
