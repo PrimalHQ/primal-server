@@ -146,6 +146,7 @@ MEMBERSHIP_CONTENT_REBROADCAST_STATUS=10_000_167
 MEMBERSHIP_LEGEND_CUSTOMIZATION=10_000_168
 MEMBERSHIP_COHORTS=10_000_169
 MEMBERSHIP_LEGEND_LEADERBOARD=10_000_170
+MEMBERSHIP_PREMIUM_LEADERBOARD=10_000_171
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -3707,23 +3708,72 @@ function membership_content_rebroadcast_status(est::DB.CacheStorage; event_from_
     [(; kind=Int(MEMBERSHIP_CONTENT_REBROADCAST_STATUS), content=JSON.json(res))]
 end
 
-function membership_legends_leaderboard(est::DB.CacheStorage; order_by="donated_btc", limit=100)
-    order_by in ["donated_btc", "last_donation"] || error("invalid order_by")
-    limit = min(limit, 500)
+function membership_legends_leaderboard(est::DB.CacheStorage; order_by="donated_btc", limit=100, since=0, until=typemax(Int), offset=0)
+    order_by in ["donated_btc", "last_donation", "index"] || error("invalid order_by")
+    limit = min(limit, 300)
+    dir = order_by in ["donated_btc", "last_donation"] ? "desc" : "asc"
     res = []
     rs = []
-    for (pubkey, last_donation, donated_btc) in 
+    ks = []
+    for (k, index, pubkey, last_donation, donated_btc) in 
         Postgres.execute(:membership, "
-                         select pubkey, last_donation, donated_btc from legends
-                         where donated_btc > 0
-                         order by $order_by desc limit \$1
-                         ", [limit])[2]
+                         with a as (
+                             select row_number() over () as index, * from (
+                                 select 
+                                     ls.pubkey, 
+                                     extract(epoch from ls.last_donation)::int8 as last_donation,
+                                     (ls.donated_btc*100000000)::int8 as donated_btc
+                                 from legend_users ls, memberships ms, membership_legend_customization mlc
+                                 where ms.pubkey = ls.pubkey and ms.pubkey = mlc.pubkey and mlc.in_leaderboard and ls.donated_btc > 0
+                                 order by ls.donated_btc desc
+                            ) b
+                         )
+                         select $order_by, * from a
+                         where $order_by >= \$1 and $order_by <= \$2
+                         order by $order_by $dir limit \$3 offset \$4
+                         ", [since, until, limit, offset])[2]
         pubkey = Nostr.PubKeyId(pubkey)
-        push!(rs, (; pubkey, donated_btc=string(donated_btc), last_donation=trunc(Int, Dates.datetime2unix(last_donation))))
+        push!(ks, (pubkey, k))
+        push!(rs, (; index, pubkey, donated_btc=string(donated_btc), last_donation))
         append!(res, user_infos(est; pubkeys=[pubkey]))
         append!(res, primal_verified_names(est, [pubkey]))
     end
     push!(res, (; kind=Int(MEMBERSHIP_LEGEND_LEADERBOARD), content=JSON.json(rs)))
+    append!(res, range(ks, order_by))
+    res
+end
+
+function membership_premium_leaderboard(est::DB.CacheStorage; order_by="premium_since", limit=100, since=0, until=typemax(Int), offset=0)
+    order_by in ["index", "premium_since"] || error("invalid order_by")
+    limit = min(limit, 300)
+    dir = order_by in ["premium_since"] ? "desc" : "asc"
+    res = []
+    rs = []
+    ks = []
+    for (k, index, pubkey, premium_since) in 
+        Postgres.execute(:membership, "
+                         with a as (
+                             select row_number() over () as index, * from (
+                                 select 
+                                     pu.pubkey,
+                                     extract(epoch from ms.premium_since)::int8 as premium_since
+                                 from premium_users pu, memberships ms
+                                 where ms.pubkey = pu.pubkey
+                                 order by ms.premium_since
+                            ) b
+                         )
+                         select $order_by, * from a
+                         where $order_by >= \$1 and $order_by <= \$2
+                         order by $order_by $dir limit \$3 offset \$4
+                         ", [since, until, limit, offset])[2]
+        pubkey = Nostr.PubKeyId(pubkey)
+        push!(ks, (pubkey, k))
+        push!(rs, (; index, pubkey, premium_since))
+        append!(res, user_infos(est; pubkeys=[pubkey]))
+        append!(res, primal_verified_names(est, [pubkey]))
+    end
+    push!(res, (; kind=Int(MEMBERSHIP_PREMIUM_LEADERBOARD), content=JSON.json(rs)))
+    append!(res, range(ks, order_by))
     res
 end
 

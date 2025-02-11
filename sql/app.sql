@@ -829,8 +829,7 @@ BEGIN
             'in_leaderboard', in_leaderboard,
             'current_shoutout', case when current_shoutout = '' or current_shoutout is null then 'Supporter of open networks and open source builders'
                                 else current_shoutout
-                                end,
-            'legend_since', extract(epoch from legend_since)::int8
+                                end
     ))
     INTO r FROM membership_legend_customization WHERE pubkey = ANY(a_pubkeys);
     IF r IS NOT NULL THEN
@@ -839,7 +838,14 @@ BEGIN
 
     SELECT json_object_agg(
         ENCODE(pubkey, 'hex'), 
-        jsonb_build_object('cohort_1', cohort_1, 'cohort_2', cohort_2, 'tier', tier, 'expires_on', extract(epoch from valid_until)::int8))
+        jsonb_build_object(
+            'cohort_1', cohort_1, 
+            'cohort_2', cohort_2, 
+            'tier', tier, 
+            'expires_on', extract(epoch from valid_until)::int8,
+            'legend_since', extract(epoch from legend_since)::int8,
+            'premium_since', extract(epoch from premium_since)::int8
+    ))
     INTO r FROM memberships WHERE pubkey = ANY(a_pubkeys) AND 
     (tier = 'premium' or tier = 'premium-legend')
     ;
