@@ -365,6 +365,16 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                 twitter_image = "https://$host/public/primal-link-preview.jpg?a=444",
                )
 
+    elseif !isnothing(local m = match(r"^/legends", path)) && 1==1
+        return (; 
+                title="Primal Legends", 
+                description="Recognizing users who made a contribution to Nostr and Primal",
+                image="https://$host/public/legends-link-preview.png",
+                url="https://$host/legends",
+                twitter_card = "summary_large_image",
+                twitter_image = "https://$host/public/legends-link-preview.png?a=444",
+               )
+
     elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
         return (; 
                 title="Primal", 
