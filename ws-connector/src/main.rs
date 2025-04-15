@@ -48,7 +48,7 @@ use std::collections::HashMap;
 
 use ::function_name::named;
 
-const POOL_GET_TIMEOUT: u64 = 1;
+const POOL_GET_TIMEOUT: u64 = 15;
 
 struct Stats {
     recvmsgcnt: AtomicI64,
@@ -300,6 +300,13 @@ async fn main() -> Result<(), Error> {
     let management_pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 4, None);
     let pool            = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16, Some(30000));
     let membership_pool = make_dbconn_pool("192.168.11.7", 5432, "primal", "primal", 16, None);
+
+    {
+        // early exit if any database is not running
+        management_pool.get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
+        pool           .get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
+        membership_pool.get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
+    }
 
     {
         let mut state = state.lock().await;
@@ -857,7 +864,11 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
     async fn pool_get(pool: &Pool) -> Result<Client, ReqError> {
         match timeout(Duration::from_secs(POOL_GET_TIMEOUT), pool.get()).await {
             Ok(Ok(client)) => Ok(client),
-            _ => req_error("pool.get() timeout, send upstream")
+            // _ => req_error("pool.get() timeout, send upstream")
+            _ => {
+                println!("pool.get() timeout, unconditional process exit");
+                std::process::exit(11)
+            }
         }
     }
 
