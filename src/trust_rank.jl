@@ -25,7 +25,7 @@ function load(tr)
 end
 
 function import_trustrank(server, tr_sorted::Vector; running=Ref(true))
-    session = Postgres.make_session(Postgres.servers[server].connstr)
+    session = Postgres.make_session(server isa Symbol ? Postgres.servers[server].connstr : server)
     try
         Postgres.transaction(session) do session
             Postgres.execute(session, "truncate pubkey_trustrank")

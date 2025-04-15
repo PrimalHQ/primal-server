@@ -1840,6 +1840,7 @@ function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false
                                                           ))
         catch ex
             println("import_events: error: $ex")
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
             errcnt[] += 1
         end
     end
@@ -3098,7 +3099,7 @@ function dvm_feed(
     #     end
     # end
     relays = collect(Set(relays))
-                    
+
     req_id = UUIDs.uuid4()
 
     jobreq = Nostr.Event(DVM_REQUESTER_KEYPAIR[].seckey, DVM_REQUESTER_KEYPAIR[].pubkey,

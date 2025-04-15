@@ -20,6 +20,8 @@ TIMEOUT = Ref(10)
 PRINT_EXCEPTIONS = Ref(false)
 LOG = Ref(false)
 
+TARGET_SERVERS = [:p0]
+
 exceptions_lock = ReentrantLock()
 
 const cache_storage = Ref{Any}(nothing)
@@ -150,6 +152,10 @@ end
 function run_make()
     r = make_2(cache_storage[]; running=Ref(true))
     Main.TrustRank.load(Dict(r.tr_sorted))
+    for server in TARGET_SERVERS
+        println("TrustRankMaker.run_make: server: $server")
+        @time "import_trustrank" Main.TrustRank.import_trustrank(r.tr_sorted)
+    end
 end
 
 # ---------------------------------------------- #

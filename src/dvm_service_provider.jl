@@ -241,7 +241,11 @@ function on_connect(client)
     for (feed_id, state, name, about, image, spec, verifiedonly, personalized) in FEEDS
         seckey, pubkey = Nostr.generate_keypair(; seckey=SHA.sha256([PRIMAL_DVM_KEYPAIR_SALT[]; collect(transcode(UInt8, feed_id))]))
         keypairs[feed_id] = (; seckey, pubkey, verifiedonly)
-        created_at = trunc(Int, datetime2unix(DateTime("2024-11-20T00:00"))) # bump when any feed is updated
+
+        # bump when any feed is updated or after every 3 months
+        # created_at = trunc(Int, datetime2unix(DateTime("2024-11-20T00:00"))) 
+        created_at = trunc(Int, datetime2unix(DateTime("2025-03-20T00:00"))) 
+
         eact = Nostr.Event(seckey, pubkey,
                            created_at,
                            NIP89_HANDLER_INFORMATION,

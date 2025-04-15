@@ -16,6 +16,9 @@ PORT2 = Ref(24000)
 
 PRINT_EXCEPTIONS = Ref(true)
 
+APPLE_APP_SITE_ASSOCIATION_FILE = Ref("apple-app-site-association.json")
+ANDROID_ASSETLINKS_FILE = Ref("assetlinks.json")
+
 server = Ref{Any}(nothing)
 router = Ref{Any}(nothing)
 server2 = Ref{Any}(nothing)
@@ -145,6 +148,11 @@ function stop()
     @assert !isnothing(server[])
     close(server[])
     server[] = nothing
+
+    @assert !isnothing(server2[])
+    close(server2[])
+    server2[] = nothing
+
     close(short_urls[])
     short_urls[] = nothing
     close(verified_users[])
@@ -232,20 +240,22 @@ end
 function mdpubkey(cache_storage, pk)
     title = description = image = ""
     url = nothing
-    if pk in cache_storage.meta_data
-        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
-        if c isa Dict
-            addr = try strip(c["nip05"]) catch _ "" end
-            if !isnothing(addr) && endswith(addr, "@primal.net")
-                url = "https://primal.net/$(split(addr, '@')[1])"
+    if isempty(Postgres.execute(:membership, "select 1 from filterlist where target_type = 'pubkey' and target = \$1 and blocked limit 1", [pk])[2])
+        if pk in cache_storage.meta_data
+            c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
+            if c isa Dict
+                addr = try strip(c["nip05"]) catch _ "" end
+                if !isnothing(addr) && endswith(addr, "@primal.net")
+                    url = "https://primal.net/$(split(addr, '@')[1])"
+                end
+                try title = mdtitle(c) catch _ end
+                description = try replace(c["about"], re_url=>"") catch _ "" end
+                image = try c["picture"] catch _ "" end
             end
-            try title = mdtitle(c) catch _ end
-            description = try replace(c["about"], re_url=>"") catch _ "" end
-            image = try c["picture"] catch _ "" end
         end
-    end
-    if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
-        image = r[1][1]
+        if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
+            image = r[1][1]
+        end
     end
     return (; title, description, image, (isnothing(url) ? (;) : (; url))...)
 end
@@ -353,6 +363,9 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                                               end
                                           end
                                           twitter_card = "summary_large_image"
+                                          if isempty(image)
+                                              image = mdpubkey(cache_storage, pubkey).image
+                                          end
                                           md = (; title, description, image, url, twitter_card)
                                       end
                                   end
@@ -459,15 +472,19 @@ end
 
 function preview_handler(req::HTTP.Request)
     lock(index_lock) do
-        if startswith(req.target, "/search/")
-            return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain"]), "not found")
+        # if startswith(req.target, "/search/")
+        #     return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain"]), "not found")
+        if     req.target == "/.well-known/apple-app-site-association"
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), read(APPLE_APP_SITE_ASSOCIATION_FILE[], String))
+        elseif req.target == "/.well-known/assetlinks.json"
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), read(ANDROID_ASSETLINKS_FILE[], String))
         end
         host = Dict(req.headers)["Host"]
         h = index_htmls[host]
         dochtml = h.index_html[]
         try
             h.throttle() do
-                index_dir = host == "primal.net" ? "/var/www/dev.primal.net" : "/mnt/ppr0/var/www/dev.primal.net"
+                index_dir = host == "primal.net" ? "/var/www/dev.primal.net" : "$(ENV["HOME"])/tmp/dev.primal.net"
                 h.index_html[] = read("$(index_dir)/index.html", String)
                 h.index_doc[] = doc = EzXML.parsehtml(h.index_html[])
                 for e in EzXML.findall("/html/head/meta", doc)
@@ -562,13 +579,28 @@ function nostr_json_handler(req::HTTP.Request)
     end
 end
 
+ALLOWED_MEDIA_HOSTS = [
+                       "media.primal.net", 
+                       "m.primal.net",
+                       "blossom.primal.net",
+                       "primaldata.s3.us-east-005.backblazeb2.com",
+                       "primaldata.fsn1.your-objectstorage.com",
+                       "r2.primal.net",
+                      ]
+
 function media_upload_handler(req::HTTP.Request)
     catch_exception(:media_upload_handler, req) do
         host = Dict(req.headers)["Host"]
         path, query = split(req.target, '?')
         args = NamedTuple([Symbol(k)=>v for (k, v) in [split(s, '=') for s in split(query, '&')]])
         url = string(URIs.unescapeuri(args.u))
-        HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+        if URIs.parse_uri(url).host in ALLOWED_MEDIA_HOSTS
+            # println((:media_upload_ok, url))
+            HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+        else
+            println((:media_upload_blocked, url))
+            HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain", "Cache-Control"=>"max-age=20"]), "not found")
+        end
     end
 end
 
@@ -606,6 +638,13 @@ function media_cache_handler(req::HTTP.Request)
 
         variant_specs = variant == (:original, true) ? [variant] : Media.all_variants
         # @show (url, variant_specs)
+
+        if isempty(Postgres.execute(:p0, "select 1 from media m where m.url = \$1", [url])[2]) && !(URIs.parse_uri(url).host in ALLOWED_MEDIA_HOSTS)
+            # println((:media_cache_blocked, url))
+            return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain", "Cache-Control"=>"max-age=20"]), "not found")
+        else
+            # println((:media_cache_ok, url))
+        end
 
         tr = @elapsed (r = Media.media_variants(est[], url; variant_specs, sync=true, already_imported=true))
         # println("$tr  $query  $(isnothing(r))")
@@ -718,6 +757,7 @@ function url_lookup_handler(req::HTTP.Request)
         host = Dict(req.headers)["Host"]
         spath = splitext(string(split(req.target, '/')[end]))[1]
         r = DB.exec(short_urls[], DB.@sql("select url from short_urls where path = ?1 and media_block_id is null limit 1"), (spath,))
+        # @show (spath, r)
         if isempty(r)
             HTTP.Response(404, headers, "unknown url")
         else
@@ -728,9 +768,16 @@ function url_lookup_handler(req::HTTP.Request)
                                                     select media_url 
                                                     from media_storage ms, media_storage_priority msp
                                                     where ms.h = \$1 and ms.storage_provider = msp.storage_provider
-                                                    order by msp.priority desc limit 1", 
+                                                    order by msp.priority limit 1", 
                                                     [h])[2])
+            # if !isempty(local rs = Postgres.execute(:p0, "
+            #                                         select media_url 
+            #                                         from media_storage ms
+            #                                         where ms.h = \$1 and ms.storage_provider = 'cloudflare'
+            #                                         limit 1", 
+            #                                         [h])[2])
                 url2 = rs[1][1]
+                # @show url2
                 u = URIs.parse_uri(url2)
                 if u.host == "media.primal.net"
                     "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url2))"
@@ -738,7 +785,9 @@ function url_lookup_handler(req::HTTP.Request)
                     url2
                 end
             else
-                "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
+                # @show url
+                # "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
+                "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri("https://media.primal.net"*URIs.parse_uri(url).path))"
             end
             HTTP.Response(302, HTTP.Headers([headers..., "Location"=>rurl]))
         end
