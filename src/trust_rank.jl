@@ -22,7 +22,6 @@ function load(tr)
             nothing
         end
     end
-    import_trustrank(:p0, collect(tr))
 end
 
 function import_trustrank(server, tr_sorted::Vector; running=Ref(true))

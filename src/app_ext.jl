@@ -248,6 +248,7 @@ function scored_content(
         usepgfuncs=false,
         apply_humaness_check=false,
         limit2=nothing,
+        gm_mode=nothing,
     )
     limit = min(50, limit)
     isnothing(limit2) || (limit = limit2)
@@ -295,6 +296,11 @@ function scored_content(
         if isempty(pubkeys)
             q_wheres = wheres()
             if group_by_pubkey
+                extrawhere = 
+                if     isnothing(gm_mode); ""
+                elseif gm_mode == :gmonly; "and     exists (select 1 from events e where es.event_id = e.id and (e.content ilike '%gm%' or e.content ilike '%good morning%'))"
+                elseif gm_mode == :nogm;   "and not exists (select 1 from events e where es.event_id = e.id and (e.content ilike '%gm%' or e.content ilike '%good morning%'))"
+                end
                 q = "
                 with a as (
                     select author_pubkey, max($field) as maxfield 
@@ -305,9 +311,9 @@ function scored_content(
                     limit ?1 offset ?2
                 ) 
                 select a.author_pubkey, es.event_id, es.$field
-                from a, event_stats es 
+                from a, event_stats es
                 where a.author_pubkey = es.author_pubkey and a.maxfield = es.$field
-                and es.$field > 0 and $created_after <= es.created_at 
+                and es.$field > 0 and $created_after <= es.created_at $extrawhere
                 "
             else
                 # q = "with a as materialized (select author_pubkey, event_id, $field from event_stats $q_wheres) select * from a order by $field desc limit ?1 offset ?2"
@@ -434,10 +440,18 @@ function scored(est::DB.CacheStorage; selector, user_pubkey=nothing)
 end
 
 function scored_(est::DB.CacheStorage; selector, user_pubkey=nothing)
-    if     selector == "trending_24h"; explore_global_trending(est, 24; user_pubkey, include_top_zaps=false)
-    elseif selector == "trending_12h"; explore_global_trending(est, 12; user_pubkey, include_top_zaps=false)
-    elseif selector == "trending_4h";  explore_global_trending(est, 4; user_pubkey, include_top_zaps=false)
-    elseif selector == "trending_1h";  explore_global_trending(est, 1; user_pubkey, include_top_zaps=false)
+    if     selector == "trending_24h"; explore_global_trending(est, 24; user_pubkey, include_top_zaps=false, gm_mode=:nogm)
+    elseif selector == "trending_12h"; explore_global_trending(est, 12; user_pubkey, include_top_zaps=false, gm_mode=:nogm)
+    elseif selector == "trending_4h";  explore_global_trending(est, 4; user_pubkey, include_top_zaps=false, gm_mode=:nogm)
+    elseif selector == "trending_1h";  explore_global_trending(est, 1; user_pubkey, include_top_zaps=false, gm_mode=:nogm)
+    elseif selector == "gm_trending_24h"; explore_global_trending(est, 24; user_pubkey, include_top_zaps=false, gm_mode=:gmonly)
+    elseif selector == "gm_trending_12h"; explore_global_trending(est, 12; user_pubkey, include_top_zaps=false, gm_mode=:gmonly)
+    elseif selector == "gm_trending_4h";  explore_global_trending(est, 4; user_pubkey, include_top_zaps=false, gm_mode=:gmonly)
+    elseif selector == "gm_trending_1h";  explore_global_trending(est, 1; user_pubkey, include_top_zaps=false, gm_mode=:gmonly)
+    elseif selector == "classic_trending_24h"; explore_global_trending(est, 24; user_pubkey, include_top_zaps=false)
+    elseif selector == "classic_trending_12h"; explore_global_trending(est, 12; user_pubkey, include_top_zaps=false)
+    elseif selector == "classic_trending_4h";  explore_global_trending(est, 4; user_pubkey, include_top_zaps=false)
+    elseif selector == "classic_trending_1h";  explore_global_trending(est, 1; user_pubkey, include_top_zaps=false)
     elseif selector == "mostzapped_24h"; explore_global_mostzapped(est, 24; user_pubkey, include_top_zaps=false)
     elseif selector == "mostzapped_12h"; explore_global_mostzapped(est, 12; user_pubkey, include_top_zaps=false)
     elseif selector == "mostzapped_4h";  explore_global_mostzapped(est, 4; user_pubkey, include_top_zaps=false)
@@ -503,6 +517,14 @@ function precalculate_analytics(est::DB.CacheStorage)
         "trending_12h",
         "trending_4h",
         "trending_1h",
+        "gm_trending_24h",
+        "gm_trending_12h",
+        "gm_trending_4h",
+        "gm_trending_1h",
+        "classic_trending_24h",
+        "classic_trending_12h",
+        "classic_trending_4h",
+        "classic_trending_1h",
         "mostzapped_24h",
         "mostzapped_12h",
         "mostzapped_4h",
@@ -920,6 +942,8 @@ function advanced_search(
         return [res1; res2]
     end
 
+    query = replace(query, DB.re_url=>s->'"'*s*'"')
+
     if !isnothing(DAG_OUTPUTS[])
         mod, outputs = DAG_OUTPUTS[]
         tdur = @elapsed res, orderby, stats, err = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
@@ -1114,19 +1138,20 @@ function get_notifications(
 
     type =
     if     type_group == :all;  nothing
-    elseif type_group == :zaps; type = [
-                                        DB.YOUR_POST_WAS_ZAPPED,
-                                       ]
-    elseif type_group == :replies; type = [
-                                           DB.YOUR_POST_WAS_REPLIED_TO,
-                                          ]
-    elseif type_group == :mentions; type = [
-                                            DB.YOU_WERE_MENTIONED_IN_POST,
-                                            DB.YOUR_POST_WAS_MENTIONED_IN_POST,
-                                           ]
-    elseif type_group == :reposts; type = [
-                                           DB.YOUR_POST_WAS_REPOSTED,
-                                          ]
+    elseif type_group == :zaps; [
+                                 DB.YOUR_POST_WAS_ZAPPED,
+                                ]
+    elseif type_group == :replies; [
+                                    DB.YOUR_POST_WAS_REPLIED_TO,
+                                   ]
+    elseif type_group == :mentions; [
+                                     DB.YOU_WERE_MENTIONED_IN_POST,
+                                     DB.YOUR_POST_WAS_MENTIONED_IN_POST,
+                                    ]
+    elseif type_group == :reposts; [
+                                    DB.YOUR_POST_WAS_REPOSTED,
+                                   ]
+    else; nothing
     end
 
     if !isnothing(type)
@@ -1278,8 +1303,8 @@ function get_notification_counts(est::DB.CacheStorage; pubkey)
     [(; kind=Int(NOTIFICATIONS_SUMMARY), pubkey=Nostr.PubKeyId(pk),
       [Symbol(string(Int(i)))=>cnt
        for (i, cnt) in zip(instances(DB.NotificationType), cnts)]...)
-     for (pk, cnts...) in DB.exe(est.pubkey_notification_cnts,
-                                 "select * from pubkey_notification_cnts where pubkey = ?1", pubkey)]
+     for (pk, cnts...) in Postgres.execute(:p0, "select pubkey, $(join(["type$(i|>Int)" for i in instances(DB.NotificationType)], ", ")) 
+                                           from pubkey_notification_cnts where pubkey = \$1", [pubkey])[2]]
 end
 
 function get_notification_counts_2(est::DB.CacheStorage; pubkey)
@@ -1308,18 +1333,23 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
         res[pk] = est.pubkey_followers_cnt[pk]
     elseif isnothing(pubkey)
         catch_exception(:user_search, (; query)) do
-            for (pk,) in DB.exec(est.dyn[:user_search],
-                                 DB.@sql("select pubkey from user_search where
-                                         name @@ to_tsquery('simple', ?1) or
-                                         username @@ to_tsquery('simple', ?2) or
-                                         display_name @@ to_tsquery('simple', ?3) or
-                                         displayName @@ to_tsquery('simple', ?4) or
-                                         nip05 @@ to_tsquery('simple', ?5) or
-                                         lud16 @@ to_tsquery('simple', ?6)
-                                         "),
-                                 (q, q, q, q, q, q))
+            for (pk, rank) in Postgres.execute(:p0, "
+                                         select us.pubkey, tr.rank
+                                         from user_search us, pubkey_trustrank tr
+                                         where
+                                             (
+                                                 us.name @@ to_tsquery('simple', \$1) or
+                                                 us.username @@ to_tsquery('simple', \$2) or
+                                                 us.display_name @@ to_tsquery('simple', \$3) or
+                                                 us.displayName @@ to_tsquery('simple', \$4) or
+                                                 us.nip05 @@ to_tsquery('simple', \$5) or
+                                                 us.lud16 @@ to_tsquery('simple', \$6)
+                                             ) and 
+                                             us.pubkey = tr.pubkey
+                                         ", [q, q, q, q, q, q])[2]
                 pk = Nostr.PubKeyId(pk)
                 res[pk] = est.pubkey_followers_cnt[pk]
+                # res[pk] = rank
             end
         end
     else
@@ -1346,7 +1376,7 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
             end
         end
     end
-    
+
     res_meta_data = OrderedSet()
 
     for (pk, _) in sort(collect(res); by=r->-r[2])[1:min(limit, length(res))]
@@ -1363,6 +1393,9 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     append!(res, res_meta_data)
     ext_user_infos(est, res, res_meta_data)
     append!(res, user_scores(est, res_meta_data))
+    # append!(res, user_trustranks(est, Nostr.PubKeyId[md.pubkey for md in collect(res_meta_data)]))
+    append!(res, primal_verified_names(est, [e.pubkey for e in res_meta_data]))
+    append!(res, user_follower_counts(est, [e.pubkey for e in res_meta_data]))
     append!(res, primal_verified_names(est, [e.pubkey for e in res_meta_data]))
     res
 end
@@ -1513,12 +1546,12 @@ function get_media_metadata(est::DB.CacheStorage; urls::Vector, eid=nothing)
     thumbnails = Dict()
     for url in urls
         variants = []
-        for (s, a, w, h, mt, dur) in DB.exec(est.media, DB.@sql("select size, animated, width, height, mimetype, duration from media where url = ?1"), (url,))
-            push!(variants, (; s=s[1], a, w, h, mt, dur, media_url=Media.cdn_url(url, s, a)))
+        for (s, a, w, h, mt, dur, media_url) in Postgres.execute(:p0, "select * from get_media_url(\$1)", [url])[2]
+            push!(variants, (; s=s[1], a, w, h, mt, dur, media_url))
             root_mt = mt
         end
         push!(resources, (; url, variants, (isnothing(root_mt) ? [] : [:mt=>root_mt])...))
-        for (thumbnail_url,) in DB.exec(est.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1"), (url,))
+        for (thumbnail_url,) in Postgres.execute(:p0, "select mu.media_url from video_thumbnails vt, get_media_url(vt.thumbnail_url) mu where vt.video_url = \$1", [url])[2]
             thumbnails[url] = thumbnail_url
         end
     end

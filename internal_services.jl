@@ -202,11 +202,19 @@ function content_refs_resolved(e::Nostr.Event)
     replace(c, re_mention => function (r)
                 r = string(r)
                 if startswith(r, "nostr:"); r = r[7:end]; end
-                if !isnothing(local pk = Bech32.nip19_decode_wo_tlv(r))
+                x = Bech32.nip19_decode_wo_tlv(r)
+                if     x isa Nostr.PubKeyId
                     try
-                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
+                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[x]].content)
                         return "@"*mdtitle(c)
                     catch _ end
+                elseif x isa Nostr.EventId
+                    try
+                        pk = cache_storage.events[x].pubkey
+                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
+                        return "[nostr note by $(mdtitle(c))]"
+                    catch _ end
+                    return "[nostr note]"
                 end
                 r
             end)
@@ -252,7 +260,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
 
     if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
         pk = string(m[2])
-        pk = startswith(pk, "npub") ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
+        pk = (startswith(pk, "npub") || startswith(pk, "nprofile")) ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
         return mdpubkey_(pk)
 
     elseif !isnothing(local m = match(r"^/(thread|e)/(.*)", path))
@@ -319,7 +327,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
 
     elseif !isnothing(local md = begin
                           md = nothing
-                          m = match(r"^/([^/]*)/(.*)", path)
+                          m = match(r"^/([^/]*)/([^?]*)", path)
                           if !isnothing(m)
                               name, identifier = string(m[1]), string(m[2])
                               pubkey = nothing
@@ -709,7 +717,7 @@ function url_lookup_handler(req::HTTP.Request)
     catch_exception(:url_lookup_handler, req) do
         host = Dict(req.headers)["Host"]
         spath = splitext(string(split(req.target, '/')[end]))[1]
-        r = DB.exec(short_urls[], DB.@sql("select url from short_urls where path = ?1 limit 1"), (spath,))
+        r = DB.exec(short_urls[], DB.@sql("select url from short_urls where path = ?1 and media_block_id is null limit 1"), (spath,))
         if isempty(r)
             HTTP.Response(404, headers, "unknown url")
         else

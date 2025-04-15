@@ -807,11 +807,12 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
             if tag.fields[1] == "a"
                 if resolve_parametrized_replaceable_events
                     ps = split(tag.fields[2], ':')
-                    push_parametrized_replaceable_event(Nostr.PubKeyId(string(ps[2])), parse(Int, ps[1]), string(ps[3]))
+                    try push_parametrized_replaceable_event(Nostr.PubKeyId(string(ps[2])), parse(Int, ps[1]), string(ps[3]))
+                    catch _ end
                 else
                     push!(mentiontags, tag)
                 end
-            else
+            elseif tag.fields[1] == "e"
                 push!(mentiontags, tag)
             end
         end
@@ -1023,6 +1024,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
     relay_url, e = try
         event_from_msg(JSON.parse(msg))
     catch _
+        # Utils.print_exceptions()
         incr(est, :parseerr)
         rethrow()
     end
@@ -1175,6 +1177,8 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
                             event_pubkey_action(est, eid, e, :liked)
                             ext_reaction(est, e, eid)
                         end
+                        # event_hook(est, eid, (:notifications_cb, YOUR_POST_HAD_REACTION, e.id, c))
+                        event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_LIKED, e.id, c))
                     end
                 end
             end
@@ -1200,22 +1204,11 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
 
         elseif e.kind == Int(Nostr.DIRECT_MESSAGE)
             import_directmsg(est, e)
+            event_hook(est, e.id, (:notifications_cb, NEW_DIRECT_MESSAGE, e.pubkey))
 
         elseif e.kind == Int(Nostr.EVENT_DELETION)
-            for tag in e.tags
-                if length(tag.fields) >= 2 && tag.fields[1] == "e"
-                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                        if eid in est.events
-                            de = est.events[eid]
-                            if de.pubkey == e.pubkey
-                                incr(est, :eventdeletions)
-                                est.deleted_events[eid] = e.id
-                                eid in est.events && delete!(est.events, eid)
-                            end
-                        end
-                    end
-                end
-            end
+            import_delete_event(est, e) && incr(est, :eventdeletions)
+
         elseif e.kind == Int(Nostr.REPOST)
             incr(est, :reposts)
             for tag in e.tags
@@ -1278,7 +1271,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
                                     dd = JSON.parse(String(HTTP.request("GET", lnurl;
                                                                         retry=false, connect_timeout=10, readtimeout=10, proxy=Main.PROXY).body))
                                     if haskey(dd, "nostrPubkey")
-                                        zapper_ok[] = Nostr.PubKeyId(dd["nostrPubkey"]) == e.pubkey
+                                        zapper_ok[] = try Nostr.PubKeyId(dd["nostrPubkey"]) catch _ end == e.pubkey
                                     end
                                 end
                             end
@@ -1335,9 +1328,29 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             update_fetcher_relays(est, e.pubkey; source_event_id=e.id)
         elseif e.kind == Int(Nostr.BOOKMARKS)
             if !haskey(est.dyn[:bookmarks], e.pubkey) || est.events[est.dyn[:bookmarks][e.pubkey]].created_at < e.created_at
+                parse_eids(e) = [Nostr.EventId(tag.fields[2]) for tag in e.tags if length(tag.fields) >= 2 && tag.fields[1] == "e"]
+                old_eids = e.pubkey in est.dyn[:bookmarks] ? parse_eids(est.events[est.dyn[:bookmarks][e.pubkey]]) : []
                 est.dyn[:bookmarks][e.pubkey] = e.id
                 import_pubkey_bookmarks(est, e)
+                new_eids = parse_eids(e)
+                for eid in new_eids
+                    eid in old_eids || event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_BOOKMARKED, e.id))
+                end
             end
+        elseif e.kind == Int(Nostr.HIGHLIGHT)
+            try
+                for tag in e.tags 
+                    if length(tag.fields) >= 2
+                        if tag.fields[1] == "e"
+                            eid = Nostr.EventId(tag.fields[2]) 
+                            event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_HIGHLIGHTED, e.id))
+                        elseif tag.fields[1] == "a"
+                            eid = lookup_parametrized_replaceable_event(est, parse_a_tag(tag.fields[2]))
+                            event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_HIGHLIGHTED, e.id))
+                        end
+                    end
+                end
+            catch _ Utils.print_exceptions() end
         elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
             ext_long_form_note(est, e)
         end
@@ -1377,20 +1390,30 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     return true
 end
 
+function parse_a_tag(s::String)
+    kind, pubkey, identifier = map(string, split(s, ':'))
+    kind = parse(Int, kind)
+    pubkey = Nostr.PubKeyId(pubkey)
+    (; kind, pubkey, identifier)
+end
+
+function lookup_parametrized_replaceable_event(est::CacheStorage, event_coords::NamedTuple)
+    for (eid,) in exec(est.dyn[:parametrized_replaceable_events], 
+                       @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                       (event_coords.pubkey, event_coords.kind, event_coords.identifier))
+        return Nostr.EventId(eid)
+    end
+    nothing
+end
+
 function parse_parent_eid(est::CacheStorage, e::Nostr.Event)
     function parse_eid(tag)
         if length(tag.fields) >= 4 
             if     tag.fields[1] == "e"
-                return (try Nostr.EventId(tag.fields[2]) catch _ end)
+                try return Nostr.EventId(tag.fields[2]) catch _ end
             elseif tag.fields[1] == "a" 
-                kind, pk, identifier = map(string, split(tag.fields[2], ':'))
-                kind = parse(Int, kind)
-                pk = Nostr.PubKeyId(pk)
-                for (eid,) in exec(est.dyn[:parametrized_replaceable_events], 
-                                   @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                   (pk, kind, identifier))
-                    return Nostr.EventId(eid)
-                end
+                try return lookup_parametrized_replaceable_event(est, parse_a_tag(tag.fields[2]))
+                catch _ end
             end
         end
         nothing
@@ -1510,6 +1533,50 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
             end
         end
     end
+end
+
+function import_delete_event(est::CacheStorage, e::Nostr.Event)
+    deleted = Ref(false)
+
+    function delete_event(eid)
+        est.deleted_events[eid] = e.id
+        if eid in est.events
+            delete!(est.events, eid)
+            deleted[] = true
+        end
+    end
+
+    for tag in e.tags
+        if length(tag.fields) >= 2 && tag.fields[1] == "e"
+            if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                if eid in est.events
+                    de = est.events[eid]
+                    if de.pubkey == e.pubkey
+                        delete_event(eid)
+                    end
+                end
+            end
+        elseif length(tag.fields) >= 2 && tag.fields[1] == "a"
+            kind, pk, identifier = map(string, split(tag.fields[2], ':'))
+            kind = parse(Int, kind)
+            pk = Nostr.PubKeyId(pk)
+            for (eid,) in Postgres.execute(:p0,  "select event_id from parametrized_replaceable_events where pubkey = \$1 and kind = \$2 and identifier = \$3 limit 1", 
+                                           [pk, kind, identifier])[2]
+                eid = Nostr.EventId(eid)
+                delete_event(eid)
+            end
+            if kind == Int(Nostr.LONG_FORM_CONTENT)
+                for (eid,) in Postgres.execute(:p0, "select eid from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])[2]
+                    eid = Nostr.EventId(eid)
+                    delete_event(eid)
+                end
+                Postgres.execute(:p0, "delete from reads where pubkey = \$1 and identifier = \$2", [pk, identifier])
+                Postgres.execute(:p0, "delete from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])
+            end
+        end
+    end
+
+    deleted[]
 end
 
 function import_pubkey_bookmarks(est::CacheStorage, e::Nostr.Event)

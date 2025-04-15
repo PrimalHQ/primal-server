@@ -20,6 +20,11 @@
     POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED=202
     POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED=203
     POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO=204
+
+    YOUR_POST_WAS_HIGHLIGHTED=301
+    YOUR_POST_WAS_BOOKMARKED=302
+
+    NEW_DIRECT_MESSAGE=401
 end
 
 JSON.lower(type::NotificationType) = Int(type)
@@ -34,8 +39,8 @@ db_conversion_funcs(::Type{PGDict{K, V}}, ::Type{NotificationType}) where {K, V}
 notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           USER_UNFOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
 
-                          YOUR_POST_WAS_ZAPPED=>((:your_post, Nostr.EventId), (:who_zapped_it, Nostr.PubKeyId), (:satszapped, Int)),
-                          YOUR_POST_WAS_LIKED=>((:your_post, Nostr.EventId), (:who_liked_it, Nostr.PubKeyId)),
+                          YOUR_POST_WAS_ZAPPED=>((:your_post, Nostr.EventId), (:who_zapped_it, Nostr.PubKeyId), (:satszapped, Int), (:message, String)),
+                          YOUR_POST_WAS_LIKED=>((:your_post, Nostr.EventId), (:who_liked_it, Nostr.PubKeyId), (:reaction, String)),
                           YOUR_POST_WAS_REPOSTED=>((:your_post, Nostr.EventId), (:who_reposted_it, Nostr.PubKeyId)),
                           YOUR_POST_WAS_REPLIED_TO=>((:your_post, Nostr.EventId), (:who_replied_to_it, Nostr.PubKeyId), (:reply, Nostr.EventId)),
 
@@ -50,5 +55,11 @@ notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_zapped_it, Nostr.PubKeyId), (:satszapped, Int)),
                           POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_liked_it, Nostr.PubKeyId)),
                           POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_reposed_it, Nostr.PubKeyId)),
-                          POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_replied_to_it, Nostr.PubKeyId), (:reply, Nostr.EventId))])
+                          POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO=>((:post_your_post_was_mentioned_in, Nostr.EventId), (:your_post, Nostr.EventId), (:who_replied_to_it, Nostr.PubKeyId), (:reply, Nostr.EventId)),
+
+                          YOUR_POST_WAS_HIGHLIGHTED=>((:your_post, Nostr.EventId), (:who_highlighted_it, Nostr.PubKeyId), (:highlight, Nostr.EventId)),
+                          YOUR_POST_WAS_BOOKMARKED=>((:your_post, Nostr.EventId), (:who_bookmarked_it, Nostr.PubKeyId)),
+
+                          NEW_DIRECT_MESSAGE=>((:event_id, Nostr.EventId), (:sender, Nostr.PubKeyId)),
+                         ])
 ##

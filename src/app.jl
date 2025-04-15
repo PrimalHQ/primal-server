@@ -90,6 +90,21 @@ exposed_functions = Set([:feed,
                          :membership_content_rebroadcast_status,
 
                          :membership_legends_leaderboard,
+                         :membership_premium_leaderboard,
+
+                         :nip19_decode,
+
+                         # :mute_thread,
+                         # :unmute_thread,
+                        
+                         :update_push_notification_token,
+
+                         :articles_stats,
+                         :drafts,
+                         :top_article,
+
+                         :get_recommended_blossom_servers,
+                         :replaceable_event,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -147,6 +162,14 @@ MEMBERSHIP_LEGEND_CUSTOMIZATION=10_000_168
 MEMBERSHIP_COHORTS=10_000_169
 MEMBERSHIP_LEGEND_LEADERBOARD=10_000_170
 MEMBERSHIP_PREMIUM_LEADERBOARD=10_000_171
+
+USER_TRUSTRANKS=10_000_172
+
+NIP19_DECODE_RESULT=10_000_173
+
+ARTICLES_STATS=10_000_174
+
+RECOMMENDED_BLOSSOM_SERVERS=10_000_175
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -227,7 +250,7 @@ function event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
         es = zip([:likes, :replies, :mentions, :reposts, :zaps, :satszapped, :score, :score24h], r[1])
         [(; 
              kind=Int(EVENT_STATS),
-             content=JSON.json((; event_id=eid, es...)))]
+             content=JSON.json((; event_id=eid, es..., bookmarks=0)))]
     end
 end
 
@@ -303,6 +326,9 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
            pubkeys = Dict{Nostr.PubKeyId, NamedTuple{(:parent, :scopes), Tuple{Nostr.PubKeyId, Set{Symbol}}}}(),
            groups = Dict{Symbol, NamedTuple{(:scopes,), Tuple{Set{Symbol}}}}(),
            pubkeys_allowed = Set{Nostr.PubKeyId}(),
+           blocked_threads = Set{Nostr.EventId}(), # scope: content
+           blocked_hashtags = Set{String}(), # scope: content
+           blocked_words = Set{String}(), # scope: content
           )
     r = catch_exception(:compile_content_moderation_rules, (; pubkey)) do
         settings = ext_user_get_settings(est, pubkey)
@@ -315,7 +341,11 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
         if !isnothing(pubkey)
             ml = (; 
                   pubkeys = Dict{Nostr.PubKeyId, Set{Symbol}}(),
-                  groups = Dict{Symbol, Set{Symbol}}())
+                  groups = Dict{Symbol, Set{Symbol}}(),
+                  blocked_threads = Set{Nostr.EventId}(),
+                  blocked_hashtags = Set{String}(),
+                  blocked_words = Set{String}(),
+                 )
 
             if pubkey in est.mute_lists
                 local mlseid = est.mute_lists[pubkey]
@@ -340,6 +370,12 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
                                 #     else
                                 #         Set{Symbol}()
                                 #     end
+                            elseif tag.fields[1] == "e"
+                                try push!(ml.blocked_threads, Nostr.EventId(tag.fields[2])) catch _ end
+                            elseif tag.fields[1] == "t"
+                                push!(ml.blocked_hashtags, tag.fields[2])
+                            elseif tag.fields[1] == "word"
+                                push!(ml.blocked_words, tag.fields[2])
                             end
                         end
                     end
@@ -402,6 +438,12 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
                     end
                 end
             end
+
+            if !isnothing(pubkey)
+                union!(cmr.blocked_threads, ml.blocked_threads)
+                union!(cmr.blocked_hashtags, ml.blocked_hashtags)
+                union!(cmr.blocked_words, ml.blocked_words)
+            end
         end
 
         compiled_content_moderation_rules[pubkey] = (h, cmr)
@@ -421,6 +463,9 @@ function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
                     :cmr_pubkeys_parent,
                     :cmr_groups,
                     :cmr_pubkeys_allowed,
+                    :cmr_threads,
+                    :cmr_hashtags,
+                    :cmr_hashtags,
                    ]
             Postgres.execute(sess, "delete from $tbl where user_pubkey = \$1", [user_pubkey])
         end
@@ -437,6 +482,15 @@ function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
         end
         for pk in cmr.pubkeys_allowed
             Postgres.execute(sess, "insert into cmr_pubkeys_allowed values (\$1, \$2)", [user_pubkey, pk])
+        end
+        for eid in cmr.blocked_threads
+            Postgres.execute(sess, "insert into cmr_threads values (\$1, \$2, 'content'::cmr_scope)", [user_pubkey, eid])
+        end
+        for ht in cmr.blocked_hashtags
+            Postgres.execute(sess, "insert into cmr_hashtags values (\$1, \$2, 'content'::cmr_scope)", [user_pubkey, ht])
+        end
+        for w in cmr.blocked_words
+            Postgres.execute(sess, "insert into cmr_words values (\$1, \$2, 'content'::cmr_scope)", [user_pubkey, w])
         end
     end
 end
@@ -957,12 +1011,26 @@ function network_stats(est::DB.CacheStorage)
 end
 
 function user_scores(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
+    d = Dict()
+    # for pk in pubkeys
+    #     rs = DB.exec(est.dyn[:pubkey_trustrank], "select rank from pubkey_trustrank where pubkey = ?1", [pk])
+    #     isempty(rs) || (d[Nostr.hex(pk)] = trunc(Int, rs[1][1]*10000000000))
+    # end
     d = Dict([(Nostr.hex(pubkey), get(est.pubkey_followers_cnt, pubkey, 0))
               for pubkey in pubkeys])
     isempty(d) ? [] : [(; kind=Int(USER_SCORES), content=JSON.json(d))]
 end
 function user_scores(est::DB.CacheStorage, res_meta_data)
     user_scores(est, Nostr.PubKeyId[e.pubkey for e in collect(res_meta_data)])
+end
+
+function user_trustranks(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
+    d = Dict()
+    for pk in pubkeys
+        rs = DB.exec(est.dyn[:pubkey_trustrank], "select rank from pubkey_trustrank where pubkey = ?1", [pk])
+        isempty(rs) || (d[Nostr.hex(pk)] = rs[1][1])
+    end
+    isempty(d) ? [] : [(; kind=Int(USER_TRUSTRANKS), content=JSON.json(d))]
 end
 
 function contact_list(est::DB.CacheStorage; pubkey, extended_response=true)
@@ -1056,6 +1124,11 @@ function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
     # res
 end
 
+function user_follower_counts(est::DB.CacheStorage, pubkeys::Vector)
+    [(; kind=USER_FOLLOWER_COUNTS,
+      content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys])))]
+end
+
 function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=true, apply_humaness_check=false)
     pubkeys = [pk isa Nostr.PubKeyId ? pk : Nostr.PubKeyId(pk) for pk in pubkeys]
 
@@ -1079,8 +1152,7 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=true, ap
     end
     res = [
            res_meta_data_arr..., user_scores(est, res_meta_data_arr)..., 
-           (; kind=USER_FOLLOWER_COUNTS,
-            content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys]))),
+           user_follower_counts(est, pubkeys)...,
            primal_verified_names(est, pubkeys)...,
           ]
     ext_user_infos(est, res, res_meta_data_arr)
@@ -1698,6 +1770,16 @@ function parametrized_replaceable_events(est::DB.CacheStorage; events::Vector, e
     res
 end
 
+function replaceable_event(est::DB.CacheStorage; pubkey, kind::Int)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    res = []
+    for (eid,) in Postgres.execute(:p0, "select event_id from replaceable_events where pubkey = \$1 and kind = \$2", [pubkey, kind])[2]
+        eid = Nostr.EventId(eid) 
+        eid in est.events && push!(res, est.events[eid])
+    end
+    res
+end
+
 function search_filterlist(est::DB.CacheStorage; pubkey, user_pubkey)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
@@ -1725,29 +1807,39 @@ function search_filterlist(est::DB.CacheStorage; pubkey, user_pubkey)
     isnothing(res) ? [] : [ (; kind=Int(FILTERING_REASON), content=JSON.json(res))]
 end
 
+IMPORT_EVENTS_SERVER = Ref{Any}(nothing)
+
 function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false)
     replicated || replicate_request(:import_events; events)
     est.readonly[] && return []
+    isnothing(IMPORT_EVENTS_SERVER[]) && return []
 
     cnt = Ref(0)
     errcnt = Ref(0)
     for e in events
         e = Nostr.Event(e)
         try
-            add_human_override(e.pubkey, true, "import_events")
-            msg = JSON.json([time(), nothing, ["EVENT", "", e]])
-            if DB.import_msg_into_storage(msg, est)
-                cnt[] += 1
-            end
-            try
-                o = DAG_OUTPUTS[][2]
-                Main.DAG.import_basic_tags(DAG_OUTPUTS_DB[], o.events, o.basic_tags, e.created_at, e.created_at)
-                Main.DAG.import_event_mentions(est, o.event_mentions, e)
-            catch ex
-                println("import_events: import_event_mentions error: $ex")
-            end
-            ext_import_event(est, e)
-        catch _ 
+            DB.add_human_override(est, e.pubkey, true, "import_events")
+            cnt[] += Main.rex(IMPORT_EVENTS_SERVER[]..., :(let e = $e
+                                                               msg = JSON.json([time(), nothing, ["EVENT", "", e]])
+                                                               est = Main.cache_storage
+                                                               cnt = 0
+                                                               if DB.import_msg_into_storage(msg, est)
+                                                                   cnt += 1
+                                                               end
+                                                               try
+                                                                   o = Main.App.DAG_OUTPUTS[][2]
+                                                                   Main.DAG.import_basic_tags(Main.App.DAG_OUTPUTS_DB[], o.events, o.basic_tags, e.created_at, e.created_at)
+                                                                   Main.DAG.import_event_mentions(est, o.event_mentions, e)
+                                                               catch ex
+                                                                   println("import_events: import_event_mentions error: $ex")
+                                                               end
+                                                               Main.App.ext_import_event(est, e)
+                                                               cnt
+                                                           end
+                                                          ))
+        catch ex
+            println("import_events: error: $ex")
             errcnt[] += 1
         end
     end
@@ -2598,12 +2690,20 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
             elseif kind == Int(NOTIFICATION)
                 d = JSON.parse(content)
                 for (k, v) in d
-                    length(v) == 64 && try
-                        if is_hidden_(est, cmr, user_pubkey, :content, Nostr.PubKeyId(v))
-                            ok = false
-                            break
-                        end
-                    catch _ end
+                    if length(v) == 64
+                        try
+                            if is_hidden_(est, cmr, user_pubkey, :content, Nostr.PubKeyId(v))
+                                ok = false
+                                break
+                            end
+                        catch _ end
+                        try
+                            if is_hidden_(est, cmr, user_pubkey, :content, Nostr.EventId(v))
+                                ok = false
+                                break
+                            end
+                        catch _ end
+                    end
                 end
             end
         end
@@ -3519,7 +3619,10 @@ function membership_media_management_uploads(
         Postgres.execute(:membership, 
                          "select 'https://m.primal.net/' || su.path || su.ext, mu.size, mu.mimetype, mu.created_at
                          from media_uploads mu, short_urls su
-                         where mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and su.url = 'https://media.primal.net' || mu.path
+                         where 
+                            mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and 
+                            su.url = 'https://media.primal.net' || mu.path and 
+                            mu.media_block_id is null
                          order by mu.created_at desc
                          limit \$4 offset \$5", 
                          [e.pubkey, since, until, limit, offset])[2]
@@ -3538,7 +3641,10 @@ function membership_media_management_delete(est::DB.CacheStorage; event_from_use
 
     surl = JSON.parse(e.content)["url"]
 
-    String(HTTP.request("POST", "$(MEDIA_SERVER_HOST[])/purge-media", [], JSON.json((; e.pubkey, url=surl))).body) == "ok" || error("deletion failed")
+    spath, ext = splitext(URIs.parse_uri(surl).path[2:end])
+    isempty(Postgres.execute(:membership, "select 1 from short_urls where path = \$1 and ext = \$2", [spath, ext])[2]) && error("invalid url")
+
+    String(HTTP.request("POST", "$(MEDIA_SERVER_HOST[])/purge-media", [], JSON.json((; e.pubkey, url=surl, reason="deleted"))).body) == "ok" || error("deletion failed")
 
     []
 end
@@ -3783,6 +3889,141 @@ function fetch_content(est::DB.CacheStorage, pubkey::Nostr.PubKeyId; withfollows
     withfollows && append!(pks, follows(est, pubkey))
     DB.fetch((; kinds=[0], authors=pks))
     DB.fetch((; since=Utils.current_time()-days*24*3600, kinds=DB.kindints, authors=pks))
+end
+
+function nip19_decode(est::DB.CacheStorage; ids::Vector)
+    function ser(r)
+        if     r isa Nostr.EventId
+            [("EventId", r)]
+        elseif r isa Nostr.PubKeyId
+            [("PubKeyId", r)]
+        elseif r isa Vector
+            res = []
+            for e in r
+                append!(res, ser(e))
+            end
+            res
+        elseif r isa Tuple
+            res = []
+            for e in r
+                append!(res, ser(e))
+            end
+            res
+        else
+            [r]
+        end
+    end
+    res = Dict([id=>ser(Bech32.nip19_decode(id)) for id in ids])
+    [(; kind=Int(NIP19_DECODE_RESULT), content=JSON.json(res))]
+end
+
+# function mute_thread(est::DB.CacheStorage; event_from_user)
+#     e = membership_event_from_user(event_from_user)
+#     root_eid = cast(JSON.parse(e.content)["root_event_id"], Nostr.EventId)
+#     Postgres.execute(:membership, "
+#                      insert into muted_threads values (\$1, \$2, now())
+#                      on conflict do nothing
+#                      ", [e.pubkey, root_eid])
+#     []
+# end
+
+# function unmute_thread(est::DB.CacheStorage; event_from_user)
+#     e = membership_event_from_user(event_from_user)
+#     root_eid = cast(JSON.parse(e.content)["root_event_id"], Nostr.EventId)
+#     Postgres.execute(:membership, "
+#                      delete from muted_threads where pubkey = \$1 and root_eid = \$2
+#                      ", [e.pubkey, root_eid])
+#     []
+# end
+
+function parse_event_from_user_for_push_notification_token(event_from_user::Dict)
+    e = Nostr.Event(event_from_user)
+    e.created_at < time() + 300 || error("event from the future")
+    Nostr.verify(e) || error("event_from_user verification failed")
+    d = JSON.parse(e.content)
+    (; e, token=d["token"])
+end
+
+function update_push_notification_token(est::DB.CacheStorage; events_from_users::Vector, platform::String, token::String, environment=nothing)
+    # push!(Main.stuff, (:update_push_notification_token, (; events_from_users, platform, token, environment)))
+    platform = lowercase(platform)
+    tokens = [parse_event_from_user_for_push_notification_token(e) for e in events_from_users]
+    Postgres.transaction(:membership) do sess
+        Postgres.execute(sess, "delete from notification_tokens where platform = \$1 and token = \$2", [platform, token])
+        for t in tokens
+            @assert t.token == token
+            Postgres.execute(sess, "insert into notification_tokens values (\$1, \$2, \$3, now(), \$4, \$5)", 
+                             [platform, token, t.e.pubkey, environment, JSON.json(t.e)])
+        end
+    end
+    []
+end
+
+function articles_stats(est::DB.CacheStorage; pubkey, kind=30023)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    res = (; 
+           articles=Postgres.execute(:p0, "select count(1) from reads where pubkey = \$1", [pubkey])[2][1][1],
+           drafts=Postgres.execute(:p0, "
+                                   with ts as (select id, jsonb_array_elements(tags) ->> 0 as tag, jsonb_array_elements(tags) ->> 1 as arg
+                                               from events where pubkey = \$1 and kind = 31234)
+                                   select count(distinct id) from ts where ts.tag = 'k' and ts.arg = \$2::varchar",
+                                   [pubkey, kind])[2][1][1],
+           satszapped=Postgres.execute(:p0, "select coalesce(sum(satszapped), 0) from reads where pubkey = \$1", [pubkey])[2][1][1],
+          )
+    [(; kind=Int(ARTICLES_STATS), content=JSON.json(res))]
+end
+
+function drafts(est::DB.CacheStorage; pubkey, kind, since=0, until=Utils.current_time(), limit=20, offset=0)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    limit = min(100, limit)
+    res = []
+    for r in Postgres.execute(:p0, "
+                              with ts as (select id, jsonb_array_elements(tags) ->> 0 as tag, jsonb_array_elements(tags) ->> 1 as arg
+                                          from events where pubkey = \$1 and kind = 31234)
+                              select es.* from ts, events es
+                              where ts.arg = \$2::varchar and ts.id = es.id and es.created_at >= \$3 and es.created_at <= \$4
+                              order by es.created_at desc 
+                              limit \$5 offset \$6", [pubkey, kind, since, until, limit, offset])[2]
+        push!(res, event_from_row(r))
+    end
+    res
+end
+
+function top_article(est::DB.CacheStorage; pubkey, by)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    by = cast(by, Symbol)
+    eid = nothing
+    if     by == :satszapped
+        for r in Postgres.execute(:p0, "
+                                  select latest_eid from reads where pubkey = \$1
+                                  order by satszapped desc limit 1", 
+                                  [pubkey])[2]
+            eid = Nostr.EventId(r[1])
+        end
+    elseif by == :interactions
+        for r in Postgres.execute(:p0, "
+                                  select latest_eid from reads where pubkey = \$1
+                                  order by (likes + zaps + replies + reposts) desc limit 1", 
+                                  [pubkey])[2]
+            eid = Nostr.EventId(r[1])
+        end
+    end
+    res = []
+    if eid in est.events
+        push!(res, est.events[eid])
+        for r in Postgres.pexnt(:p0, "
+                             select latest_eid as event_id, likes, replies, 0 AS mentions, reposts, zaps, satszapped, 0 AS score, 0 AS score24h, 0 as bookmarks 
+                             from reads where latest_eid = \$1
+                             ", [eid])
+            push!(res, (; kind=Int(EVENT_STATS), content=JSON.json(r)))
+        end
+    end
+    res
+end
+
+function get_recommended_blossom_servers(est::DB.CacheStorage)
+    d = try JSON.parse(read(content_moderation_repo_file("recommended-blossom-servers.json"), String)) catch _; nothing end
+    [(; kind=Int(RECOMMENDED_BLOSSOM_SERVERS), content=JSON.json(d))]
 end
 
 end

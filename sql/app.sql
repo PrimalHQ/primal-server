@@ -130,6 +130,11 @@ SELECT
     /* WHEN 202 THEN user_is_human(arg3, a_user_pubkey) */
     /* WHEN 203 THEN user_is_human(arg3, a_user_pubkey) */
     /* WHEN 204 THEN user_is_human(arg3, a_user_pubkey) */
+
+    WHEN 301 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 302 THEN user_is_human(arg2, a_user_pubkey)
+
+    ELSE false
     END CASE
 $BODY$;
 
@@ -173,7 +178,7 @@ CREATE OR REPLACE FUNCTION public.event_stats(a_event_id bytea) RETURNS SETOF js
 AS $BODY$
 	SELECT jsonb_build_object('kind', c_EVENT_STATS(), 'content', row_to_json(a)::text)
 	FROM (
-		SELECT ENCODE(a_event_id, 'hex') as event_id, likes, replies, mentions, reposts, zaps, satszapped, score, score24h 
+		SELECT ENCODE(a_event_id, 'hex') as event_id, likes, replies, mentions, reposts, zaps, satszapped, score, score24h, 0 as bookmarks
 		FROM event_stats WHERE event_id = a_event_id
 		LIMIT 1
 	) a
@@ -184,7 +189,7 @@ CREATE OR REPLACE FUNCTION public.event_stats_for_long_form_content(a_event_id b
 AS $BODY$
 	SELECT jsonb_build_object('kind', c_EVENT_STATS(), 'content', row_to_json(a)::text)
 	FROM (
-        SELECT ENCODE(a_event_id, 'hex') as event_id, likes, replies, 0 AS mentions, reposts, zaps, satszapped, 0 AS score, 0 AS score24h 
+        SELECT ENCODE(a_event_id, 'hex') as event_id, likes, replies, 0 AS mentions, reposts, zaps, satszapped, 0 AS score, 0 AS score24h, 0 as bookmarks
         FROM reads WHERE latest_eid = a_event_id LIMIT 1
 	) a
 $BODY$;
@@ -221,22 +226,23 @@ BEGIN
         DECLARE
             variants jsonb := '[]';
         BEGIN
-            FOR r IN SELECT size AS s, animated AS a, width AS w, height AS h, mimetype AS mt, duration AS dur FROM media WHERE media.url = r_url LOOP
+            FOR r IN SELECT * FROM get_media_url(r_url) LOOP
                 variants := variants || jsonb_build_array(jsonb_build_object(
-                        's', SUBSTR(r.s, 1, 1),
-                        'a', r.a,
-                        'w', r.w,
-                        'h', r.h,
-                        'mt', r.mt,
-                        'dur', r.dur,
-                        'media_url', cdn_url(r_url, r.s, r.a::int4::bool)));
-                root_mt := r.mt;
+                        's', SUBSTR(r.size, 1, 1),
+                        'a', r.animated,
+                        'w', r.width,
+                        'h', r.height,
+                        'mt', r.mimetype,
+                        'dur', r.duration,
+                        'media_url', r.media_url));
+                root_mt := r.mimetype;
             END LOOP;
             resources := resources || jsonb_build_array(jsonb_build_object(
                     'url', r_url,
                     'variants', variants,
                     'mt', root_mt));
-            FOR r_thumbnail_url IN SELECT thumbnail_url FROM video_thumbnails WHERE video_url = r_url LOOP
+            FOR r_thumbnail_url IN 
+                SELECT mu.media_url FROM video_thumbnails vt, get_media_url(vt.thumbnail_url) mu WHERE vt.video_url = r_url LOOP
                 thumbnails := jsonb_set(thumbnails, array[r_url], to_jsonb(r_thumbnail_url));
             END LOOP;
         END;
@@ -291,6 +297,7 @@ CREATE OR REPLACE FUNCTION public.zap_response(r record, a_user_pubkey bytea) RE
 AS $BODY$	
 DECLARE
     pk bytea;
+    pubkeys bytea[] := '{}';
 BEGIN
     IF (a_user_pubkey IS NOT null AND is_pubkey_hidden(a_user_pubkey, 'content', r.sender)) OR
         is_pubkey_hidden(r.receiver, 'content', r.sender) 
@@ -300,6 +307,7 @@ BEGIN
 
     FOR pk IN VALUES (r.sender), (r.receiver) LOOP
         RETURN NEXT get_event_jsonb(meta_data.value) FROM meta_data WHERE pk = meta_data.key;
+        pubkeys := array_append(pubkeys, pk);
     END LOOP;
 
     RETURN NEXT get_event_jsonb(r.zap_receipt_id);
@@ -313,6 +321,11 @@ BEGIN
             'receiver', ENCODE(r.receiver, 'hex'),
             'amount_sats', r.amount_sats,
             'zap_receipt_id', ENCODE(r.zap_receipt_id, 'hex'))::text);
+
+    IF pubkeys != '{}' THEN
+        RETURN QUERY SELECT * FROM primal_verified_names(pubkeys);
+        RETURN QUERY SELECT * FROM user_blossom_servers(pubkeys);
+    END IF;
 END $BODY$;
 
 CREATE OR REPLACE FUNCTION public.event_zaps(a_event_id bytea, a_user_pubkey bytea) RETURNS SETOF jsonb 
@@ -391,12 +404,14 @@ BEGIN
 
 	e := get_event(a_event_id);
 
-    IF EXISTS (
+    IF event_is_deleted(e.id) THEN
+        RETURN;
+    ELSIF EXISTS (
         SELECT 1 FROM pubkey_followers pf 
         WHERE pf.follower_pubkey = a_user_pubkey AND e.pubkey = pf.pubkey
     ) THEN
         -- user follows publisher
-    ELSIF event_is_deleted(e.id) OR is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey) THEN
+    ELSIF is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey) THEN
         RETURN;
     END IF;
 
@@ -473,30 +488,38 @@ CREATE OR REPLACE FUNCTION public.user_follows_posts(
         a_limit bigint,
         a_offset bigint) 
 	RETURNS SETOF post
-    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
-SELECT
-	pe.event_id,
-	pe.created_at
-FROM
-	pubkey_events pe,
-	pubkey_followers pf
-WHERE
-	pf.follower_pubkey = a_pubkey AND
-	pf.pubkey = pe.pubkey AND
-	pe.created_at >= a_since AND
-	pe.created_at <= a_until AND
-	(
-		pe.is_reply = 0 OR
-		pe.is_reply = a_include_replies
-	) 
-    AND referenced_event_is_note(pe.event_id)
-ORDER BY
-	pe.created_at DESC
-LIMIT
-	a_limit
-OFFSET
-	a_offset
+DECLARE
+    follows_cnt int8;
+BEGIN
+    select jsonb_array_length(es.tags) into follows_cnt from contact_lists cl, events es where cl.key = a_pubkey and cl.value = es.id;
+
+    RAISE DEBUG 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
+
+    RETURN QUERY SELECT
+        pe.event_id,
+        pe.created_at
+    FROM
+        pubkey_events pe,
+        pubkey_followers pf
+    WHERE
+        pf.follower_pubkey = a_pubkey AND
+        pf.pubkey = pe.pubkey AND
+        pe.created_at >= a_since AND
+        pe.created_at <= a_until AND
+        (
+            pe.is_reply = 0 OR
+            pe.is_reply = a_include_replies
+        ) 
+        AND (follows_cnt < 5 OR referenced_event_is_note(pe.event_id))
+    ORDER BY
+        pe.created_at DESC
+    LIMIT
+        a_limit
+    OFFSET
+        a_offset;
+END
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.enrich_feed_events(
@@ -523,7 +546,7 @@ DECLARE
     elements jsonb := '{}';
 BEGIN
     BEGIN
-        a_posts_sorted := ARRAY (SELECT (event_id, created_at)::post FROM UNNEST(a_posts) p ORDER BY created_at DESC);
+        a_posts_sorted := ARRAY (SELECT (event_id, created_at)::post FROM UNNEST(a_posts) p GROUP BY event_id, created_at ORDER BY created_at DESC);
         SELECT COALESCE(jsonb_agg(ENCODE(event_id, 'hex')), '[]'::jsonb) INTO elements FROM UNNEST(a_posts_sorted) p;
     EXCEPTION WHEN OTHERS THEN
         RAISE NOTICE '% %', SQLERRM, SQLSTATE;
@@ -843,7 +866,7 @@ BEGIN
             'cohort_2', cohort_2, 
             'tier', tier, 
             'expires_on', extract(epoch from valid_until)::int8,
-            'legend_since', extract(epoch from legend_since)::int8,
+            'legend_since', extract(epoch from least(legend_since, premium_since))::int8,
             'premium_since', extract(epoch from premium_since)::int8
     ))
     INTO r FROM memberships WHERE pubkey = ANY(a_pubkeys) AND 
@@ -1084,5 +1107,54 @@ EXCEPTION
     WHEN OTHERS THEN
         RETURN NULL;
 END;
+$BODY$;
+
+CREATE SEQUENCE IF NOT EXISTS short_urls_idx_seq
+    START WITH 1100000
+    INCREMENT BY 1
+    MINVALUE 1100000
+    NO MAXVALUE
+    CACHE 1;
+
+-- CREATE OR REPLACE FUNCTION public.thread_notifications_muted(a_pubkey bytea, a_event_id bytea) RETURNS bool
+--     LANGUAGE 'plpgsql' 
+-- AS $BODY$
+-- DECLARE
+--     eid bytea := a_event_id;
+-- BEGIN
+--     WHILE true LOOP
+--         RAISE NOTICE 'thread_notifications_muted: % % %', a_pubkey, a_event_id, eid;
+--         IF EXISTS (SELECT 1 FROM muted_threads WHERE pubkey = a_pubkey AND root_eid = eid LIMIT 1) THEN
+--             RETURN true;
+--         END IF;
+--         SELECT value INTO eid FROM event_thread_parents WHERE key = eid LIMIT 1;
+--         IF NOT FOUND THEN
+--             EXIT;
+--         END IF;
+--     END LOOP;
+--     RETURN false;
+-- END;
+-- $BODY$;
+
+CREATE OR REPLACE FUNCTION public.get_media_url(a_url varchar) RETURNS TABLE(
+    size varchar, 
+    animated int8, 
+    width int8, 
+    height int8, 
+    mimetype varchar, 
+    duration float8, 
+    media_url varchar
+)
+LANGUAGE 'sql' AS $BODY$
+select distinct on (m.media_url)
+   m.size, m.animated, m.width, m.height, m.mimetype, m.duration, 
+   case when (ms.media_url is not null and msp.storage_provider is not null) then ms.media_url
+   else m.media_url
+   end as media_url
+from media m
+  left join media_storage ms on ms.h = split_part(split_part(m.media_url, '/', -1), '.', 1)
+  left join media_storage_priority msp on ms.storage_provider = msp.storage_provider
+where m.url = a_url
+order by m.media_url, msp.priority
 $BODY$;
 
