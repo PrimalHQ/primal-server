@@ -20,7 +20,7 @@ TIMEOUT = Ref(10)
 PRINT_EXCEPTIONS = Ref(false)
 LOG = Ref(false)
 
-TARGET_SERVERS = [:p0]
+TARGET_SERVERS = Any[:p0]
 
 exceptions_lock = ReentrantLock()
 
