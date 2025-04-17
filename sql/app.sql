@@ -105,7 +105,7 @@ SELECT (
 )
 $BODY$;
 
-CREATE OR REPLACE FUNCTION public.notification_is_visible(type int8, arg1 bytea, arg2 bytea, a_user_pubkey bytea) RETURNS bool
+CREATE OR REPLACE FUNCTION public.notification_is_visible(type int8, arg1 bytea, arg2 bytea, arg3 jsonb, a_user_pubkey bytea) RETURNS bool
 LANGUAGE 'sql' STABLE PARALLEL SAFE
 AS $BODY$
 SELECT
@@ -119,7 +119,7 @@ SELECT
     WHEN 6 THEN user_is_human(arg2, a_user_pubkey)
 
     WHEN 7 THEN user_is_human(arg2, a_user_pubkey)
-    /* WHEN 8 THEN user_is_human(arg3, a_user_pubkey) */
+    WHEN 8 THEN user_is_human(decode(arg3 #>> '{}', 'hex'), a_user_pubkey)
 
     WHEN 101 THEN user_is_human(arg2, a_user_pubkey)
     WHEN 102 THEN user_is_human(arg2, a_user_pubkey)
@@ -1147,14 +1147,15 @@ CREATE OR REPLACE FUNCTION public.get_media_url(a_url varchar) RETURNS TABLE(
 )
 LANGUAGE 'sql' AS $BODY$
 select distinct on (m.media_url)
-   m.size, m.animated, m.width, m.height, m.mimetype, m.duration, 
+   sz.oldsize, m.animated, m.width, m.height, m.mimetype, m.duration, 
    case when (ms.media_url is not null and msp.storage_provider is not null) then ms.media_url
    else m.media_url
    end as media_url
-from media m
-  left join media_storage ms on ms.h = split_part(split_part(m.media_url, '/', -1), '.', 1)
-  left join media_storage_priority msp on ms.storage_provider = msp.storage_provider
-where m.url = a_url
+from (values ('small', 'medium'), ('medium', 'large'), ('large', 'large'), ('original', 'original')) sz(oldsize, newsize),
+     media m
+       left join media_storage ms on ms.h = split_part(split_part(m.media_url, '/', -1), '.', 1)
+       left join media_storage_priority msp on ms.storage_provider = msp.storage_provider
+where m.url = a_url and m.size = sz.newsize
 order by m.media_url, msp.priority
 $BODY$;
 

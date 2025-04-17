@@ -507,6 +507,7 @@ function notification(
     pubkey in est.app_settings || return
 
     callargs = (; pubkey, notif_created_at, notif_type, args)
+    pubkey == Main.test_pubkeys[:qa] && @show callargs
     # @show callargs
 
     for a in args
@@ -530,13 +531,10 @@ function notification(
     block = Ref(false)
 
     catch_exception(est, :notification_settings, callargs) do
-        block[] =
         if !isempty(local r = exe(est.notification_settings, 
                                   @sql("select enabled from notification_settings where pubkey = ?1 and type = ?2 limit 1"),
                                   pubkey, string(notif_type)))
-            !r[1][1]
-        else
-            false
+            if !r[1][1]; block[] = true; end
         end
     end
     block[] && return
@@ -570,6 +568,25 @@ function notification(
 
     block[] |= catch_exception(est, :notification_blocked_by_mutelist, callargs) do
         notification_blocked_by_mutelist(est, pubkey, args)
+    end
+    block[] && return
+
+    catch_exception(est, :notification_additional_settings, callargs) do
+        if notif_type == NEW_DIRECT_MESSAGE
+            pk = args[2] # sender
+            if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_dm_notifications_from_users_i_follow')::bool, true) limit 1", [pubkey])[2])
+                if isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, pk])[2])
+                    block[] = true
+                end
+            end
+        elseif notif_type == YOUR_POST_WAS_LIKED
+            pk = args[2] # who_liked_it
+            if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_reactions_from_users_i_follow')::bool, false) limit 1", [pubkey])[2])
+                if isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, pk])[2])
+                    block[] = true
+                end
+            end
+        end
     end
     block[] && return
 
@@ -671,7 +688,7 @@ function notifications_cb(est::CacheStorage, e::Nostr.Event, notif_type, args...
 
     elseif notif_type == YOUR_POST_WAS_MENTIONED_IN_POST
         e0 = est.events[conv(Nostr.EventId, args[1])]
-        notification(est, e.pubkey, e.created_at, notif_type,
+        notification(est, e.pubkey, e0.created_at, notif_type,
                      #= your_post =# e.id, #= their_post =# e0.id, #= mentioned_by =# e0.pubkey)
 
     # elseif notif_type in [POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED,

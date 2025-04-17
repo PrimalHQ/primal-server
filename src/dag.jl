@@ -3835,9 +3835,9 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             else
                 @assert op.field in ["score", "likes", "replies", "reposts", "zaps", "satszapped", "score2"]
                 if op.field in ["score2"]
-                    cond("$(T("event_stats_2")).event_id = $(T(o.advsearch)).id")
-                    cond("$(T("event_stats_2")).$(op.field) > 0")
-                    orderby = "$(T("event_stats_2")).$(op.field)"
+                    # cond("$(T("event_stats_2")).event_id = $(T(o.advsearch)).id")
+                    # cond("$(T("event_stats_2")).$(op.field) > 0")
+                    # orderby = "$(T("event_stats_2")).$(op.field)"
                 else
                     cond("$(T(o.event_stats)).event_id = $(T(o.advsearch)).id")
                     cond("$(T(o.event_stats)).$(op.field) > 0")
@@ -3907,8 +3907,32 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
                           $(T(o.advsearch)).pubkey = $(P(user_pubkey))
                       ))") # TODO reads
                 elseif op.scope == "mynetworkinteractions"
-                    T("basic_tags btscopeint") 
-                    user_pubkey_network_conds("scope_pks")
+                    # user_pubkey_network_conds("scope_pks")
+                    cond("exists (
+                         select 1 
+                         from basic_tags btscopeint2
+                         where
+                            btscopeint2.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.REPOST)), $(Int(Nostr.REACTION))) and 
+                            btscopeint2.tag = 'e' and btscopeint2.arg1 = $(T(o.advsearch)).id and 
+                            (
+                                exists (
+                                    select 1
+                                    from pubkey_followers pf1
+                                    where pf1.follower_pubkey = $(P(user_pubkey)) and pf1.pubkey = btscopeint2.pubkey
+                                    limit 1
+                                )
+                                or
+                                exists (
+                                   select 1
+                                   from pubkey_followers pf2, pubkey_followers pf3
+                                   where
+                                       pf2.follower_pubkey = $(P(user_pubkey)) and 
+                                       pf3.follower_pubkey = pf2.pubkey and
+                                       pf3.pubkey = btscopeint2.pubkey
+                                   limit 1
+                                )
+                            )
+                        )")
                 end
             elseif op.scope == "notmyfollows"
                 user_pubkey_follows_conds("scope_pks")

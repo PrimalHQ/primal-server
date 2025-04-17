@@ -1177,7 +1177,7 @@ function get_notifications(
                              from pubkey_notifications pn
                              where 
                                 pubkey = \$1 and created_at >= \$2 and created_at <= \$3
-                                and notification_is_visible(type, arg1, arg2, \$4)
+                                and notification_is_visible(type, arg1, arg2, arg3, \$4)
                              order by created_at desc",
                              (pubkey, s, u, user_pubkey))
                         else
@@ -1190,7 +1190,7 @@ function get_notifications(
                              where 
                                 pubkey = \$1 and created_at >= \$2 and created_at <= \$3
                                 and type = any (\$4::int8[])
-                                and notification_is_visible(type, arg1, arg2, \$5)
+                                and notification_is_visible(type, arg1, arg2, arg3, \$5)
                              order by created_at desc",
                              (pubkey, s, u, type_arr, user_pubkey))
                         end
@@ -1333,9 +1333,9 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
         res[pk] = est.pubkey_followers_cnt[pk]
     elseif isnothing(pubkey)
         catch_exception(:user_search, (; query)) do
-            for (pk, rank) in Postgres.execute(:p0, "
-                                         select us.pubkey, tr.rank
-                                         from user_search us, pubkey_trustrank tr
+            for (pk, cnt) in Postgres.execute(:p0timelimit, "
+                                         select us.pubkey, pfc.value
+                                         from user_search us, pubkey_followers_cnt pfc
                                          where
                                              (
                                                  us.name @@ to_tsquery('simple', \$1) or
@@ -1345,11 +1345,11 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
                                                  us.nip05 @@ to_tsquery('simple', \$5) or
                                                  us.lud16 @@ to_tsquery('simple', \$6)
                                              ) and 
-                                             us.pubkey = tr.pubkey
-                                         ", [q, q, q, q, q, q])[2]
+                                             us.pubkey = pfc.key
+                                         order by pfc.value desc limit \$7
+                                         ", [q, q, q, q, q, q, limit])[2]
                 pk = Nostr.PubKeyId(pk)
-                res[pk] = est.pubkey_followers_cnt[pk]
-                # res[pk] = rank
+                res[pk] = cnt
             end
         end
     else

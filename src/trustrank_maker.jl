@@ -25,7 +25,7 @@ TARGET_SERVERS = [:p0]
 exceptions_lock = ReentrantLock()
 
 const cache_storage = Ref{Any}(nothing)
-const RUN_PERIOD = Ref(3600)
+const RUN_PERIOD = Ref(3*3600)
 const task = Ref{Any}(nothing)
 const running = Ref(true)
 
@@ -149,12 +149,14 @@ function make_2(
     )
 end
 
+last_r = Ref{Any}(nothing)
+
 function run_make()
-    r = make_2(cache_storage[]; running=Ref(true))
+    r = last_r[] = make_2(cache_storage[]; running=Ref(true))
     Main.TrustRank.load(Dict(r.tr_sorted))
     for server in TARGET_SERVERS
         println("TrustRankMaker.run_make: server: $server")
-        @time "import_trustrank" Main.TrustRank.import_trustrank(r.tr_sorted)
+        @time "import_trustrank" Main.TrustRank.import_trustrank(server, r.tr_sorted)
     end
 end
 
