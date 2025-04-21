@@ -1754,9 +1754,21 @@ function ext_user_get_settings(est::DB.CacheStorage, pubkey)
             d = JSON.parse(e.content)
             d["id"] = e.id
 
-            for (k, v) in d
-                res[k] = v
+            function deepmerge!(a, b)
+                for (k, v) in b
+                    if haskey(a, k)
+                        if isa(a[k], Dict) && isa(v, Dict)
+                            deepmerge!(a[k], v)
+                        else
+                            a[k] = v
+                        end
+                    else
+                        a[k] = v
+                    end
+                end
             end
+            res = deepcopy(res)
+            deepmerge!(res, d)
 
             parsed_settings[pubkey] = (seid, res)
         end

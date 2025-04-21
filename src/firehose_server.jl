@@ -61,9 +61,9 @@ function start()
                      lock(connections) do conns
                          deleted = []
                          for sock in conns
-                             if !isopen(sock) || !iswritable(sock)|| !isreadable(sock)
+                             if !isopen(sock) || !iswritable(sock) || !isreadable(sock)
                                  try
-                                     try write(sock, "bye") catch _ end
+                                     # try write(sock, "bye") catch _ end
                                      try close(sock) catch _ end
                                  catch _ end
                                  @debug "$sock is closed"

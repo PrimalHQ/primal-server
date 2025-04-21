@@ -156,9 +156,11 @@ function listener(client::Client)
                         end
                     end
                 catch ex
-                    println("listener inner: ", typeof(ex))
                     client.log_exceptions && push!(client.exceptions, (; loc=:inner, t=Dates.now(), exception=Utils.get_exceptions()))
-                    ex isa EOFError || ex isa HTTP.WebSockets.WebSocketError || rethrow(ex)
+                    if !(ex isa EOFError || ex isa HTTP.WebSockets.WebSocketError)
+                        println("listener inner: $(client.relay_url): $(typeof(ex))")
+                        rethrow(ex)
+                    end
                 finally
                     try client.on_disconnect(client) catch _ end
                     try close(ws) catch _ end

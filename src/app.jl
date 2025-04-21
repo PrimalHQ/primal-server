@@ -3137,7 +3137,7 @@ function dvm_feed(
 
     end
 
-    cond = Condition()
+    chn = Channel(Inf)
 
     function handle_result(client, m)
         m[1] == "EVENT" || return
@@ -3148,11 +3148,11 @@ function dvm_feed(
             for t in JSON.parse(e.content)
                 t[1] == "e" && push!(eids, Nostr.EventId(t[2]))
             end
-            notify(cond, eids)
+            put!(chn, eids)
         elseif e.kind == 7000
             for t in e.tags; t = t.fields
                 if t[1] == "status" && t[2] == "error"
-                    notify(cond, ErrorException("dvm_feed error: $(t[3])"); error=true)
+                    put!(chn, ErrorException("dvm_feed error: $(t[3])"))
                 end
             end
         end
@@ -3160,7 +3160,7 @@ function dvm_feed(
 
     @async begin
         sleep(timeout)
-        notify(cond, NostrClient.Timeout("dvm_feed"); error=true)
+        put!(chn, NostrClient.Timeout("dvm_feed"))
     end
 
     clients = []
@@ -3174,7 +3174,8 @@ function dvm_feed(
     end
 
     try
-        eids = wait(cond)
+        eids = take!(chn)
+        eids isa Exception && throw(eids)
         response(eids)
     finally
         for client in clients

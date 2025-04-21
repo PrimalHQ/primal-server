@@ -530,15 +530,6 @@ function notification(
 
     block = Ref(false)
 
-    catch_exception(est, :notification_settings, callargs) do
-        if !isempty(local r = exe(est.notification_settings, 
-                                  @sql("select enabled from notification_settings where pubkey = ?1 and type = ?2 limit 1"),
-                                  pubkey, string(notif_type)))
-            if !r[1][1]; block[] = true; end
-        end
-    end
-    block[] && return
-
     catch_exception(est, :block_notifications_for_hellthreads, callargs) do
         if notif_type in [YOU_WERE_MENTIONED_IN_POST, 
                           POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, 
@@ -596,26 +587,34 @@ function notification(
     args = (args..., [nothing for _ in 1:4-length(args)]...)
 
     notif = (pubkey, notif_created_at, notif_type, args...)
+    notif_d = notif2namedtuple(notif)
+
+    if PUSH_NOTIFICATIONS_ENABLED[]
+        try
+            Base.invokelatest(Main.PushNotifications.notification, est, notif_d)
+        catch ex
+            @show callargs
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        end
+    end
+
+    catch_exception(est, :notification_settings, callargs) do
+        if !isempty(local r = exe(est.notification_settings, 
+                                  @sql("select enabled from notification_settings where pubkey = ?1 and type = ?2 limit 1"),
+                                  pubkey, string(notif_type)))
+            if !r[1][1]; block[] = true; end
+        end
+    end
+    block[] && return
+
     exe(est.pubkey_notifications, @sql("insert into pubkey_notifications values (?1, ?2, ?3, ?4, ?5, ?6, ?7)"),
         pubkey, notif[2:5]..., [JSON.json(x) for x in notif[6:7]]...)
-
-    notif_d = notif2namedtuple(notif)
 
     lock(est.notification_processors) do notification_processors
         for func in values(notification_processors)
             catch_exception(est, func, notif_d) do
                 Base.invokelatest(func, est, notif_d)
             end
-        end
-    end
-
-    if PUSH_NOTIFICATIONS_ENABLED[]
-        try
-            # Base.invokelatest(Main.PushNotifications.notification, est, notif_d)
-            Base.invokelatest(Main.eval(:(PushNotifications.notification)), est, notif_d)
-        catch ex
-            @show callargs
-            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         end
     end
 

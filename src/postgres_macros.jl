@@ -36,14 +36,22 @@ function pg_str(query::String)
     pgps(expr)
 end
 
-function exec_str(connsel::Symbol, query::String)
+function exec_to_table(connsel::Symbol, query::String)
+    :($(Base.esc(Postgres)).execute($(QuoteNode(connsel)), $(pg_str(query))...))
+end
+function exec_to_namedtuples(connsel::Symbol, query::String)
     :($(Base.esc(Postgres)).execute($(QuoteNode(connsel)), $(pg_str(query))...) |> tonamedtuples)
 end
 
-macro p0_str(query::String); exec_str(:p0, query); end
-macro p0tl_str(query::String); exec_str(:p0timelimit, query); end
-macro ms_str(query::String); exec_str(:membership, query); end
 macro pg_str(query::String); pg_str(query); end
+
+macro p0_str(query::String); exec_to_namedtuples(:p0, query); end
+macro p0tl_str(query::String); exec_to_namedtuples(:p0timelimit, query); end
+macro ms_str(query::String); exec_to_namedtuples(:membership, query); end
+
+macro p0__str(query::String); exec_to_table(:p0, query); end
+macro p0tl__str(query::String); exec_to_table(:p0timelimit, query); end
+macro ms__str(query::String); exec_to_table(:membership, query); end
 
 column_to_jl_type = Dict{String, Function}()
 tonamedtuples(r) = [(; [Symbol(k)=>

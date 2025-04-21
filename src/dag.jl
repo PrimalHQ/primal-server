@@ -800,7 +800,8 @@ function advsearch_node(
 
                     mentions = Set()
                     DB.for_mentiones(runctx.est, e) do t
-                        if length(t.fields) >= 4 && t.fields[1] == "p" && t.fields[4] == "mention"
+                        # if length(t.fields) >= 4 && t.fields[1] == "p" && t.fields[4] == "mention"
+                        if length(t.fields) >= 2 && t.fields[1] == "p"
                             if !isnothing(local pk = try Nostr.PubKeyId(t.fields[2]) catch _ end)
                                 push!(mentions, Nostr.hex(pk))
                             end
