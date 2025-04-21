@@ -1146,7 +1146,7 @@ CREATE OR REPLACE FUNCTION public.get_media_url(a_url varchar) RETURNS TABLE(
     media_url varchar
 )
 LANGUAGE 'sql' AS $BODY$
-select distinct on (m.media_url)
+select distinct on (m.animated, m.media_url)
    sz.oldsize, m.animated, m.width, m.height, m.mimetype, m.duration, 
    case when (ms.media_url is not null and msp.storage_provider is not null) then ms.media_url
    else m.media_url
@@ -1156,6 +1156,6 @@ from (values ('small', 'medium'), ('medium', 'large'), ('large', 'large'), ('ori
        left join media_storage ms on ms.h = split_part(split_part(m.media_url, '/', -1), '.', 1)
        left join media_storage_priority msp on ms.storage_provider = msp.storage_provider
 where m.url = a_url and m.size = sz.newsize
-order by m.media_url, msp.priority
+order by m.animated desc, m.media_url, msp.priority
 $BODY$;
 
