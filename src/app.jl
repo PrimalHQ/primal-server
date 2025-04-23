@@ -14,6 +14,7 @@ import ..DB
 import ..Nostr
 using ..Utils: ThreadSafe, Throttle
 using ..Postgres: @P, pgparams
+using ..PostgresMacros: @p0_str
 import ..Bech32
 
 exposed_functions = Set([:feed,
@@ -2824,6 +2825,8 @@ function mega_feed_directive(
             return feed(est; skwa..., kwargs..., usepgfuncs, apply_humaness_check)
         elseif id == "search"
             return search(est; skwa..., kwargs...)
+        elseif id == "muted-threads"
+            return muted_threads_feed(est; skwa..., kwargs...)
         end
 
     elseif id == "explore-media"
@@ -4026,6 +4029,24 @@ end
 function get_recommended_blossom_servers(est::DB.CacheStorage)
     d = try JSON.parse(read(content_moderation_repo_file("recommended-blossom-servers.json"), String)) catch _; nothing end
     [(; kind=Int(RECOMMENDED_BLOSSOM_SERVERS), content=JSON.json(d))]
+end
+
+function muted_threads_feed(
+        est::DB.CacheStorage;
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        user_pubkey=nothing
+    )
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    posts = Tuple{Nostr.EventId, Int}[]
+    for r in p0"
+        select es.id, es.created_at from replaceable_events re, basic_tags bt, events es
+        where re.pubkey = $user_pubkey and re.kind = $(Int(Nostr.MUTE_LIST)) 
+          and re.event_id = bt.id and bt.tag = 'e' and bt.arg1 = es.id 
+          and es.created_at >= $since and es.created_at <= $until 
+        order by es.created_at desc limit $limit offset $offset"
+        push!(posts, (Nostr.EventId(r.id), r.created_at))
+    end
+    enrich_feed_events_pg(est; posts, user_pubkey)
 end
 
 end

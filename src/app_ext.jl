@@ -294,21 +294,30 @@ function scored_content(
 
         empty!(posts)
         if isempty(pubkeys)
-            q_wheres = wheres()
+            params = Any[n, offset]
             if group_by_pubkey
+                q_wheres = wheres()
                 extrawhere = 
                 if     isnothing(gm_mode); ""
                 elseif gm_mode == :gmonly; "and     exists (select 1 from events e where es.event_id = e.id and (e.content ilike '%gm%' or e.content ilike '%good morning%'))"
                 elseif gm_mode == :nogm;   "and not exists (select 1 from events e where es.event_id = e.id and (e.content ilike '%gm%' or e.content ilike '%good morning%'))"
                 end
+                push!(params, user_pubkey)
                 q = "
                 with a as (
                     select author_pubkey, max($field) as maxfield 
                     from event_stats 
                     where $field > 0 and $created_after <= created_at 
+                      and not is_pubkey_hidden(\$3, 'trending', author_pubkey)
+                      and not exists (
+                        select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
+                        where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey 
+                          and cmr.user_pubkey = \$3 and cmr.scope = 'trending' 
+                        limit 1
+                      )
                     group by author_pubkey 
                     order by maxfield desc 
-                    limit ?1 offset ?2
+                    limit \$1 offset \$2
                 ) 
                 select a.author_pubkey, es.event_id, es.$field
                 from a, event_stats es
@@ -316,12 +325,24 @@ function scored_content(
                 and es.$field > 0 and $created_after <= es.created_at $extrawhere
                 "
             else
+                push!(where_exprs, "not is_pubkey_hidden(\$3, 'trending', author_pubkey)")
+                push!(where_exprs, "not exists (
+                        select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
+                        where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey 
+                          and cmr.user_pubkey = \$3 and cmr.scope = 'trending' 
+                        limit 1
+                      )")
+                push!(params, user_pubkey)
+                q_wheres = wheres()
                 # q = "with a as materialized (select author_pubkey, event_id, $field from event_stats $q_wheres) select * from a order by $field desc limit ?1 offset ?2"
-                q = "select author_pubkey, event_id, $field from event_stats $q_wheres order by $field desc limit ?1 offset ?2"
+                q = "
+                select author_pubkey, event_id, $field 
+                from event_stats $q_wheres 
+                order by $field desc limit \$1 offset \$2"
             end
-            # println(q); @show (n, offset)
+            # println(q); @show params
             pkseen = Set{Nostr.PubKeyId}()
-            for (pk, eid, v) in DB.exec(est.event_stats, q, (n, offset))
+            for (pk, eid, v) in Postgres.execute(:p0timelimit, q, params)[2]
                 pk = Nostr.PubKeyId(pk)
                 pk in pkseen && continue
                 push!(pkseen, pk)
@@ -352,6 +373,7 @@ function scored_content(
                 push!(posts_filtered, (eid, v))
             end
         end
+        # @show (length(posts), length(posts_filtered))
 
         (length(posts) < n || length(posts_filtered) >= limit) && break
         n += n
@@ -1312,8 +1334,9 @@ function get_notification_counts_2(est::DB.CacheStorage; pubkey)
     [(; kind=Int(NOTIFICATIONS_SUMMARY_2), pubkey=Nostr.PubKeyId(pk),
       content=JSON.json(Dict([Symbol(string(Int(i)))=>cnt
                               for (i, cnt) in zip(instances(DB.NotificationType), cnts)])))
-     for (pk, cnts...) in DB.exe(est.pubkey_notification_cnts,
-                                 "select * from pubkey_notification_cnts where pubkey = ?1", pubkey)]
+     for (pk, cnts...) in Postgres.execute(:p0, "select pubkey, $(join(["type$(i|>Int)" for i in instances(DB.NotificationType)], ", ")) 
+                                           from pubkey_notification_cnts where pubkey = \$1", [pubkey])[2]
+    ]
 end
 
 function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey::Any=nothing)

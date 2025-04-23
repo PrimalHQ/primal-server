@@ -495,7 +495,7 @@ DECLARE
 BEGIN
     select jsonb_array_length(es.tags) into follows_cnt from contact_lists cl, events es where cl.key = a_pubkey and cl.value = es.id;
 
-    RAISE DEBUG 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
+    -- RAISE NOTICE 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
 
     RETURN QUERY SELECT
         pe.event_id,
@@ -993,7 +993,12 @@ CREATE OR REPLACE FUNCTION public.content_moderation_filtering(a_results jsonb, 
 AS $BODY$
 SELECT e 
 FROM jsonb_array_elements(a_results) r(e) 
-WHERE e->>'pubkey' IS NULL OR NOT is_pubkey_hidden(a_user_pubkey, a_scope, DECODE(e->>'pubkey', 'hex'))
+WHERE (e->>'pubkey' IS NULL OR NOT is_pubkey_hidden(a_user_pubkey, a_scope, DECODE(e->>'pubkey', 'hex'))) AND
+      (e->>'id' IS NULL OR NOT EXISTS (
+        SELECT 1 FROM cmr_pubkeys_scopes cmr, basic_tags bt
+        WHERE bt.id = DECODE(e->>'id', 'hex') AND bt.tag = 'p' AND bt.arg1 = cmr.pubkey 
+          AND cmr.user_pubkey = a_user_pubkey and cmr.scope = a_scope
+        LIMIT 1))
 $BODY$;
 
 CREATE OR REPLACE FUNCTION update_updated_at()
