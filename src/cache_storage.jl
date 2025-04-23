@@ -1204,7 +1204,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
 
         elseif e.kind == Int(Nostr.DIRECT_MESSAGE)
             import_directmsg(est, e)
-            event_hook(est, e.id, (:notifications_cb, NEW_DIRECT_MESSAGE, e.pubkey))
+            event_hook(est, e.id, (:notifications_cb, NEW_DIRECT_MESSAGE))
 
         elseif e.kind == Int(Nostr.EVENT_DELETION)
             import_delete_event(est, e) && incr(est, :eventdeletions)

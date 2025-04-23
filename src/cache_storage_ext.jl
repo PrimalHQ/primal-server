@@ -507,7 +507,8 @@ function notification(
     pubkey in est.app_settings || return
 
     callargs = (; pubkey, notif_created_at, notif_type, args)
-    pubkey == Main.test_pubkeys[:qa] && @show callargs
+    # pubkey == Main.test_pubkeys[:qa] && @show callargs
+    pubkey == Main.test_pubkeys[:aquarius] && @show callargs
     # @show callargs
 
     for a in args
@@ -744,9 +745,17 @@ function notifications_cb(est::CacheStorage, e::Nostr.Event, notif_type, args...
     #                  #= your post =# e.id, #= who =# e0.pubkey, args[2:end]...)
         
     elseif notif_type == NEW_DIRECT_MESSAGE
-        you = conv(Nostr.PubKeyId, args[1])
-        notification(est, you, e.created_at, notif_type,
-                     #= direct message =# e.id, #= sender =# e.pubkey)
+        receiver = nothing
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "p"
+                try receiver = Nostr.PubKeyId(t.fields[2]) catch _ end
+                break
+            end
+        end
+        if !isnothing(receiver)
+            notification(est, receiver, e.created_at, notif_type,
+                         #= direct message =# e.id, #= sender =# e.pubkey)
+        end
     end
 end
 
