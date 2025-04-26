@@ -92,7 +92,52 @@ $BODY$;
 CREATE OR REPLACE FUNCTION public.is_event_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_event_id bytea) RETURNS bool
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
-SELECT EXISTS (SELECT 1 FROM events WHERE events.id = a_event_id AND is_pubkey_hidden(a_user_pubkey, a_scope, events.pubkey))
+SELECT EXISTS (
+    SELECT 1
+    FROM public.event e
+    WHERE e.id = a_event_id AND (
+        public.is_pubkey_hidden(a_user_pubkey, a_scope, e.pubkey)
+
+        -- Check for muted words in content
+        OR EXISTS (
+            SELECT 1
+            FROM public.cmr_words_2 w, advsearch s
+            WHERE w.user_pubkey = a_user_pubkey
+              AND w.scope = a_scope
+              AND s.id = a_event_id
+              AND s.content_tsv @@ w.words
+        )
+
+        -- Check for muted hashtags
+        OR EXISTS (
+            SELECT 1
+            FROM public.cmr_hashtags_2 h, advsearch s
+            WHERE h.user_pubkey = a_user_pubkey
+              AND h.scope = a_scope
+              AND s.id = a_event_id
+              AND s.hashtag_tsv @@ h.hashtags
+        )
+
+        -- Check if the event *is* a muted thread root
+        OR EXISTS (
+            SELECT 1
+            FROM public.cmr_threads t
+            WHERE t.user_pubkey = a_user_pubkey
+              AND t.scope = a_scope
+              AND t.event_id = e.id
+        )
+
+        -- Check if the event *references* a muted thread root using the basic_tags table
+        OR EXISTS (
+            SELECT 1
+            FROM public.basic_tags bt
+            INNER JOIN public.cmr_threads t ON t.user_pubkey = a_user_pubkey AND t.scope = a_scope
+            WHERE bt.id = a_event_id
+              AND bt.tag = 'e'
+              AND bt.arg1 = t.event_id
+        )
+    )
+)
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.user_is_human(a_pubkey bytea, a_user_pubkey bytea) RETURNS bool
@@ -412,6 +457,8 @@ BEGIN
     ) THEN
         -- user follows publisher
     ELSIF is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey) THEN
+        RETURN;
+    ELSIF is_event_hidden(a_user_pubkey, 'content', a_event_id) THEN
         RETURN;
     END IF;
 

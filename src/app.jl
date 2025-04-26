@@ -371,12 +371,6 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
                                 #     else
                                 #         Set{Symbol}()
                                 #     end
-                            elseif tag.fields[1] == "e"
-                                try push!(ml.blocked_threads, Nostr.EventId(tag.fields[2])) catch _ end
-                            elseif tag.fields[1] == "t"
-                                push!(ml.blocked_hashtags, tag.fields[2])
-                            elseif tag.fields[1] == "word"
-                                push!(ml.blocked_words, tag.fields[2])
                             end
                         end
                     end
@@ -412,10 +406,18 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
                 for tbl in [est.mute_list, est.mute_list_2]
                     if ppk in tbl
                         for tag in est.events[tbl[ppk]].tags
-                            if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                                    cmr.pubkeys[pk] = (; parent=ppk, 
-                                                       scopes=haskey(ml.pubkeys, ppk) ? ml.pubkeys[ppk] : Set{Symbol}())
+                            if length(tag.fields) >= 2
+                                if tag.fields[1] == "p"
+                                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                                        cmr.pubkeys[pk] = (; parent=ppk, 
+                                                           scopes=haskey(ml.pubkeys, ppk) ? ml.pubkeys[ppk] : Set{Symbol}())
+                                    end
+                                elseif tag.fields[1] == "e"
+                                    try push!(cmr.blocked_threads, Nostr.EventId(tag.fields[2])) catch _ end
+                                elseif tag.fields[1] == "t"
+                                    push!(cmr.blocked_hashtags, tag.fields[2])
+                                elseif tag.fields[1] == "word"
+                                    push!(cmr.blocked_words, tag.fields[2])
                                 end
                             end
                         end
@@ -439,12 +441,6 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
                     end
                 end
             end
-
-            if !isnothing(pubkey)
-                union!(cmr.blocked_threads, ml.blocked_threads)
-                union!(cmr.blocked_hashtags, ml.blocked_hashtags)
-                union!(cmr.blocked_words, ml.blocked_words)
-            end
         end
 
         compiled_content_moderation_rules[pubkey] = (h, cmr)
@@ -466,7 +462,9 @@ function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
                     :cmr_pubkeys_allowed,
                     :cmr_threads,
                     :cmr_hashtags,
-                    :cmr_hashtags,
+                    :cmr_words,
+                    :cmr_hashtags_2,
+                    :cmr_words_2,
                    ]
             Postgres.execute(sess, "delete from $tbl where user_pubkey = \$1", [user_pubkey])
         end
@@ -484,14 +482,33 @@ function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
         for pk in cmr.pubkeys_allowed
             Postgres.execute(sess, "insert into cmr_pubkeys_allowed values (\$1, \$2)", [user_pubkey, pk])
         end
-        for eid in cmr.blocked_threads
-            Postgres.execute(sess, "insert into cmr_threads values (\$1, \$2, 'content'::cmr_scope)", [user_pubkey, eid])
-        end
-        for ht in cmr.blocked_hashtags
-            Postgres.execute(sess, "insert into cmr_hashtags values (\$1, \$2, 'content'::cmr_scope)", [user_pubkey, ht])
-        end
-        for w in cmr.blocked_words
-            Postgres.execute(sess, "insert into cmr_words values (\$1, \$2, 'content'::cmr_scope)", [user_pubkey, w])
+        for scope in [:content, :trending]
+            for eid in cmr.blocked_threads
+                Postgres.execute(sess, "insert into cmr_threads values (\$1, \$2, \$3::cmr_scope)", [user_pubkey, eid, scope])
+            end
+            for ht in cmr.blocked_hashtags
+                Postgres.execute(sess, "insert into cmr_hashtags values (\$1, \$2, \$3::cmr_scope)", [user_pubkey, ht, scope])
+            end
+            for w in cmr.blocked_words
+                Postgres.execute(sess, "insert into cmr_words values (\$1, \$2, \$3::cmr_scope)", [user_pubkey, w, scope])
+            end
+            function make_tsquery(ws)
+                res = []
+                for w in ws
+                    w = replace(w, r"[^a-zA-Z0-9_]" => " ")
+                    w = replace(w, r"\s+" => " ")
+                    w = string(strip(w))
+                    w = "\"$(replace(w, " "=>"\\ "))\""
+                    push!(res, w)
+                end
+                res = join(res, " | ")
+                # @show ws=>res
+                res
+            end
+            isempty(cmr.blocked_hashtags) || Postgres.execute(sess, "insert into cmr_hashtags_2 values (\$1, \$2::cmr_scope, to_tsquery('simple', \$3))", 
+                                                              [user_pubkey, scope, make_tsquery(cmr.blocked_hashtags)])
+            isempty(cmr.blocked_words) || Postgres.execute(sess, "insert into cmr_words_2 values (\$1, \$2::cmr_scope, to_tsquery('simple', \$3))", 
+                                                           [user_pubkey, scope, make_tsquery(cmr.blocked_words)])
         end
     end
 end

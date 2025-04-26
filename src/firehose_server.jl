@@ -96,7 +96,12 @@ end
 function start_reader_task(sock)
     errormonitor(@async begin
                      while isactive() && isopen(sock) && isreadable(sock)
-                         s = readline(sock)
+                         s = try
+                             readline(sock)
+                         catch ex
+                             ex isa Base.IOError && break
+                             rethrow()
+                         end
                          isempty(s) && break
                          push!(latest_received_messages, s)
                          if s == "STREAM-NEW-EVENTS"
