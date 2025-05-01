@@ -250,6 +250,8 @@ function scored_content(
         limit2=nothing,
         gm_mode=nothing,
     )
+    # @show (; timeframe, limit, created_after, since, until, offset, group_by_pubkey, user_pubkey, include_top_zaps, usepgfuncs, apply_humaness_check, limit2, gm_mode)
+
     limit = min(50, limit)
     isnothing(limit2) || (limit = limit2)
     if timeframe != :popular
@@ -308,7 +310,7 @@ function scored_content(
                     select author_pubkey, max($field) as maxfield 
                     from event_stats 
                     where $field > 0 and $created_after <= created_at 
-                      and not is_pubkey_hidden(\$3, 'trending', author_pubkey)
+                      and not is_event_hidden(\$3, 'trending', event_id)
                       and not exists (
                         select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
                         where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey 
@@ -325,7 +327,7 @@ function scored_content(
                 and es.$field > 0 and $created_after <= es.created_at $extrawhere
                 "
             else
-                push!(where_exprs, "not is_pubkey_hidden(\$3, 'trending', author_pubkey)")
+                push!(where_exprs, "not is_event_hidden(\$3, 'trending', event_id)")
                 push!(where_exprs, "not exists (
                         select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
                         where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey 
@@ -1368,7 +1370,8 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
                                                  us.nip05 @@ to_tsquery('simple', \$5) or
                                                  us.lud16 @@ to_tsquery('simple', \$6)
                                              ) and 
-                                             us.pubkey = pfc.key
+                                             us.pubkey = pfc.key and
+                                             not exists (select 1 from filterlist where grp in ('csam', 'impersonation') and target_type = 'pubkey' and target = us.pubkey and blocked limit 1)
                                          order by pfc.value desc limit \$7
                                          ", [q, q, q, q, q, q, limit])[2]
                 pk = Nostr.PubKeyId(pk)
