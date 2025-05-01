@@ -507,8 +507,6 @@ function notification(
     pubkey in est.app_settings || return
 
     callargs = (; pubkey, notif_created_at, notif_type, args)
-    # pubkey == Main.test_pubkeys[:qa] && @show callargs
-    pubkey == Main.test_pubkeys[:aquarius] && @show callargs
     # @show callargs
 
     for a in args
@@ -571,11 +569,33 @@ function notification(
                     block[] = true
                 end
             end
-        elseif notif_type == YOUR_POST_WAS_LIKED
-            pk = args[2] # who_liked_it
-            if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_reactions_from_users_i_follow')::bool, false) limit 1", [pubkey])[2])
-                if isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, pk])[2])
-                    block[] = true
+        else
+            pk =
+            if     notif_type in [NEW_USER_FOLLOWED_YOU, USER_UNFOLLOWED_YOU]
+                args[1] # follower
+            elseif notif_type in [YOUR_POST_WAS_ZAPPED,
+                                  YOUR_POST_WAS_LIKED,
+                                  YOUR_POST_WAS_REPOSTED]
+                args[2] # who_liked_it
+            elseif notif_type == YOUR_POST_WAS_REPLIED_TO
+                args[2] # who_replied_to_it
+            elseif notif_type == YOU_WERE_MENTIONED_IN_POST
+                args[2] # who_mentioned_it
+            elseif notif_type == YOUR_POST_WAS_MENTIONED_IN_POST
+                args[3] # who_mentioned_it
+            elseif notif_type == YOUR_POST_WAS_HIGHLIGHTED
+                args[2] # who_highlighted_it
+            elseif notif_type == YOUR_POST_WAS_BOOKMARKED
+                args[2] # who_bookmarked_it
+            else
+                nothing
+            end
+            # @show (notif_type, pk)
+            if !isnothing(pk)
+                if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_reactions_from_users_i_follow')::bool, false) limit 1", [pubkey])[2])
+                    if isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, pk])[2])
+                        block[] = true
+                    end
                 end
             end
         end
@@ -592,7 +612,7 @@ function notification(
 
     if PUSH_NOTIFICATIONS_ENABLED[]
         try
-            Base.invokelatest(Main.PushNotifications.notification, est, notif_d)
+            Base.invokelatest(Main.eval(:(PushNotifications.notification)), est, notif_d)
         catch ex
             @show callargs
             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
