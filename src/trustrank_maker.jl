@@ -90,6 +90,8 @@ function make_2(
     end
 
     verified_pubkeys = [Nostr.PubKeyId(pubkey) for (pubkey,) in Postgres.execute(:membership, "select pubkey from verified_users where default_name")[2]]
+    blocked_pubkeys  = [Nostr.PubKeyId(pubkey) for (pubkey,) in Postgres.execute(:membership, "select target from filterlist where target_type = 'pubkey' and grp in ('spam', 'csam') and blocked group by target")[2]]
+    @show length(verified_pubkeys) length(blocked_pubkeys)
 
     Threads.@threads for pk in verified_pubkeys
         yield()
@@ -116,7 +118,11 @@ function make_2(
     ##
     ui = Dict([pk=>i for (i, pk) in enumerate(keys(users))])
     iu = [pk for (_, pk) in enumerate(keys(users))]
-    d = [pk in verified_pubkeys ? 1.0 : 0.0 for pk in keys(ui)]
+    # d = [pk in verified_pubkeys ? 1.0 : 0.0 for pk in keys(ui)]
+    d = [if     pk in blocked_pubkeys;  0.0
+         elseif pk in verified_pubkeys; 1.0
+         else;  0.0
+         end for pk in keys(ui)]
     d /= sum(d)
     tr = d
     a = 0.85
@@ -137,6 +143,8 @@ function make_2(
         delta = sum(abs.(tr_ - tr))
         tr = tr_
     end
+    tr = [pk in blocked_pubkeys ? 0.0 : v 
+          for (pk, v) in zip(keys(ui), tr)]
     println()
     #
     tr_sorted = sort([(pk, t) for (pk, t) in collect(zip(keys(users), tr)) if t > 0]; by=t->-t[2])
