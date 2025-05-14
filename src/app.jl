@@ -3639,11 +3639,10 @@ function membership_media_management_uploads(
     us = []
     for (url, size, mimetype, created_at) in 
         Postgres.execute(:membership, 
-                         "select 'https://m.primal.net/' || su.path || su.ext, mu.size, mu.mimetype, mu.created_at
-                         from media_uploads mu, short_urls su
+                         "select 'https://blossom.primal.net/' || encode(mu.sha256, 'hex'), mu.size, mu.mimetype, mu.created_at
+                         from media_uploads mu
                          where 
                             mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and 
-                            su.url = 'https://media.primal.net' || mu.path and 
                             mu.media_block_id is null
                          order by mu.created_at desc
                          limit \$4 offset \$5", 
@@ -3659,16 +3658,21 @@ end
 MEDIA_SERVER_HOST = Ref("")
 
 function membership_media_management_delete(est::DB.CacheStorage; event_from_user::Dict)
+    try
     e = membership_event_from_user(event_from_user)
 
     surl = JSON.parse(e.content)["url"]
 
-    spath, ext = splitext(URIs.parse_uri(surl).path[2:end])
-    isempty(Postgres.execute(:membership, "select 1 from short_urls where path = \$1 and ext = \$2", [spath, ext])[2]) && error("invalid url")
+    @show sha256 = hex2bytes(splitext(splitpath(URIs.parse_uri(surl).path)[end])[1])
+    isempty(Postgres.execute(:membership, "select 1 from media_uploads where sha256 = \$1 and pubkey = \$2", [sha256, e.pubkey])[2]) && error("invalid url")
 
     String(HTTP.request("POST", "$(MEDIA_SERVER_HOST[])/purge-media", [], JSON.json((; e.pubkey, url=surl, reason="deleted"))).body) == "ok" || error("deletion failed")
 
     []
+catch _
+    Utils.print_exceptions()
+    rethrow()
+end
 end
 
 function membership_recovery_contact_lists(

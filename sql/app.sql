@@ -1207,7 +1207,7 @@ from (values ('small', 'medium'), ('medium', 'large'), ('large', 'large'), ('ori
      media m
        left join media_storage ms on ms.h = split_part(split_part(m.media_url, '/', -1), '.', 1)
        left join media_storage_priority msp on ms.storage_provider = msp.storage_provider
-where m.url = a_url and m.size = sz.newsize
+where m.url = a_url and m.size = sz.newsize and ms.media_block_id is null
 order by m.animated desc, m.media_url, msp.priority
 $BODY$;
 
