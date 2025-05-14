@@ -273,7 +273,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         pk = (startswith(pk, "npub") || startswith(pk, "nprofile")) ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
         return mdpubkey_(pk)
 
-    elseif !isnothing(local m = match(r"^/(thread|e)/(.*)", path))
+    elseif !isnothing(local m = match(r"^/(thread|e|a)/(.*)", path))
         eid = string(m[2])
         if startswith(eid, "nevent")
             for x in Bech32.nip19_decode(eid)
@@ -340,6 +340,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                           m = match(r"^/([^/]*)/([^?]*)", path)
                           if !isnothing(m)
                               name, identifier = string(m[1]), string(m[2])
+                              identifier = URIs.unescapeuri(identifier)
                               pubkey = nothing
                               for pk in nostr_json_query_by_name(name)
                                   pubkey = pk
@@ -394,6 +395,16 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                 url="https://$host/legends",
                 twitter_card = "summary_large_image",
                 twitter_image = "https://$host/public/legends-link-preview.png?a=444",
+               )
+
+    elseif !isnothing(local m = match(r"^/myarticles$", path)) && 1==1
+        return (; 
+                title="Primal Article Editor", 
+                description="Create long form articles for Nostr",
+                image=("https://$host/public/article-editor-link-preview.png",),
+                url="https://$host/myarticles",
+                twitter_card = "summary_large_image",
+                twitter_image = "https://$host/public/article-editor-link-preview.png?a=444",
                )
 
     elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
