@@ -244,7 +244,8 @@ function on_connect(client)
 
         # bump when any feed is updated or after every 3 months
         # created_at = trunc(Int, datetime2unix(DateTime("2024-11-20T00:00"))) 
-        created_at = trunc(Int, datetime2unix(DateTime("2025-03-20T00:00"))) 
+        # created_at = trunc(Int, datetime2unix(DateTime("2025-03-20T00:00"))) 
+        created_at = trunc(Int, datetime2unix(DateTime("2025-05-01T00:00"))) 
 
         eact = Nostr.Event(seckey, pubkey,
                            created_at,
