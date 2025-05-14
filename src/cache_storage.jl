@@ -1035,6 +1035,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
 end
 
 BLOCKED_KINDS = [29333]
+EVENT_RELAY_TRACKING_ENABLED = Ref(false)
 
 function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_daily_stats=false, relay_url=nothing)
     est.readonly[] && return false
@@ -1045,7 +1046,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
 
     e.id in est.deleted_events && return false
 
-    isnothing(relay_url) || Postgres.execute(:p0, "insert into event_relays values (\$1, \$2, \$3) on conflict do nothing", [e.id, relay_url, Utils.current_time()])
+    EVENT_RELAY_TRACKING_ENABLED[] && isnothing(relay_url) || Postgres.execute(:p0, "insert into event_relays values (\$1, \$2, \$3) on conflict do nothing", [e.id, relay_url, Utils.current_time()])
 
     should_import = lock(already_imported_check_lock) do
         if e.kind in BLOCKED_KINDS || e.id in est.events || !ext_preimport_check(est, e)
