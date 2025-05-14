@@ -592,10 +592,8 @@ function notification(
             end
             # @show (notif_type, pk)
             if !isnothing(pk)
-                if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_reactions_from_users_i_follow')::bool, false) limit 1", [pubkey])[2])
-                    if isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, pk])[2])
-                        block[] = true
-                    end
+                if notification_blocked_sender_not_follower(pubkey, pk)
+                    block[] = true
                 end
             end
         end
@@ -642,6 +640,15 @@ function notification(
     notification_periodic() do
         Main.PushGatewayExporter.set!("notification_latest", Utils.current_time())
     end
+end
+
+function notification_blocked_sender_not_follower(pubkey::Nostr.PubKeyId, initiator::Union{Nostr.PubKeyId, Nothing})
+    if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_reactions_from_users_i_follow')::bool, false) limit 1", [pubkey])[2])
+        if isnothing(initiator) || isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, initiator])[2])
+            return true
+        end
+    end
+    false
 end
 
 function notification_blocked_by_mutelist(est::CacheStorage, pubkey::Nostr.PubKeyId, notif_args)
