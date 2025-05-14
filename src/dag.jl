@@ -3463,6 +3463,8 @@ function init_parsing()
                                           :mention_expr,
                                           :kind_expr,
                                           :repliestokind_expr,
+                                          :posttype_expr,
+                                          :event_expr,
                                           :minduration_expr,
                                           :maxduration_expr,
                                           :filter_expr,
@@ -3524,6 +3526,11 @@ function init_parsing()
                    :mention_expr => P.seq(t"@", :pubkey),
                    :kind_expr => P.seq(t"kind:", :number),
                    :repliestokind_expr => P.seq(t"repliestokind:", :number),
+                   :posttype_expr => P.seq(t"post:", :word_expr),
+                   :event_note => P.seq(t"note", P.some(P.satisfy(c->isletter(c)||isdigit(c)))),
+                   :event_nevent => P.seq(t"nevent", P.some(P.satisfy(c->isletter(c)||isdigit(c)))),
+                   :event_naddr => P.seq(t"naddr", P.some(P.satisfy(c->isletter(c)||isdigit(c)))),
+                   :event_expr => P.first(:event_note, :event_nevent, :event_naddr),
                    :filter_expr => P.seq(t"filter:", :word_expr),
                    :url_expr => P.seq(t"url:", :word_expr),
                    :orientation_expr => P.seq(t"orientation:", :word_expr),
@@ -3589,6 +3596,9 @@ struct To;       pubkey::Nostr.PubKeyId; end
 struct Mention;  pubkey::Nostr.PubKeyId; end
 struct Kind;     kind::Int; end
 struct RepliesToKind; kind::Int; end
+struct PostType; type::String; end
+struct EventId;    eid::Nostr.EventId; end
+struct EventAddr;  kind::Int; pubkey::Nostr.PubKeyId; identifier::String; end
 struct Filter;   filter::String; end
 struct Url;      word::String; end
 struct List;     list::String; end
@@ -3682,6 +3692,11 @@ function parse_search_query(query)
         elseif m.rule == :mention_expr; O.Mention(sm[2])
         elseif m.rule == :kind_expr; O.Kind(sm[2])
         elseif m.rule == :repliestokind_expr; O.RepliesToKind(sm[2])
+        elseif m.rule == :posttype_expr; O.PostType(sm[2].word)
+        elseif m.rule == :event_note; O.EventId(Nostr.bech32_decode(string(m.view)))
+        elseif m.rule == :event_nevent; O.EventId(Bech32.nip19_decode_wo_tlv(string(m.view)))
+        elseif m.rule == :event_naddr; let a = Dict(Bech32.nip19_decode(string(m.view))); O.EventAddr(a[Bech32.Kind], a[Bech32.Author], a[Bech32.Special]); end
+        elseif m.rule == :event_expr; sm[1]
         elseif m.rule == :filter_expr; O.Filter(sm[2].word)
         elseif m.rule == :url_expr; O.Url(sm[2].word)
         elseif m.rule == :minduration_expr; O.MinDuration(Float64(sm[2]))
@@ -3869,6 +3884,8 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             # else
             #     error("unsupported repliestokind operator argument")
             # end
+        elseif op isa O.PostType && op.type == "root"
+            cond("not exists (select 1 from basic_tags btpt where btpt.id = $(T(o.advsearch)).id and btpt.kind = $(Int(Nostr.TEXT_NOTE)) and btpt.tag = 'e' and btpt.arg3 = 'root' limit 1)")
         elseif op isa O.Scope
             if op.scope in ["myfollows", "mynetwork"]
                 if     op.scope == "myfollows"
@@ -3996,6 +4013,9 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         elseif op isa O.From;      cond("$(T(o.advsearch)).pubkey = $(P(op.pubkey))")
         elseif op isa O.To;        cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
         elseif op isa O.Mention;   cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
+        elseif op isa O.EventId;   cond("$(T(o.advsearch)).id = $(P(op.eid))")
+        elseif op isa O.EventAddr
+            cond("$(T(o.reads)).pubkey = $(P(op.pubkey)) and $(T(o.reads)).identifier = $(P(op.identifier)) and $(T(o.reads)).latest_eid = $(T(o.advsearch)).id")
         elseif op isa O.Filter
             if startswith(op.filter, '-')
                 cond("$(T(o.advsearch)).filter_tsv @@ to_tsquery('simple', $(P("! "*op.filter)))")
@@ -4117,7 +4137,9 @@ function debug_query(est, query; limit=40, user_pubkey=Main.test_pubkeys[:pedja]
                                      explain,
                                      sql_generator=function (s, u, rs_)
                                          @show (length(rs_), "$((u-s)/(24*3600)) days", "$(u-s) secs", Dates.unix2datetime(s), Dates.unix2datetime(u))
-                                         sql, params = to_sql(est, user_pubkey, Main.App.DAG_OUTPUTS[][2], parse_search_query(query), 1, s, u, limit, 0)
+                                         pq = parse_search_query(query)
+                                         display(pq)
+                                         sql, params = to_sql(est, user_pubkey, Main.App.DAG_OUTPUTS[][2], pq, 1, s, u, limit, 0)
                                          println(sql)
                                          println()
                                          sql2 = replace(sql, r"\$[0-9]+"=>function (s)
