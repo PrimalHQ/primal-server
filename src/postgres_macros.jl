@@ -77,7 +77,7 @@ macro ms__str(query::String); exec_to_table(:membership, query); end
 
 column_to_jl_type = Dict{String, Function}()
 tonamedtuples(r) = [(; [Symbol(k)=>
-                        if     k in ["pubkey", "pk"]    || endswith(k, "_pk");  Nostr.PubKeyId(v)
+                        if     k in ["pubkey", "pk", "user_pubkey"]    || endswith(k, "_pk");  Nostr.PubKeyId(v)
                         elseif k in ["event_id", "eid"] || endswith(k, "_eid"); Nostr.EventId(v)
                         else;  get(column_to_jl_type, k, identity)(v)
                         end

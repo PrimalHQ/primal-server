@@ -573,7 +573,8 @@ CREATE OR REPLACE FUNCTION public.enrich_feed_events(
     a_posts post[], 
     a_user_pubkey bytea, 
     a_apply_humaness_check bool, 
-    a_order_by varchar DEFAULT 'created_at'
+    a_order_by varchar DEFAULT 'created_at',
+    presort bool DEFAULT true
 )
 	RETURNS SETOF jsonb
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
@@ -592,8 +593,12 @@ DECLARE
     a_posts_sorted post[];
     elements jsonb := '{}';
 BEGIN
-    BEGIN
+    IF presort THEN
         a_posts_sorted := ARRAY (SELECT (event_id, created_at)::post FROM UNNEST(a_posts) p GROUP BY event_id, created_at ORDER BY created_at DESC);
+    ELSE
+        a_posts_sorted := a_posts;
+    END IF;
+    BEGIN
         SELECT COALESCE(jsonb_agg(ENCODE(event_id, 'hex')), '[]'::jsonb) INTO elements FROM UNNEST(a_posts_sorted) p;
     EXCEPTION WHEN OTHERS THEN
         RAISE NOTICE '% %', SQLERRM, SQLSTATE;
