@@ -14,7 +14,7 @@ import ..DB
 import ..Nostr
 using ..Utils: ThreadSafe, Throttle
 using ..Postgres: @P, pgparams
-using ..PostgresMacros: @p0_str
+using ..PostgresMacros: @p0_str, @p0tl_str
 import ..Bech32
 
 exposed_functions = Set([:feed,
