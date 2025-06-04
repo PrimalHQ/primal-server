@@ -100,7 +100,8 @@ function broadcast_events(
     cond = Condition()
 
     cnts = (; 
-            relays_started = Ref(0),
+            # relays_started = Ref(0),
+            relays_started = Ref(length(relays)),
             relays_done    = Ref(0),
             per_eid        = Dict{Nostr.EventId, Int}(),
             sends          = Ref(0),
@@ -109,9 +110,9 @@ function broadcast_events(
            ) |> Utils.ThreadSafe
 
     function handle_connection(client)
-        lock(cnts) do cnts
-            cnts.relays_started[] += 1
-        end
+        # lock(cnts) do cnts
+        #     cnts.relays_started[] += 1
+        # end
         try
             for e in events
                 @tr (:event, (; client.relay_url, e.id, e.pubkey, e.created_at))
@@ -127,6 +128,9 @@ function broadcast_events(
                                                  m[3] || (cnts.duplicates[] += 1)
                                                  haskey(cnts.per_eid, eid) || on_first_accept(e)
                                                  cnts.per_eid[eid] = get(cnts.per_eid, eid, 0) + 1
+                                                 if length(cnts.per_eid) == length(events)
+                                                     notify(cond, cnts)
+                                                 end
                                              end
                                          end
                                      catch _
@@ -140,9 +144,9 @@ function broadcast_events(
         end
         lock(cnts) do cnts
             cnts.relays_done[] += 1
-            if cnts.relays_done[] == cnts.relays_started[]
-                notify(cond, cnts)
-            end
+            # if cnts.relays_done[] == cnts.relays_started[]
+            #     notify(cond, cnts)
+            # end
         end
     end
 
