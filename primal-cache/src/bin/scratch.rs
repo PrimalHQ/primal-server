@@ -22,7 +22,7 @@ pub use sqlx::Pool;
 async fn main() -> anyhow::Result<()> {
     // CALL-SELECTED-FUNCTION-HERE
     let f = t122;
-    primal_cache::main_1(f).await
+    primal_cache::main_1(f, f).await
 }
 
 async fn t122(config: Config, state: State) -> anyhow::Result<()> {{

@@ -77,7 +77,7 @@ function run_rebroadcasting()
                 @tr res
                 Postgres.execute(:membership, "update event_rebroadcasting set last_batch_status = \$2 where pubkey = \$1", 
                                  [pubkey, JSON.json(res, 2)])
-                if @tr res.success[]
+                if @tr res.success
                     Postgres.execute(:membership, "update event_rebroadcasting set event_created_at = \$2, event_idx = event_idx + \$3, batchhash = \$4 where pubkey = \$1", 
                                      [pubkey, events[end].created_at, cnt, batchhash])
                 end
@@ -92,7 +92,7 @@ end
 
 function broadcast_events(
         relays::Vector, events::Vector{Nostr.Event}; 
-        timeout=TIMEOUT[], 
+        timeout=TIMEOUT[], delay=0.0,
         on_first_accept::Function=(e::Nostr.Event)->nothing,
     )
     funcname = "broadcast_events"
@@ -106,7 +106,6 @@ function broadcast_events(
             per_eid        = Dict{Nostr.EventId, Int}(),
             sends          = Ref(0),
             duplicates     = Ref(0),
-            success        = Ref(false),
            ) |> Utils.ThreadSafe
 
     function handle_connection(client)
@@ -152,7 +151,7 @@ function broadcast_events(
 
     @async begin
         sleep(timeout)
-        notify(cond, NostrClient.Timeout("broadcast_events"); error=true)
+        notify(cond, NostrClient.Timeout("broadcast_events"); error=false)
     end
 
     clients = []
@@ -165,25 +164,25 @@ function broadcast_events(
                                           end))
     end
 
+    sleep(delay)
+
     try
         res = wait(cond)
-        if res isa Exception
-            throw(res)
-        else
-            lock(cnts) do cnts
-                res.success[] = length(cnts.per_eid) == length(events)
-                (; 
-                 success        = cnts.success[],
-                 relays         = length(relays),
-                 relays_started = cnts.relays_started[],
-                 relays_done    = cnts.relays_done[],
-                 events         = length(events),
-                 events_done    = length(cnts.per_eid),
-                 sends          = cnts.sends[],
-                 duplicates     = cnts.duplicates[],
-                 per_eid        = Dict([Nostr.hex(eid)=>cnt for (eid, cnt) in cnts.per_eid]),
-                )
-            end
+        lock(cnts) do cnts
+            success = length(cnts.per_eid) == length(events)
+            (; 
+             success,
+             relays         = length(relays),
+             relays_started = cnts.relays_started[],
+             relays_done    = cnts.relays_done[],
+             events         = length(events),
+             events_done    = length(cnts.per_eid),
+             sends          = cnts.sends[],
+             duplicates     = cnts.duplicates[],
+             per_eid        = Dict([Nostr.hex(eid)=>cnt for (eid, cnt) in cnts.per_eid]),
+             timedout       = !success && res isa Exception,
+             relay_urls     = relays,
+            )
         end
     finally
         for client in clients
