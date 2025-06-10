@@ -106,6 +106,8 @@ exposed_functions = Set([:feed,
 
                          :get_recommended_blossom_servers,
                          :replaceable_event,
+                         :follow_lists,
+                         :follow_list,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -1152,7 +1154,8 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=true, ap
 
     if usepgfuncs
         return [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from user_infos(\$1::text[])", 
-                                                           ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}'])]
+                                                           ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}']
+                                                           ) if !(e isa Missing)]
     end
 
     res_meta_data = Dict() |> ThreadSafe
@@ -4068,6 +4071,73 @@ function muted_threads_feed(
         push!(posts, (Nostr.EventId(r.id), r.created_at))
     end
     enrich_feed_events_pg(est; posts, user_pubkey)
+end
+
+function parse_follow_list(e::Nostr.Event)
+    pks = Set{Nostr.PubKeyId}()
+    for t in e.tags
+        if length(t.fields) >= 2 && t.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(t.fields[2]) catch _ end)
+            push!(pks, pk)
+        end
+    end
+    pks
+end
+
+function follow_lists(
+        est::DB.CacheStorage;
+        since=0, until=Utils.current_time(), 
+        limit=5, offset=0,
+    )
+    limit = min(20, limit)
+
+    es = []
+    res = []
+
+    pks = Set{Nostr.PubKeyId}()
+    for r in p0"
+        select es.* from parametrized_replaceable_events pre, events es 
+        where pre.kind = 39089 and pre.created_at >= $since and pre.created_at <= $until and pre.event_id = es.id
+        order by pre.created_at desc limit $limit offset $offset"
+        e = event_from_row(collect(r))
+
+        has_image = false
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "image"
+                has_image = true
+                break
+            end
+        end
+        has_image || continue
+
+        push!(res, e)
+
+        append!(res, map(castnamedtuple, p0"select * from event_media_response($(e.id))"))
+
+        push!(es, (e.id, e.created_at))
+
+        push!(pks, e.pubkey)
+
+        pks_param = "{$(join(["\\\\x$(Nostr.hex(pk))" for pk in parse_follow_list(e)], ','))}"
+        rs = p0"select key as pubkey, value as cnt from pubkey_followers_cnt where key = any ($(pks_param)::bytea[]) order by cnt desc limit 5"
+        union!(pks, [r.pubkey for r in rs])
+    end
+
+    [res..., user_infos(est; pubkeys=collect(pks), usepgfuncs=true)..., range(es, :created_at)...]
+end
+
+function follow_list(
+        est::DB.CacheStorage;
+        pubkey, identifier::String,
+    )
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    rs = p0"
+    select es.* from parametrized_replaceable_events pre, events es 
+    where pre.kind = 39089 and pre.pubkey = $pubkey and pre.identifier = $identifier and pre.event_id = es.id
+    "
+    isempty(rs) && error("no such follow list")
+    e = event_from_row(collect(rs[1]))
+    pks = parse_follow_list(e)
+    [e, user_infos(est; pubkeys=collect(pks), usepgfuncs=true)...]
 end
 
 end
