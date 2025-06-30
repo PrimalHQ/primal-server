@@ -123,6 +123,7 @@ EOF
 
   init_postgres_schema = pkgs.writeShellScript "init_postgres_schema.sh" ''
     set -x
+    psql -h127.0.0.1 -p54017 primal1 < sql/schemas/membership.sql
     psql -h127.0.0.1 -p54017 primal1 < sql/schemas/cache-full.sql
   '';
 
