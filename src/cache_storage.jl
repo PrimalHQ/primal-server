@@ -29,7 +29,7 @@ hashfunc(::Type{Nostr.PubKeyId}) = pk->pk.pk[32]
 hashfunc(::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) = p->p[1].pk[32]
 
 MAX_MESSAGE_SIZE = Ref(500_000) |> ThreadSafe
-kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT]]
+kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT, Nostr.REPORTING]]
 
 term_lines = try parse(Int, strip(read(`tput lines`, String))) catch _ 15 end
 threadprogress = Dict{Int, Any}() |> ThreadSafe
@@ -1356,6 +1356,8 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             catch _ Utils.print_exceptions() end
         elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
             ext_long_form_note(est, e)
+        elseif e.kind == Int(Nostr.REPORTING)
+            import_reporting(est, e)
         end
     end
 
@@ -1593,6 +1595,38 @@ function import_pubkey_bookmarks(est::CacheStorage, e::Nostr.Event)
             end
         end
     end
+end
+
+REPORTING_WHITELIST = Set{Nostr.PubKeyId}()
+
+function import_reporting(est::CacheStorage, e::Nostr.Event)
+    function insert_rule(target, target_type, grp)
+        Postgres.execute(:membership, "insert into filterlist values (\$1, \$2, \$3, \$4, \$5, \$6) on conflict do nothing", 
+                         [target, target_type, true, grp, e.created_at, "1984/$(Nostr.hex(e.id)): " * e.content])
+    end
+    cnt = 0
+    if e.pubkey in REPORTING_WHITELIST
+        for tag in e.tags
+            if length(tag.fields) >= 3 
+                grp =
+                if     tag.fields[3] == "impersonation"; "impersonation"
+                elseif tag.fields[3] == "spam";          "spam"
+                else;  continue
+                end
+                if     tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                    insert_rule(pk, "pubkey", grp)
+                    cnt += 1
+                elseif tag.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                    insert_rule(eid, "event", grp)
+                    insert_rule(est.events[eid].pubkey, "pubkey", grp)
+                    cnt += 2
+                else
+                    continue
+                end
+            end
+        end
+    end
+    cnt
 end
 
 function update_content_moderation_rules(est::CacheStorage, pubkey::Nostr.PubKeyId)
