@@ -106,6 +106,7 @@ exposed_functions = Set([:feed,
 
                          :get_recommended_blossom_servers,
                          :replaceable_event,
+
                          :follow_lists,
                          :follow_list,
                         ])
@@ -1338,8 +1339,38 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     append!(res, primal_verified_names(est, [pubkey]))
 
     !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
+    
+    append!(res, user_profile_live_streams(est, pubkey))
 
     res.wrapped
+end
+
+function user_profile_live_streams(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    res = []
+    for (e,) in Postgres.execute(:p0, "
+        SELECT get_event_jsonb(pre.event_id)
+        FROM parametrized_replaceable_events pre, basic_tags bt
+        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8
+          AND pre.event_id = bt.id AND bt.tag = 'p' AND bt.arg1 = \$1
+          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
+                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
+                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
+        ", [pubkey])[2]
+        e = castnamedtuple(e) 
+        push!(res, e)
+    end
+    for (e,) in Postgres.execute(:p0, "
+        SELECT get_event_jsonb(pre.event_id)
+        FROM parametrized_replaceable_events pre
+        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8 AND pre.pubkey = \$1
+          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
+                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
+                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
+        ", [pubkey])[2]
+        e = castnamedtuple(e) 
+        push!(res, e)
+    end
+    collect(Set(res))
 end
 
 function user_profile_followed_by(est::DB.CacheStorage; pubkey, user_pubkey, limit=10)
