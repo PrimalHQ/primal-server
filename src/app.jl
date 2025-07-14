@@ -930,7 +930,8 @@ end
 function thread_view(est::DB.CacheStorage; 
         event_id, 
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
-        usepgfuncs=false, 
+        # usepgfuncs=false, 
+        usepgfuncs=true, 
         user_pubkey=nothing, 
         apply_humaness_check=false,
         kwargs...)
@@ -942,8 +943,9 @@ function thread_view(est::DB.CacheStorage;
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
     if usepgfuncs
-        res = map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from thread_view(\$1, \$2, \$3, \$4, \$5, \$6, \$7)",
-                                      [event_id, limit, since, until, offset, user_pubkey, apply_humaness_check]))
+        include_parent_posts = get(kwargs, :include_parent_posts, true)
+        res = map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from thread_view(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)",
+                                      [event_id, limit, since, until, offset, user_pubkey, apply_humaness_check, include_parent_posts]))
         return res
     end
 
