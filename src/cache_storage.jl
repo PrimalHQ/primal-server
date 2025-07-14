@@ -1540,13 +1540,15 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
     end
 end
 
-function import_delete_event(est::CacheStorage, e::Nostr.Event)
+function import_delete_event(est::CacheStorage, e::Nostr.Event; dryrun=false)
     deleted = Ref(false)
 
     function delete_event(eid)
-        est.deleted_events[eid] = e.id
+        if !dryrun
+            est.deleted_events[eid] = e.id
+        end
         if eid in est.events
-            delete!(est.events, eid)
+            dryrun || delete!(est.events, eid)
             deleted[] = true
         end
     end
@@ -1570,13 +1572,14 @@ function import_delete_event(est::CacheStorage, e::Nostr.Event)
                 eid = Nostr.EventId(eid)
                 delete_event(eid)
             end
+            Postgres.execute(:p0,  "delete from parametrized_replaceable_events where pubkey = \$1 and kind = \$2 and identifier = \$3", [pk, kind, identifier])
             if kind == Int(Nostr.LONG_FORM_CONTENT)
                 for (eid,) in Postgres.execute(:p0, "select eid from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])[2]
                     eid = Nostr.EventId(eid)
                     delete_event(eid)
                 end
-                Postgres.execute(:p0, "delete from reads where pubkey = \$1 and identifier = \$2", [pk, identifier])
-                Postgres.execute(:p0, "delete from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])
+                dryrun || Postgres.execute(:p0, "delete from reads where pubkey = \$1 and identifier = \$2", [pk, identifier])
+                dryrun || Postgres.execute(:p0, "delete from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])
             end
         end
     end
