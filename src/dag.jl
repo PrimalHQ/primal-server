@@ -3440,6 +3440,14 @@ macro t_str(t, flags...)
 end
 
 function init_parsing()
+    function scan_hex_id(m)
+        if length(m) == 64 && all(c->c in '0':'9' || c in 'a':'f' || c in 'A':'F', m)
+            length(m)
+        else
+            0
+        end
+    end
+
     rules[] = Dict(
                    :input => P.seq(:ws, :or_expr, :ws, P.end_of_input),
 
@@ -3513,15 +3521,14 @@ function init_parsing()
                    :not_phrase_expr => P.seq(t"-\"", P.some(P.satisfy(c->c!='"')), t"\""),
                    :not_word_expr => P.seq(t"-", :word_expr),
                    :not_hashtag_expr => P.seq(t"-#", :word_expr),
-                   # :ts => P.some(P.satisfy(c->isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
                    :ts => P.some(P.satisfy(c->isletter(c)||isdigit(c)||(c=='-')||(c=='_')||(c==':'))),
                    :since_expr => P.seq(t"since:", :ts),
                    :until_expr => P.seq(t"until:", :ts),
-                   :pubkey_hex => P.some(P.satisfy(c->c in '0':'9' || c in 'a':'f' || c in 'A':'F')),
+                   :pubkey_hex => P.scan(scan_hex_id),
                    :pubkey_npub => P.seq(t"npub", P.some(P.satisfy(c->isletter(c)||isdigit(c)))),
                    :pubkey_nprofile => P.seq(t"nprofile", P.some(P.satisfy(c->isletter(c)||isdigit(c)))),
                    :pubkey => P.first(:pubkey_hex, :pubkey_npub, :pubkey_nprofile),
-                   :from_expr => P.seq(t"from:", P.first(:pubkey, :event_naddr)),
+                   :from_expr => P.seq(t"from:", P.first(:pubkey, :event_naddr, :word_expr)),
                    :to_expr => P.seq(t"to:", :pubkey),
                    :mention_expr => P.seq(t"@", :pubkey),
                    :kind_expr => P.seq(t"kind:", :number),
@@ -3593,7 +3600,7 @@ struct Since;    ts::Int; end
 struct Until;    ts::Int; end
 struct EventId;   eid::Nostr.EventId; end
 struct EventAddr; kind::Int; pubkey::Nostr.PubKeyId; identifier::String; end
-struct From;     from::Union{Nostr.PubKeyId, EventAddr}; end
+struct From;     from::Union{Nostr.PubKeyId, EventAddr, Word}; end
 struct To;       pubkey::Nostr.PubKeyId; end
 struct Mention;  pubkey::Nostr.PubKeyId; end
 struct Kind;     kind::Int; end
@@ -4014,7 +4021,9 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             if     op.from isa Nostr.PubKeyId; cond("$(T(o.advsearch)).pubkey = $(P(op.from))")
             elseif op.from isa O.EventAddr    
                 @assert op.from.kind == 39089
-                cond("$(T(o.advsearch)).pubkey in (select follow_pubkey from cache.follow_lists where pubkey = $(P(op.from.pubkey)) and identifier = $(P(op.from.identifier)))")
+                cond("$(T(o.advsearch)).pubkey in (select follow_pubkey from follow_lists where pubkey = $(P(op.from.pubkey)) and identifier = $(P(op.from.identifier)))")
+            elseif op.from isa O.Word
+                cond("$(T(o.advsearch)).pubkey = (select pubkey from verified_users where name = $(P(op.from.word)) and default_name limit 1)")
             end
         elseif op isa O.To;        cond("$(T(o.advsearch)).reply_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
         elseif op isa O.Mention;   cond("$(T(o.advsearch)).mention_tsv @@ plainto_tsquery('simple', $(P(Nostr.hex(op.pubkey))))")
@@ -4172,7 +4181,7 @@ using Test: @testset, @test
 
 function runtests()
     @testset "AdvancedSearch-Parsing-1" begin
-        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 -\"phraseword3 phraseword4\" #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf from:naddr1qvzqqqyckypzqpxfzhdwlm3cx9l6wdzyft8w8y9gy607tqgtyfq7tekaxs7lhmxfqqx8sa3hdg6x6empwejhycglw40tv to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? mininteractions:5 scope:myfollows minwords:100 minlongreplies:11 mintrustrank:-9 lang:fra features:feat1,feat2"
+        input = "word1 word2 \"phraseword1 phraseword2\" -notword1 -\"phraseword3 phraseword4\" #hashtag1 since:2011-02-03 until:2022-02-03_11:22 from:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 from:npub13rxpxjc6vh65aay2eswlxejsv0f7530sf64c4arydetpckhfjpustsjeaf from:naddr1qvzqqqyckypzqpxfzhdwlm3cx9l6wdzyft8w8y9gy607tqgtyfq7tekaxs7lhmxfqqx8sa3hdg6x6empwejhycglw40tv from:miljan to:88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 @88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079 kind:123 filter:filter url:urlword1 orientation:vertical minduration:123 maxduration:234 :) list:list1 ? mininteractions:5 scope:myfollows minwords:100 minlongreplies:11 mintrustrank:-9 lang:fra features:feat1,feat2"
         expr = parse_search_query(input)
         @assert expr isa O.And
         # dump(expr)
@@ -4187,6 +4196,7 @@ function runtests()
                                        O.From(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
                                        O.From(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
                                        O.From(O.EventAddr(39089, Nostr.PubKeyId("04c915daefee38317fa734444acee390a8269fe5810b2241e5e6dd343dfbecc9"), "xv7j4mgavera")),
+                                       O.From(O.Word("miljan")),
                                        O.To(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
                                        O.Mention(Nostr.PubKeyId("88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079")),
                                        O.Kind(123),
