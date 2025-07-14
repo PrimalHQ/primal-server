@@ -694,22 +694,25 @@ end
 
 DEFAULT_RELAYS_FILE = Ref("default-relays.json")
 
+NON_RECOMMENDED_RELAYS = Set{String}()
+
 function get_default_relays(est::DB.CacheStorage)
     mined = [s for s in readlines("primal-server/relays-mined-from-contact-lists.txt") if !isempty(s)]
-    mined_idxs = Set()
-    while length(mined_idxs) < 4
-        push!(mined_idxs, rand(1:length(mined)))
+    rand_relays = []
+    while length(rand_relays) < 4
+        relay = mined[rand(1:length(mined))]
+        relay in NON_RECOMMENDED_RELAYS && continue
+        push!(rand_relays, relay)
     end
     relays = [
               "wss://relay.primal.net",
-              "wss://purplepag.es",
               rand([
                     "wss://relay.damus.io", 
                     "wss://nos.lol", 
                     "wss://relay.nostr.band", 
                     "wss://relayable.org",
                    ]),
-              mined[collect(mined_idxs)]...
+              rand_relays...,
              ]
     [(; kind=Int(DEFAULT_RELAYS), content=JSON.json(relays))]
 end
