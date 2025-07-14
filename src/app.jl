@@ -3673,9 +3673,9 @@ function membership_media_management_uploads(
     res = []
     urls = []
     us = []
-    for (url, size, mimetype, created_at) in 
+    for (sha256, path, size, mimetype, created_at) in 
         Postgres.execute(:membership, 
-                         "select 'https://blossom.primal.net/' || encode(mu.sha256, 'hex'), mu.size, mu.mimetype, mu.created_at
+                         "select mu.sha256, mu.path, mu.size, mu.mimetype, mu.created_at
                          from media_uploads mu
                          where 
                             mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and 
@@ -3683,6 +3683,8 @@ function membership_media_management_uploads(
                          order by mu.created_at desc
                          limit \$4 offset \$5", 
                          [e.pubkey, since, until, limit, offset])[2]
+        ext = splitext(path)[end]
+        url = "https://blossom.primal.net/$(bytes2hex(sha256))$(ext)"
         push!(us, (url, created_at))
         push!(res, (; url, size, mimetype, created_at))
         push!(urls, url)
