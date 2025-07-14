@@ -135,8 +135,19 @@ Postgres.pg_to_jl_type_conversion[2950] = d->Base.UUID(String(d))
 Postgres.pg_to_jl_type_conversion[114] = v -> JSON.parse(String(v))
 Postgres.pg_to_jl_type_conversion[3802] = v -> JSON.parse(String(v))
 
-Postgres.pg_to_jl_type_conversion[198456] = v -> String(v) # filterlist.target_type
-Postgres.pg_to_jl_type_conversion[198449] = v -> String(v) # filterlist.grp
+# Postgres.pg_to_jl_type_conversion[198456] = v -> String(v) # filterlist.target_type
+# Postgres.pg_to_jl_type_conversion[198449] = v -> String(v) # filterlist.grp
+
+function init_postgres_type_conversions()
+    for ty in [
+               "filterlist_target",
+               "filterlist_grp",
+              ]
+        for (oid,) in Postgres.execute(:p0, "SELECT t.oid FROM pg_type t WHERE t.typname  = \$1", [ty])[2]
+            Postgres.pg_to_jl_type_conversion[oid] = v -> String(v)
+        end
+    end
+end
 
 function Base.setindex!(ssd::PGDict{K, V}, v::V, k::K)::V where {K, V}
     exe(ssd.dbconns[shard(ssd, k)],

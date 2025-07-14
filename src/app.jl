@@ -1104,7 +1104,8 @@ end
 function castnamedtuple(d)
     if     d isa NamedTuple; d
     elseif d isa Dict; d["kind"] < 10_000_000 ? Nostr.Event(d) : (; [Symbol(k)=>v for (k, v) in d]...)
-    else; error("invalid argument")
+    elseif d isa Missing; nothing
+    else; error("invalid argument: $d")
     end
 end
         
@@ -3719,7 +3720,10 @@ function membership_recovery_contact_lists(
         kwargs...
     )
     e = membership_event_from_user(event_from_user)
+    membership_recovery_contact_lists_(est, e.pubkey)
+end
 
+function membership_recovery_contact_lists_(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     es = []
     for (_, eid, created_at) in Postgres.execute(:p0timelimit, "
                                                  with cls as (
@@ -3731,7 +3735,7 @@ function membership_recovery_contact_lists(
                                                  order by day desc, follows desc, id
                                                  limit 30
                                                  ",
-                                                 [e.pubkey])[2]
+                                                 [pubkey])[2]
         push!(es, (Nostr.EventId(eid), created_at))
     end
     # es = sort(es; by=x->-x[2])

@@ -1036,6 +1036,7 @@ end
 
 BLOCKED_KINDS = [29333]
 EVENT_RELAY_TRACKING_ENABLED = Ref(false)
+IMPORT_REPORTING_EVENTS = Ref(false)
 
 function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_daily_stats=false, relay_url=nothing)
     est.readonly[] && return false
@@ -1047,6 +1048,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     e.id in est.deleted_events && return false
 
     EVENT_RELAY_TRACKING_ENABLED[] && (isnothing(relay_url) || Postgres.execute(:p0, "insert into event_relays values (\$1, \$2, \$3) on conflict do nothing", [e.id, relay_url, Utils.current_time()]))
+    isnothing(relay_url) || update_known_relays(est, relay_url)
 
     should_import = lock(already_imported_check_lock) do
         if e.kind in BLOCKED_KINDS || e.id in est.events || !ext_preimport_check(est, e)
@@ -1357,7 +1359,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
             ext_long_form_note(est, e)
         elseif e.kind == Int(Nostr.REPORTING)
-            import_reporting(est, e)
+            IMPORT_REPORTING_EVENTS[] && import_reporting(est, e)
         end
     end
 
@@ -2068,9 +2070,14 @@ end
 function update_fetcher_relays(est::CacheStorage, pubkey::Nostr.PubKeyId; source_event_id=nothing)
     relay_urls = [t[2] for t in Main.App.get_user_relays(est; pubkey)[1].tags]
     for relay_url in relay_urls
-        Postgres.execute(:p0, "insert into fetcher_relays values (\$1, \$2, \$3) on conflict do nothing", 
+        Postgres.execute(:p0, "insert into fetcher_relays values (\$1, \$2, \$3) on conflict (relay_url) do update set updated_at = excluded.updated_at", 
                          [relay_url, Dates.now(), source_event_id])
     end
+end
+
+function update_known_relays(est::CacheStorage, relay_url::String)
+    Postgres.execute(:p0, "insert into known_relays values (\$1, \$2) on conflict (relay_url) do update set last_import_at = excluded.last_import_at", 
+                     [relay_url, Dates.now()])
 end
 
 function import_messages(est::CacheStorage, filename::String; pos=0, cond=e->true, running=Utils.PressEnterToStop())

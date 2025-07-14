@@ -155,6 +155,8 @@ DROP INDEX public.logs_1_d241bdb71c_t_idx;
 DROP INDEX public.logs_1_d241bdb71c_module_idx;
 DROP INDEX public.logs_1_d241bdb71c_func_idx;
 DROP INDEX public.logs_1_d241bdb71c_eid;
+DROP INDEX public.live_event_participants_kind_pubkey_identifier_idx;
+DROP INDEX public.live_event_participants_kind_participant_pubkey_idx;
 DROP INDEX public.lists_pubkey;
 DROP INDEX public.lists_list;
 DROP INDEX public.lists_added_at;
@@ -201,6 +203,8 @@ DROP INDEX public.event_sentiment_1_d3d7a00a54_topsentiment_idx;
 DROP INDEX public.event_replies_1_9d033b5bb3_rowid_idx;
 DROP INDEX public.event_replies_1_9d033b5bb3_reply_created_at_idx;
 DROP INDEX public.event_replies_1_9d033b5bb3_event_id_idx;
+DROP INDEX public.event_relays_imported_at_idx;
+DROP INDEX public.event_relays_event_id_idx;
 DROP INDEX public.event_pubkey_actions_1_d62afee35d_updated_at_idx;
 DROP INDEX public.event_pubkey_actions_1_d62afee35d_rowid_idx;
 DROP INDEX public.event_pubkey_actions_1_d62afee35d_pubkey_idx;
@@ -285,20 +289,19 @@ ALTER TABLE ONLY public.wsconnvars DROP CONSTRAINT wsconnvars_pkey;
 ALTER TABLE ONLY public.wsconnruns DROP CONSTRAINT wsconnruns_pkey;
 ALTER TABLE ONLY public.vars DROP CONSTRAINT vars_pkey;
 ALTER TABLE ONLY public.user_search DROP CONSTRAINT user_search_pkey;
-ALTER TABLE ONLY public.ui DROP CONSTRAINT ui_pk;
 ALTER TABLE ONLY public.trusted_pubkey_followers_cnt DROP CONSTRAINT trusted_pubkey_followers_cnt_pkey;
 ALTER TABLE ONLY public.text_metadata DROP CONSTRAINT text_metadata_pkey;
 ALTER TABLE ONLY public.replaceable_events DROP CONSTRAINT replaceable_events_pk;
 ALTER TABLE ONLY public.relays DROP CONSTRAINT relays_pkey;
 ALTER TABLE ONLY public.relay_url_map DROP CONSTRAINT relay_url_map_pkey;
 ALTER TABLE ONLY public.relay_list_metadata_1_801a17fc93 DROP CONSTRAINT relay_list_metadata_1_801a17fc93_pkey;
-ALTER TABLE ONLY public.refs DROP CONSTRAINT refs_pkey;
 ALTER TABLE ONLY public.reads_versions_12_b537d4df66 DROP CONSTRAINT reads_versions_12_b537d4df66_pubkey_identifier_eid_key;
 ALTER TABLE ONLY public.reads_versions_11_fb53a8e0b4 DROP CONSTRAINT reads_versions_11_fb53a8e0b4_pubkey_identifier_eid_key;
 ALTER TABLE ONLY public.reads_12_68c6bbfccd DROP CONSTRAINT reads_12_68c6bbfccd_pkey;
 ALTER TABLE ONLY public.reads_11_2a4d2ce519 DROP CONSTRAINT reads_11_2a4d2ce519_pkey;
 ALTER TABLE ONLY public.pubkey_zapped_1_17f1f622a9 DROP CONSTRAINT pubkey_zapped_1_17f1f622a9_pkey;
 ALTER TABLE ONLY public.pubkey_trustrank DROP CONSTRAINT pubkey_trustrank_pkey;
+ALTER TABLE ONLY public.pubkey_notification_cnts_1_d78f6fcade DROP CONSTRAINT pubkey_notification_cnts_1_d78f6fcade_pkey;
 ALTER TABLE ONLY public.pubkey_media_cnt_1_b5e2a488b1 DROP CONSTRAINT pubkey_media_cnt_1_b5e2a488b1_pkey;
 ALTER TABLE ONLY public.pubkey_ln_address_1_d3649b2898 DROP CONSTRAINT pubkey_ln_address_1_d3649b2898_pkey;
 ALTER TABLE ONLY public.pubkey_ids_1_54b55dd09c DROP CONSTRAINT pubkey_ids_1_54b55dd09c_pkey;
@@ -308,6 +311,7 @@ ALTER TABLE ONLY public.notification_types DROP CONSTRAINT notification_types_pk
 ALTER TABLE ONLY public.note_stats_1_07d205f278 DROP CONSTRAINT note_stats_1_07d205f278_pkey;
 ALTER TABLE ONLY public.note_length_1_15d66ffae6 DROP CONSTRAINT note_length_1_15d66ffae6_pkey;
 ALTER TABLE ONLY public.node_outputs_1_cfe6037c9f DROP CONSTRAINT node_outputs_1_cfe6037c9f_pkey;
+ALTER TABLE ONLY public.muted_threads DROP CONSTRAINT muted_threads_pkey;
 ALTER TABLE ONLY public.mute_lists_1_d90e559628 DROP CONSTRAINT mute_lists_1_d90e559628_pkey;
 ALTER TABLE ONLY public.mute_list_2_1_949b3d746b DROP CONSTRAINT mute_list_2_1_949b3d746b_pkey;
 ALTER TABLE ONLY public.mute_list_1_f693a878b9 DROP CONSTRAINT mute_list_1_f693a878b9_pkey;
@@ -317,13 +321,17 @@ ALTER TABLE ONLY public.membership_legend_customization DROP CONSTRAINT membersh
 ALTER TABLE ONLY public.media_storage_priority DROP CONSTRAINT media_storage_priority_pk;
 ALTER TABLE ONLY public.media_storage DROP CONSTRAINT media_storage_pk;
 ALTER TABLE ONLY public.media_metadata DROP CONSTRAINT media_metadata_pkey;
+ALTER TABLE ONLY public.live_event_participants DROP CONSTRAINT live_event_participants_pkey;
+ALTER TABLE ONLY public.known_relays DROP CONSTRAINT known_relays_pkey;
 ALTER TABLE ONLY public.id_table DROP CONSTRAINT id_table_pkey;
 ALTER TABLE ONLY public.human_override DROP CONSTRAINT human_override_pkey;
 ALTER TABLE ONLY public.follow_lists DROP CONSTRAINT follow_lists_pkey;
 ALTER TABLE ONLY public.filterlist DROP CONSTRAINT filterlist_pkey;
 ALTER TABLE ONLY public.fetcher_relays DROP CONSTRAINT fetcher_relays_pk;
 ALTER TABLE ONLY public.event_thread_parents_1_e17bf16c98 DROP CONSTRAINT event_thread_parents_1_e17bf16c98_pkey;
+ALTER TABLE ONLY public.event_stats_2 DROP CONSTRAINT event_stats_2_pkey;
 ALTER TABLE ONLY public.event_sentiment_1_d3d7a00a54 DROP CONSTRAINT event_sentiment_1_d3d7a00a54_pkey;
+ALTER TABLE ONLY public.event_relays DROP CONSTRAINT event_relays_pkey;
 ALTER TABLE ONLY public.event_relay DROP CONSTRAINT event_relay_pkey;
 ALTER TABLE ONLY public.event_pubkey_actions_1_d62afee35d DROP CONSTRAINT event_pubkey_actions_1_d62afee35d_pkey;
 ALTER TABLE ONLY public.event DROP CONSTRAINT event_pkey;
@@ -331,13 +339,12 @@ ALTER TABLE ONLY public.event_mentions_1_6738bfddaf DROP CONSTRAINT event_mentio
 ALTER TABLE ONLY public.event_mentions_1_0b730615c4 DROP CONSTRAINT event_mentions_1_0b730615c4_pkey;
 ALTER TABLE ONLY public.event_media_1_30bf07e9cf DROP CONSTRAINT event_media_1_30bf07e9cf_pkey;
 ALTER TABLE ONLY public.event_created_at_1_7a51e16c5c DROP CONSTRAINT event_created_at_1_7a51e16c5c_pkey;
-ALTER TABLE ONLY public.edgetypes DROP CONSTRAINT edgetypes_pkey;
-ALTER TABLE ONLY public.edges DROP CONSTRAINT edges_pkey;
 ALTER TABLE ONLY public.dvm_feeds DROP CONSTRAINT dvm_feeds_pkey;
 ALTER TABLE ONLY public.deleted_events_1_0249f47b16 DROP CONSTRAINT deleted_events_1_0249f47b16_pkey;
 ALTER TABLE ONLY public.daily_followers_cnt_increases DROP CONSTRAINT daily_followers_cnt_increases_pkey;
 ALTER TABLE ONLY public.dag_1_4bd2aaff98 DROP CONSTRAINT dag_1_4bd2aaff98_output_input_key;
 ALTER TABLE ONLY public.coverages_1_8656fc443b DROP CONSTRAINT coverages_1_8656fc443b_name_t_key;
+ALTER TABLE ONLY public.counter_by_bytea DROP CONSTRAINT counter_by_bytea_pkey;
 ALTER TABLE ONLY public.contact_lists_1_1abdf474bd DROP CONSTRAINT contact_lists_1_1abdf474bd_pkey;
 ALTER TABLE ONLY public.cmr_words DROP CONSTRAINT cmr_words_pkey;
 ALTER TABLE ONLY public.cmr_words_2 DROP CONSTRAINT cmr_words_2_pkey;
@@ -357,6 +364,7 @@ ALTER TABLE public.wsconnruns ALTER COLUMN run DROP DEFAULT;
 ALTER TABLE public.basic_tags_6_62c3d17c2f ALTER COLUMN i DROP DEFAULT;
 ALTER TABLE public.advsearch_5_d7da6f551e ALTER COLUMN i DROP DEFAULT;
 ALTER TABLE public.a_tags_1_7d98c5333f ALTER COLUMN i DROP DEFAULT;
+DROP SEQUENCE studio.idx_seq;
 DROP VIEW public.zap_receipts;
 DROP TABLE public.wsconnvars;
 DROP SEQUENCE public.wsconnruns_run_seq;
@@ -367,15 +375,10 @@ DROP TABLE public.video_thumbnails_1_107d5a46eb;
 DROP TABLE public.verified_users;
 DROP TABLE public.vars;
 DROP TABLE public.user_search;
-DROP TABLE public.ui;
-DROP TABLE public.tviews;
-DROP TABLE public.tt2;
 DROP VIEW public.trusted_users_trusted_followers;
 DROP TABLE public.trusted_pubkey_followers_cnt;
-DROP TABLE public.trelays;
 DROP TABLE public.text_metadata;
 DROP TABLE public.test_pubkeys;
-DROP TABLE public.t_push_notifications_log;
 DROP TABLE public.stuff;
 DROP TABLE public.score_expiry;
 DROP TABLE public.scheduled_hooks;
@@ -383,7 +386,6 @@ DROP TABLE public.replaceable_events;
 DROP TABLE public.relays;
 DROP TABLE public.relay_url_map;
 DROP VIEW public.relay_list_metadata;
-DROP TABLE public.refs;
 DROP TABLE public.reads_versions_11_fb53a8e0b4;
 DROP VIEW public.reads_versions;
 DROP TABLE public.reads_11_2a4d2ce519;
@@ -413,6 +415,7 @@ DROP TABLE public.notification_types;
 DROP VIEW public.note_stats;
 DROP VIEW public.note_length;
 DROP TABLE public.node_outputs_1_cfe6037c9f;
+DROP TABLE public.muted_threads;
 DROP VIEW public.mute_lists;
 DROP VIEW public.mute_list_2;
 DROP VIEW public.mute_list;
@@ -425,11 +428,14 @@ DROP TABLE public.media_metadata;
 DROP VIEW public.media;
 DROP TABLE public.media_1_16fa35f2dc;
 DROP TABLE public.logs_1_d241bdb71c;
+DROP TABLE public.live_event_participants;
 DROP TABLE public.lists;
+DROP TABLE public.known_relays;
 DROP TABLE public.id_table;
 DROP TABLE public.human_override;
 DROP VIEW public.hashtags;
 DROP TABLE public.follow_lists;
+DROP SEQUENCE public.id_seq;
 DROP TABLE public.filterlist_pubkey;
 DROP TABLE public.filterlist;
 DROP TABLE public.fetcher_relays;
@@ -438,9 +444,11 @@ DROP VIEW public.event_zapped;
 DROP VIEW public.event_thread_parents;
 DROP VIEW public.event_tags;
 DROP VIEW public.event_stats_by_pubkey;
+DROP TABLE public.event_stats_2;
 DROP VIEW public.event_stats;
 DROP VIEW public.event_sentiment;
 DROP VIEW public.event_replies;
+DROP TABLE public.event_relays;
 DROP TABLE public.event_relay;
 DROP VIEW public.event_pubkey_actions;
 DROP VIEW public.event_pubkey_action_refs;
@@ -455,14 +463,12 @@ DROP TABLE public.event_hooks;
 DROP VIEW public.event_hashtags;
 DROP VIEW public.event_created_at;
 DROP VIEW public.event_attributes;
-DROP TABLE public.edgetypes;
-DROP TABLE public.edges;
-DROP SEQUENCE public.id_seq;
 DROP TABLE public.dvm_feeds;
 DROP VIEW public.deleted_events;
 DROP TABLE public.daily_followers_cnt_increases;
 DROP TABLE public.dag_1_4bd2aaff98;
 DROP TABLE public.coverages_1_8656fc443b;
+DROP TABLE public.counter_by_bytea;
 DROP VIEW public.contact_lists;
 DROP TABLE public.cmr_words_2;
 DROP TABLE public.cmr_words;
@@ -478,10 +484,6 @@ DROP VIEW public.bookmarks;
 DROP SEQUENCE public.basic_tags_6_62c3d17c2f_i_seq;
 DROP VIEW public.basic_tags;
 DROP VIEW public.allow_list;
-DROP TABLE public.aimetadata1;
-DROP TABLE public.aievents3;
-DROP TABLE public.aievents2;
-DROP TABLE public.aievents1;
 DROP SEQUENCE public.advsearch_5_d7da6f551e_i_seq;
 DROP VIEW public.advsearch;
 DROP SEQUENCE public.a_tags_1_7d98c5333f_i_seq;
@@ -573,8 +575,11 @@ DROP VIEW prod.advsearch;
 DROP TABLE public.advsearch_5_d7da6f551e;
 DROP VIEW prod.a_tags;
 DROP TABLE public.a_tags_1_7d98c5333f;
+DROP SEQUENCE cache.id_seq;
+DROP SEQUENCE agent.knowledge_id_seq;
 DROP FUNCTION public.zap_response(r record, a_user_pubkey bytea);
 DROP FUNCTION public.wsconntasks(a_port bigint);
+DROP FUNCTION public.user_live_events(a_kind bigint, a_pubkey bytea);
 DROP FUNCTION public.user_is_human(a_pubkey bytea, a_user_pubkey bytea);
 DROP FUNCTION public.user_is_human(a_pubkey bytea);
 DROP FUNCTION public.user_infos(a_pubkeys text[]);
@@ -586,9 +591,10 @@ DROP FUNCTION public.user_blossom_relays(a_pubkeys bytea[]);
 DROP PROCEDURE public.update_user_relative_daily_follower_count_increases();
 DROP FUNCTION public.update_updated_at();
 DROP FUNCTION public.try_cast_jsonb(a_json text, a_default jsonb);
+DROP FUNCTION public.trusted_nostr_users(a_period character varying);
 DROP FUNCTION public.thread_view_reply_posts(a_event_id bytea, a_limit bigint, a_since bigint, a_until bigint, a_offset bigint);
 DROP FUNCTION public.thread_view_parent_posts(a_event_id bytea);
-DROP FUNCTION public.thread_view(a_event_id bytea, a_limit bigint, a_since bigint, a_until bigint, a_offset bigint, a_user_pubkey bytea, a_apply_humaness_check boolean);
+DROP FUNCTION public.thread_view(a_event_id bytea, a_limit bigint, a_since bigint, a_until bigint, a_offset bigint, a_user_pubkey bytea, a_apply_humaness_check boolean, a_include_parent_posts boolean);
 DROP FUNCTION public.test_pubkeys(a_name text);
 DROP FUNCTION public.safe_jsonb(data text);
 DROP FUNCTION public.safe_json(i text, fallback jsonb);
@@ -598,8 +604,9 @@ DROP PROCEDURE public.record_trusted_pubkey_followers_cnt();
 DROP FUNCTION public.raise_notice(a text);
 DROP FUNCTION public.primal_verified_names(a_pubkeys bytea[]);
 DROP FUNCTION public.notification_is_visible(type bigint, arg1 bytea, arg2 bytea, arg3 jsonb, a_user_pubkey bytea);
-DROP FUNCTION public.notification_is_hidden(type bigint, arg1 bytea, arg2 bytea);
 DROP FUNCTION public.long_form_content_feed(a_pubkey bytea, a_notes character varying, a_topic character varying, a_curation character varying, a_minwords bigint, a_limit bigint, a_since bigint, a_until bigint, a_offset bigint, a_user_pubkey bytea, a_apply_humaness_check boolean);
+DROP FUNCTION public.live_feed_posts(a_kind bigint, a_pubkey bytea, a_identifier character varying, a_limit bigint);
+DROP FUNCTION public.live_feed_initial_response(a_kind bigint, a_pubkey bytea, a_identifier character varying, a_user_pubkey bytea, a_limit bigint, a_apply_humaness_check boolean);
 DROP FUNCTION public.is_pubkey_hidden_by_group(a_user_pubkey bytea, a_scope public.cmr_scope, a_pubkey bytea, a_cmr_grp public.cmr_grp, a_fl_grp public.filterlist_grp);
 DROP FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope public.cmr_scope, a_pubkey bytea);
 DROP FUNCTION public.is_event_hidden(a_user_pubkey bytea, a_scope public.cmr_scope, a_event_id bytea);
@@ -609,6 +616,7 @@ DROP FUNCTION public.get_event_jsonb(a_event_id bytea);
 DROP FUNCTION public.get_event(a_event_id bytea);
 DROP TABLE public.event;
 DROP FUNCTION public.get_bookmarks(a_pubkey bytea);
+DROP FUNCTION public.fetch_results_for_user_follows_posts(a_pubkey bytea, a_include_replies bigint, p_since bigint, p_until bigint, p_limit integer, p_offset integer, p_dt bigint, p_timeout numeric);
 DROP FUNCTION public.feed_user_follows(a_pubkey bytea, a_since bigint, a_until bigint, a_include_replies bigint, a_limit bigint, a_offset bigint, a_user_pubkey bytea, a_apply_humaness_check boolean);
 DROP FUNCTION public.feed_user_authored(a_pubkey bytea, a_since bigint, a_until bigint, a_include_replies bigint, a_limit bigint, a_offset bigint, a_user_pubkey bytea, a_apply_humaness_check boolean);
 DROP FUNCTION public.extract_bolt11_tag(tags jsonb);
@@ -629,6 +637,10 @@ DROP FUNCTION public.c_zap_event();
 DROP FUNCTION public.c_user_scores();
 DROP FUNCTION public.c_user_primal_names();
 DROP FUNCTION public.c_user_follower_counts();
+DROP FUNCTION public.c_studio_home_totals();
+DROP FUNCTION public.c_studio_home_top_notes();
+DROP FUNCTION public.c_studio_home_top_articles();
+DROP FUNCTION public.c_studio_home_graph();
 DROP FUNCTION public.c_referenced_event();
 DROP FUNCTION public.c_range();
 DROP FUNCTION public.c_membership_legend_customization();
@@ -658,17 +670,34 @@ DROP EXTENSION amcheck;
 DROP EXTENSION age;
 DROP EXTENSION plv8;
 DROP EXTENSION pljava;
+DROP SCHEMA studio;
 DROP SCHEMA sqlj;
 DROP SCHEMA prod;
 DROP SCHEMA plrust;
 DROP SCHEMA hint_plan;
 DROP EXTENSION pg_cron;
+DROP SCHEMA cache;
+DROP SCHEMA agent;
 DROP SCHEMA ag_catalog;
 --
 -- Name: ag_catalog; Type: SCHEMA; Schema: -; Owner: -
 --
 
 CREATE SCHEMA ag_catalog;
+
+
+--
+-- Name: agent; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA agent;
+
+
+--
+-- Name: cache; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA cache;
 
 
 --
@@ -711,6 +740,13 @@ CREATE SCHEMA prod;
 --
 
 CREATE SCHEMA sqlj;
+
+
+--
+-- Name: studio; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA studio;
 
 
 --
@@ -1034,6 +1070,42 @@ CREATE FUNCTION public.c_referenced_event() RETURNS integer
 
 
 --
+-- Name: c_studio_home_graph(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.c_studio_home_graph() RETURNS integer
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$SELECT 10000902$$;
+
+
+--
+-- Name: c_studio_home_top_articles(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.c_studio_home_top_articles() RETURNS integer
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$SELECT 10000904$$;
+
+
+--
+-- Name: c_studio_home_top_notes(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.c_studio_home_top_notes() RETURNS integer
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$SELECT 10000903$$;
+
+
+--
+-- Name: c_studio_home_totals(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.c_studio_home_totals() RETURNS integer
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$SELECT 10000901$$;
+
+
+--
 -- Name: c_user_follower_counts(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1225,6 +1297,7 @@ BEGIN
                     END LOOP;
                     -- RETURN QUERY SELECT get_event_jsonb(value) FROM contact_lists WHERE key = e_pubkey LIMIT 1; -- bugs prod ios app
                     -- RETURN QUERY SELECT get_event_jsonb(event_id) FROM relay_list_metadata WHERE pubkey = e_pubkey LIMIT 1;
+                    RETURN QUERY SELECT * FROM user_live_events(30311, e_pubkey);
                 END IF;
 
                 IF e_kind = 9735 AND t.is_referenced_event THEN
@@ -1654,6 +1727,7 @@ $$;
 CREATE FUNCTION public.feed_user_follows(a_pubkey bytea, a_since bigint, a_until bigint, a_include_replies bigint, a_limit bigint, a_offset bigint, a_user_pubkey bytea, a_apply_humaness_check boolean) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
+-- select raise_notice((a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, a_user_pubkey, a_apply_humaness_check)::text);
 SELECT * FROM enrich_feed_events(
     ARRAY (
         SELECT r
@@ -1665,6 +1739,91 @@ SELECT * FROM enrich_feed_events(
             a_limit,
             a_offset) r),
     a_user_pubkey, a_apply_humaness_check)
+$$;
+
+
+--
+-- Name: fetch_results_for_user_follows_posts(bytea, bigint, bigint, bigint, integer, integer, bigint, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fetch_results_for_user_follows_posts(a_pubkey bytea, a_include_replies bigint, p_since bigint, p_until bigint, p_limit integer, p_offset integer, p_dt bigint DEFAULT (1 * 3600), p_timeout numeric DEFAULT 7.0) RETURNS SETOF public.post
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    dt_start bigint := p_dt;
+    t_start  timestamp := clock_timestamp();
+    t_end    timestamp := t_start + (p_timeout || ' seconds')::interval;
+    t        bigint := p_until;
+    done     boolean := false;
+    current_timeout int;
+    r        post;
+    rs       post[] := ARRAY[]::post[];
+    ids      bytea[] := ARRAY[]::bytea[];
+    i        bigint;
+BEGIN
+    PERFORM set_config('statement_timeout', trunc(p_timeout * 1000)::text, true);
+    WHILE (
+        (array_length(rs, 1) is null OR array_length(rs, 1) < (p_limit + p_offset))
+        AND p_since <= t
+        AND clock_timestamp() < t_end
+        AND NOT done
+        )
+        LOOP
+            current_timeout := trunc(extract(epoch FROM (t_end - clock_timestamp())) * 1000);
+            RAISE NOTICE 'current_timeout: %', current_timeout;
+            IF current_timeout < 0 THEN
+                RAISE NOTICE 'exit0';
+                EXIT;
+            END IF;
+
+            BEGIN
+                RAISE NOTICE 't: % .. % [ % h ]', t - p_dt, t, p_dt/3600;
+                i := 0;
+                FOR r IN SELECT pe.event_id, pe.created_at
+                         FROM pubkey_events pe, pubkey_followers pf
+                         WHERE
+                             pf.follower_pubkey = a_pubkey AND
+                             pf.pubkey = pe.pubkey AND
+                             pe.created_at >= t - p_dt AND
+                             pe.created_at <= t AND
+                             (
+                                 pe.is_reply = 0 OR
+                                 pe.is_reply = a_include_replies
+                             )
+                           AND referenced_event_is_note(pe.event_id)
+                         ORDER BY pe.created_at DESC LIMIT p_limit
+                    LOOP
+                        IF array_length(rs, 1) is not null AND array_length(rs, 1) >= (p_limit + p_offset)
+                            OR clock_timestamp() >= t_end
+                            OR done THEN
+                            RAISE NOTICE 'exit1';
+                            EXIT;
+                        END IF;
+
+                        IF NOT (r.event_id = ANY(ids)) THEN
+                            ids := array_append(ids, r.event_id);
+                            rs  := array_append(rs, r);
+                            i   := i + 1;
+                            RETURN NEXT r;
+                            -- (If you need to signal early termination, you might set done := true here.)
+                        END IF;
+                    END LOOP;
+            EXCEPTION WHEN query_canceled THEN
+                RAISE NOTICE 'exit2';
+                EXIT;
+            END;
+
+            IF i > 0 THEN
+                t := rs[array_length(rs, 1)].created_at;
+                p_dt := dt_start;
+            ELSE
+                t := t - p_dt;
+                p_dt := p_dt * 4;
+            END IF;
+        END LOOP;
+
+--     RETURN QUERY SELECT * from unnest(rs) OFFSET p_offset;
+END;
 $$;
 
 
@@ -1824,7 +1983,6 @@ SELECT EXISTS (
               AND bt.arg1 = t.event_id
         )
     )
-    LIMIT 1
 )
 $$;
 
@@ -1837,6 +1995,10 @@ CREATE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope public.cmr_
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
+    IF EXISTS (SELECT 1 FROM filterlist WHERE target = a_pubkey AND target_type = 'pubkey' AND blocked AND grp = 'impersonation') THEN
+        RETURN true;
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM cmr_pubkeys_allowed
         WHERE user_pubkey = a_user_pubkey AND pubkey = a_pubkey
@@ -1879,6 +2041,57 @@ SELECT
             cmr.user_pubkey = a_user_pubkey AND cmr.grp = a_cmr_grp AND cmr.scope = a_scope AND 
             fl.target = a_pubkey AND fl.target_type = 'pubkey' AND fl.blocked AND fl.grp = a_fl_grp AND
             NOT EXISTS (SELECT 1 FROM filterlist fl2 WHERE fl2.target = a_pubkey AND fl2.target_type = 'pubkey' AND NOT fl2.blocked))
+$$;
+
+
+--
+-- Name: live_feed_initial_response(bigint, bytea, character varying, bytea, bigint, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.live_feed_initial_response(a_kind bigint, a_pubkey bytea, a_identifier character varying, a_user_pubkey bytea, a_limit bigint DEFAULT 20, a_apply_humaness_check boolean DEFAULT true) RETURNS SETOF jsonb
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    -- RETURN QUERY SELECT * FROM enrich_feed_events(
+    --     ARRAY (
+    --         SELECT r
+    --         FROM live_feed_posts(
+    --             a_kind,
+    --             a_pubkey,
+    --             a_identifier,
+    --             a_limit
+    --         ) r),
+    --     a_user_pubkey, a_apply_humaness_check);
+    RETURN QUERY SELECT get_event_jsonb(r.event_id) FROM live_feed_posts(
+                a_kind,
+                a_pubkey,
+                a_identifier,
+                a_limit
+            ) r;
+
+    RETURN QUERY SELECT get_event_jsonb(eid)
+        FROM a_tags 
+        WHERE kind in (7, 9735)
+          AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier
+        ORDER BY created_at DESC LIMIT 1000;
+END
+$$;
+
+
+--
+-- Name: live_feed_posts(bigint, bytea, character varying, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.live_feed_posts(a_kind bigint, a_pubkey bytea, a_identifier character varying, a_limit bigint DEFAULT 20) RETURNS SETOF public.post
+    LANGUAGE plpgsql STABLE
+    AS $$
+BEGIN
+    RETURN QUERY SELECT eid, created_at 
+        FROM a_tags 
+        WHERE kind = 1311
+          AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier
+        ORDER BY created_at DESC LIMIT 10000;
+END
 $$;
 
 
@@ -1959,39 +2172,6 @@ BEGIN
 
     RETURN QUERY SELECT * FROM enrich_feed_events(posts, a_user_pubkey, a_apply_humaness_check, 'published_at');
 END
-$$;
-
-
---
--- Name: notification_is_hidden(bigint, bytea, bytea); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.notification_is_hidden(type bigint, arg1 bytea, arg2 bytea) RETURNS boolean
-    LANGUAGE sql STABLE PARALLEL SAFE
-    AS $$
-SELECT 
-    CASE type
-    WHEN 1 THEN user_is_human(arg1)
-    WHEN 2 THEN user_is_human(arg1)
-
-    WHEN 3 THEN user_is_human(arg2)
-    WHEN 4 THEN user_is_human(arg2)
-    WHEN 5 THEN user_is_human(arg2)
-    WHEN 6 THEN user_is_human(arg2)
-
-    WHEN 7 THEN user_is_human(arg2)
-    /* WHEN 8 THEN user_is_human(arg3) */
-
-    WHEN 101 THEN user_is_human(arg2)
-    WHEN 102 THEN user_is_human(arg2)
-    WHEN 103 THEN user_is_human(arg2)
-    WHEN 104 THEN user_is_human(arg2)
-
-    /* WHEN 201 THEN user_is_human(arg3) */
-    /* WHEN 202 THEN user_is_human(arg3) */
-    /* WHEN 203 THEN user_is_human(arg3) */
-    /* WHEN 204 THEN user_is_human(arg3) */
-    END CASE
 $$;
 
 
@@ -2265,10 +2445,10 @@ CREATE FUNCTION public.test_pubkeys(a_name text) RETURNS bytea
 
 
 --
--- Name: thread_view(bytea, bigint, bigint, bigint, bigint, bytea, boolean); Type: FUNCTION; Schema: public; Owner: -
+-- Name: thread_view(bytea, bigint, bigint, bigint, bigint, bytea, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.thread_view(a_event_id bytea, a_limit bigint DEFAULT 20, a_since bigint DEFAULT 0, a_until bigint DEFAULT (EXTRACT(epoch FROM now()))::bigint, a_offset bigint DEFAULT 0, a_user_pubkey bytea DEFAULT NULL::bytea, a_apply_humaness_check boolean DEFAULT false) RETURNS SETOF jsonb
+CREATE FUNCTION public.thread_view(a_event_id bytea, a_limit bigint DEFAULT 20, a_since bigint DEFAULT 0, a_until bigint DEFAULT (EXTRACT(epoch FROM now()))::bigint, a_offset bigint DEFAULT 0, a_user_pubkey bytea DEFAULT NULL::bytea, a_apply_humaness_check boolean DEFAULT false, a_include_parent_posts boolean DEFAULT true) RETURNS SETOF jsonb
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
@@ -2287,9 +2467,15 @@ BEGIN
             a_user_pubkey, a_apply_humaness_check);
     END IF;
 
-    RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
-        ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
-        a_user_pubkey, false);
+    IF a_include_parent_posts THEN
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
+            a_user_pubkey, false);
+    ELSE
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT (id, created_at)::post FROM events WHERE id = a_event_id),
+            a_user_pubkey, a_apply_humaness_check);
+    END IF;
 END
 $$;
 
@@ -2326,6 +2512,21 @@ CREATE FUNCTION public.thread_view_reply_posts(a_event_id bytea, a_limit bigint 
 select reply_event_id, reply_created_at from event_replies
 where event_id = a_event_id and reply_created_at >= a_since and reply_created_at <= a_until
 order by reply_created_at desc limit a_limit offset a_offset;
+$$;
+
+
+--
+-- Name: trusted_nostr_users(character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.trusted_nostr_users(a_period character varying) RETURNS TABLE(t date, cnt integer)
+    LANGUAGE sql
+    AS $$
+select date_trunc(a_period, to_timestamp(es.created_at))::date as t, count(distinct es.pubkey) as cnt
+from events es, pubkey_trustrank tr
+where es.pubkey = tr.pubkey
+  and es.created_at >= extract(epoch from now() - interval '6 months')::int8
+group by t order by t
 $$;
 
 
@@ -2445,9 +2646,14 @@ CREATE FUNCTION public.user_follows_posts(a_pubkey bytea, a_since bigint, a_unti
 DECLARE
     follows_cnt int8;
 BEGIN
+    -- a_since := a_since - 24*3600;
+    -- a_until := a_until - 24*3600;
+    a_since := a_since - 30;
+    a_until := a_until - 30;
+
     select jsonb_array_length(es.tags) into follows_cnt from contact_lists cl, events es where cl.key = a_pubkey and cl.value = es.id;
 
-    RAISE DEBUG 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
+    -- RAISE NOTICE 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
 
     RETURN QUERY SELECT
         pe.event_id,
@@ -2501,14 +2707,14 @@ DECLARE
     r jsonb;
 BEGIN
     FOR mdeid IN SELECT value FROM meta_data WHERE key = ANY(a_pubkeys) LOOP
-            RETURN NEXT get_event_jsonb(mdeid);
-            RETURN QUERY SELECT * FROM event_media_response(mdeid);
-            RETURN QUERY SELECT * FROM event_preview_response(mdeid);
-        END LOOP;
+        RETURN NEXT get_event_jsonb(mdeid);
+        RETURN QUERY SELECT * FROM event_media_response(mdeid);
+        RETURN QUERY SELECT * FROM event_preview_response(mdeid);
+    END LOOP;
 
     SELECT json_object_agg(ENCODE(key, 'hex'), value) INTO r FROM pubkey_followers_cnt WHERE key = ANY(a_pubkeys);
-    RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', r::text);
-    RETURN NEXT jsonb_build_object('kind', c_USER_FOLLOWER_COUNTS(), 'content', r::text);
+	RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', r::text);
+	RETURN NEXT jsonb_build_object('kind', c_USER_FOLLOWER_COUNTS(), 'content', r::text);
 
     RETURN QUERY SELECT * FROM primal_verified_names(a_pubkeys);
     RETURN QUERY SELECT * FROM user_blossom_servers(a_pubkeys);
@@ -2553,6 +2759,20 @@ SELECT (
     EXISTS (SELECT 1 FROM human_override ho WHERE ho.pubkey = a_pubkey AND ho.is_human) OR
     EXISTS (SELECT 1 FROM pubkey_followers WHERE pubkey = a_pubkey AND follower_pubkey = a_user_pubkey)
 )
+$$;
+
+
+--
+-- Name: user_live_events(bigint, bytea); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.user_live_events(a_kind bigint, a_pubkey bytea) RETURNS SETOF jsonb
+    LANGUAGE sql STABLE
+    AS $$
+SELECT get_event_jsonb(lep.event_id)
+FROM live_event_participants lep
+WHERE lep.participant_pubkey = a_pubkey
+  AND lep.kind = a_kind
 $$;
 
 
@@ -2606,6 +2826,31 @@ BEGIN
         RETURN QUERY SELECT * FROM user_blossom_servers(pubkeys);
     END IF;
 END $$;
+
+
+--
+-- Name: knowledge_id_seq; Type: SEQUENCE; Schema: agent; Owner: -
+--
+
+CREATE SEQUENCE agent.knowledge_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: id_seq; Type: SEQUENCE; Schema: cache; Owner: -
+--
+
+CREATE SEQUENCE cache.id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
 
 
 --
@@ -3827,79 +4072,6 @@ ALTER SEQUENCE public.advsearch_5_d7da6f551e_i_seq OWNED BY public.advsearch_5_d
 
 
 --
--- Name: aievents1; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.aievents1 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint
-);
-
-
---
--- Name: aievents2; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.aievents2 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint,
-    url text,
-    sentimentlabel text
-);
-
-
---
--- Name: aievents3; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.aievents3 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint,
-    url text,
-    sentimentlabel text,
-    rank double precision,
-    lang character varying,
-    sent character varying,
-    topic character varying
-);
-
-
---
--- Name: aimetadata1; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.aimetadata1 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint,
-    contentjson jsonb
-);
-
-
---
 -- Name: allow_list; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -4078,6 +4250,17 @@ CREATE VIEW public.contact_lists AS
 
 
 --
+-- Name: counter_by_bytea; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.counter_by_bytea (
+    type character varying NOT NULL,
+    key bytea NOT NULL,
+    cnt bigint NOT NULL
+);
+
+
+--
 -- Name: coverages_1_8656fc443b; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4133,42 +4316,6 @@ CREATE TABLE public.dvm_feeds (
     kind character varying NOT NULL,
     personalized boolean NOT NULL,
     ok boolean NOT NULL
-);
-
-
---
--- Name: id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: edges; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.edges (
-    id bigint DEFAULT nextval('public.id_seq'::regclass) NOT NULL,
-    input_id bigint NOT NULL,
-    output_id bigint NOT NULL,
-    etype bigint,
-    extra jsonb
-);
-
-
---
--- Name: edgetypes; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.edgetypes (
-    id bigint DEFAULT nextval('public.id_seq'::regclass) NOT NULL,
-    name character varying NOT NULL,
-    extra jsonb
 );
 
 
@@ -4345,6 +4492,17 @@ CREATE TABLE public.event_relay (
 
 
 --
+-- Name: event_relays; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_relays (
+    event_id bytea NOT NULL,
+    relay_url character varying NOT NULL,
+    imported_at bigint NOT NULL
+);
+
+
+--
 -- Name: event_replies; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -4390,6 +4548,16 @@ CREATE VIEW public.event_stats AS
     score24h,
     rowid
    FROM public.event_stats_1_1b380f4869;
+
+
+--
+-- Name: event_stats_2; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_stats_2 (
+    event_id bytea NOT NULL,
+    score2 bigint NOT NULL
+);
 
 
 --
@@ -4501,6 +4669,18 @@ CREATE TABLE public.filterlist_pubkey (
 
 
 --
+-- Name: id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
 -- Name: follow_lists; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4547,6 +4727,16 @@ CREATE TABLE public.id_table (
 
 
 --
+-- Name: known_relays; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.known_relays (
+    relay_url character varying NOT NULL,
+    last_import_at timestamp without time zone NOT NULL
+);
+
+
+--
 -- Name: lists; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4554,6 +4744,20 @@ CREATE TABLE public.lists (
     list character varying(200) NOT NULL,
     pubkey bytea NOT NULL,
     added_at integer NOT NULL
+);
+
+
+--
+-- Name: live_event_participants; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.live_event_participants (
+    kind bigint NOT NULL,
+    pubkey bytea NOT NULL,
+    identifier character varying NOT NULL,
+    participant_pubkey bytea NOT NULL,
+    event_id bytea NOT NULL,
+    created_at bigint NOT NULL
 );
 
 
@@ -4738,6 +4942,17 @@ CREATE VIEW public.mute_lists AS
     value,
     rowid
    FROM public.mute_lists_1_d90e559628;
+
+
+--
+-- Name: muted_threads; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.muted_threads (
+    pubkey bytea NOT NULL,
+    root_eid bytea NOT NULL,
+    muted_at timestamp without time zone NOT NULL
+);
 
 
 --
@@ -5159,17 +5374,6 @@ CREATE TABLE public.reads_versions_11_fb53a8e0b4 (
 
 
 --
--- Name: refs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.refs (
-    id bigint DEFAULT nextval('public.id_seq'::regclass) NOT NULL,
-    ref jsonb NOT NULL,
-    extra jsonb
-);
-
-
---
 -- Name: relay_list_metadata; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -5244,17 +5448,6 @@ CREATE TABLE public.stuff (
 
 
 --
--- Name: t_push_notifications_log; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.t_push_notifications_log (
-    t timestamp without time zone,
-    tag character varying,
-    d jsonb
-);
-
-
---
 -- Name: test_pubkeys; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5275,16 +5468,6 @@ CREATE TABLE public.text_metadata (
     t timestamp without time zone NOT NULL,
     text character varying,
     event_id bytea
-);
-
-
---
--- Name: trelays; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.trelays (
-    relay_url text,
-    cnt bigint
 );
 
 
@@ -5312,37 +5495,6 @@ CREATE VIEW public.trusted_users_trusted_followers AS
     public.pubkey_trustrank tr1,
     public.pubkey_trustrank tr2
   WHERE ((pf.pubkey = tr1.pubkey) AND (pf.follower_pubkey = tr2.pubkey));
-
-
---
--- Name: tt2; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.tt2 (
-    eid bytea,
-    pubkey bytea
-);
-
-
---
--- Name: tviews; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.tviews (
-    tablename text
-);
-
-
---
--- Name: ui; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.ui (
-    key character varying NOT NULL,
-    value jsonb,
-    updated_at timestamp without time zone NOT NULL,
-    expires_at timestamp without time zone
-);
 
 
 --
@@ -5477,6 +5629,18 @@ CREATE VIEW public.zap_receipts AS
     satszapped,
     imported_at
    FROM public.zap_receipts_1_9fe40119b2;
+
+
+--
+-- Name: idx_seq; Type: SEQUENCE; Schema: studio; Owner: -
+--
+
+CREATE SEQUENCE studio.idx_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
 
 
 --
@@ -5628,6 +5792,14 @@ ALTER TABLE ONLY public.contact_lists_1_1abdf474bd
 
 
 --
+-- Name: counter_by_bytea counter_by_bytea_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.counter_by_bytea
+    ADD CONSTRAINT counter_by_bytea_pkey PRIMARY KEY (type, key);
+
+
+--
 -- Name: coverages_1_8656fc443b coverages_1_8656fc443b_name_t_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5665,22 +5837,6 @@ ALTER TABLE ONLY public.deleted_events_1_0249f47b16
 
 ALTER TABLE ONLY public.dvm_feeds
     ADD CONSTRAINT dvm_feeds_pkey PRIMARY KEY (pubkey, identifier);
-
-
---
--- Name: edges edges_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.edges
-    ADD CONSTRAINT edges_pkey PRIMARY KEY (id);
-
-
---
--- Name: edgetypes edgetypes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.edgetypes
-    ADD CONSTRAINT edgetypes_pkey PRIMARY KEY (name);
 
 
 --
@@ -5740,11 +5896,27 @@ ALTER TABLE ONLY public.event_relay
 
 
 --
+-- Name: event_relays event_relays_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_relays
+    ADD CONSTRAINT event_relays_pkey PRIMARY KEY (event_id, relay_url);
+
+
+--
 -- Name: event_sentiment_1_d3d7a00a54 event_sentiment_1_d3d7a00a54_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.event_sentiment_1_d3d7a00a54
     ADD CONSTRAINT event_sentiment_1_d3d7a00a54_pkey PRIMARY KEY (eid, model);
+
+
+--
+-- Name: event_stats_2 event_stats_2_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_stats_2
+    ADD CONSTRAINT event_stats_2_pkey PRIMARY KEY (event_id);
 
 
 --
@@ -5793,6 +5965,22 @@ ALTER TABLE ONLY public.human_override
 
 ALTER TABLE ONLY public.id_table
     ADD CONSTRAINT id_table_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: known_relays known_relays_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.known_relays
+    ADD CONSTRAINT known_relays_pkey PRIMARY KEY (relay_url);
+
+
+--
+-- Name: live_event_participants live_event_participants_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.live_event_participants
+    ADD CONSTRAINT live_event_participants_pkey PRIMARY KEY (kind, pubkey, identifier, participant_pubkey);
 
 
 --
@@ -5868,6 +6056,14 @@ ALTER TABLE ONLY public.mute_lists_1_d90e559628
 
 
 --
+-- Name: muted_threads muted_threads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.muted_threads
+    ADD CONSTRAINT muted_threads_pkey PRIMARY KEY (pubkey, root_eid);
+
+
+--
 -- Name: node_outputs_1_cfe6037c9f node_outputs_1_cfe6037c9f_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5940,6 +6136,14 @@ ALTER TABLE ONLY public.pubkey_media_cnt_1_b5e2a488b1
 
 
 --
+-- Name: pubkey_notification_cnts_1_d78f6fcade pubkey_notification_cnts_1_d78f6fcade_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pubkey_notification_cnts_1_d78f6fcade
+    ADD CONSTRAINT pubkey_notification_cnts_1_d78f6fcade_pkey PRIMARY KEY (pubkey);
+
+
+--
 -- Name: pubkey_trustrank pubkey_trustrank_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5988,14 +6192,6 @@ ALTER TABLE ONLY public.reads_versions_12_b537d4df66
 
 
 --
--- Name: refs refs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.refs
-    ADD CONSTRAINT refs_pkey PRIMARY KEY (ref);
-
-
---
 -- Name: relay_list_metadata_1_801a17fc93 relay_list_metadata_1_801a17fc93_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6041,14 +6237,6 @@ ALTER TABLE ONLY public.text_metadata
 
 ALTER TABLE ONLY public.trusted_pubkey_followers_cnt
     ADD CONSTRAINT trusted_pubkey_followers_cnt_pkey PRIMARY KEY (t, pubkey);
-
-
---
--- Name: ui ui_pk; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.ui
-    ADD CONSTRAINT ui_pk PRIMARY KEY (key);
 
 
 --
@@ -6645,6 +6833,20 @@ CREATE INDEX event_pubkey_actions_1_d62afee35d_updated_at_idx ON public.event_pu
 
 
 --
+-- Name: event_relays_event_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX event_relays_event_id_idx ON public.event_relays USING btree (event_id);
+
+
+--
+-- Name: event_relays_imported_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX event_relays_imported_at_idx ON public.event_relays USING btree (imported_at);
+
+
+--
 -- Name: event_replies_1_9d033b5bb3_event_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -6964,6 +7166,20 @@ CREATE INDEX lists_list ON public.lists USING btree (list);
 --
 
 CREATE INDEX lists_pubkey ON public.lists USING btree (pubkey);
+
+
+--
+-- Name: live_event_participants_kind_participant_pubkey_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX live_event_participants_kind_participant_pubkey_idx ON public.live_event_participants USING btree (kind, participant_pubkey);
+
+
+--
+-- Name: live_event_participants_kind_pubkey_identifier_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX live_event_participants_kind_pubkey_identifier_idx ON public.live_event_participants USING btree (kind, pubkey, identifier);
 
 
 --

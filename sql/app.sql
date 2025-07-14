@@ -709,6 +709,7 @@ BEGIN
                     END LOOP;
                     -- RETURN QUERY SELECT get_event_jsonb(value) FROM contact_lists WHERE key = e_pubkey LIMIT 1; -- bugs prod ios app
                     -- RETURN QUERY SELECT get_event_jsonb(event_id) FROM relay_list_metadata WHERE pubkey = e_pubkey LIMIT 1;
+                    RETURN QUERY SELECT * FROM user_live_events(30311, e_pubkey);
                 END IF;
 
                 IF e_kind = 9735 AND t.is_referenced_event THEN
@@ -1229,4 +1230,71 @@ from (values ('small', 'medium'), ('medium', 'large'), ('large', 'large'), ('ori
 where m.url = a_url and m.size = sz.newsize and ms.media_block_id is null
 order by m.animated desc, m.media_url, msp.priority
 $BODY$;
+
+CREATE OR REPLACE FUNCTION public.live_feed_initial_response(
+    a_kind bigint,
+    a_pubkey bytea,
+    a_identifier varchar,
+    a_user_pubkey bytea, 
+    a_limit bigint DEFAULT 20,
+    a_apply_humaness_check bool DEFAULT true
+) 
+	RETURNS SETOF jsonb
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    -- RETURN QUERY SELECT * FROM enrich_feed_events(
+    --     ARRAY (
+    --         SELECT r
+    --         FROM live_feed_posts(
+    --             a_kind,
+    --             a_pubkey,
+    --             a_identifier,
+    --             a_limit
+    --         ) r),
+    --     a_user_pubkey, a_apply_humaness_check);
+    RETURN QUERY SELECT get_event_jsonb(r.event_id) FROM live_feed_posts(
+                a_kind,
+                a_pubkey,
+                a_identifier,
+                a_limit
+            ) r;
+
+    RETURN QUERY SELECT get_event_jsonb(eid)
+        FROM a_tags 
+        WHERE kind in (7, 9735)
+          AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier
+        ORDER BY created_at DESC LIMIT 1000;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.live_feed_posts(
+    a_kind bigint,
+    a_pubkey bytea,
+    a_identifier varchar,
+    a_limit bigint DEFAULT 20
+)
+	RETURNS SETOF post
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    RETURN QUERY SELECT eid, created_at 
+        FROM a_tags 
+        WHERE kind = 1311
+          AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier
+        ORDER BY created_at DESC LIMIT 10000;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.user_live_events(
+    a_kind bigint,
+    a_pubkey bytea
+) RETURNS SETOF jsonb LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT get_event_jsonb(lep.event_id)
+FROM live_event_participants lep
+WHERE lep.participant_pubkey = a_pubkey
+  AND lep.kind = a_kind
+$BODY$;
+
 

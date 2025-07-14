@@ -697,13 +697,24 @@ DEFAULT_RELAYS_FILE = Ref("default-relays.json")
 NON_RECOMMENDED_RELAYS = Set{String}()
 
 function get_default_relays(est::DB.CacheStorage)
-    mined = [s for s in readlines("primal-server/relays-mined-from-contact-lists.txt") if !isempty(s)]
-    rand_relays = []
+    mined = [r[1] for r in Postgres.execute(:p0, "
+            select (case
+                    when rum.dest is not null then rum.dest
+                    else kr.relay_url 
+                end)
+            from known_relays kr left join relay_url_map rum on kr.relay_url = rum.src
+            where kr.last_import_at >= now() - interval '2 hours'
+            ")[2] 
+             if !(r[1] in NON_RECOMMENDED_RELAYS)]
+
+    @assert length(mined) >= 4 "Not enough mined relays found, at least 4 are required"
+    
+    rand_relays = Set()
     while length(rand_relays) < 4
         relay = mined[rand(1:length(mined))]
-        relay in NON_RECOMMENDED_RELAYS && continue
         push!(rand_relays, relay)
     end
+
     relays = [
               "wss://relay.primal.net",
               rand([
@@ -714,6 +725,7 @@ function get_default_relays(est::DB.CacheStorage)
                    ]),
               rand_relays...,
              ]
+
     [(; kind=Int(DEFAULT_RELAYS), content=JSON.json(relays))]
 end
 
@@ -976,7 +988,7 @@ function advanced_search(
         tdur = @elapsed res, orderby, stats, err = Base.invokelatest(mod.search, est, user_pubkey, query; limit, kwargs..., outputs, logextra=(; user_pubkey))
 
         d = (; host=gethostname(), query, user_pubkey, stats, reslen=length(res), err, tdur) 
-        Postgres.execute(:membership, "insert into advsearch_log values (now(), \$1, \$2::jsonb)", [user_pubkey, JSON.json(d)])
+        # Postgres.execute(:membership, "insert into advsearch_log values (now(), \$1, \$2::jsonb)", [user_pubkey, JSON.json(d)])
 
         posts = Tuple{Nostr.EventId, Int}[(eid, orderkey) for (eid, orderkey) in res]
 
