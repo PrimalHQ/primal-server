@@ -62,6 +62,10 @@ CREATE OR REPLACE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope 
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
+    IF EXISTS (SELECT 1 FROM filterlist WHERE target = a_pubkey AND target_type = 'pubkey' AND blocked AND grp = 'impersonation') THEN
+        RETURN true;
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM cmr_pubkeys_allowed
         WHERE user_pubkey = a_user_pubkey AND pubkey = a_pubkey
@@ -540,6 +544,11 @@ AS $BODY$
 DECLARE
     follows_cnt int8;
 BEGIN
+    -- a_since := a_since - 24*3600;
+    -- a_until := a_until - 24*3600;
+    a_since := a_since - 30;
+    a_until := a_until - 30;
+
     select jsonb_array_length(es.tags) into follows_cnt from contact_lists cl, events es where cl.key = a_pubkey and cl.value = es.id;
 
     -- RAISE NOTICE 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
@@ -972,7 +981,9 @@ CREATE OR REPLACE FUNCTION public.thread_view(
     a_event_id bytea,
     a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0, a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0,
     a_user_pubkey bytea DEFAULT null,
-    a_apply_humaness_check bool DEFAULT false)
+    a_apply_humaness_check bool DEFAULT false,
+    a_include_parent_posts bool DEFAULT true
+)
 	RETURNS SETOF jsonb
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
@@ -992,9 +1003,15 @@ BEGIN
             a_user_pubkey, a_apply_humaness_check);
     END IF;
 
-    RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
-        ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
-        a_user_pubkey, false);
+    IF a_include_parent_posts THEN
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
+            a_user_pubkey, false);
+    ELSE
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT (id, created_at)::post FROM events WHERE id = a_event_id),
+            a_user_pubkey, a_apply_humaness_check);
+    END IF;
 END
 $BODY$;
 
