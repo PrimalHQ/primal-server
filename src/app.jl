@@ -4130,6 +4130,7 @@ function follow_lists(
     for r in p0"
         select es.* from parametrized_replaceable_events pre, events es 
         where pre.kind = 39089 and pre.created_at >= $since and pre.created_at <= $until and pre.event_id = es.id
+          and not exists (select 1 from filterlist fl where fl.target = pre.pubkey and fl.target_type = 'pubkey' and fl.grp = 'spam' and fl.blocked)
         order by pre.created_at desc limit $limit offset $offset"
         e = event_from_row(collect(r))
 
