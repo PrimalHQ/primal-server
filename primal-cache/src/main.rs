@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use chrono::TimeZone;
 use primal_cache::{parse_parent_eid, parse_zap_receipt, EventRow};
 use primal_cache::{
-    event_to_json, log, parse_event, Config, Event, EventAddr, EventId, EventReference, PubKeyId, State, Tag, set_var, get_var, 
+    log, parse_event, Config, Event, EventAddr, EventId, EventReference, PubKeyId, State, Tag, set_var, get_var, 
     recent_items,
 };
 use primal_cache::{Ref, insert_edge};
