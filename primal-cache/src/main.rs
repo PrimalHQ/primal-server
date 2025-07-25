@@ -68,7 +68,6 @@ async fn import_event(state: &State, e: &Event) -> Result<(), anyhow::Error> {
 
         LIVE_EVENT => {
             if let Some(le) = parse_live_event(e) {
-                dbg!(&le);
                 match le.status {
                     LiveEventStatus::Live => {
                         let mut tx = state.cache_pool.begin().await?;
