@@ -39,6 +39,7 @@ function start(est::DB.CacheStorage)
     task[] = 
     Base.errormonitor(@async while running[]
                           Utils.active_sleep(RUN_PERIOD[], running)
+                          running[] || break
                           try
                               Base.invokelatest(run_make)
                           catch _

@@ -1987,7 +1987,8 @@ end
 function trusted_users(est::DB.CacheStorage; limit::Int=500, extended_response=true)
     limit = min(10000, limit)
     res = []
-    pktrs = Main.TrustRank.pubkey_rank_sorted[1:limit]
+    # pktrs = Main.TrustRank.pubkey_rank_sorted[1:limit]
+    pktrs = [(Nostr.PubKeyId(pk), rank) for (pk, rank) in Postgres.execute(:p0, "select pubkey, rank from pubkey_trustrank order by rank desc limit \$1", [limit])[2]]
     push!(res, (; kind=Int(TRUSTED_USERS), content=JSON.json([(; pk, tr) for (pk, tr) in pktrs])))
     for (pk, tr) in pktrs
         haskey(est.meta_data, pk) && haskey(est.events, est.meta_data[pk]) && push!(res, est.events[est.meta_data[pk]])

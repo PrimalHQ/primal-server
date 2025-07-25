@@ -21,6 +21,7 @@ NIP65_RELAY_LIST_METADATA=10002
 
 PRIMAL_DVM_KEYPAIR_SALT = Ref{Any}(nothing)
 
+# bump created_at if the relay list is updated
 RELAY_URLS = [
               "wss://relay.damus.io",
               "wss://relay.primal.net",
@@ -242,10 +243,12 @@ function on_connect(client)
         seckey, pubkey = Nostr.generate_keypair(; seckey=SHA.sha256([PRIMAL_DVM_KEYPAIR_SALT[]; collect(transcode(UInt8, feed_id))]))
         keypairs[feed_id] = (; seckey, pubkey, verifiedonly)
 
-        # bump when any feed is updated or after every 3 months
+        # bump when relay list is updated or any feed is updated or after every 3 months
         # created_at = trunc(Int, datetime2unix(DateTime("2024-11-20T00:00"))) 
         # created_at = trunc(Int, datetime2unix(DateTime("2025-03-20T00:00"))) 
-        created_at = trunc(Int, datetime2unix(DateTime("2025-05-01T00:00"))) 
+        # created_at = trunc(Int, datetime2unix(DateTime("2025-05-01T00:00"))) 
+        # created_at = trunc(Int, datetime2unix(DateTime("2025-06-01T00:00"))) 
+        created_at = trunc(Int, datetime2unix(DateTime("2025-06-20T15:54"))) 
 
         eact = Nostr.Event(seckey, pubkey,
                            created_at,
@@ -268,7 +271,7 @@ function on_connect(client)
                                                      ]],
                            "")
         enip65 = Nostr.Event(seckey, pubkey,
-                             Utils.current_time(),
+                             created_at,
                              NIP65_RELAY_LIST_METADATA,
                              [Nostr.TagAny(t) 
                               for t in [["r", url] 
@@ -283,12 +286,10 @@ function on_connect(client)
         NostrClient.send(client, e; timeout=(5.0, "dvm: handler info event ack for $(client.relay_url)")) do m, done
             # @show (client.relay_url, m)
             m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) handler info event for feed $feed_id failed")
-            # println((:okinfo, feed_id, pubkey, client.relay_url, m))
             done(:ok)
         end
         NostrClient.send(client, enip65; timeout=(5.0, "dvm: nip65 relay meta data event ack for $(client.relay_url)")) do m, done
             m[1] == "OK" || error("dvm: broadcasting to $(client.relay_url) nip65 relay meta data event for feed $feed_id failed")
-            # println((:oknip65, feed_id, pubkey, client.relay_url, m))
             done(:ok)
         end
 

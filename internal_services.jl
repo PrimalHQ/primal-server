@@ -268,169 +268,200 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
 
     mdpubkey_(pk) = (; url="https://$host$path", twitter_card, mdpubkey(cache_storage, pk)...)
 
-    if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
-        pk = string(m[2])
-        pk = (startswith(pk, "npub") || startswith(pk, "nprofile")) ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
-        return mdpubkey_(pk)
+    if host in ["primal.net", "dev.primal.net"]
+        if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
+            pk = string(m[2])
+            pk = (startswith(pk, "npub") || startswith(pk, "nprofile")) ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
+            return mdpubkey_(pk)
 
-    elseif !isnothing(local m = match(r"^/(thread|e|a)/(.*)", path))
-        eid = string(m[2])
-        if startswith(eid, "nevent")
-            for x in Bech32.nip19_decode(eid)
-                if x[2] isa Nostr.EventId
-                    eid = x[2]
-                    break
-                end
-            end
-        else
-            try eid = Bech32.nip19_decode(eid) catch _ end
-        end
-        try eid = Bech32.nip19_decode(eid) catch _ end
-        isnothing(eid) && (eid = try Nostr.EventId(eid) catch _ end)
-        if eid isa Nostr.EventId
-            if eid in cache_storage.events
-                e = cache_storage.events[eid]
-                url = "https://$(host)/e/$(m[2])"
-                description = replace(content_refs_resolved(e), re_url => "")
-                if e.pubkey in cache_storage.meta_data
-                    c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)
-                    title = mdtitle(c)
-                    image = get(c, "picture", "")
-                end
-                media_urls = DB.exec(cache_storage.event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
-                if !isempty(media_urls)
-                    twitter_card = "summary_large_image"
-                    image = media_urls[1][1]
-                    thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
-                    if !isempty(thumbnails)
-                        image = (thumbnails[1][1],)
-                    else
-                        if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
-                            image = r[1][1]
-                        end
+        elseif !isnothing(local m = match(r"^/(thread|e|a)/(.*)", path))
+            eidstr = string(m[2])
+            eid = nothing
+            if startswith(eidstr, "nevent")
+                for x in Bech32.nip19_decode(eidstr)
+                    if x[2] isa Nostr.EventId
+                        eid = x[2]
+                        break
                     end
                 end
+            elseif !isnothing(try eid = Bech32.nip19_decode(eidstr) catch _ end)
+            elseif !isnothing(try eid = Nostr.bech32_decode(eidstr) catch _ end)
+            elseif !isnothing(try eid = Nostr.EventId(eidstr) catch _ end)
             end
-        elseif eid isa Vector
-            if startswith(string(m[2]), "naddr")
-                d = Dict(eid)
-                for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
-                                      DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                      (d[Bech32.Author], d[Bech32.Kind], d[Bech32.Special]))
-                    eid = Nostr.EventId(eid)
-                    if eid in cache_storage.events
-                        e = cache_storage.events[eid]
-                        url = "https://$(host)/e/$(m[2])"
-                        for t in e.tags
-                            if length(t.fields) >= 2
-                                t.fields[1] == "title" && (title = t.fields[2])
-                                t.fields[1] == "summary" && (description = t.fields[2])
-                                t.fields[1] == "image" && (image = t.fields[2])
+            if eid isa Nostr.EventId
+                if eid in cache_storage.events
+                    e = cache_storage.events[eid]
+                    url = "https://$(host)/e/$(m[2])"
+                    description = replace(content_refs_resolved(e), re_url => "")
+                    if e.pubkey in cache_storage.meta_data
+                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)
+                        title = mdtitle(c)
+                        image = get(c, "picture", "")
+                    end
+                    media_urls = DB.exec(cache_storage.event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
+                    if !isempty(media_urls)
+                        twitter_card = "summary_large_image"
+                        image = media_urls[1][1]
+                        thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
+                        if !isempty(thumbnails)
+                            image = (thumbnails[1][1],)
+                        else
+                            if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 and animated = 0 and size != 'small' order by (width*height) limit 1"), (image,)))
+                                image = r[1][1]
                             end
                         end
-                        twitter_card = "summary_large_image"
+                    end
+                end
+            elseif eid isa Vector
+                if startswith(string(m[2]), "naddr")
+                    d = Dict(eid)
+                    for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                          DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                          (d[Bech32.Author], d[Bech32.Kind], d[Bech32.Special]))
+                        eid = Nostr.EventId(eid)
+                        if eid in cache_storage.events
+                            e = cache_storage.events[eid]
+                            url = "https://$(host)/e/$(m[2])"
+                            for t in e.tags
+                                if length(t.fields) >= 2
+                                    t.fields[1] == "title" && (title = t.fields[2])
+                                    t.fields[1] == "summary" && (description = t.fields[2])
+                                    t.fields[1] == "image" && (image = t.fields[2])
+                                end
+                            end
+                            twitter_card = "summary_large_image"
+                        end
                     end
                 end
             end
-        end
-        return (; title, description, image, url, twitter_card)
+            return (; title, description, image, url, twitter_card)
 
-    elseif !isnothing(local md = begin
-                          md = nothing
-                          m = match(r"^/([^/]*)/([^?]*)", path)
-                          if !isnothing(m)
-                              name, identifier = string(m[1]), string(m[2])
-                              identifier = URIs.unescapeuri(identifier)
-                              pubkey = nothing
-                              for pk in nostr_json_query_by_name(name)
-                                  pubkey = pk
-                                  break
-                              end
-                              if !isnothing(pubkey)
-                                  kind = 30023
-                                  for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
-                                                        DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                                        (pubkey, kind, identifier))
-                                      eid = Nostr.EventId(eid)
-                                      if eid in cache_storage.events
-                                          e = cache_storage.events[eid]
-                                          naddr = Bech32.nip19_encode_naddr(kind, pubkey, identifier)
-                                          url = "https://$(host)/e/$(naddr)"
-                                          for t in e.tags
-                                              if length(t.fields) >= 2
-                                                  t.fields[1] == "title" && (title = t.fields[2])
-                                                  t.fields[1] == "summary" && (description = t.fields[2])
-                                                  t.fields[1] == "image" && (image = t.fields[2])
+        elseif !isnothing(local md = begin
+                              md = nothing
+                              m = match(r"^/([^/]*)/([^?]*)", path)
+                              if !isnothing(m)
+                                  name, identifier = string(m[1]), string(m[2])
+                                  identifier = URIs.unescapeuri(identifier)
+                                  pubkey = nothing
+                                  for pk in nostr_json_query_by_name(name)
+                                      pubkey = pk
+                                      break
+                                  end
+                                  if !isnothing(pubkey)
+                                      kind = 30023
+                                      for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                                            DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                                            (pubkey, kind, identifier))
+                                      # for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                      #                       DB.@sql("select event_id from parametrized_replaceable_events 
+                                      #                               where pubkey = ?1 and kind = ?2 
+                                      #                                 and regexp_replace(identifier, '[^a-zA-Z0-9]', '', 'g') like regexp_replace(?3, '[^a-zA-Z0-9]', '', 'g') || '%'
+                                      #                               limit 1"), 
+                                      #                       (pubkey, kind, identifier))
+                                          eid = Nostr.EventId(eid)
+                                          if eid in cache_storage.events
+                                              e = cache_storage.events[eid]
+                                              naddr = Bech32.nip19_encode_naddr(kind, pubkey, identifier)
+                                              url = "https://$(host)/e/$(naddr)"
+                                              for t in e.tags
+                                                  if length(t.fields) >= 2
+                                                      t.fields[1] == "title" && (title = t.fields[2])
+                                                      t.fields[1] == "summary" && (description = t.fields[2])
+                                                      if t.fields[1] == "image"
+                                                          image = t.fields[2]
+                                                          for (media_url,) in Postgres.execute(:p0, "select media_url from media where url = \$1 and size = 'medium' and animated = 0 limit 1", [image])[2]
+                                                              image = media_url
+                                                          end
+                                                      end
+                                                  end
                                               end
+                                              twitter_card = "summary_large_image"
+                                              if isempty(image)
+                                                  image = mdpubkey(cache_storage, pubkey).image
+                                              end
+                                              md = (; title, description, image, url, twitter_card)
                                           end
-                                          twitter_card = "summary_large_image"
-                                          if isempty(image)
-                                              image = mdpubkey(cache_storage, pubkey).image
-                                          end
-                                          md = (; title, description, image, url, twitter_card)
                                       end
                                   end
                               end
-                          end
-                          md
-                      end)
-        return md
+                              md
+                          end)
+            return md
 
-    elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
-        return (; 
-                title="Download Primal apps and source code", 
-                description="",
-                image="https://$host/public/primal-link-preview.jpg",
-                url="https://$host/downloads",
-                twitter_card = "summary_large_image",
-                # twitter_image = "https://$host/images/twitter-hero.jpg",
-                twitter_image = "https://$host/public/primal-link-preview.jpg?a=444",
-               )
+        elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
+            return (; 
+                    title="Download Primal apps and source code", 
+                    description="",
+                    image="https://$host/public/primal-link-preview.jpg",
+                    url="https://$host/downloads",
+                    twitter_card = "summary_large_image",
+                    # twitter_image = "https://$host/images/twitter-hero.jpg",
+                    twitter_image = "https://$host/public/primal-link-preview.jpg?a=444",
+                   )
 
-    elseif !isnothing(local m = match(r"^/legends", path)) && 1==1
-        return (; 
-                title="Primal Legends", 
-                description="Recognizing users who made a contribution to Nostr and Primal",
-                image="https://$host/public/legends-link-preview.png",
-                url="https://$host/legends",
-                twitter_card = "summary_large_image",
-                twitter_image = "https://$host/public/legends-link-preview.png?a=444",
-               )
+        elseif !isnothing(local m = match(r"^/legends", path)) && 1==1
+            return (; 
+                    title="Primal Legends", 
+                    description="Recognizing users who made a contribution to Nostr and Primal",
+                    image="https://$host/public/legends-link-preview.png",
+                    url="https://$host/legends",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://$host/public/legends-link-preview.png?a=444",
+                   )
 
-    elseif !isnothing(local m = match(r"^/myarticles$", path)) && 1==1
-        return (; 
-                title="Primal Article Editor", 
-                description="Create long form articles for Nostr",
-                image=("https://$host/public/article-editor-link-preview.png",),
-                url="https://$host/myarticles",
-                twitter_card = "summary_large_image",
-                twitter_image = "https://$host/public/article-editor-link-preview.png?a=444",
-               )
+        elseif !isnothing(local m = match(r"^/myarticles$", path)) && 1==1
+            return (; 
+                    title="Primal Article Editor", 
+                    description="Create long form articles for Nostr",
+                    image=("https://$host/public/article-editor-link-preview.png",),
+                    url="https://$host/myarticles",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://$host/public/article-editor-link-preview.png?a=444",
+                   )
 
-    elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
-        return (; 
-                title="Primal", 
-                description="Discover the best of Nostr",
-                image=("https://$host/public/primal-link-preview.jpg",),
-                url="https://$host/",
-                twitter_card = "summary_large_image",
-                twitter_image = "https://$host/images/twitter-hero.jpg")
+        elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
+            return (; 
+                    title="Primal", 
+                    description="Discover the best of Nostr",
+                    image=("https://$host/public/primal-link-preview.jpg",),
+                    url="https://$host/",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://$host/images/twitter-hero.jpg")
 
-    elseif !isnothing(local m = match(r"^/landing$", path)) && 1==1
-        return (; 
-                title="Primal", 
-                description="Discover the best of Nostr",
-                image=("https://$host/public/primal-link-preview.jpg",),
-                url="https://primal.net/",
-                twitter_card = "summary_large_image",
-                twitter_image = "https://primal.net/images/twitter-hero.jpg")
+        elseif !isnothing(local m = match(r"^/landing$", path)) && 1==1
+            return (; 
+                    title="Primal", 
+                    description="Discover the best of Nostr",
+                    image=("https://$host/public/primal-link-preview.jpg",),
+                    url="https://primal.net/",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://primal.net/images/twitter-hero.jpg")
 
-    elseif !isnothing(local m = match(r"^/(.*)", path))
-        name = string(m[1])
-        if !isempty(local pks = nostr_json_query_by_name(name))
-            return mdpubkey_(pks[1])
+        # elseif !isnothing(local m = match(r"^/join$", path)) && 1==1
+        #     return (; 
+        #             title="Primal", 
+        #             description="Discover the best of Nostr",
+        #             image=("https://$host/public/primal-link-preview.jpg",),
+        #             url="https://$host/",
+        #             twitter_card = "summary_large_image",
+        #             twitter_image = "https://$host/public/primal-link-preview.jpg?a=555")
+
+        elseif !isnothing(local m = match(r"^/(.*)", path))
+            name = string(m[1])
+            if !isempty(local pks = nostr_json_query_by_name(name))
+                return mdpubkey_(pks[1])
+            end
+
         end
 
+    elseif host in ["studio.primal.net", "studio-dev.primal.net"]
+        return (; 
+                title="Primal Studio", 
+                description="Empowering Nostr Content Creators",
+                image=("https://$host/public/link-preview_primal-studio.jpg",),
+                url="https://$host/",
+                twitter_card = "summary_large_image",
+                twitter_image = "https://$host/public/link-preview_primal-studio.jpg")
     end
 
     return nothing
@@ -442,7 +473,7 @@ index_htmls = Dict([host=>(;
                            index_doc=Ref{Any}(nothing),
                            index_elems=Dict{Symbol, EzXML.Node}(),
                           )
-                    for host in ["primal.net", "dev.primal.net"]])
+                    for host in ["primal.net", "dev.primal.net", "studio.primal.net", "studio-dev.primal.net"]])
 index_html = Ref("")
 index_doc = Ref{Any}(nothing)
 index_elems = Dict{Symbol, EzXML.Node}()
@@ -490,12 +521,36 @@ function preview_handler(req::HTTP.Request)
         elseif req.target == "/.well-known/assetlinks.json"
             return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), read(ANDROID_ASSETLINKS_FILE[], String))
         end
+
         host = Dict(req.headers)["Host"]
+
+        index_dir = 
+        if     host == "primal.net"
+            "/var/www/dev.primal.net"
+        elseif host == "dev.primal.net"
+            "$(ENV["HOME"])/tmp/dev.primal.net"
+        elseif host == "studio.primal.net"
+            "/var/www/studio-dev.primal.net"
+        elseif host == "studio-dev.primal.net"
+            "$(ENV["HOME"])/tmp/studio-dev.primal.net"
+        else
+            "/var/www/dev.primal.net"
+        end
+
+        if     startswith(req.target, "/imageCacheWorker.js")
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/javascript",
+                                                    "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+                                                   ]), read("$index_dir/imageCacheWorker.js", String))
+        elseif startswith(req.target, "/manifest.json")
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/json",
+                                                    "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+                                                   ]), read("$index_dir/manifest.json", String))
+        end
+
         h = index_htmls[host]
         dochtml = h.index_html[]
         try
             h.throttle() do
-                index_dir = host == "primal.net" ? "/var/www/dev.primal.net" : "$(ENV["HOME"])/tmp/dev.primal.net"
                 h.index_html[] = read("$(index_dir)/index.html", String)
                 h.index_doc[] = doc = EzXML.parsehtml(h.index_html[])
                 for e in EzXML.findall("/html/head/meta", doc)
@@ -559,7 +614,8 @@ function preview_handler(req::HTTP.Request)
                 maxlen = 50
                 s = mels.description
                 s = length(s) > maxlen ? (first(s, maxlen) * "...") : s
-                s = strip(mels.title * ": " * s)
+                # s = strip(mels.title * ": " * s)
+                s = mels.title
                 EzXML.link!(eltitle, EzXML.TextNode(s))
 
                 dochtml = string(h.index_doc[])
