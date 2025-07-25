@@ -309,7 +309,7 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
                 try
                     if !ext_is_hidden(est, e.id)
                         event_hook(est, eid, (:event_stats_cb, :reposts, +1))
-                        event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 5))
+                        event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 7))
                     end
                 catch ex
                     PRINT_EXCEPTIONS[] && Utils.print_exceptions()
@@ -362,7 +362,7 @@ function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
 end
 
 function ext_repost(est::CacheStorage, e::Nostr.Event, eid)
-    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 5))
+    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 7))
     event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED, "make_event_hooks", e.id))
@@ -371,7 +371,7 @@ end
 ext_zap_lock = ReentrantLock()
 function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
     sender = zap_sender(e)
-    event_hook(est, parent_eid, (:score_event_cb, sender, e.created_at, :zap, 3))
+    event_hook(est, parent_eid, (:score_event_cb, sender, e.created_at, :zap, 5))
     if ext_is_human(est, sender)
         msg = ""
         for t in e.tags

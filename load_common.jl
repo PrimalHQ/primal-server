@@ -10,6 +10,7 @@ for fn in [
            "filterlist.jl",
            "trust_rank.jl",
            "postgres.jl",
+           "postgres_macros.jl",
            "tracing.jl",
            "workers.jl",
            "db.jl",

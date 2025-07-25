@@ -42,6 +42,7 @@ Base.hash(ta::TagAny, h::UInt) = hash(ta.fields, h)
 end
 BOOKMARKS=10003
 HIGHLIGHT=9802
+REPORTING=1984
 
 struct Event
     id::EventId # <32-bytes lowercase hex-encoded sha256 of the the serialized event data>

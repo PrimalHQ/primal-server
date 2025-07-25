@@ -94,7 +94,7 @@ pub enum EventReference {
     EventAddr(EventAddr),
 }
 
-#[derive(Debug, Serialize, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Tag {
     EventId(EventId, Vec<String>),
     PubKeyId(PubKeyId, Vec<String>),
@@ -159,20 +159,8 @@ pub const REACTION: i64 = 7;
 pub const ZAP_RECEIPT: i64 = 9735;
 pub const LONG_FORM_CONTENT: i64 = 30023;
 pub const BOOKMARKS: i64 = 10003;
-
-pub fn event_to_json(e: &Event) -> Value {
-    json!({
-        "id": hex::encode(&e.id),
-        "pubkey": hex::encode(&e.pubkey),
-        "created_at": e.created_at,
-        "kind": e.kind,
-        "tags": e.tags.iter()
-            .map(|tag| tag.clone().into_vec())
-            .collect::<Vec<_>>(),
-        "content": e.content,
-        "sig": hex::encode(&e.sig),
-    })
-}
+pub const FOLLOW_LIST: i64 = 39089;
+pub const LIVE_EVENT: i64 = 30311;
 
 impl Tag {
     pub fn into_vec(self) -> Vec<String> {
@@ -302,6 +290,75 @@ pub fn parse_zap_receipt(e: &Event) -> Option<ZapReceipt> {
         Some(ZapReceipt { sender_pubkey, receiver_pubkey, amount_msats, event })
     } else {
         None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LiveEventStatus {
+    Live,
+    Ended,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LiveEventParticipantType {
+    Host,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveEvent {
+    pub kind: i64,
+    pub pubkey: PubKeyId,
+    pub identifier: String,
+    pub status: LiveEventStatus,
+    pub participants: Vec<(PubKeyId, LiveEventParticipantType)>,
+    pub e: Event,
+}
+
+pub fn parse_live_event(e: &Event) -> Option<LiveEvent> {
+    if e.kind != LIVE_EVENT {
+        return None;
+    }
+    let mut identifier = None;
+    let mut status = LiveEventStatus::Unknown;
+    let mut participants = Vec::new();
+    for t in &e.tags {
+        match t {
+            Tag::PubKeyId(pk, rest) => {
+                participants.push((
+                        pk.clone(), 
+                        if rest.len() >= 2 && rest[1] == "host" { LiveEventParticipantType::Host } else { LiveEventParticipantType::Unknown }));
+            }
+            Tag::Any(fields) if fields.len() >= 2 => {
+                match fields[0].as_str() {
+                    "d" => {
+                        identifier = Some(fields[1].clone());
+                    },
+                    "status" => {
+                        match fields[1].as_str() {
+                            "live" => status = LiveEventStatus::Live,
+                            "ended" => status = LiveEventStatus::Ended,
+                            _ => { },
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(identifier) = identifier {
+        Some(LiveEvent {
+            kind: e.kind,
+            pubkey: e.pubkey.clone(),
+            identifier: identifier.clone(),
+            status,
+            participants,
+            e: e.clone(),
+        })
+    } else {
+        return None;
     }
 }
 

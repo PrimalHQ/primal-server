@@ -22,7 +22,7 @@ directory="$(STORAGEPATH)/primalnode$(NODEIDX)/cache"
 
 Postgres.SESSIONS_PER_POOL[] = 5
 for s in [:p0, :membership, :p0timelimit]
-    Postgres.servers[s] = Postgres.Server(; connstr=Postgres.PGConnStr("host=127.0.0.1 port=54017 dbname=primal1 user=pr", ["set statement_timeout=10000"]))
+    Postgres.servers[s] = Postgres.Server(; connstr=Postgres.PGConnStr("host=127.0.0.1 port=54017 dbname=primal1 user=$(ENV["USER"])", ["set statement_timeout=10000"]))
 end
 Postgres.maintain_connection_pools()
 

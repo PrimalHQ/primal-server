@@ -62,6 +62,10 @@ CREATE OR REPLACE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope 
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
+    IF EXISTS (SELECT 1 FROM filterlist WHERE target = a_pubkey AND target_type = 'pubkey' AND blocked AND grp = 'impersonation') THEN
+        RETURN true;
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM cmr_pubkeys_allowed
         WHERE user_pubkey = a_user_pubkey AND pubkey = a_pubkey
@@ -540,6 +544,11 @@ AS $BODY$
 DECLARE
     follows_cnt int8;
 BEGIN
+    -- a_since := a_since - 24*3600;
+    -- a_until := a_until - 24*3600;
+    a_since := a_since - 30;
+    a_until := a_until - 30;
+
     select jsonb_array_length(es.tags) into follows_cnt from contact_lists cl, events es where cl.key = a_pubkey and cl.value = es.id;
 
     -- RAISE NOTICE 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
@@ -705,6 +714,7 @@ BEGIN
                     END LOOP;
                     -- RETURN QUERY SELECT get_event_jsonb(value) FROM contact_lists WHERE key = e_pubkey LIMIT 1; -- bugs prod ios app
                     -- RETURN QUERY SELECT get_event_jsonb(event_id) FROM relay_list_metadata WHERE pubkey = e_pubkey LIMIT 1;
+                    RETURN QUERY SELECT * FROM user_live_events(30311, e_pubkey);
                 END IF;
 
                 IF e_kind = 9735 AND t.is_referenced_event THEN
@@ -977,7 +987,9 @@ CREATE OR REPLACE FUNCTION public.thread_view(
     a_event_id bytea,
     a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0, a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0,
     a_user_pubkey bytea DEFAULT null,
-    a_apply_humaness_check bool DEFAULT false)
+    a_apply_humaness_check bool DEFAULT false,
+    a_include_parent_posts bool DEFAULT true
+)
 	RETURNS SETOF jsonb
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
@@ -997,9 +1009,15 @@ BEGIN
             a_user_pubkey, a_apply_humaness_check);
     END IF;
 
-    RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
-        ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
-        a_user_pubkey, false);
+    IF a_include_parent_posts THEN
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT r FROM thread_view_parent_posts(a_event_id) r ORDER BY r.created_at), 
+            a_user_pubkey, false);
+    ELSE
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT (id, created_at)::post FROM events WHERE id = a_event_id),
+            a_user_pubkey, a_apply_humaness_check);
+    END IF;
 END
 $BODY$;
 
@@ -1146,6 +1164,8 @@ BEGIN
 END
 $BODY$;
 
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
 SELECT cron.schedule('record_trusted_pubkey_followers_cnt',                 '0 */3 * * *', 'CALL record_trusted_pubkey_followers_cnt()');
 SELECT cron.schedule('record_trusted_pubkey_followers_cnt_delete_old',      '0 * * * *', $$DELETE FROM trusted_pubkey_followers_cnt WHERE t < NOW() - INTERVAL '2 DAY'$$);
 SELECT cron.schedule('update_user_relative_daily_follower_count_increases', '0 * * * *', 'CALL update_user_relative_daily_follower_count_increases()');
@@ -1215,4 +1235,71 @@ from (values ('small', 'medium'), ('medium', 'large'), ('large', 'large'), ('ori
 where m.url = a_url and m.size = sz.newsize and ms.media_block_id is null
 order by m.animated desc, m.media_url, msp.priority
 $BODY$;
+
+CREATE OR REPLACE FUNCTION public.live_feed_initial_response(
+    a_kind bigint,
+    a_pubkey bytea,
+    a_identifier varchar,
+    a_user_pubkey bytea, 
+    a_limit bigint DEFAULT 20,
+    a_apply_humaness_check bool DEFAULT true
+) 
+	RETURNS SETOF jsonb
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    -- RETURN QUERY SELECT * FROM enrich_feed_events(
+    --     ARRAY (
+    --         SELECT r
+    --         FROM live_feed_posts(
+    --             a_kind,
+    --             a_pubkey,
+    --             a_identifier,
+    --             a_limit
+    --         ) r),
+    --     a_user_pubkey, a_apply_humaness_check);
+    RETURN QUERY SELECT get_event_jsonb(r.event_id) FROM live_feed_posts(
+                a_kind,
+                a_pubkey,
+                a_identifier,
+                a_limit
+            ) r;
+
+    RETURN QUERY SELECT get_event_jsonb(eid)
+        FROM a_tags 
+        WHERE kind in (7, 9735)
+          AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier
+        ORDER BY created_at DESC LIMIT 1000;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.live_feed_posts(
+    a_kind bigint,
+    a_pubkey bytea,
+    a_identifier varchar,
+    a_limit bigint DEFAULT 20
+)
+	RETURNS SETOF post
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    RETURN QUERY SELECT eid, created_at 
+        FROM a_tags 
+        WHERE kind = 1311
+          AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier
+        ORDER BY created_at DESC LIMIT 10000;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.user_live_events(
+    a_kind bigint,
+    a_pubkey bytea
+) RETURNS SETOF jsonb LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT get_event_jsonb(lep.event_id)
+FROM live_event_participants lep
+WHERE lep.participant_pubkey = a_pubkey
+  AND lep.kind = a_kind
+$BODY$;
+
 

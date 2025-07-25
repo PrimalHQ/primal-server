@@ -1,11 +1,15 @@
 #![allow(unused)]
 
+use std::sync::atomic::Ordering;
+
 use chrono::TimeZone;
 use primal_cache::{parse_parent_eid, parse_zap_receipt, EventRow};
 use primal_cache::{
     event_to_json, log, parse_event, Config, Event, EventAddr, EventId, EventReference, PubKeyId, State, Tag, set_var, get_var, 
+    recent_items,
 };
 use primal_cache::{Ref, insert_edge};
+use primal_cache::{FOLLOW_LIST, LIVE_EVENT, parse_live_event, LiveEventStatus, LiveEventParticipantType};
 
 use serde_json::json;
 use serde_json::Value;
@@ -14,8 +18,6 @@ use serde_json::Value;
 async fn main() -> anyhow::Result<()> {
     primal_cache::main_1(main_2, main_2).await
 }
-
-pub const FOLLOW_LIST: i64 = 39089;
 
 async fn import_event(state: &State, e: &Event) -> Result<(), anyhow::Error> {
     println!("{:?} {:?} {}", e.id, e.kind, chrono::Utc.timestamp_opt(e.created_at, 0).single().unwrap_or_default().to_rfc3339());
@@ -63,43 +65,91 @@ async fn import_event(state: &State, e: &Event) -> Result<(), anyhow::Error> {
                 tx.commit().await?;
             }
         }
+
+        LIVE_EVENT => {
+            if let Some(le) = parse_live_event(e) {
+                dbg!(&le);
+                match le.status {
+                    LiveEventStatus::Live => {
+                        let mut tx = state.cache_pool.begin().await?;
+                        sqlx::query!(r#"
+                            delete from live_event_participants where kind = $1 and pubkey = $2 and identifier = $3
+                            "#, e.kind, e.pubkey.0, le.identifier,
+                        ).execute(&mut *tx).await?;
+                        for (pk, ptype) in le.participants {
+                            if ptype == LiveEventParticipantType::Host {
+                                sqlx::query!(r#"
+                                    insert into live_event_participants (kind, pubkey, identifier, participant_pubkey, event_id, created_at)
+                                    values ($1, $2, $3, $4, $5, $6)
+                                    "#,
+                                    e.kind, e.pubkey.0, le.identifier, pk.0,
+                                    e.id.0, e.created_at, 
+                                ).execute(&mut *tx).await?;
+                            }
+                        }
+                        tx.commit().await?;
+                    },
+                    LiveEventStatus::Ended => {
+                        sqlx::query!(r#"
+                            delete from live_event_participants where kind = $1 and pubkey = $2 and identifier = $3
+                            "#, e.kind, e.pubkey.0, le.identifier,
+                        ).execute(&state.cache_pool).await?;
+                    },
+                    LiveEventStatus::Unknown => { }
+                }
+            }
+        }
+
         _ => {}
     }
     Ok(())
 }
 
 async fn main_2(config: Config, state: State) -> anyhow::Result<()> {{
-    let tstart = std::time::Instant::now();
+    let mut seen_events = recent_items::RecentItems::new(10000);
 
-    let since = state.since;
-    let until = chrono::Utc::now().timestamp() as i64;
-    let mut last_created_at = since;
+    let kinds = format!("{{{}}}", vec![FOLLOW_LIST, LIVE_EVENT].iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
 
-    for r in sqlx::query_as!(EventRow, r#"
-        select * from events 
-        where created_at >= $1 
-          and created_at < $2 
-          and kind in ($3)
-        order by created_at
-        "#, since, until, FOLLOW_LIST).fetch_all(&state.cache_pool).await.unwrap() {
+    let mut since = state.since;
 
-        match parse_event(r) {
-            Ok(e) => {
-                let res = import_event(&state, &e).await;
-                if let Err(err) = res {
-                    println!("Error importing event: {err:?}");
+    loop {
+        if state.got_sig.load(Ordering::SeqCst) { break; }
+
+        let until = chrono::Utc::now().timestamp() as i64;
+        let mut last_created_at = since;
+
+        for r in sqlx::query_as!(EventRow, r#"
+            select * from events 
+            where imported_at >= $1 
+              and imported_at <= $2 
+              and kind = any ($3::varchar::int[])
+            order by created_at
+            "#, since, until, kinds).fetch_all(&state.cache_pool).await.unwrap() {
+
+            match parse_event(r) {
+                Ok(e) => {
+                    if seen_events.push(e.id.clone()) {
+                        let res = import_event(&state, &e).await;
+                        if let Err(err) = res {
+                            println!("error importing event: {err:?}");
+                        }
+                        last_created_at = e.created_at;
+                    }
                 }
-                last_created_at = e.created_at;
-            }
-            Err(err) => {
-                println!("error parsing event: {err:?}");
+                Err(err) => {
+                    println!("error parsing event: {err:?}");
+                }
             }
         }
+
+        // set_var(&state.cache_pool, &config.import_latest_t_key, Value::from(last_created_at)).await.unwrap();
+        set_var(&state.cache_pool, &config.import_latest_t_key, Value::from(until)).await.unwrap();
+
+        since = until;
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 
-    set_var(&state.cache_pool, &config.import_latest_t_key, Value::from(last_created_at)).await.unwrap();
-
-    dbg!(tstart.elapsed());
     Ok(())
 }}
 

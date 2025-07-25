@@ -29,7 +29,7 @@ hashfunc(::Type{Nostr.PubKeyId}) = pk->pk.pk[32]
 hashfunc(::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) = p->p[1].pk[32]
 
 MAX_MESSAGE_SIZE = Ref(500_000) |> ThreadSafe
-kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT]]
+kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT, Nostr.REPORTING]]
 
 term_lines = try parse(Int, strip(read(`tput lines`, String))) catch _ 15 end
 threadprogress = Dict{Int, Any}() |> ThreadSafe
@@ -1036,6 +1036,7 @@ end
 
 BLOCKED_KINDS = [29333]
 EVENT_RELAY_TRACKING_ENABLED = Ref(false)
+IMPORT_REPORTING_EVENTS = Ref(false)
 
 function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_daily_stats=false, relay_url=nothing)
     est.readonly[] && return false
@@ -1047,6 +1048,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     e.id in est.deleted_events && return false
 
     EVENT_RELAY_TRACKING_ENABLED[] && (isnothing(relay_url) || Postgres.execute(:p0, "insert into event_relays values (\$1, \$2, \$3) on conflict do nothing", [e.id, relay_url, Utils.current_time()]))
+    isnothing(relay_url) || update_known_relays(est, relay_url)
 
     should_import = lock(already_imported_check_lock) do
         if e.kind in BLOCKED_KINDS || e.id in est.events || !ext_preimport_check(est, e)
@@ -1356,6 +1358,8 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             catch _ Utils.print_exceptions() end
         elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
             ext_long_form_note(est, e)
+        elseif e.kind == Int(Nostr.REPORTING)
+            IMPORT_REPORTING_EVENTS[] && import_reporting(est, e)
         end
     end
 
@@ -1538,13 +1542,15 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
     end
 end
 
-function import_delete_event(est::CacheStorage, e::Nostr.Event)
+function import_delete_event(est::CacheStorage, e::Nostr.Event; dryrun=false)
     deleted = Ref(false)
 
     function delete_event(eid)
-        est.deleted_events[eid] = e.id
+        if !dryrun
+            est.deleted_events[eid] = e.id
+        end
         if eid in est.events
-            delete!(est.events, eid)
+            dryrun || delete!(est.events, eid)
             deleted[] = true
         end
     end
@@ -1568,13 +1574,14 @@ function import_delete_event(est::CacheStorage, e::Nostr.Event)
                 eid = Nostr.EventId(eid)
                 delete_event(eid)
             end
+            Postgres.execute(:p0,  "delete from parametrized_replaceable_events where pubkey = \$1 and kind = \$2 and identifier = \$3", [pk, kind, identifier])
             if kind == Int(Nostr.LONG_FORM_CONTENT)
                 for (eid,) in Postgres.execute(:p0, "select eid from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])[2]
                     eid = Nostr.EventId(eid)
                     delete_event(eid)
                 end
-                Postgres.execute(:p0, "delete from reads where pubkey = \$1 and identifier = \$2", [pk, identifier])
-                Postgres.execute(:p0, "delete from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])
+                dryrun || Postgres.execute(:p0, "delete from reads where pubkey = \$1 and identifier = \$2", [pk, identifier])
+                dryrun || Postgres.execute(:p0, "delete from reads_versions where pubkey = \$1 and identifier = \$2", [pk, identifier])
             end
         end
     end
@@ -1593,6 +1600,38 @@ function import_pubkey_bookmarks(est::CacheStorage, e::Nostr.Event)
             end
         end
     end
+end
+
+REPORTING_WHITELIST = Set{Nostr.PubKeyId}()
+
+function import_reporting(est::CacheStorage, e::Nostr.Event)
+    function insert_rule(target, target_type, grp)
+        Postgres.execute(:membership, "insert into filterlist values (\$1, \$2, \$3, \$4, \$5, \$6) on conflict do nothing", 
+                         [target, target_type, true, grp, e.created_at, "1984/$(Nostr.hex(e.id)): " * e.content])
+    end
+    cnt = 0
+    if e.pubkey in REPORTING_WHITELIST
+        for tag in e.tags
+            if length(tag.fields) >= 3 
+                grp =
+                if     tag.fields[3] == "impersonation"; "impersonation"
+                elseif tag.fields[3] == "spam";          "spam"
+                else;  continue
+                end
+                if     tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                    insert_rule(pk, "pubkey", grp)
+                    cnt += 1
+                elseif tag.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                    insert_rule(eid, "event", grp)
+                    insert_rule(est.events[eid].pubkey, "pubkey", grp)
+                    cnt += 2
+                else
+                    continue
+                end
+            end
+        end
+    end
+    cnt
 end
 
 function update_content_moderation_rules(est::CacheStorage, pubkey::Nostr.PubKeyId)
@@ -2031,9 +2070,14 @@ end
 function update_fetcher_relays(est::CacheStorage, pubkey::Nostr.PubKeyId; source_event_id=nothing)
     relay_urls = [t[2] for t in Main.App.get_user_relays(est; pubkey)[1].tags]
     for relay_url in relay_urls
-        Postgres.execute(:p0, "insert into fetcher_relays values (\$1, \$2, \$3) on conflict do nothing", 
+        Postgres.execute(:p0, "insert into fetcher_relays values (\$1, \$2, \$3) on conflict (relay_url) do update set updated_at = excluded.updated_at", 
                          [relay_url, Dates.now(), source_event_id])
     end
+end
+
+function update_known_relays(est::CacheStorage, relay_url::String)
+    Postgres.execute(:p0, "insert into known_relays values (\$1, \$2) on conflict (relay_url) do update set last_import_at = excluded.last_import_at", 
+                     [relay_url, Dates.now()])
 end
 
 function import_messages(est::CacheStorage, filename::String; pos=0, cond=e->true, running=Utils.PressEnterToStop())

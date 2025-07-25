@@ -106,6 +106,9 @@ exposed_functions = Set([:feed,
 
                          :get_recommended_blossom_servers,
                          :replaceable_event,
+
+                         :follow_lists,
+                         :follow_list,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -928,7 +931,8 @@ end
 function thread_view(est::DB.CacheStorage; 
         event_id, 
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
-        usepgfuncs=false, 
+        # usepgfuncs=false, 
+        usepgfuncs=true, 
         user_pubkey=nothing, 
         apply_humaness_check=false,
         kwargs...)
@@ -940,8 +944,9 @@ function thread_view(est::DB.CacheStorage;
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
     if usepgfuncs
-        res = map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from thread_view(\$1, \$2, \$3, \$4, \$5, \$6, \$7)",
-                                      [event_id, limit, since, until, offset, user_pubkey, apply_humaness_check]))
+        include_parent_posts = get(kwargs, :include_parent_posts, true)
+        res = map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from thread_view(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)",
+                                      [event_id, limit, since, until, offset, user_pubkey, apply_humaness_check, include_parent_posts]))
         return res
     end
 
@@ -1099,7 +1104,8 @@ end
 function castnamedtuple(d)
     if     d isa NamedTuple; d
     elseif d isa Dict; d["kind"] < 10_000_000 ? Nostr.Event(d) : (; [Symbol(k)=>v for (k, v) in d]...)
-    else; error("invalid argument")
+    elseif d isa Missing; nothing
+    else; error("invalid argument: $d")
     end
 end
         
@@ -1152,7 +1158,8 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=true, ap
 
     if usepgfuncs
         return [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from user_infos(\$1::text[])", 
-                                                           ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}'])]
+                                                           ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}']
+                                                           ) if !(e isa Missing)]
     end
 
     res_meta_data = Dict() |> ThreadSafe
@@ -1333,8 +1340,38 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     append!(res, primal_verified_names(est, [pubkey]))
 
     !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
+    
+    append!(res, user_profile_live_streams(est, pubkey))
 
     res.wrapped
+end
+
+function user_profile_live_streams(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    res = []
+    for (e,) in Postgres.execute(:p0, "
+        SELECT get_event_jsonb(pre.event_id)
+        FROM parametrized_replaceable_events pre, basic_tags bt
+        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8
+          AND pre.event_id = bt.id AND bt.tag = 'p' AND bt.arg1 = \$1
+          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
+                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
+                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
+        ", [pubkey])[2]
+        e = castnamedtuple(e) 
+        push!(res, e)
+    end
+    for (e,) in Postgres.execute(:p0, "
+        SELECT get_event_jsonb(pre.event_id)
+        FROM parametrized_replaceable_events pre
+        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8 AND pre.pubkey = \$1
+          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
+                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
+                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
+        ", [pubkey])[2]
+        e = castnamedtuple(e) 
+        push!(res, e)
+    end
+    collect(Set(res))
 end
 
 function user_profile_followed_by(est::DB.CacheStorage; pubkey, user_pubkey, limit=10)
@@ -3637,9 +3674,9 @@ function membership_media_management_uploads(
     res = []
     urls = []
     us = []
-    for (url, size, mimetype, created_at) in 
+    for (sha256, path, size, mimetype, created_at) in 
         Postgres.execute(:membership, 
-                         "select 'https://blossom.primal.net/' || encode(mu.sha256, 'hex'), mu.size, mu.mimetype, mu.created_at
+                         "select mu.sha256, mu.path, mu.size, mu.mimetype, mu.created_at
                          from media_uploads mu
                          where 
                             mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and 
@@ -3647,6 +3684,8 @@ function membership_media_management_uploads(
                          order by mu.created_at desc
                          limit \$4 offset \$5", 
                          [e.pubkey, since, until, limit, offset])[2]
+        ext = splitext(path)[end]
+        url = "https://blossom.primal.net/$(bytes2hex(sha256))$(ext)"
         push!(us, (url, created_at))
         push!(res, (; url, size, mimetype, created_at))
         push!(urls, url)
@@ -3681,7 +3720,10 @@ function membership_recovery_contact_lists(
         kwargs...
     )
     e = membership_event_from_user(event_from_user)
+    membership_recovery_contact_lists_(est, e.pubkey)
+end
 
+function membership_recovery_contact_lists_(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     es = []
     for (_, eid, created_at) in Postgres.execute(:p0timelimit, "
                                                  with cls as (
@@ -3693,7 +3735,7 @@ function membership_recovery_contact_lists(
                                                  order by day desc, follows desc, id
                                                  limit 30
                                                  ",
-                                                 [e.pubkey])[2]
+                                                 [pubkey])[2]
         push!(es, (Nostr.EventId(eid), created_at))
     end
     # es = sort(es; by=x->-x[2])
@@ -4068,6 +4110,74 @@ function muted_threads_feed(
         push!(posts, (Nostr.EventId(r.id), r.created_at))
     end
     enrich_feed_events_pg(est; posts, user_pubkey)
+end
+
+function parse_follow_list(e::Nostr.Event)
+    pks = Set{Nostr.PubKeyId}()
+    for t in e.tags
+        if length(t.fields) >= 2 && t.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(t.fields[2]) catch _ end)
+            push!(pks, pk)
+        end
+    end
+    pks
+end
+
+function follow_lists(
+        est::DB.CacheStorage;
+        since=0, until=Utils.current_time(), 
+        limit=5, offset=0,
+    )
+    limit = min(20, limit)
+
+    es = []
+    res = []
+
+    pks = Set{Nostr.PubKeyId}()
+    for r in p0"
+        select es.* from parametrized_replaceable_events pre, events es 
+        where pre.kind = 39089 and pre.created_at >= $since and pre.created_at <= $until and pre.event_id = es.id
+          and not exists (select 1 from filterlist fl where fl.target = pre.pubkey and fl.target_type = 'pubkey' and fl.grp = 'spam' and fl.blocked)
+        order by pre.created_at desc limit $limit offset $offset"
+        e = event_from_row(collect(r))
+
+        has_image = false
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "image"
+                has_image = true
+                break
+            end
+        end
+        has_image || continue
+
+        push!(res, e)
+
+        append!(res, map(castnamedtuple, p0"select * from event_media_response($(e.id))"))
+
+        push!(es, (e.id, e.created_at))
+
+        push!(pks, e.pubkey)
+
+        pks_param = "{$(join(["\\\\x$(Nostr.hex(pk))" for pk in parse_follow_list(e)], ','))}"
+        rs = p0"select key as pubkey, value as cnt from pubkey_followers_cnt where key = any ($(pks_param)::bytea[]) order by cnt desc limit 5"
+        union!(pks, [r.pubkey for r in rs])
+    end
+
+    [res..., user_infos(est; pubkeys=collect(pks), usepgfuncs=true)..., range(es, :created_at)...]
+end
+
+function follow_list(
+        est::DB.CacheStorage;
+        pubkey, identifier::String,
+    )
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    rs = p0"
+    select es.* from parametrized_replaceable_events pre, events es 
+    where pre.kind = 39089 and pre.pubkey = $pubkey and pre.identifier = $identifier and pre.event_id = es.id
+    "
+    isempty(rs) && error("no such follow list")
+    e = event_from_row(collect(rs[1]))
+    pks = parse_follow_list(e)
+    [e, user_infos(est; pubkeys=collect(pks), usepgfuncs=true)...]
 end
 
 end

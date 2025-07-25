@@ -128,6 +128,26 @@ pub fn parse_event(r: EventRow) -> Result<Event, anyhow::Error> {
     }
 }
 
+impl serde::Serialize for Tag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        fn tag_to_value(v: &Vec<String>, rest: &Vec<String>) -> Value {
+            let mut a = v.clone();
+            a.extend(rest.iter().map(|s| s.to_string()));
+            json!(a)
+        }
+        let sv = match self {
+            Tag::EventId(event_id, rest) => tag_to_value(&vec!["e".to_string(), hex::encode(event_id)], rest),
+            Tag::PubKeyId(pubkey, rest) => tag_to_value(&vec!["p".to_string(), hex::encode(pubkey)], rest),
+            Tag::EventAddr(addr, rest) =>  tag_to_value(&vec!["a".to_string(), format!("{}:{}:{}", addr.kind, hex::encode(&addr.pubkey), addr.identifier)], rest),
+            Tag::Any(rest) => tag_to_value(&vec![], rest),
+        };
+        sv.serialize(serializer)
+    }
+}
+
 #[derive(Debug,Clone,Deserialize)]
 pub struct Config {
     pub proxy: Option<String>,
@@ -453,7 +473,7 @@ where
     Ok(())
 }
 
-fn make_got_sig() -> Arc<AtomicBool> {
+pub fn make_got_sig() -> Arc<AtomicBool> {
     let got_sig = Arc::new(AtomicBool::new(false));
     let watcher = got_sig.clone();
     tokio::spawn(async move {
@@ -473,5 +493,39 @@ pub async fn set_var(pool: &Pool<Postgres>, key: &str, value: Value) -> anyhow::
         r#"insert into vars values ($1, $2, now()) on conflict (key) do update set value = $2, updated_at = now()"#,
         key, value).fetch_all(pool).await?;
     Ok(())
+}
+
+pub async fn live_importer<F, Fut, S>(imp_state: Arc<State>, state: S, import_event_f: F)  
+where
+    S: Clone,
+    F: Fn(Arc<State>, Event, S) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    let mut since = chrono::Utc::now().timestamp() as i64;
+
+    let mut seen_events = crate::recent_items::RecentItems::new(10000);
+
+    loop {
+        let until = chrono::Utc::now().timestamp() as i64;
+        if let Some(res) = sqlx::query_as!(EventRow, r#"select * from events where imported_at >= $1 and imported_at <= $2 order by created_at"#, since, until).fetch_all(&imp_state.cache_pool).await.ok() {
+            for r in res {
+                match parse_event(r) {
+                    Ok(e) => {
+                        if seen_events.push(e.id.clone()) {
+                            let res = import_event_f(imp_state.clone(), e.clone(), state.clone()).await;
+                            if let Err(err) = res {
+                                println!("Error importing event: {err:?}");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        println!("error parsing event: {err:?}");
+                    }
+                }
+            }
+            since = until;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    }
 }
 
