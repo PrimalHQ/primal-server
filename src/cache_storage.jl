@@ -807,7 +807,8 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
             if tag.fields[1] == "a"
                 if resolve_parametrized_replaceable_events
                     ps = split(tag.fields[2], ':')
-                    push_parametrized_replaceable_event(Nostr.PubKeyId(string(ps[2])), parse(Int, ps[1]), string(ps[3]))
+                    try push_parametrized_replaceable_event(Nostr.PubKeyId(string(ps[2])), parse(Int, ps[1]), string(ps[3]))
+                    catch _ end
                 else
                     push!(mentiontags, tag)
                 end
@@ -1340,6 +1341,8 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             end
         elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
             ext_long_form_note(est, e)
+        elseif e.kind == Int(Nostr.FOLLOW_PACK)
+            import_follow_list_media(est, e)
         end
     end
 
@@ -1373,6 +1376,10 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
         event_hook_execute(est, e, Tuple(JSON.parse(funcall)))
     end
     exe(est.event_hooks, @sql("delete from event_hooks where event_id = ?1"), e.id)
+
+    catch_exception(est, e.id) do
+        ext_event(est, e)
+    end
 
     return true
 end
@@ -2034,6 +2041,8 @@ function iterate_events_in_file(body::Function, filename::String; pos=0, cond=e-
     end
     nothing
 end
+
+function ext_event(est::CacheStorage, e::Nostr.Event) end
 
 include("cache_storage_ext.jl")
 include("cache_storage_media.jl")

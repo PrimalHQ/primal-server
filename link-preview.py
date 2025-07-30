@@ -3,7 +3,7 @@ import os
 import json
 import subprocess
 import traceback
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -38,30 +38,28 @@ for ee in soup.html.head.find_all('link'):
         e = ee.attrs
         if "rel" in e and "href" in e:
             if len(e["rel"]) == 1 and e["rel"][0] == "icon":
-                u = urlparse(url)
-                image = u.scheme+"://"+u.netloc+e["href"]
+                image = urljoin(url, e["href"])
     except:
         traceback.print_exc()
 
 for ee in soup.html.head.find_all('meta'):
     e = ee.attrs
     if "property" in e and "content" in e:
-        prop = e["property"]
-        if   prop == "og:title": title = e["content"]
-        elif prop == "og:image": image = e["content"]
-        elif prop == "og:description": description = e["content"]
-        elif prop == "twitter:title": title = e["content"]
-        elif prop == "twitter:description": description = e["content"]
-        elif prop == "twitter:image:src": image = e["content"]
+        if   e["property"] == "og:title": title = e["content"]
+        elif e["property"] == "og:image": image = urljoin(url, e["content"])
+        elif e["property"] == "og:description": description = e["content"]
+        elif e["property"] == "twitter:title": title = e["content"]
+        elif e["property"] == "twitter:description": description = e["content"]
+        elif e["property"] == "twitter:image:src": image = urljoin(url, e["content"])
 
     elif "name" in e and "content" in e:
         if   e["name"] == "description": description = e["content"]
         elif e["name"] == "og:title": title = e["content"]
-        elif e["name"] == "og:image": image = e["content"]
+        elif e["name"] == "og:image": image = urljoin(url, e["content"])
         elif e["name"] == "og:description": description = e["content"]
         elif e["name"] == "twitter:title": title = e["content"]
         elif e["name"] == "twitter:description": description = e["content"]
-        elif e["name"] == "twitter:image:src": image = e["content"]
+        elif e["name"] == "twitter:image:src": image = urljoin(url, e["content"])
 
 icon_url = ""
 # for ee in soup.html.head.find_all('link'):

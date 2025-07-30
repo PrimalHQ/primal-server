@@ -54,11 +54,12 @@ mutable struct Throttle
     t
     period
     lock
-    Throttle(; period=1.0, t=time()) = new(t, period, ReentrantLock())
+    time_override
+    Throttle(; period=1.0, t=time()) = new(t, period, ReentrantLock(), nothing)
 end
 function (thr::Throttle)(f::Function)
     lock(thr.lock) do
-        t = time()
+        t = isnothing(thr.time_override) ? time() : thr.time_override
         if t - thr.t >= thr.period
             thr.t = t
             f()
@@ -373,7 +374,9 @@ function process_collection(
         running=PressEnterToStop()|>ThreadSafe,
         errors=Ref(0)|>ThreadSafe,
         error_kinds=DataStructures.Accumulator{String,Int}()|>ThreadSafe,
-        usethreads=true,
+        parallel::Symbol=:threads, # :threads, :asyncmap, :off
+        asyncmap_tasks=8,
+        report_every=1000,
     )
     i = Ref(0) |> ThreadSafe
 
@@ -393,23 +396,29 @@ function process_collection(
         end
         lock(i) do i
             i[] += 1
-            if i[] % 1000 == 0
+            if i[] % report_every == 0
                 s = isnothing(f) ? "" : f()
                 print("$(i[])/$(length(collection))  errors:$(errors[]) error_kinds:$(length(error_kinds))$s\r")
             end
         end
     end
 
-    if usethreads
-        Threads.@threads for x in collection
+    if parallel == :asyncmap
+        asyncmap(collection; ntasks=asyncmap_tasks) do x
+            running[] || return
             yield()
-            running[] || break
             process_element(x)
         end
-    else
-        for x in collection
-            yield()
+    elseif parallel == :threads
+        Threads.@threads for x in collection
             running[] || break
+            yield()
+            process_element(x)
+        end
+    elseif parallel == :off
+        for x in collection
+            running[] || break
+            yield()
             process_element(x)
         end
     end
@@ -425,6 +434,21 @@ geoiplookup(ip) = join(split(split(read(`geoiplookup $ip`, String), '\n')[1])[4:
 import JSON
 function strict_json(d::Dict)::String
     JSON.json(NamedTuple([Symbol(k)=>v for (k, v) in sort(collect(d); by=kv->kv[1])]))
+end
+
+function asyncmap_tls_pass(body::Function, args...; kwargs...)
+    tls = deepcopy(task_local_storage())
+    asyncmap(args...; kwargs...) do a
+        for (k, v) in tls
+            task_local_storage(k, v)
+        end
+        task_local_storage(:aaa, 123)
+        body(a)
+    end
+end
+
+macro chain(func::Symbol)
+    :($(esc(func))(args1...; kwargs...) = (args2...)->$(esc(func))(args1..., args2...; kwargs...))
 end
 
 end

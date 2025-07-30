@@ -78,11 +78,12 @@ function on_event(sd::SpamDetector, e::Nostr.Event, time::Float64=Float64(e.crea
                 if length(ewords) >= sd.MIN_NOTE_SIZE[]
                     for (cwords, cvec) in sd.latest_clusters
                         if length(cvec) >= sd.CLUSTER_SIZE_THRESHOLD[] && is_spam(ewords, cwords)
-                            sd.realtime_spam_note_cnt[] += 1
+                            # @show sd.realtime_spam_note_cnt[] += 1
                             notspam[] = false
                             push!(sd.realtime_spamlist, e.pubkey)
                             push!(sd.realtime_spamlist_diff, e.pubkey)
                             sd.realtime_spamlist_periodic() do
+                                # @show :realtime_spamlist_periodic
                                 process_spamlist(sd, sd.realtime_spamlist_diff)
                                 empty!(sd.realtime_spamlist_diff)
                             end

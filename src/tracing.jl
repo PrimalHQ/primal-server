@@ -7,8 +7,8 @@ import UUIDs
 import ..Utils
 import ..Postgres
 
-const ENABLED = Ref(true)
-const PRINT_EXCEPTIONS = Ref(true)
+const ENABLED = Ref(false)
+const PRINT_EXCEPTIONS = Ref(false)
 
 const hostname = gethostname()
 

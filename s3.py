@@ -44,4 +44,17 @@ elif req['operation'] == 'delete':
     res = {'status': ok}
     print(json.dumps(res))
 
+elif req['operation'] == 'copy':
+    s3_client.copy_object(Bucket=req['destination_bucket'], Key=req['destination_object'],
+                          CopySource={'Bucket': req['source_bucket'], 'Key': req['source_object']})
+    res = {'status': True}
+    print(json.dumps(res))
+
+elif req['operation'] == 'pre-sign-url':
+    url = s3_client.generate_presigned_url('get_object',
+                                           Params={'Bucket': req['bucket'], 'Key': req['object']},
+                                           ExpiresIn=req.get('expires', 3600))
+    res = {'status': True, 'url': url}
+    print(json.dumps(res))
+
 

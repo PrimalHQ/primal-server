@@ -3,6 +3,7 @@ module InternalServices
 import HTTP, EzXML, JSON, URIs
 using DataStructures: CircularBuffer
 import Glob
+import UUIDs
 
 import ..Utils
 import ..Nostr
@@ -10,6 +11,7 @@ import ..Bech32
 import ..DB
 import ..Media
 import ..Postgres
+using ..Tracing: @ti, @tc, @td, @tr
 
 PORT = Ref(14000)
 PORT2 = Ref(24000)
@@ -135,7 +137,7 @@ function start(cache_storage::DB.CacheStorage; setup_handlers=true)
 
         HTTP.register!(router[], "/api/suggestions", suggestions_handler)
 
-        HTTP.register!(router2[], "/purge-media", purge_media_handler)
+        HTTP.register!(router2[], "/**", media_moderation_handler)
     end
 
     nothing
@@ -590,7 +592,7 @@ function media_cache_handler(req::HTTP.Request)
         tr = @elapsed (r = Media.media_variants(est[], url; variant_specs, sync=true, already_imported=true))
         # println("$tr  $query  $(isnothing(r))")
 
-        if isnothing(r)
+        if 1==1 || isnothing(r)
             HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
         else
             resurl = r[variant]
@@ -657,9 +659,10 @@ function url_shortening(url)
     lock(short_urls_lock) do
         r = DB.exec(short_urls[], DB.@sql("select path, ext from short_urls where url = ?1 limit 1"), (url,))
         if isempty(r)
-            maxidx = DB.exec(short_urls[], DB.@sql("select max(idx) from short_urls"))[1][1]
-            ismissing(maxidx) && (maxidx = 0)
-            idx = maxidx + 1
+            # maxidx = DB.exec(short_urls[], DB.@sql("select max(idx) from short_urls"))[1][1]
+            # ismissing(maxidx) && (maxidx = 0)
+            # idx = maxidx + 1
+            idx = DB.exec(short_urls[], DB.@sql("select nextval('short_urls_idx_seq')"))[1][1]
             i = 1000000+idx
             cs = []
             while i > 0
@@ -791,73 +794,203 @@ function suggestions_handler(req::HTTP.Request)
     end
 end
 
-function purge_media_handler(req::HTTP.Request)
-    catch_exception(:purge_media_handler, req) do
+function media_moderation_handler(req::HTTP.Request)
+    catch_exception(:media_moderation_handler, req) do
         r = JSON.parse(String(req.body))
-        purge_media(Nostr.PubKeyId(r["pubkey"]), r["url"])
-        HTTP.Response(200, api_headers, "ok")
+        @show (:media_moderation_handler, req.target)
+        if     req.target == "/purge-media"
+            purge_media_(isnothing(r["pubkey"]) ? nothing : Nostr.PubKeyId(r["pubkey"]), r["url"];
+                         reason=get(r, "reason", nothing),
+                         block_all_uploads=get(r, "block_all_uploads", false),
+                         extra=(; initiator_pubkey=get(r, "initiator_pubkey", nothing)))
+            return HTTP.Response(200, api_headers, "ok")
+        # elseif req.target == "/restore-media"
+        #     Main.InternalServices2.restore_media(Base.UUID(r["media_block_id"]))
+        #     return HTTP.Response(200, api_headers, "ok")
+        # elseif req.target == "/restore-user-media"
+        #     Main.InternalServices2.restore_user_media(Nostr.PubKeyId(r["pubkey"]))
+        #     return HTTP.Response(200, api_headers, "ok")
+        elseif req.target == "/pre-sign-urls"
+            res = pre_sign_urls(r["bucket"], r["paths"], Symbol(r["storage_provider"]))
+            return HTTP.Response(200, api_headers, JSON.json(res))
+        end
+        HTTP.Response(404, api_headers, "not found")
     end
 end
 
 BUNNY_API_KEY = Ref{Any}(nothing)
+CLOUDFLARE_API_KEY = Ref{Any}(nothing)
+CLOUDFLARE_CACHE_ZONE_ID = Ref{Any}(nothing)
 
 function bunny_purge()
     @assert HTTP.request("POST", "https://api.bunny.net/pullzone/1425721/purgeCache", ["AccessKey"=>BUNNY_API_KEY[]]).status == 204
 end
 
-function purge_media(pubkey::Nostr.PubKeyId, surl::String)
-    # @show (:purge_media, pubkey, surl)
-    function purge(url)
-        path = string(URIs.parse_uri(url).path)
+function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reason=nothing, extra=(;), verbose=false, block_all_uploads=false)
+    @show (:purge_media, pubkey, surl, reason)
 
-        for mps in values(Main.Media.MEDIA_PATHS)
-            for mp in mps
-                if mp[1] == :local
-                    filepath = join(split(mp[3], '/')[1:end-1], '/') * path
-                    # @show (:rmlocal, filepath)
-                    try isfile(filepath) && rm(filepath) 
-                    catch ex println(ex) end
-                elseif mp[1] == :s3
-                    # @show (:rms3, Media.s3_check(mp[2], path[2:end]), path)
-                    try Media.s3_delete(mp[2], path[2:end])
-                    catch ex println(ex) end
-                end
+    media_block_id = string(UUIDs.uuid4())
+    mb = (; surl, files=[], media_urls=[], thumbnail_urls=[], short_urls=[], blossom_urls=[], upload_urls=[], extra...)
+    if !isnothing(reason); mb = (; mb..., reason); end
+    if !isnothing(pubkey); mb = (; mb..., pubkey); end
+    Postgres.execute(:membership, "insert into media_block values (\$1, now(), \$2)", [media_block_id, JSON.json(mb)])
+
+    update_mb() = Postgres.execute(:membership, "update media_block set d = \$2 where id = \$1", [media_block_id, JSON.json(mb)])
+
+    function purge(url)
+        @show (:purge, url)
+        path_ext = string(URIs.parse_uri(url).path)
+        path = splitext(path_ext)[1]
+        kh = splitpath(path)[end]
+
+        asyncmap([(p, mp)
+                  for p in [path, path*".key", path_ext]
+                  for mps_ in [Main.Media.MEDIA_PATHS, Main.Media.MEDIA_PATHS_2]
+                  for mps in values(mps_)
+                  for mp in mps
+                 ]; ntasks=10) do (p, mp)
+            if mp[1] == :local
+                filepath = join(split(mp[3], '/')[1:end-1], '/') * p
+                verbose && @show (:rm_local, filepath)
+                # try (isfile(filepath) || islink(filepath)) && rm(filepath) 
+                # catch ex println(ex) end
+                try 
+                    if isfile(filepath) || islink(filepath)
+                        dst_root = string(join(splitpath(filepath)[1:end-6], '/')[2:end])
+                        dst = "$(dst_root)/cdn-hidden/"*(splitpath(filepath)[end])
+                        # @show (filepath, dst)
+                        push!(mb.files, (; mp, p, filepath, dst))
+                        mv(filepath, dst; force=true)
+                    end
+                catch ex println(ex) end
+            elseif mp[1] == :s3
+                s3_provider = mp[2]
+                verbose && @show (:rm_s3, s3_provider, Media.s3_check(s3_provider, p[2:end]), p)
+                try 
+                    if Media.s3_check(s3_provider, p[2:end])
+                        push!(mb.files, (; mp, p))
+                        Media.s3_copy(s3_provider, 
+                                      Main.S3_CONFIGS[s3_provider].bucket,  p[2:end],
+                                      Main.S3_CONFIGS[s3_provider].bucket2, p[2:end])
+                        Media.s3_delete(s3_provider, p[2:end])
+                    end
+                    if s3_provider == :bunny
+                        # bunny_purge()
+                    elseif s3_provider == :cloudflare
+                        if !isnothing(CLOUDFLARE_CACHE_ZONE_ID[]) && !isnothing(CLOUDFLARE_API_KEY[])
+                            s3_url = "https://$(Main.S3_CONFIGS[s3_provider].domain)$p"
+                            r = JSON.parse(String(HTTP.request("POST", "https://api.cloudflare.com/client/v4/zones/$(CLOUDFLARE_CACHE_ZONE_ID[])/purge_cache",
+                                                               ["Authorization"=>"Bearer $(CLOUDFLARE_API_KEY[])", "Content-Type"=>"application/json" ], 
+                                                               JSON.json((; files=[s3_url]))).body))
+                            @assert r["success"] == true
+                        end
+                    end
+                catch ex println(ex) end
             end
+            # Postgres.execute(:p0, "delete from media_storage where storage_provider = \$1 and h = \$2", [mp[2], kh])
+            Postgres.execute(:p0, "update media_storage set media_block_id = \$3 where storage_provider = \$1 and h = \$2", [mp[2], kh, media_block_id])
+        end
+        update_mb()
+    end
+
+    u = URIs.parse_uri(surl)
+    spath, ext = splitext(u.path[2:end])
+    host = string(u.host)
+
+    if host in ["blossom.primal.net", "blossom-dev.primal.net"]
+        push!(mb.blossom_urls, surl)
+        sha256 = hex2bytes(spath)
+        clear_cache = false
+        if !isnothing(pubkey)
+            Postgres.execute(:membership, "update media_uploads set media_block_id = \$3 where sha256 = \$1 and pubkey = \$2",
+                             [sha256, pubkey, media_block_id])
+
+            ulcnt    = Postgres.execute(:membership, "select count(1) from media_uploads where sha256 = \$1 and pubkey = \$2", [sha256, pubkey])[2][1][1]
+            ulallcnt = Postgres.execute(:membership, "select count(1) from media_uploads where sha256 = \$1", [sha256])[2][1][1]
+            @show (surl, ulcnt, ulallcnt)
+            if ulcnt != 0 && ulcnt == ulallcnt
+                for (path,) in Postgres.execute(:membership, "select path from media_uploads where sha256 = \$1 and pubkey = \$2 group by path", [sha256, pubkey])[2]
+                    upload_url = "https://_media.primal.net$path"
+                    push!(mb.upload_urls, upload_url)
+                    purge(upload_url)
+                end
+
+                for (media_url,) in Postgres.execute(:p0, "select media_url from media_storage where sha256 = \$1", [sha256])[2]
+                    push!(mb.media_urls, media_url)
+                    purge(media_url)
+                end
+                Postgres.execute(:p0, "update media_storage set media_block_id = \$1 where sha256 = \$2", [media_block_id, sha256])
+
+                clear_cache = true
+            end
+
+        else
+            for (path,) in Postgres.execute(:membership, "select path from media_uploads where sha256 = \$1", [sha256])[2]
+                upload_url = "https://_media.primal.net$path"
+                push!(mb.upload_urls, upload_url)
+                purge(upload_url)
+            end
+            Postgres.execute(:membership,
+                             "update media_uploads set media_block_id = \$2 where sha256 = \$1",
+                             [sha256, media_block_id])
+        end
+
+        if clear_cache
+            for (media_url,) in Postgres.execute(:p0, "select media_url from media_1_16fa35f2dc where orig_sha256 = \$1 and media_url like '%/cache/%'", [sha256])[2]
+                push!(mb.media_urls, media_url)
+                purge(media_url)
+            end
+            Postgres.execute(:p0, "update media_storage set media_block_id = \$1 where sha256 = \$2 and media_url like '%/cache/%'", [media_block_id, sha256])
+        end
+
+        if block_all_uploads
+            Postgres.execute(:membership, "update media_uploads set media_block_id = \$2 where sha256 = \$1", [sha256, media_block_id])
+        end
+    elseif host == "m.primal.net"
+        for (url,) in Postgres.execute(:membership,
+                                       "select url from short_urls where path = \$1 and ext = \$2",
+                                       [spath, ext])[2]
+            # @show ("short", url)
+            push!(mb.short_urls, url)
+            purge(url)
+
+            Postgres.execute(:membership, "update short_urls set media_block_id = \$3 where path = \$1 and ext = \$2",
+                             [spath, ext, media_block_id])
+
+            if !isnothing(pubkey)
+                path = string(URIs.parse_uri(url).path)
+                # @show path
+
+                Postgres.execute(:membership,
+                                 "update media_uploads set media_block_id = \$3 where pubkey = \$1 and path = \$2",
+                                 [pubkey, path, media_block_id])
+            end
+        end
+    else
+        purge(surl)
+
+        for (media_url,) in Postgres.execute(:p0, "select media_url from media where url = \$1", [surl])[2]
+            push!(mb.media_urls, media_url)
+            purge(media_url)
+        end
+        for (url,) in Postgres.execute(:p0, "select thumbnail_url from video_thumbnails where video_url = \$1", [surl])[2]
+            push!(mb.thumbnail_urls, url)
+            purge(url)
         end
     end
 
-    spath, ext = splitext(URIs.parse_uri(surl).path[2:end])
+    update_mb()
 
-    for (url,) in Postgres.execute(:p0, "select media_url from media where url = \$1", [surl])[2]
-        # @show url
-        purge(url)
+    @show media_block_id
+    nothing
+end
+
+function pre_sign_urls(bucket::String, paths::Vector, storage_provider::Symbol)
+    res = Dict()
+    for path in paths
+        res[path] = Media.s3_presign_url(storage_provider, path[2:end], bucket)
     end
-    for (url,) in Postgres.execute(:p0, "select thumbnail_url from video_thumbnails where video_url = \$1", [surl])[2]
-        # @show url
-        purge(url)
-    end
-
-    for (url,) in Postgres.execute(:membership,
-                                   "select url from short_urls where path = \$1 and ext = \$2 ",
-                                   [spath, ext])[2]
-        # @show url
-        purge(url)
-
-        path = string(URIs.parse_uri(url).path)
-
-        path, size = Postgres.execute(:membership,
-                                      "select path, size from media_uploads where pubkey = \$1 and path = \$2 ",
-                                      [pubkey, path])[2][1]
-
-        Postgres.execute(:membership, "delete from media_uploads where pubkey = \$1 and path = \$2",
-                         [pubkey, path])
-
-        Postgres.execute(:membership, "delete from short_urls where path = \$1 and ext = \$2",
-                         [spath, ext])
-
-        Postgres.execute(:membership, "update memberships set used_storage = used_storage - \$2 where pubkey = \$1",
-                         [pubkey, size])
-    end
+    res
 end
 
 end

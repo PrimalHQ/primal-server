@@ -101,14 +101,28 @@ end
 
 function find_blob(req_target)
     r = find_upload(req_target)
+    return r # !!
     isnothing(r) || return r
 
     h, ext = splitext(req_target[2:end])
     h = lowercase(h)
     sha256 = hex2bytes(h)
-    for (media_url, mimetype, storage_provider) in pex(:p0, "select media_url, content_type, storage_provider from media_storage where key::jsonb->>'sha256' = ?1 limit 1", [h])[2]
+    for (media_url, mimetype, size, storage_provider) in pex(:p0, "
+                                                       select ms.media_url, ms.content_type, ms.size, ms.storage_provider 
+                                                       from media_storage ms
+                                                       where 
+                                                         ms.sha256 = ?1 and ms.media_block_id is null and
+                                                         not exists (
+                                                           select 1 from media_uploads mu, media_block mb 
+                                                           where 
+                                                             ms.sha256 = mu.sha256 and mu.media_block_id = mb.id and
+                                                             mb.d->>'reason' like 'csam%'
+                                                           limit 1
+                                                         )
+                                                       limit 1", 
+                                                       [sha256])[2]
         storage_provider = Symbol(storage_provider)
-        return (; media_url, storage_provider, mimetype, sha256)
+        return (; media_url, storage_provider, mimetype, size, sha256)
     end
     nothing
 end
@@ -117,16 +131,25 @@ function find_upload(req_target)
     h, ext = splitext(req_target[2:end])
     h = lowercase(h)
     sha256 = try hex2bytes(h) catch _ return nothing end
-    for (mimetype, path, pubkey, key) in pex("select mimetype, path, pubkey, key::varchar from media_uploads where sha256 = ?1 limit 1", [sha256])[2]
-        for (media_url, mimetype, storage_provider) in pex(:p0, "select media_url, content_type, storage_provider from media_storage where key::jsonb->>'sha256' = ?1 limit 1", [h])[2]
+    for (mimetype, size, path, pubkey, key) in pex("select mimetype, size, path, pubkey, key::varchar 
+                                             from media_uploads 
+                                             where sha256 = ?1 and media_block_id is null limit 1", 
+                                             [sha256])[2]
+        kh = splitpath(splitext(path)[1])[end]
+        for (media_url, mimetype, size, storage_provider) in pex(:p0, "
+                                                           select ms.media_url, ms.content_type, ms.size, ms.storage_provider 
+                                                           from media_storage ms, media_storage_priority msp
+                                                           where ms.h = ?1 and ms.media_block_id is null and msp.storage_provider = ms.storage_provider
+                                                           order by msp.priority limit 1", 
+                                                           [kh])[2]
             storage_provider = Symbol(storage_provider)
-            return (; media_url, storage_provider, path, mimetype, sha256, pubkey=Nostr.PubKeyId(pubkey))
+            return (; media_url, storage_provider, path, mimetype, size, sha256, pubkey=Nostr.PubKeyId(pubkey))
         end
         for mp in Main.Media.MEDIA_PATHS[Main.App.UPLOADS_DIR[]]
             if mp[1] == :local
                 filepath = join(split(mp[3], '/')[1:end-1], '/') * path
                 media_url = "https://media.primal.net$path"
-                try isfile(filepath) && return (; media_url, storage_provider=nothing, filepath, path, mimetype, sha256, pubkey=Nostr.PubKeyId(pubkey))
+                try isfile(filepath) && return (; media_url, storage_provider=nothing, filepath, path, mimetype, size, sha256, pubkey=Nostr.PubKeyId(pubkey))
                 catch _ end
             end
         end
@@ -191,15 +214,19 @@ function blossom_handler(req::HTTP.Request)
                                 sha256=bytes2hex(sha256),
                                 size,
                                 type=mimetype,
-                                created=created_at,
+                                uploaded=created_at,
                                ))
                 end
                 return HTTP.Response(200, response_headers(), JSON.json(res))
 
             elseif !isnothing(match(r"^/[0-9a-fA-F]{64}", req.target))
+                # @show req.target
                 r = find_blob(req.target)
                 if !isnothing(r)
-                    return HTTP.Response(302, response_headers(r.mimetype; extra=["Location"=>"https://primal.b-cdn.net/media-cache?s=o&a=1&u=$(URIs.escapeuri(r.media_url))"]), "redirecting")
+                    # return HTTP.Response(302, response_headers(r.mimetype; extra=["Location"=>"https://primal.b-cdn.net/media-cache?s=o&a=1&u=$(URIs.escapeuri(r.media_url))"]), 
+                    #                      "redirecting")
+                    return HTTP.Response(302, response_headers(r.mimetype; extra=["Location"=>r.media_url]), 
+                                         "redirecting")
                 else
                     blossom_error(404, "not found")
                 end
@@ -215,7 +242,7 @@ function blossom_handler(req::HTTP.Request)
             else
                 r = find_blob(req.target)
                 if !isnothing(r)
-                    return HTTP.Response(200, response_headers(r.mimetype), "")
+                    return HTTP.Response(200, response_headers(r.mimetype; extra=["Content-Length"=>string(r.size)]), "")
                 else
                     blossom_error(404, "not found")
                 end
@@ -224,22 +251,8 @@ function blossom_handler(req::HTTP.Request)
         elseif req.method == "DELETE"
             r = find_upload(req.target)
             e = check_action(req, "delete"; x_tag_hash=r.sha256)
-            if !isnothing(r)
-                pex("delete from media_uploads where pubkey = ?1 and sha256 = ?2", [e.pubkey, r.sha256])
-                if isempty(pex("select 1 from media_uploads where sha256 = ?1 limit 1", [r.sha256])[2])
-                    # @show (:rm, r.path)
-                    if haskey(Main.S3_CONFIGS, r.storage_provider)
-                        Main.Media.s3_delete(r.storage_provider, r.path)
-                    else
-                        for mp in Main.Media.MEDIA_PATHS[Main.App.UPLOADS_DIR[]]
-                            if mp[1] == :local
-                                filepath = join(split(mp[3], '/')[1:end-1], '/') * r.path
-                                try isfile(filepath) && rm(filepath) 
-                                catch ex println(ex) end
-                            end
-                        end
-                    end
-                end
+            if !isnothing(r) && r.pubkey == e.pubkey
+                @show Main.InternalServices.purge_media_(e.pubkey, r.media_url; reason="delete from blossom", extra=(; initiator_pubkey=e.pubkey))
                 return HTTP.Response(200, response_headers("text/plain"), "ok")
             else
                 blossom_error(404, "not found")
@@ -251,7 +264,7 @@ function blossom_handler(req::HTTP.Request)
                 url = JSON.parse(String(req.body))["url"]
                 h = hex2bytes(match(r"/([0-9a-fA-F]{64})", url)[1])
                 e = check_action(req, "upload"; x_tag_hash=h)
-                data = Media.download(est[], url; timeout=60)
+                data = Media.download(est[], url; timeout=300)
                 return import_blob(e, data; strip_metadata=false)
             else
                 data = collect(req.body)
@@ -267,7 +280,7 @@ end
 
 function import_blob(e::Nostr.Event, data::Vector{UInt8}; strip_metadata::Bool)
     h = SHA.sha256(data)
-    r = JSON.parse([x for x in Main.App.import_upload_2(est[], e.pubkey, data; strip_metadata) 
+    r = JSON.parse([x for x in Main.App.import_upload_2(est[], e.pubkey, data; strip_metadata)
                     if x.kind == Int(Main.App.UPLOADED_2)][1].content)
     sha256 = hex2bytes(r["sha256"])
     strip_metadata || @assert h == sha256
@@ -282,7 +295,7 @@ function import_blob(e::Nostr.Event, data::Vector{UInt8}; strip_metadata::Bool)
                                         sha256=bytes2hex(sha256),
                                         size,
                                         type=mimetype,
-                                        created=created_at,
+                                        uploaded=created_at,
                                        )))
     end
     blossom_error(404, "not found")

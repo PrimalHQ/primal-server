@@ -5,6 +5,8 @@ import ..TrustRank
 import SHA
 
 using ..Tracing: @ti, @tc, @td, @tr
+using ..ProcessingGraph: @procnode, @pn, @pnl, @pnd
+import ..PrimalServer
 
 include("../src/notifications.jl")
 
@@ -255,9 +257,22 @@ function ext_metadata_changed(est::CacheStorage, e::Nostr.Event)
                 if !isnothing(url) && !isempty(url)
                     _, ext = splitext(lowercase(url))
                     if any((startswith(ext, ext2) for ext2 in image_exts))
-                        DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task import_media(est, e.id, url, Main.Media.all_variants))
+                        # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task import_media(est, e.id, url, Main.Media.all_variants))
+                        DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
                     end
                 end
+            end
+        end
+    end
+end
+
+function import_follow_list_media(est::CacheStorage, e::Nostr.Event)
+    catch_exception(est, (:import_follow_list_media, e.id)) do
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "image"
+                url = t.fields[2]
+                # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task import_media(est, e.id, url, Main.Media.all_variants))
+                DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
             end
         end
     end
@@ -270,24 +285,32 @@ function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED, "make_event_hooks", e.id))
 end
 
-DOWNLOAD_MEDIA = Ref(false)
+DOWNLOAD_MEDIA    = Ref(false)
 DOWNLOAD_PREVIEWS = Ref(false)
 image_exts = [".png", ".gif", ".jpg", ".jpeg", ".webp"]
-video_exts = [".mp4", ".mov"]
+video_exts = [".mp4", ".mov", ".3gp"]
 audio_exts = [".wav", ".mp3", ".aac", ".flac", ".ogg"]
+
+MEDIA_BLOCKED_PUBKEYS = Set{Nostr.PubKeyId}()
 
 function import_note_urls(est::CacheStorage, e::Nostr.Event)
     funcname = "import_note_urls"
+    # @show e.id
     DB.ext_is_human(est, e.pubkey; threshold=0.0) || return
+    e.pubkey in MEDIA_BLOCKED_PUBKEYS && return
     for_urls(est, e) do url
         _, ext = splitext(lowercase(url))
         if any((startswith(ext, ext2) for ext2 in image_exts))
-            # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true), (:large, true), (:small, true)]))
-            DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, Main.Media.all_variants))
+            # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, Main.Media.all_variants))
+            DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
+            DOWNLOAD_MEDIA[] && @pnd import_media_fast_pn(est, e.id, url)
         elseif any((startswith(ext, ext2) for ext2 in video_exts))
-            DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true)]))
+            # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true)]))
+            DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, [(:original, true)])
+            DOWNLOAD_MEDIA[] && @pnd import_media_fast_pn(est, e.id, url)
         else
-            DOWNLOAD_PREVIEWS[] && Main.Media.media_queue(@task @ti @tr e.id url import_preview(est, e.id, url))
+            # DOWNLOAD_PREVIEWS[] && Main.Media.media_queue(@task @ti @tr e.id url import_preview(est, e.id, url))
+            DOWNLOAD_PREVIEWS[] && @pnd import_preview_pn(est, e.id, url)
         end
     end
 end
@@ -339,8 +362,8 @@ function ext_long_form_note(est::CacheStorage, e::Nostr.Event)
     for t in e.tags
         if length(t.fields) >= 2 && t.fields[1] == "image"
             url = t.fields[2]
-            # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true), (:large, true)]))
-            DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, Main.Media.all_variants))
+            # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, Main.Media.all_variants))
+            DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
         end
     end
 end
@@ -654,12 +677,25 @@ function for_hashtags(body::Function, est::CacheStorage, e::Nostr.Event)
 end
 
 # re_url = r"https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)"
-re_url = r"https?:\/\/(www\.)?[-\pL0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-\pL0-9()@:%_\+.~#?&//=]*)"
+# re_url = r"https?:\/\/(www\.)?[-\pL0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-\pL0-9()@:%_\+.~#?&//=]*)"
+re_url = r"https?:\/\/(www\.)?[-\pL0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9]{1,6}\b([-\pL0-9@:%_\+.~#?&//=]*)"
 
 function for_urls(body::Function, est::CacheStorage, e::Nostr.Event)
     # e.kind in [Int(Nostr.TEXT_NOTE), Int(Nostr.LONG_FORM_CONTENT)] || return
     for m in eachmatch(re_url, e.content)
         body(String(m.match))
+    end
+    if e.kind == Nostr.PICTURE
+        for t in e.tags
+            if length(t.fields) >= 1 && t.fields[1] == "imeta"
+                for it in t.fields[2:end]
+                    ps = map(string, split(it))
+                    if length(ps) >= 2 && ps[1] == "url"
+                        body(ps[2])
+                    end
+                end
+            end
+        end
     end
 end
 
