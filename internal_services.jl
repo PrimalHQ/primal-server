@@ -516,12 +516,20 @@ end
 
 function preview_handler(req::HTTP.Request)
     lock(index_lock) do
+        cache_headers = [
+                         # "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+                         "Cache-Control"=>"must-revalidate, proxy-revalidate, max-age=1",
+                        ]
+
+        # @show req.target
+        # return HTTP.Response(500, HTTP.Headers(["Content-Type"=>"text/plain", cache_headers...]), "error")
+
         # if startswith(req.target, "/search/")
         #     return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain"]), "not found")
         if     req.target == "/.well-known/apple-app-site-association"
-            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), read(APPLE_APP_SITE_ASSOCIATION_FILE[], String))
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json", cache_headers...]), read(APPLE_APP_SITE_ASSOCIATION_FILE[], String))
         elseif req.target == "/.well-known/assetlinks.json"
-            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), read(ANDROID_ASSETLINKS_FILE[], String))
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json", cache_headers...]), read(ANDROID_ASSETLINKS_FILE[], String))
         end
 
         host = Dict(req.headers)["Host"]
@@ -540,13 +548,9 @@ function preview_handler(req::HTTP.Request)
         end
 
         if     startswith(req.target, "/imageCacheWorker.js")
-            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/javascript",
-                                                    "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
-                                                   ]), read("$index_dir/imageCacheWorker.js", String))
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/javascript", cache_headers...]), read("$index_dir/imageCacheWorker.js", String))
         elseif startswith(req.target, "/manifest.json")
-            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/json",
-                                                    "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
-                                                   ]), read("$index_dir/manifest.json", String))
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/json", cache_headers...]), read("$index_dir/manifest.json", String))
         end
 
         h = index_htmls[host]
@@ -626,9 +630,7 @@ function preview_handler(req::HTTP.Request)
             push!(exceptions, (:preview_handler, time(), ex, req))
             PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         end
-        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/html",
-                                         "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
-                                        ]), dochtml)
+        HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/html", cache_headers...]), dochtml)
     end
 end
 
