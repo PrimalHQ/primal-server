@@ -94,6 +94,7 @@ EVENT_BROADCAST_RESPONSES=10_000_149
 ADVANCED_FEEDS=10_000_150
 APP_SUBSETTINGS=10_000_155
 HASHTAGS_2=10_000_160
+MEDIA_METADATA_BY_HASH=10_000_176
 
 # ------------------------------------------------------ #
 
@@ -1602,6 +1603,39 @@ function get_media_metadata(est::DB.CacheStorage; urls::Vector, eid=nothing)
     if !isempty(thumbnails); res[:thumbnails] = thumbnails; end
     if !isempty(res) && !isnothing(eid); res[:event_id] = eid; end
     isempty(res) ? [] : [(; kind=Int(MEDIA_METADATA), content=JSON.json(res))]
+end
+
+function get_media_metadata_by_hash(est::DB.CacheStorage; hashes::Vector)
+    resources = []
+    root_mt = nothing
+    thumbnails = Dict()
+    for hash in hashes
+        variants = []
+        urls = []
+        # for (s, a, w, h, mt, dur, media_url, url) in Main.rex(34,31,:(Postgres.execute(:p0, "
+        for (s, a, w, h, mt, dur, media_url, url) in ((Postgres.execute(:p0, "
+             select m2.size, m2.animated, m2.width, m2.height, m2.mimetype, m2.duration, m2.media_url, m2.url
+             from 
+                (select url from media_1_16fa35f2dc where orig_sha256 = \$1 order by imported_at desc limit 1) m1,
+                media_1_16fa35f2dc m2
+             where m1.url = m2.url
+             ", [hex2bytes(hash)])[2]))
+            push!(variants, (; s=s[1], a, w, h, mt, dur, media_url))
+            root_mt = mt
+            push!(urls, url)
+        end
+        push!(resources, (; hash, variants, (isnothing(root_mt) ? [] : [:mt=>root_mt])...))
+        for url in urls
+            for (thumbnail_url,) in Postgres.execute(:p0, "select mu.media_url from video_thumbnails vt, get_media_url(vt.thumbnail_url) mu where vt.video_url = \$1", [url])[2]
+                thumbnails[hash] = thumbnail_url
+            end
+        end
+    end
+
+    res = Dict()
+    if !isempty(resources); res[:resources] = resources; end
+    if !isempty(thumbnails); res[:thumbnails] = thumbnails; end
+    isempty(res) ? [] : [(; kind=Int(MEDIA_METADATA_BY_HASH), content=JSON.json(res))]
 end
 
 function event_media_response(est::DB.CacheStorage, eid::Nostr.EventId)

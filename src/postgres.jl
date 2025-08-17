@@ -750,9 +750,9 @@ function execute_simple(session::Session, query::String; callbacks=nothing)
     recv_rows(session.socket; callbacks)
 end
 
-function execute(connstr::ConnStr, query::String)
+function execute(connstr::ConnStr, query::String, params::Any=[])
     handle_errors((; connstr, session_initializer=identity)) do session
-        execute(session, query)
+        execute(session, query, params)
     end
 end
 
