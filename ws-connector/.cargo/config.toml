@@ -1,0 +1,7 @@
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-Awarnings",
+    "--cfg", "tokio_unstable", 
+    "--cfg", "tokio_taskdump",
+]
+

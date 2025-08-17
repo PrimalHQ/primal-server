@@ -14,17 +14,18 @@ function import_from(
         est::DB.CacheStorage=Main.cache_storage;
         # running=Ref(true),
         running=Utils.PressEnterToStop(),
+        verbose=false,
     )
     missing_eids = []
     for (i, eid) in enumerate(eids)
         running[] || break
         if i % 1000 == 0
             yield()
-            print("$(length(missing_eids)) / $i\r")
+            verbose && print("$(length(missing_eids)) / $i\r")
         end
         eid in est.events || push!(missing_eids, eid)
     end
-    println()
+    verbose && println()
     imported = [] |> Utils.ThreadSafe
     i = Ref(0) |> Utils.ThreadSafe
     Threads.@threads for eids_chunk in collect(Iterators.partition(map(Nostr.hex, missing_eids), 100))
@@ -38,13 +39,13 @@ function import_from(
             DB.incr(i)
             DB.import_event(est, e; disable_daily_stats=true) && push!(imported, e.id)
         end
-        lock(i) do i
+        verbose && lock(i) do i
             print("$(i[]) / $(length(imported)) / $(length(missing_eids))\r")
         end
     end
-    println()
-    @show (length(imported), length(eids))
-    collect(imported)
+    verbose && println()
+    verbose && @show (length(imported), length(eids))
+    (; eventcnt=length(eids), importedcnt=length(imported), imported=collect(imported))
 end
 
 function event_ids_by_created_at(

@@ -152,20 +152,24 @@ function listener(client::Client)
                         try
                             Base.invokelatest(handle_message, client, msg)
                         catch _
-                            client.log_exceptions && push!(client.exceptions, (; t=Dates.now(), exception=Utils.get_exceptions()))
+                            client.log_exceptions && push!(client.exceptions, (; loc=:for, t=Dates.now(), exception=Utils.get_exceptions()))
                         end
                     end
                 catch ex
-                    # println("listener inner: ", typeof(ex))
-                    ex isa EOFError || ex isa HTTP.WebSockets.WebSocketError || rethrow(ex)
+                    client.log_exceptions && push!(client.exceptions, (; loc=:inner, t=Dates.now(), exception=Utils.get_exceptions()))
+                    if !(ex isa EOFError || ex isa HTTP.WebSockets.WebSocketError)
+                        println("listener inner: $(client.relay_url): $(typeof(ex))")
+                        rethrow(ex)
+                    end
                 finally
                     try client.on_disconnect(client) catch _ end
                     try close(ws) catch _ end
                 end
             end
         catch ex
-            # println("listener outter: ", typeof(ex))
-            break
+            # println("listener outer: ", typeof(ex))
+            client.log_exceptions && push!(client.exceptions, (; loc=:outer, t=Dates.now(), exception=Utils.get_exceptions()))
+            ex isa HTTP.Exceptions.RequestError && sleep(10.0)
         end
         sleep(0.2)
     end

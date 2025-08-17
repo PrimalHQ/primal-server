@@ -18,6 +18,9 @@ PORT2 = Ref(24000)
 
 PRINT_EXCEPTIONS = Ref(true)
 
+APPLE_APP_SITE_ASSOCIATION_FILE = Ref("apple-app-site-association.json")
+ANDROID_ASSETLINKS_FILE = Ref("assetlinks.json")
+
 server = Ref{Any}(nothing)
 router = Ref{Any}(nothing)
 server2 = Ref{Any}(nothing)
@@ -147,6 +150,11 @@ function stop()
     @assert !isnothing(server[])
     close(server[])
     server[] = nothing
+
+    @assert !isnothing(server2[])
+    close(server2[])
+    server2[] = nothing
+
     close(short_urls[])
     short_urls[] = nothing
     close(verified_users[])
@@ -182,6 +190,8 @@ function get_image_links(content)
     urls
 end
 
+re_mention = r"\b(nostr:)?((note|npub|naddr|nevent|nprofile)1\w+)\b"
+
 function content_refs_resolved(e::Nostr.Event)
     cache_storage = est[]
     c = replace(e.content, DB.re_hashref => function (r)
@@ -199,14 +209,22 @@ function content_refs_resolved(e::Nostr.Event)
                 end
                 ""
             end)
-    replace(c, DB.re_mention => function (r)
-                # prefix = "nostr:npub"
-                # startswith(r, prefix) || return r
-                if !isnothing(local pk = Bech32.nip19_decode_wo_tlv(r))
+    replace(c, re_mention => function (r)
+                r = string(r)
+                if startswith(r, "nostr:"); r = r[7:end]; end
+                x = Bech32.nip19_decode_wo_tlv(r)
+                if     x isa Nostr.PubKeyId
                     try
-                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
+                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[x]].content)
                         return "@"*mdtitle(c)
                     catch _ end
+                elseif x isa Nostr.EventId
+                    try
+                        pk = cache_storage.events[x].pubkey
+                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
+                        return "[nostr note by $(mdtitle(c))]"
+                    catch _ end
+                    return "[nostr note]"
                 end
                 r
             end)
@@ -224,20 +242,22 @@ end
 function mdpubkey(cache_storage, pk)
     title = description = image = ""
     url = nothing
-    if pk in cache_storage.meta_data
-        c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
-        if c isa Dict
-            addr = try strip(c["nip05"]) catch _ "" end
-            if !isnothing(addr) && endswith(addr, "@primal.net")
-                url = "https://primal.net/$(split(addr, '@')[1])"
+    if isempty(Postgres.execute(:membership, "select 1 from filterlist where target_type = 'pubkey' and target = \$1 and blocked limit 1", [pk])[2])
+        if pk in cache_storage.meta_data
+            c = JSON.parse(cache_storage.events[cache_storage.meta_data[pk]].content)
+            if c isa Dict
+                addr = try strip(c["nip05"]) catch _ "" end
+                if !isnothing(addr) && endswith(addr, "@primal.net")
+                    url = "https://primal.net/$(split(addr, '@')[1])"
+                end
+                try title = mdtitle(c) catch _ end
+                description = try replace(c["about"], re_url=>"") catch _ "" end
+                image = try c["picture"] catch _ "" end
             end
-            try title = mdtitle(c) catch _ end
-            description = try replace(c["about"], re_url=>"") catch _ "" end
-            image = try c["picture"] catch _ "" end
         end
-    end
-    if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
-        image = r[1][1]
+        if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
+            image = r[1][1]
+        end
     end
     return (; title, description, image, (isnothing(url) ? (;) : (; url))...)
 end
@@ -250,145 +270,200 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
 
     mdpubkey_(pk) = (; url="https://$host$path", twitter_card, mdpubkey(cache_storage, pk)...)
 
-    if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
-        pk = string(m[2])
-        pk = startswith(pk, "npub") ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
-        return mdpubkey_(pk)
+    if host in ["primal.net", "dev.primal.net"]
+        if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
+            pk = string(m[2])
+            pk = (startswith(pk, "npub") || startswith(pk, "nprofile")) ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
+            return mdpubkey_(pk)
 
-    elseif !isnothing(local m = match(r"^/(thread|e)/(.*)", path))
-        eid = string(m[2])
-        if startswith(eid, "nevent")
-            for x in Bech32.nip19_decode(eid)
-                if x[2] isa Nostr.EventId
-                    eid = x[2]
-                    break
-                end
-            end
-        else
-            try eid = Bech32.nip19_decode(eid) catch _ end
-        end
-        try eid = Bech32.nip19_decode(eid) catch _ end
-        isnothing(eid) && (eid = try Nostr.EventId(eid) catch _ end)
-        if eid isa Nostr.EventId
-            if eid in cache_storage.events
-                e = cache_storage.events[eid]
-                url = "https://$(host)/e/$(m[2])"
-                description = replace(content_refs_resolved(e), re_url => "")
-                if e.pubkey in cache_storage.meta_data
-                    c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)
-                    title = mdtitle(c)
-                    image = get(c, "picture", "")
-                end
-                media_urls = DB.exec(cache_storage.event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
-                if !isempty(media_urls)
-                    twitter_card = "summary_large_image"
-                    image = media_urls[1][1]
-                    thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
-                    if !isempty(thumbnails)
-                        image = (thumbnails[1][1],)
-                    else
-                        if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 order by (width*height) limit 1"), (image,)))
-                            image = r[1][1]
-                        end
+        elseif !isnothing(local m = match(r"^/(thread|e|a)/(.*)", path))
+            eidstr = string(m[2])
+            eid = nothing
+            if startswith(eidstr, "nevent")
+                for x in Bech32.nip19_decode(eidstr)
+                    if x[2] isa Nostr.EventId
+                        eid = x[2]
+                        break
                     end
                 end
+            elseif !isnothing(try eid = Bech32.nip19_decode(eidstr) catch _ end)
+            elseif !isnothing(try eid = Nostr.bech32_decode(eidstr) catch _ end)
+            elseif !isnothing(try eid = Nostr.EventId(eidstr) catch _ end)
             end
-        elseif eid isa Vector
-            if startswith(string(m[2]), "naddr")
-                d = Dict(eid)
-                for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
-                                      DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                      (d[Bech32.Author], d[Bech32.Kind], d[Bech32.Special]))
-                    eid = Nostr.EventId(eid)
-                    if eid in cache_storage.events
-                        e = cache_storage.events[eid]
-                        url = "https://$(host)/e/$(m[2])"
-                        for t in e.tags
-                            if length(t.fields) >= 2
-                                t.fields[1] == "title" && (title = t.fields[2])
-                                t.fields[1] == "summary" && (description = t.fields[2])
-                                t.fields[1] == "image" && (image = t.fields[2])
+            if eid isa Nostr.EventId
+                if eid in cache_storage.events
+                    e = cache_storage.events[eid]
+                    url = "https://$(host)/e/$(m[2])"
+                    description = replace(content_refs_resolved(e), re_url => "")
+                    if e.pubkey in cache_storage.meta_data
+                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)
+                        title = mdtitle(c)
+                        image = get(c, "picture", "")
+                    end
+                    media_urls = DB.exec(cache_storage.event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
+                    if !isempty(media_urls)
+                        twitter_card = "summary_large_image"
+                        image = media_urls[1][1]
+                        thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
+                        if !isempty(thumbnails)
+                            image = (thumbnails[1][1],)
+                        else
+                            if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 and animated = 0 and size != 'small' order by (width*height) limit 1"), (image,)))
+                                image = r[1][1]
                             end
                         end
-                        twitter_card = "summary_large_image"
+                    end
+                end
+            elseif eid isa Vector
+                if startswith(string(m[2]), "naddr")
+                    d = Dict(eid)
+                    for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                          DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                          (d[Bech32.Author], d[Bech32.Kind], d[Bech32.Special]))
+                        eid = Nostr.EventId(eid)
+                        if eid in cache_storage.events
+                            e = cache_storage.events[eid]
+                            url = "https://$(host)/e/$(m[2])"
+                            for t in e.tags
+                                if length(t.fields) >= 2
+                                    t.fields[1] == "title" && (title = t.fields[2])
+                                    t.fields[1] == "summary" && (description = t.fields[2])
+                                    t.fields[1] == "image" && (image = t.fields[2])
+                                end
+                            end
+                            twitter_card = "summary_large_image"
+                        end
                     end
                 end
             end
-        end
-        return (; title, description, image, url, twitter_card)
+            return (; title, description, image, url, twitter_card)
 
-    elseif !isnothing(local md = begin
-                          md = nothing
-                          m = match(r"^/([^/]*)/(.*)", path)
-                          if !isnothing(m)
-                              name, identifier = string(m[1]), string(m[2])
-                              pubkey = nothing
-                              for pk in nostr_json_query_by_name(name)
-                                  pubkey = pk
-                                  break
-                              end
-                              if !isnothing(pubkey)
-                                  kind = 30023
-                                  for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
-                                                        DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                                        (pubkey, kind, identifier))
-                                      eid = Nostr.EventId(eid)
-                                      if eid in cache_storage.events
-                                          e = cache_storage.events[eid]
-                                          naddr = Bech32.nip19_encode_naddr(kind, pubkey, identifier)
-                                          url = "https://$(host)/e/$(naddr)"
-                                          for t in e.tags
-                                              if length(t.fields) >= 2
-                                                  t.fields[1] == "title" && (title = t.fields[2])
-                                                  t.fields[1] == "summary" && (description = t.fields[2])
-                                                  t.fields[1] == "image" && (image = t.fields[2])
+        elseif !isnothing(local md = begin
+                              md = nothing
+                              m = match(r"^/([^/]*)/([^?]*)", path)
+                              if !isnothing(m)
+                                  name, identifier = string(m[1]), string(m[2])
+                                  identifier = URIs.unescapeuri(identifier)
+                                  pubkey = nothing
+                                  for pk in nostr_json_query_by_name(name)
+                                      pubkey = pk
+                                      break
+                                  end
+                                  if !isnothing(pubkey)
+                                      kind = 30023
+                                      for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                                            DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                                            (pubkey, kind, identifier))
+                                      # for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                      #                       DB.@sql("select event_id from parametrized_replaceable_events 
+                                      #                               where pubkey = ?1 and kind = ?2 
+                                      #                                 and regexp_replace(identifier, '[^a-zA-Z0-9]', '', 'g') like regexp_replace(?3, '[^a-zA-Z0-9]', '', 'g') || '%'
+                                      #                               limit 1"), 
+                                      #                       (pubkey, kind, identifier))
+                                          eid = Nostr.EventId(eid)
+                                          if eid in cache_storage.events
+                                              e = cache_storage.events[eid]
+                                              naddr = Bech32.nip19_encode_naddr(kind, pubkey, identifier)
+                                              url = "https://$(host)/e/$(naddr)"
+                                              for t in e.tags
+                                                  if length(t.fields) >= 2
+                                                      t.fields[1] == "title" && (title = t.fields[2])
+                                                      t.fields[1] == "summary" && (description = t.fields[2])
+                                                      if t.fields[1] == "image"
+                                                          image = t.fields[2]
+                                                          for (media_url,) in Postgres.execute(:p0, "select media_url from media where url = \$1 and size = 'medium' and animated = 0 limit 1", [image])[2]
+                                                              image = media_url
+                                                          end
+                                                      end
+                                                  end
                                               end
+                                              twitter_card = "summary_large_image"
+                                              if isempty(image)
+                                                  image = mdpubkey(cache_storage, pubkey).image
+                                              end
+                                              md = (; title, description, image, url, twitter_card)
                                           end
-                                          twitter_card = "summary_large_image"
-                                          md = (; title, description, image, url, twitter_card)
                                       end
                                   end
                               end
-                          end
-                          md
-                      end)
-        return md
+                              md
+                          end)
+            return md
 
-    elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
-        return (; 
-                title="Download Primal apps and source code", 
-                description="",
-                image="https://$host/public/primal-link-preview.jpg",
-                url="https://$host/downloads",
-                twitter_card = "summary_large_image",
-                # twitter_image = "https://$host/images/twitter-hero.jpg",
-                twitter_image = "https://$host/public/primal-link-preview.jpg?a=444",
-               )
+        elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
+            return (; 
+                    title="Download Primal apps and source code", 
+                    description="",
+                    image="https://$host/public/primal-link-preview.jpg",
+                    url="https://$host/downloads",
+                    twitter_card = "summary_large_image",
+                    # twitter_image = "https://$host/images/twitter-hero.jpg",
+                    twitter_image = "https://$host/public/primal-link-preview.jpg?a=444",
+                   )
 
-    elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
-        return (; 
-                title="Primal", 
-                description="Discover the best of Nostr",
-                image=("https://$host/public/primal-link-preview.jpg",),
-                url="https://$host/",
-                twitter_card = "summary_large_image",
-                twitter_image = "https://$host/images/twitter-hero.jpg")
+        elseif !isnothing(local m = match(r"^/legends", path)) && 1==1
+            return (; 
+                    title="Primal Legends", 
+                    description="Recognizing users who made a contribution to Nostr and Primal",
+                    image="https://$host/public/legends-link-preview.png",
+                    url="https://$host/legends",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://$host/public/legends-link-preview.png?a=444",
+                   )
 
-    elseif !isnothing(local m = match(r"^/landing$", path)) && 1==1
-        return (; 
-                title="Primal", 
-                description="Discover the best of Nostr",
-                image=("https://$host/public/primal-link-preview.jpg",),
-                url="https://primal.net/",
-                twitter_card = "summary_large_image",
-                twitter_image = "https://primal.net/images/twitter-hero.jpg")
+        elseif !isnothing(local m = match(r"^/myarticles$", path)) && 1==1
+            return (; 
+                    title="Primal Article Editor", 
+                    description="Create long form articles for Nostr",
+                    image=("https://$host/public/article-editor-link-preview.png",),
+                    url="https://$host/myarticles",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://$host/public/article-editor-link-preview.png?a=444",
+                   )
 
-    elseif !isnothing(local m = match(r"^/(.*)", path))
-        name = string(m[1])
-        if !isempty(local pks = nostr_json_query_by_name(name))
-            return mdpubkey_(pks[1])
+        elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
+            return (; 
+                    title="Primal", 
+                    description="Discover the best of Nostr",
+                    image=("https://$host/public/primal-link-preview.jpg",),
+                    url="https://$host/",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://$host/images/twitter-hero.jpg")
+
+        elseif !isnothing(local m = match(r"^/landing$", path)) && 1==1
+            return (; 
+                    title="Primal", 
+                    description="Discover the best of Nostr",
+                    image=("https://$host/public/primal-link-preview.jpg",),
+                    url="https://primal.net/",
+                    twitter_card = "summary_large_image",
+                    twitter_image = "https://primal.net/images/twitter-hero.jpg")
+
+        # elseif !isnothing(local m = match(r"^/join$", path)) && 1==1
+        #     return (; 
+        #             title="Primal", 
+        #             description="Discover the best of Nostr",
+        #             image=("https://$host/public/primal-link-preview.jpg",),
+        #             url="https://$host/",
+        #             twitter_card = "summary_large_image",
+        #             twitter_image = "https://$host/public/primal-link-preview.jpg?a=555")
+
+        elseif !isnothing(local m = match(r"^/(.*)", path))
+            name = string(m[1])
+            if !isempty(local pks = nostr_json_query_by_name(name))
+                return mdpubkey_(pks[1])
+            end
+
         end
 
+    elseif host in ["studio.primal.net", "studio-dev.primal.net"]
+        return (; 
+                title="Primal Studio", 
+                description="Empowering Nostr Content Creators",
+                image=("https://$host/public/link-preview_primal-studio.jpg",),
+                url="https://$host/",
+                twitter_card = "summary_large_image",
+                twitter_image = "https://$host/public/link-preview_primal-studio.jpg")
     end
 
     return nothing
@@ -400,7 +475,7 @@ index_htmls = Dict([host=>(;
                            index_doc=Ref{Any}(nothing),
                            index_elems=Dict{Symbol, EzXML.Node}(),
                           )
-                    for host in ["primal.net", "dev.primal.net"]])
+                    for host in ["primal.net", "dev.primal.net", "studio.primal.net", "studio-dev.primal.net"]])
 index_html = Ref("")
 index_doc = Ref{Any}(nothing)
 index_elems = Dict{Symbol, EzXML.Node}()
@@ -441,15 +516,43 @@ end
 
 function preview_handler(req::HTTP.Request)
     lock(index_lock) do
-        if startswith(req.target, "/search/")
-            return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain"]), "not found")
+        # if startswith(req.target, "/search/")
+        #     return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain"]), "not found")
+        if     req.target == "/.well-known/apple-app-site-association"
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), read(APPLE_APP_SITE_ASSOCIATION_FILE[], String))
+        elseif req.target == "/.well-known/assetlinks.json"
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), read(ANDROID_ASSETLINKS_FILE[], String))
         end
+
         host = Dict(req.headers)["Host"]
+
+        index_dir = 
+        if     host == "primal.net"
+            "/var/www/dev.primal.net"
+        elseif host == "dev.primal.net"
+            "$(ENV["HOME"])/tmp/dev.primal.net"
+        elseif host == "studio.primal.net"
+            "/var/www/studio-dev.primal.net"
+        elseif host == "studio-dev.primal.net"
+            "$(ENV["HOME"])/tmp/studio-dev.primal.net"
+        else
+            "/var/www/dev.primal.net"
+        end
+
+        if     startswith(req.target, "/imageCacheWorker.js")
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/javascript",
+                                                    "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+                                                   ]), read("$index_dir/imageCacheWorker.js", String))
+        elseif startswith(req.target, "/manifest.json")
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"text/json",
+                                                    "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+                                                   ]), read("$index_dir/manifest.json", String))
+        end
+
         h = index_htmls[host]
         dochtml = h.index_html[]
         try
             h.throttle() do
-                index_dir = host == "primal.net" ? "/var/www/dev.primal.net" : "/mnt/ppr0/var/www/dev.primal.net"
                 h.index_html[] = read("$(index_dir)/index.html", String)
                 h.index_doc[] = doc = EzXML.parsehtml(h.index_html[])
                 for e in EzXML.findall("/html/head/meta", doc)
@@ -513,7 +616,8 @@ function preview_handler(req::HTTP.Request)
                 maxlen = 50
                 s = mels.description
                 s = length(s) > maxlen ? (first(s, maxlen) * "...") : s
-                s = strip(mels.title * ": " * s)
+                # s = strip(mels.title * ": " * s)
+                s = mels.title
                 EzXML.link!(eltitle, EzXML.TextNode(s))
 
                 dochtml = string(h.index_doc[])
@@ -544,13 +648,28 @@ function nostr_json_handler(req::HTTP.Request)
     end
 end
 
+ALLOWED_MEDIA_HOSTS = [
+                       "media.primal.net", 
+                       "m.primal.net",
+                       "blossom.primal.net",
+                       "primaldata.s3.us-east-005.backblazeb2.com",
+                       "primaldata.fsn1.your-objectstorage.com",
+                       "r2.primal.net",
+                      ]
+
 function media_upload_handler(req::HTTP.Request)
     catch_exception(:media_upload_handler, req) do
         host = Dict(req.headers)["Host"]
         path, query = split(req.target, '?')
         args = NamedTuple([Symbol(k)=>v for (k, v) in [split(s, '=') for s in split(query, '&')]])
         url = string(URIs.unescapeuri(args.u))
-        HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+        if URIs.parse_uri(url).host in ALLOWED_MEDIA_HOSTS
+            # println((:media_upload_ok, url))
+            HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))
+        else
+            println((:media_upload_blocked, url))
+            HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain", "Cache-Control"=>"max-age=20"]), "not found")
+        end
     end
 end
 
@@ -588,6 +707,13 @@ function media_cache_handler(req::HTTP.Request)
 
         variant_specs = variant == (:original, true) ? [variant] : Media.all_variants
         # @show (url, variant_specs)
+
+        if isempty(Postgres.execute(:p0, "select 1 from media m where m.url = \$1", [url])[2]) && !(URIs.parse_uri(url).host in ALLOWED_MEDIA_HOSTS)
+            # println((:media_cache_blocked, url))
+            return HTTP.Response(404, HTTP.Headers(["Content-Type"=>"text/plain", "Cache-Control"=>"max-age=20"]), "not found")
+        else
+            # println((:media_cache_ok, url))
+        end
 
         tr = @elapsed (r = Media.media_variants(est[], url; variant_specs, sync=true, already_imported=true))
         # println("$tr  $query  $(isnothing(r))")
@@ -692,12 +818,18 @@ function url_shortening_handler(req::HTTP.Request)
 end
 
 function url_lookup_handler(req::HTTP.Request)
+    headers = HTTP.Headers([
+                            "Access-Control-Allow-Origin"=>"*",
+                            "Access-Control-Allow-Methods"=>"*",
+                            "Access-Control-Allow-Headers"=>"*"
+                           ])
     catch_exception(:url_lookup_handler, req) do
         host = Dict(req.headers)["Host"]
         spath = splitext(string(split(req.target, '/')[end]))[1]
-        r = DB.exec(short_urls[], DB.@sql("select url from short_urls where path = ?1 limit 1"), (spath,))
+        r = DB.exec(short_urls[], DB.@sql("select url from short_urls where path = ?1 and media_block_id is null limit 1"), (spath,))
+        # @show (spath, r)
         if isempty(r)
-            HTTP.Response(404, "unknown url")
+            HTTP.Response(404, headers, "unknown url")
         else
             url = r[1][1]
             h = splitext(splitpath(url)[end])[1]
@@ -706,9 +838,16 @@ function url_lookup_handler(req::HTTP.Request)
                                                     select media_url 
                                                     from media_storage ms, media_storage_priority msp
                                                     where ms.h = \$1 and ms.storage_provider = msp.storage_provider
-                                                    order by msp.priority desc limit 1", 
+                                                    order by msp.priority limit 1", 
                                                     [h])[2])
+            # if !isempty(local rs = Postgres.execute(:p0, "
+            #                                         select media_url 
+            #                                         from media_storage ms
+            #                                         where ms.h = \$1 and ms.storage_provider = 'cloudflare'
+            #                                         limit 1", 
+            #                                         [h])[2])
                 url2 = rs[1][1]
+                # @show url2
                 u = URIs.parse_uri(url2)
                 if u.host == "media.primal.net"
                     "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url2))"
@@ -716,9 +855,11 @@ function url_lookup_handler(req::HTTP.Request)
                     url2
                 end
             else
-                "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
+                # @show url
+                # "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri(url))"
+                "https://primal.b-cdn.net/media-upload?u=$(URIs.escapeuri("https://media.primal.net"*URIs.parse_uri(url).path))"
             end
-            HTTP.Response(302, HTTP.Headers(["Location"=>rurl]))
+            HTTP.Response(302, HTTP.Headers([headers..., "Location"=>rurl]))
         end
     end
 end

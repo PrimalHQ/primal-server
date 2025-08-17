@@ -4,3 +4,4 @@ pgdata
 pgurl
 libbech32.so
 pljava/
+logs/

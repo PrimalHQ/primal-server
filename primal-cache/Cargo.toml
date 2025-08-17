@@ -1,0 +1,47 @@
+[package]
+name = "primal_cache"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+
+[dependencies]
+tokio = { version = "1.28", features = ["full"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "time", "uuid"] }
+hex = "0.4"
+anyhow = "1.0.98"
+chrono = "0.4.41"
+sha2 = "0.10.9"
+once_cell = "1.21.3"
+nostr-sdk = "0.41"
+serde_json = { version = "1.0.140", features = ["preserve_order"] }
+base64 = "0.22.1"
+reqwest = { version = "0.12.15", default-features = false, features = ["socks", "rustls-tls"] }
+clap = { version = "4.5.37", features = ["derive"] }
+tower-http = { version = "0.3", features = ["trace", "map-response-body"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+env_logger = "0.11.8"
+
+futures = "0.3"
+
+serde = "1.0.219"
+cfg-if = "1.0.0"
+
+tokio-postgres = "0.7.13"
+bytes = "1.10.1"
+tokio-util = { version = "0.7.15", features = ["compat", "io"] }
+futures-util = { version = "0.3.31", features = ["compat"] }
+
+lightning-invoice = "0.33.2"
+
+[[bin]]
+name = "scratch"
+path = "src/bin/scratch.rs"
+
+[[bin]]
+name = "live-events-proof-stats"
+path = "src/bin/live-events-proof-stats.rs"
+

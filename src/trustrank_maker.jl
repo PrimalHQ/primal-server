@@ -20,10 +20,12 @@ TIMEOUT = Ref(10)
 PRINT_EXCEPTIONS = Ref(false)
 LOG = Ref(false)
 
+TARGET_SERVERS = Any[:p0]
+
 exceptions_lock = ReentrantLock()
 
 const cache_storage = Ref{Any}(nothing)
-const RUN_PERIOD = Ref(3600)
+const RUN_PERIOD = Ref(3*3600)
 const task = Ref{Any}(nothing)
 const running = Ref(true)
 
@@ -36,12 +38,13 @@ function start(est::DB.CacheStorage)
 
     task[] = 
     Base.errormonitor(@async while running[]
+                          Utils.active_sleep(RUN_PERIOD[], running)
+                          running[] || break
                           try
                               Base.invokelatest(run_make)
                           catch _
                               PRINT_EXCEPTIONS[] && Utils.print_exceptions()
                           end
-                          Utils.active_sleep(RUN_PERIOD[], running)
                       end)
 
     nothing
@@ -88,8 +91,11 @@ function make_2(
     end
 
     verified_pubkeys = [Nostr.PubKeyId(pubkey) for (pubkey,) in Postgres.execute(:membership, "select pubkey from verified_users where default_name")[2]]
+    blocked_pubkeys  = [Nostr.PubKeyId(pubkey) for (pubkey,) in Postgres.execute(:membership, "select target from filterlist where target_type = 'pubkey' and grp in ('spam', 'csam') and blocked group by target")[2]]
+    @show length(verified_pubkeys) length(blocked_pubkeys)
 
     Threads.@threads for pk in verified_pubkeys
+        yield()
         visit_user(pk)
     end
     @show length(users)
@@ -98,6 +104,7 @@ function make_2(
         yield(); running[] || break
         nusers1 = length(users)
         Threads.@threads for pk in collect(keys(users))
+            yield()
             visit_user(pk)
         end
         nusers2 = length(users)
@@ -112,7 +119,11 @@ function make_2(
     ##
     ui = Dict([pk=>i for (i, pk) in enumerate(keys(users))])
     iu = [pk for (_, pk) in enumerate(keys(users))]
-    d = [pk in verified_pubkeys ? 1.0 : 0.0 for pk in keys(ui)]
+    # d = [pk in verified_pubkeys ? 1.0 : 0.0 for pk in keys(ui)]
+    d = [if     pk in blocked_pubkeys;  0.0
+         elseif pk in verified_pubkeys; 1.0
+         else;  0.0
+         end for pk in keys(ui)]
     d /= sum(d)
     tr = d
     a = 0.85
@@ -133,6 +144,8 @@ function make_2(
         delta = sum(abs.(tr_ - tr))
         tr = tr_
     end
+    tr = [pk in blocked_pubkeys ? 0.0 : v 
+          for (pk, v) in zip(keys(ui), tr)]
     println()
     #
     tr_sorted = sort([(pk, t) for (pk, t) in collect(zip(keys(users), tr)) if t > 0]; by=t->-t[2])
@@ -145,9 +158,15 @@ function make_2(
     )
 end
 
+last_r = Ref{Any}(nothing)
+
 function run_make()
-    r = make_2(cache_storage[]; running=Ref(true))
+    r = last_r[] = make_2(cache_storage[]; running=Ref(true))
     Main.TrustRank.load(Dict(r.tr_sorted))
+    for server in TARGET_SERVERS
+        println("TrustRankMaker.run_make: server: $server")
+        @time "import_trustrank" Main.TrustRank.import_trustrank(server, r.tr_sorted)
+    end
 end
 
 # ---------------------------------------------- #

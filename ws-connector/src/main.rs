@@ -1,9 +1,12 @@
-use std::{env, io::Error};
-use std::time::{SystemTime};
+// #[allow(unused)]
+
+use std::io::Error;
+use std::time::SystemTime;
 use tokio::time;
 use tokio::time::timeout;
 
-use futures_util::Future;
+use futures_util::future::BoxFuture;
+use std::future::Future;
 use futures_util::{StreamExt, SinkExt};
 use futures_util::stream::SplitSink;
 use futures_util::FutureExt;
@@ -27,11 +30,9 @@ use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Client};
 use tokio_postgres::NoTls;
 use tokio_postgres::types::ToSql;
 
-use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message::{Text, Binary};
 use tokio_tungstenite::tungstenite::Message;
-
-use measure_time::info_time;
+use tokio_tungstenite::WebSocketStream;
 
 use std::io::prelude::Write;
 use flate2::Compression;
@@ -44,11 +45,17 @@ use hex::FromHexError;
 
 use clap::{Parser, Subcommand};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ::function_name::named;
 
-const POOL_GET_TIMEOUT: u64 = 1;
+use primal_cache::{EventRow, parse_event, Event, EventAddr, EventId, EventReference, PubKeyId, Tag, live_importer};
+use chrono::TimeZone;
+use std::sync::atomic::AtomicBool;
+
+use std::hash::Hash;
+
+const POOL_GET_TIMEOUT: u64 = 15;
 
 struct Stats {
     recvmsgcnt: AtomicI64,
@@ -56,6 +63,38 @@ struct Stats {
     proxyreqcnt: AtomicI64,
     handlereqcnt: AtomicI64,
     connections: AtomicI64,
+}
+
+type SubscriptionId = String;
+// type WS = Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>;
+type WS = Arc<Mutex<MessageSink<SplitSink<WebSocketStream<TcpStream>, Message>>>>;
+type WebSocketId = i64;
+type ContentModerationMode = String;
+
+struct KeyedSubscriptions<K, ExtraData> {
+    key_to_subs: HashMap<K, HashSet<(WebSocketId, (SubscriptionId, ExtraData))>>,
+    sub_to_key: HashMap<(WebSocketId, SubscriptionId), K>,
+}
+impl<K: Clone + Eq + Hash, ExtraData: Eq + Hash> KeyedSubscriptions<K, ExtraData> {
+    fn new() -> Self {
+        Self { key_to_subs: HashMap::new(), sub_to_key: HashMap::new() }
+    }
+    fn register(&mut self, ws_id: WebSocketId, sub_id: SubscriptionId, key: K, extra_data: ExtraData) {
+        if !self.key_to_subs.contains_key(&key.clone()) {
+            self.key_to_subs.insert(key.clone(), HashSet::new());
+        }
+        if let Some(subs) = self.key_to_subs.get_mut(&key.clone()) {
+            subs.insert((ws_id, (sub_id.clone(), extra_data)));
+        }
+
+        self.sub_to_key.insert((ws_id, sub_id.clone()), key);
+    }
+    fn unregister(&mut self, ws_id: WebSocketId, sub_id: SubscriptionId) {
+        if let Some(key) = self.sub_to_key.remove(&(ws_id, sub_id.clone())) {
+            self.sub_to_key.remove(&(ws_id, sub_id));
+            self.key_to_subs.remove(&key);
+        }
+    }
 }
 
 struct State {
@@ -81,6 +120,41 @@ struct State {
     conn_index: i64,
     tasks: HashMap<i64, i64>, // tokio_task_id -> task_id
     conns: HashMap<i64, i64>, // tokio_task_id -> conn_id
+                        
+    websockets: HashMap<WebSocketId, WS>,
+    ws_to_subs: HashMap<WebSocketId, HashSet<SubscriptionId>>,
+    subs_to_ws: HashMap<(WebSocketId, SubscriptionId), WebSocketId>,
+
+    live_events: KeyedSubscriptions<EventAddr, (PubKeyId, ContentModerationMode)>,
+    live_events_from_follows: KeyedSubscriptions<PubKeyId, ()>,
+}
+
+// fn register_subscription<K: Clone + Eq + Hash>(
+//     state: &mut State, ks: &mut KeyedSubscriptions<K>, ws_id: WebSocketId, sub_id: SubscriptionId, key: K,
+// ) {
+//     ks.register(ws_id, sub_id.clone(), key);
+
+//     if !state.ws_to_subs.contains_key(&ws_id) {
+//         state.ws_to_subs.insert(ws_id, HashSet::new());
+//     }
+//     if let Some(subs) = state.ws_to_subs.get_mut(&ws_id) {
+//         subs.insert(sub_id.clone());
+//     }
+
+//     state.subs_to_ws.insert((ws_id, sub_id.clone()), ws_id);
+// }
+
+fn register_subscription(
+    state: &mut State, ws_id: WebSocketId, sub_id: SubscriptionId,
+) {
+    if !state.ws_to_subs.contains_key(&ws_id) {
+        state.ws_to_subs.insert(ws_id, HashSet::new());
+    }
+    if let Some(subs) = state.ws_to_subs.get_mut(&ws_id) {
+        subs.insert(sub_id.clone());
+    }
+
+    state.subs_to_ws.insert((ws_id, sub_id.clone()), ws_id);
 }
 
 struct MessageSink<T: Sink<Message>> {
@@ -154,7 +228,6 @@ struct LogEntry {
 }
 impl LogEntry {
     fn new(func: &str, info: Value, run: i64, task_id: i64, conn_id: Option<i64>) -> Self {
-        let tokio_task_id = get_tokio_task_id();
         LogEntry {
             run,
             task: task_id,
@@ -295,11 +368,25 @@ async fn main() -> Result<(), Error> {
         conn_index: 0,
         tasks: HashMap::new(),
         conns: HashMap::new(),
+
+        websockets: HashMap::new(),
+        ws_to_subs: HashMap::new(),
+        subs_to_ws: HashMap::new(),
+
+        live_events: KeyedSubscriptions::new(),
+        live_events_from_follows: KeyedSubscriptions::new(),
     }));
 
     let management_pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 4, None);
     let pool            = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16, Some(30000));
     let membership_pool = make_dbconn_pool("192.168.11.7", 5432, "primal", "primal", 16, None);
+
+    {
+        // early exit if any database is not running
+        management_pool.get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
+        pool           .get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
+        membership_pool.get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
+    }
 
     {
         let mut state = state.lock().await;
@@ -311,7 +398,7 @@ async fn main() -> Result<(), Error> {
 
     update_management_settings(&state, &management_pool).await;
 
-    let (logtx, mut logrx) = mpsc::channel(10000);
+    let (logtx, logrx) = mpsc::channel(10000);
     state.lock().await.logtx = Some(logtx);
 
     tokio::task::spawn(management_task(state.clone(), management_pool.clone()));
@@ -327,7 +414,7 @@ async fn main() -> Result<(), Error> {
             let mut interval = time::interval(Duration::from_millis(1000));
             loop {
                 interval.tick().await;
-                print_status(&state.lock().await.stats, &pool, &membership_pool);
+                print_status(&state, &pool, &membership_pool).await;
             }
         });
     }
@@ -351,8 +438,78 @@ async fn main() -> Result<(), Error> {
             loop {
                 sig.recv().await;
                 println!("got signal USR2");
-                runtime_dump().await;
+                runtime_dump("tasks.txt").await;
             }
+        });
+    }
+
+    {
+        let t_last_locking = Arc::new(Mutex::new(get_sys_time_in_secs()));
+        {
+            let state = state.clone();
+            let t_last_locking = t_last_locking.clone();
+            tokio::task::spawn(async move {
+                let _tt = TaskTrace::new("locking-watchdog", None, &state).await;
+                let mut interval = time::interval(Duration::from_millis(1000));
+                loop {
+                    interval.tick().await;
+                    let dt = get_sys_time_in_secs() - *t_last_locking.lock().await;
+                    if dt >= 15 {
+                        let filename = format!("locking-watchdog-tasks-{}.txt", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+                        eprintln!("locking watchdog: no locking for {} seconds, dumping runtime info ({}), exiting", dt, filename);
+                        runtime_dump(filename.as_str()).await;
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
+        {
+            let state = state.clone();
+            let t_last_locking = t_last_locking.clone();
+            tokio::task::spawn(async move {
+                let _tt = TaskTrace::new("locking-watchdog-helper", None, &state).await;
+                let mut interval = time::interval(Duration::from_millis(1000));
+                loop {
+                    state.lock().await;
+                    *t_last_locking.lock().await = get_sys_time_in_secs();
+                    interval.tick().await;
+                }
+            });
+        }
+    }
+
+    {
+        let imp_config = primal_cache::Config {
+            proxy: None,
+            cache_database_url: "postgresql://pr@127.0.0.1:54017/primal1?application_name=ws-connector&options=-csearch_path%3Dpublic".to_string(),
+            membership_database_url: "postgresql://primal@192.168.11.7:5432/primal?application_name=ws-connector".to_string(),
+            since: None,
+            tables: Vec::new(),
+            import_latest_t_key: "".to_string(),
+        };
+        use sqlx::pool::PoolOptions;
+        let cache_pool = PoolOptions::new()
+            .max_connections(10)
+            .min_connections(1)
+            .connect(&imp_config.cache_database_url).await.unwrap();
+        let membership_pool = PoolOptions::new()
+            .max_connections(10)
+            .min_connections(1)
+            .connect(&imp_config.membership_database_url).await.unwrap();
+        let imp_state = Arc::new(primal_cache::State {
+            config: imp_config,
+            cache_pool,
+            membership_pool,
+            got_sig: Arc::new(AtomicBool::new(false)),
+            since: 0,
+            incremental: true,
+            one_day: false,
+            iteration_step: 0,
+            graph_coverage: 0,
+        });
+        let state = state.clone();
+        tokio::task::spawn(async move {
+            live_importer(imp_state, state, import_event).await;
         });
     }
 
@@ -422,7 +579,7 @@ async fn main() -> Result<(), Error> {
                 sink: Vec::new(),
             }));
 
-            if handle_req(&state, &msg, &client_write, &pool, &membership_pool).await {
+            if handle_req(&state, &msg, &client_write, &pool, &membership_pool, -1).await {
                 incr(&state.lock().await.stats.handlereqcnt);
             }
 
@@ -430,7 +587,7 @@ async fn main() -> Result<(), Error> {
                 println!("{}", r);
             }
 
-            print_status(&state.lock().await.stats, &pool, &membership_pool);
+            print_status(&state, &pool, &membership_pool).await;
         },
 
         None => { },
@@ -504,28 +661,41 @@ async fn log_task(state: Arc<Mutex<State>>, mut logrx: mpsc::Receiver<LogEntry>,
             dbtx.commit().await.unwrap();
         };
         match std::panic::AssertUnwindSafe(f()).catch_unwind().await {
-            Ok(v) => {},
+            Ok(_) => {},
             Err(err) => println!("log_task panic: {err:?}"),
         }
     }
 }
 
-fn print_status(
-    stats: &Stats,
+async fn print_status(
+    state: &Arc<Mutex<State>>,
     pool: &Pool, 
     membership_pool: &Pool,
     ) {
     // let rt = tokio::runtime::Handle::current();
     // let m = rt.metrics();
     // dbg!(m);
+
+    let state = state.lock().await;
+    let stats = &state.stats;
+    
     fn load(x: &AtomicI64) -> i64 { x.load(Ordering::Relaxed) }
+
     fn pool_status(p: &Pool) -> String { 
         let status = p.status();
         format!("max_size/size/avail/wait: {} / {} / {} / {}", status.max_size, status.size, status.available, status.waiting)
     }
-    println!("conn/recv/sent/proxy/handle: {} / {} / {} / {} / {}   pool-{}   mpool-{}",
+
+    let live_feed_stats = format!("{}/{}/{} {}/{} {}/{}", 
+        state.websockets.len(), state.ws_to_subs.len(), state.subs_to_ws.len(), 
+        state.live_events.key_to_subs.len(), state.live_events.sub_to_key.len(),
+        state.live_events_from_follows.key_to_subs.len(), state.live_events_from_follows.sub_to_key.len(),
+        );
+
+    println!("conn/recv/sent/proxy/handle: {} / {} / {} / {} / {}   pool-{} mpool-{}   live: {}",
              load(&stats.connections), load(&stats.recvmsgcnt), load(&stats.sendmsgcnt), load(&stats.proxyreqcnt), load(&stats.handlereqcnt),
              pool_status(&pool), pool_status(&membership_pool),
+             live_feed_stats,
              );
 }
 
@@ -555,6 +725,11 @@ async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>
     }));
     // let client_read = Arc::new(Mutex::new(client_read));
 
+    {
+        let mut state = state.lock().await;
+        state.websockets.insert(conn_id, arc_client_write.clone());
+    }
+
     // info!("new ws connection: {}", _addr);
     incr(&state.lock().await.stats.connections);
 
@@ -564,25 +739,37 @@ async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>
     let arc_backend_write = Arc::new(Mutex::new(backend_write));
 
     struct Cleanup<T1: Sink<Message> + Unpin + Send + 'static, T2: Sink<Message> + Unpin + Send + 'static> {
+        conn_id: WebSocketId,
         cw: ClientWrite<T1>,
         bw: Arc<Mutex<T2>>,
         state: Arc<Mutex<State>>,
-    };
+    }
     impl<T1: Sink<Message> + Unpin + Send + 'static, T2: Sink<Message> + Unpin + Send + 'static> Drop for Cleanup<T1, T2> {
         fn drop(&mut self) {
             let cw = self.cw.clone();
             let bw = self.bw.clone();
             let state = self.state.clone();
+            let conn_id = self.conn_id;
             tokio::spawn(async move {
+                {
+                    let mut state = state.lock().await;
+                    decr(&state.stats.connections);
+                    state.websockets.remove(&conn_id);
+                    for sub in state.ws_to_subs.remove(&conn_id).unwrap_or_default() {
+                        state.subs_to_ws.remove(&(conn_id, sub.clone()));
+                        state.live_events.unregister(conn_id, sub.clone());
+                        state.live_events_from_follows.unregister(conn_id, sub.clone());
+                    }
+                }
                 cw.lock().await.sink.close().await;
                 bw.lock().await.close().await;
-                decr(&state.lock().await.stats.connections);
                 // println!("cleanup done");
                 // info!("ws disconnection: {}", _addr);
             });
         }
     }
     let _cleanup = Cleanup {
+        conn_id,
         cw: arc_client_write.clone(),
         bw: arc_backend_write.clone(),
         state: state.clone(),
@@ -604,7 +791,7 @@ async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>
             while *running.lock().await {
                 interval.tick().await;
                 let t = get_sys_time_in_secs();
-                let mut tl = t_last_msg.lock().await;
+                let tl = t_last_msg.lock().await;
                 let dt = t - *tl;
                 if dt >= ((rfactor*(state.lock().await.idle_connection_timeout as f64)) as u64) {
                     *running.lock().await = false;
@@ -654,7 +841,7 @@ async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>
                     send_log(get_tokio_task_id(), function_name!(), json!({"event": "client-message", "msg": msg_fmted}), &state).await;
                     if msg.is_text() || msg.is_binary() {
                         *t_last_msg.lock().await = get_sys_time_in_secs();
-                        let r = std::panic::AssertUnwindSafe(handle_req(&state, &msg, &client_write, &pool, &membership_pool)).catch_unwind().await;
+                        let r = std::panic::AssertUnwindSafe(handle_req(&state, &msg, &client_write, &pool, &membership_pool, conn_id)).catch_unwind().await;
                         let handeled = match r {
                             Ok(h) => h,
                             Err(err) => {
@@ -689,7 +876,8 @@ async fn handle_req<T: Sink<Message> + Unpin>(
     msg: &Message, 
     client_write: &ClientWrite<T>, 
     pool: &Pool, 
-    membership_pool: &Pool
+    membership_pool: &Pool,
+    conn_id: WebSocketId,
 ) -> bool where <T as Sink<Message>>::Error: Debug {
 
     incr(&state.lock().await.stats.recvmsgcnt);
@@ -712,6 +900,7 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                         client_write,
                     };
                     let reqstatus = {
+                        dbg!(funcall);
                         if funcall == "set_primal_protocol" {
                             if kwargs["compression"] == "zlib" {
                                 let cw = &mut client_write.lock().await;
@@ -738,13 +927,17 @@ async fn handle_req<T: Sink<Message> + Unpin>(
                             ReqHandlers::feed(&fa).await
                         } else if funcall == "mega_feed_directive" {
                             ReqHandlers::mega_feed_directive(&fa).await
+                        } else if funcall == "live_feed" {
+                            ReqHandlers::live_feed(&fa, conn_id).await
+                        } else if funcall == "live_events_from_follows" {
+                            ReqHandlers::live_events_from_follows(&fa, conn_id).await
                         // } else if funcall == "ttt" {
                         //     ReqHandlers::ttt(&fa).await
                         } else {
                             Ok(NotHandled)
                         }
                     };
-                    let mut handled = false;
+                    let handled;
                     match reqstatus {
                         Ok(Handled) => handled = true,
                         Ok(NotHandled) => handled = false,
@@ -844,6 +1037,8 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         for row in rows {
             if let Ok(r) = row.try_get::<_, &str>(0) {
                 res.push(r.to_string().clone());
+            } else {
+                eprintln!("failed to get row as string: {:?}", row);
             }
         }
         res
@@ -856,7 +1051,11 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
     async fn pool_get(pool: &Pool) -> Result<Client, ReqError> {
         match timeout(Duration::from_secs(POOL_GET_TIMEOUT), pool.get()).await {
             Ok(Ok(client)) => Ok(client),
-            _ => req_error("pool.get() timeout, send upstream")
+            // _ => req_error("pool.get() timeout, send upstream")
+            _ => {
+                println!("pool.get() timeout, unconditional process exit");
+                std::process::exit(11)
+            }
         }
     }
 
@@ -1226,12 +1425,184 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         Ok(NotHandled)
     }
 
+    async fn live_feed(fa: &FunArgs<'_, T>, conn_id: WebSocketId) -> Result<ReqStatus, ReqError> {
+        dbg!(fa.kwargs);
+
+        let kind = fa.kwargs["kind"].as_i64().ok_or("kind argument required")?;
+        let pubkey = fa.kwargs["pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok()).ok_or("pubkey argument required")?;
+        let identifier = fa.kwargs["identifier"].as_str().ok_or("identifier argument required")?;
+
+        let user_pubkey = fa.kwargs["user_pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok()).ok_or("user_pubkey argument required")?;
+
+        let content_moderation_mode = fa.kwargs["content_moderation_mode"].as_str().unwrap_or("all").to_string();
+
+        let res = Self::rows_to_vec(
+            &Self::pool_get(&fa.pool).await?.query(
+                "select distinct e::text from live_feed_initial_response($1, $2, $3, $4, $5) f(e)",
+                &[&kind, &pubkey, &identifier, &user_pubkey, &content_moderation_mode]).await?);
+
+        {
+            let cw = &mut fa.client_write.lock().await;
+            Self::send_response(fa.subid, cw, &res).await;
+        }
+
+        let event_coord = format!("{}:{}:{}", kind, hex::encode(pubkey.clone()), identifier);
+
+        {
+            let sub_id = fa.subid.to_string();
+            let mut state = fa.state.lock().await;
+            let eaddr = EventAddr::new(kind, PubKeyId(pubkey), identifier.to_string());
+            state.live_events.register(conn_id, sub_id.clone(), eaddr, (PubKeyId(user_pubkey), content_moderation_mode));
+            register_subscription(&mut state, conn_id, sub_id.clone());
+        }
+
+        Ok(Handled)
+    }
+
+    async fn live_events_from_follows(fa: &FunArgs<'_, T>, conn_id: WebSocketId) -> Result<ReqStatus, ReqError> {
+        dbg!(fa.kwargs);
+
+        let user_pubkey = fa.kwargs["user_pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok()).ok_or("user_pubkey argument required")?;
+
+        let res = Self::rows_to_vec(
+            &Self::pool_get(&fa.pool).await?.query(
+                r#"
+                select get_event_jsonb(lep.event_id)::text
+                from live_event_participants lep, pubkey_followers pf 
+                where pf.follower_pubkey = decode($1, 'hex')
+                  and pf.pubkey = lep.participant_pubkey
+                  and lep.kind = 30311 
+                "#,
+                &[&hex::encode(&user_pubkey)]).await?);
+
+        {
+            let cw = &mut fa.client_write.lock().await;
+            Self::send_response(fa.subid, cw, &res).await;
+        }
+
+        {
+            let sub_id = fa.subid.to_string();
+            let mut state = fa.state.lock().await;
+            state.live_events_from_follows.register(conn_id, sub_id.clone(), PubKeyId(user_pubkey), ());
+            register_subscription(&mut state, conn_id, sub_id.clone());
+        }
+
+        Ok(Handled)
+    }
+
     async fn ttt(fa: &FunArgs<'_, T>) -> Result<ReqStatus, ReqError> {
         dbg!(fa.kwargs);
         let res = Self::rows_to_vec(&Self::pool_get(&fa.pool).await?.query("select pg_sleep(3)", &[]).await?);
         dbg!(res);
         Ok(Handled)
     }
+}
+
+async fn import_event(imp_state: Arc<primal_cache::State>, e: Event, state: Arc<Mutex<State>>) -> anyhow::Result<()> {
+    // println!("{:?} {:?} {}", e.id, e.kind, chrono::Utc.timestamp_opt(e.created_at, 0).single().unwrap_or_default().to_rfc3339());
+    
+    async fn distribute_live_event(imp_state: &Arc<primal_cache::State>, state: &Arc<Mutex<State>>, eaddr: &EventAddr, e: &Event) -> anyhow::Result<()> {
+        let subs = state.lock().await.live_events.key_to_subs.get(eaddr).map_or_else(Vec::new, |x| x.iter().cloned().collect());
+
+        let mut res = Vec::new();
+        for (ws_id, (sub, (user_pubkey, content_moderation_mode))) in &subs {
+            let r = sqlx::query!(r#"select live_feed_is_hidden($1, $2, live_feed_hosts($4, $5, $6), $3) as hidden"#,
+                e.id.0, user_pubkey.0, content_moderation_mode, 
+                eaddr.kind, eaddr.pubkey.0, eaddr.identifier,
+            ).fetch_one(&imp_state.cache_pool).await?;
+            if let Some(false) = r.hidden {
+                let cw = state.lock().await.websockets.get(ws_id).map(|cw| cw.clone());
+                if let Some(cw) = cw {
+                    let e_json = serde_json::to_string(&e)?;
+                    println!("{}", e_json);
+                    {
+                        let cw = &mut cw.lock().await;
+                        if let Err(err) = ReqHandlers::send_event_str(sub, &e_json, cw).await {
+                            println!("error sending event to sub {}: {:?}", sub, err);
+                        }
+                    }
+                    res.push(sub.clone());
+                }
+            }
+        }
+        if !res.is_empty() {
+            println!("sent live feed {} event {:?} to subs: {:?}", eaddr, e.id, res);
+        }
+        Ok(())
+    }
+
+    for t in &e.tags {
+        match t {
+            Tag::EventAddr(eaddr, _) => {
+                distribute_live_event(&imp_state, &state, &eaddr, &e).await;
+            }
+            _ => {}
+        }
+    }
+
+    match e.kind {
+        primal_cache::LIVE_EVENT => {
+            if let Some(le) = primal_cache::parse_live_event(&e) {
+                {
+                    let eaddr = EventAddr::new(le.kind, le.pubkey.clone(), le.identifier);
+                    distribute_live_event(&imp_state, &state, &eaddr, &e).await;
+                }
+
+                {
+                    let mut participants = Vec::new();
+                    participants.push(le.pubkey);
+                    for (pk, ptype) in le.participants {
+                        if ptype == primal_cache::LiveEventParticipantType::Host {
+                            participants.push(pk);
+                        }
+                    }
+                    let participants_arr = format!("{{{}}}", participants.iter().map(|pk| format!("\\\\x{}", hex::encode(pk))).collect::<Vec<_>>().join(","));
+                    dbg!(&participants_arr);
+
+                    let users_arr = {
+                        let state = state.lock().await;
+                        let mut users = Vec::new();
+                        for (_, user_pubkey) in state.live_events_from_follows.sub_to_key.iter() {
+                            users.push(user_pubkey.clone());
+                        }
+                        let users_arr = format!("{{{}}}", users.iter().map(|pk| format!("\\\\x{}", hex::encode(pk))).collect::<Vec<_>>().join(","));
+                        dbg!(&users_arr);
+                        users_arr
+                    };
+
+                    for r in sqlx::query!(r#"
+                        select distinct pf.follower_pubkey from pubkey_followers pf
+                        where pf.follower_pubkey = any($1::varchar::bytea[])
+                          and pf.pubkey = any($2::varchar::bytea[])
+                        "#,
+                        &users_arr, &participants_arr,
+                    ).fetch_all(&imp_state.cache_pool).await? {
+                        if let Some(user_pubkey) = r.follower_pubkey {
+                            let user_pubkey = PubKeyId(user_pubkey);
+                            dbg!(&user_pubkey);
+                            let subs = state.lock().await.live_events_from_follows.key_to_subs.get(&user_pubkey).map_or_else(Vec::new, |x| x.iter().cloned().collect());
+                            for (ws_id, (sub, ())) in &subs {
+                                dbg!(&sub);
+                                let cw = state.lock().await.websockets.get(ws_id).map(|cw| cw.clone());
+                                if let Some(cw) = cw {
+                                    let e_json = serde_json::to_string(&e)?;
+                                    {
+                                        let cw = &mut cw.lock().await;
+                                        if let Err(err) = ReqHandlers::send_event_str(sub, &e_json, cw).await {
+                                            println!("error sending event to sub {}: {:?}", sub, err);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn req_err(description: &str) -> ReqError {
@@ -1243,18 +1614,18 @@ fn req_error<R>(description: &str) -> Result<R, ReqError> {
 
 use tokio::runtime::Handle;
 
-async fn runtime_dump() {
+async fn runtime_dump(filename: &str) {
     let handle = Handle::current();
     let mut s = String::new();
     if let Ok(dump) = timeout(Duration::from_secs(5), handle.dump()).await {
         for task in dump.tasks().iter() {
             let trace = task.trace();
-            let tokio_task_id = get_tokio_task_id();
+            let tokio_task_id = parse_tokio_task_id(task.id());
             s.push_str(format!("TASK {tokio_task_id}:\n").as_str());
             s.push_str(format!("{trace}\n\n").as_str());
         }
     }
-    tokio::fs::write("tasks.txt", s).await;
+    tokio::fs::write(filename, s).await;
 }
 
 ////
@@ -1264,10 +1635,9 @@ use tokio::net::TcpListener;
 use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{PlaceholderExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response};
 use pgwire::api::{ClientInfo, PgWireHandlerFactory, Type};
-use pgwire::error::{PgWireError, PgWireResult};
-use pgwire::api::auth::DefaultServerParameterProvider;
+use pgwire::error::PgWireResult;
 
 pub struct WSConnProcessor {
     state: Arc<Mutex<State>>,
@@ -1393,12 +1763,66 @@ impl PgWireHandlerFactory for WSConnHandlerFactory {
 mod tests {
     use super::*;
 
+    // #[test]
+    // fn test_1() {
+    //     let e = json!({
+    //         "key1": "value1", 
+    //     });
+    //     println!("{:?}", e["key1"] == "value1");
+    // }
+
     #[test]
-    fn test_1() {
-        let e = json!({
-            "key1": "value1", 
+    fn test_2() {
+        let state = Arc::new(Mutex::new(State {
+            stats: Stats {
+                recvmsgcnt: AtomicI64::new(0),
+                sendmsgcnt: AtomicI64::new(0),
+                proxyreqcnt: AtomicI64::new(0),
+                handlereqcnt: AtomicI64::new(0),
+                connections: AtomicI64::new(0),
+            },
+
+            default_app_settings_filename: "default-settings.json".to_string(),
+            app_releases_filename: "app-releases.json".to_string(),
+            srv_name: None,
+
+            primal_pubkey: None,
+
+            shutting_down: false,
+
+            logging_enabled: false,
+            idle_connection_timeout: 600,
+            log_sender_batch_size: 100,
+
+            logtx: None,
+
+            run: 0,
+            task_index: 0,
+            conn_index: 0,
+            tasks: HashMap::new(),
+            conns: HashMap::new(),
+
+            websockets: HashMap::new(),
+            ws_to_subs: HashMap::new(),
+            subs_to_ws: HashMap::new(),
+
+            live_events: KeyedSubscriptions::new(),
+            live_events_from_follows: KeyedSubscriptions::new(),
+        }));
+        let client_write = Arc::new(Mutex::new(MessageSink {
+            use_zlib: false,
+            sink: Vec::new(),
+        }));
+        let pool            = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16, Some(30000));
+        let membership_pool = make_dbconn_pool("192.168.11.7", 5432, "primal", "primal", 16, None);
+        let msg = Message::text("[\"REQ\",\"subid\",{\"cache\":[\"server_name\",{}]}]");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            handle_req(&state, &msg, &client_write, &pool, &membership_pool, -1).await;
+            let msgs = client_write.lock().await.sink.clone();
+            dbg!(&msgs);
+            assert!(msgs.len() > 0);
         });
-        println!("{:?}", e["key2"] == "value2");
     }
 }
 

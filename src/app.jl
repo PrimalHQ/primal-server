@@ -14,6 +14,7 @@ import ..DB
 import ..Nostr
 using ..Utils: ThreadSafe, Throttle
 using ..Postgres: @P, pgparams
+using ..PostgresMacros: @p0_str, @p0tl_str, @ms_str
 import ..Bech32
 
 exposed_functions = Set([:feed,
@@ -88,6 +89,28 @@ exposed_functions = Set([:feed,
                          :membership_content_rebroadcast_start,
                          :membership_content_rebroadcast_cancel,
                          :membership_content_rebroadcast_status,
+
+                         :membership_legends_leaderboard,
+                         :membership_premium_leaderboard,
+
+                         :nip19_decode,
+
+                         # :mute_thread,
+                         # :unmute_thread,
+                        
+                         :update_push_notification_token,
+
+                         :articles_stats,
+                         :drafts,
+                         :top_article,
+
+                         :get_recommended_blossom_servers,
+                         :replaceable_event,
+
+                         :follow_lists,
+                         :follow_list,
+
+                         :invoices_to_zap_receipts,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -143,6 +166,18 @@ MEMBERSHIP_CONTENT_STATS=10_000_166
 MEMBERSHIP_CONTENT_REBROADCAST_STATUS=10_000_167
 MEMBERSHIP_LEGEND_CUSTOMIZATION=10_000_168
 MEMBERSHIP_COHORTS=10_000_169
+MEMBERSHIP_LEGEND_LEADERBOARD=10_000_170
+MEMBERSHIP_PREMIUM_LEADERBOARD=10_000_171
+
+USER_TRUSTRANKS=10_000_172
+
+NIP19_DECODE_RESULT=10_000_173
+
+ARTICLES_STATS=10_000_174
+
+RECOMMENDED_BLOSSOM_SERVERS=10_000_175
+
+INVOICES_TO_ZAP_RECEIPTS=10_000_177
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -223,7 +258,7 @@ function event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
         es = zip([:likes, :replies, :mentions, :reposts, :zaps, :satszapped, :score, :score24h], r[1])
         [(; 
              kind=Int(EVENT_STATS),
-             content=JSON.json((; event_id=eid, es...)))]
+             content=JSON.json((; event_id=eid, es..., bookmarks=0)))]
     end
 end
 
@@ -299,6 +334,9 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
            pubkeys = Dict{Nostr.PubKeyId, NamedTuple{(:parent, :scopes), Tuple{Nostr.PubKeyId, Set{Symbol}}}}(),
            groups = Dict{Symbol, NamedTuple{(:scopes,), Tuple{Set{Symbol}}}}(),
            pubkeys_allowed = Set{Nostr.PubKeyId}(),
+           blocked_threads = Set{Nostr.EventId}(), # scope: content
+           blocked_hashtags = Set{String}(), # scope: content
+           blocked_words = Set{String}(), # scope: content
           )
     r = catch_exception(:compile_content_moderation_rules, (; pubkey)) do
         settings = ext_user_get_settings(est, pubkey)
@@ -311,7 +349,11 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
         if !isnothing(pubkey)
             ml = (; 
                   pubkeys = Dict{Nostr.PubKeyId, Set{Symbol}}(),
-                  groups = Dict{Symbol, Set{Symbol}}())
+                  groups = Dict{Symbol, Set{Symbol}}(),
+                  blocked_threads = Set{Nostr.EventId}(),
+                  blocked_hashtags = Set{String}(),
+                  blocked_words = Set{String}(),
+                 )
 
             if pubkey in est.mute_lists
                 local mlseid = est.mute_lists[pubkey]
@@ -371,10 +413,18 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
                 for tbl in [est.mute_list, est.mute_list_2]
                     if ppk in tbl
                         for tag in est.events[tbl[ppk]].tags
-                            if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                                    cmr.pubkeys[pk] = (; parent=ppk, 
-                                                       scopes=haskey(ml.pubkeys, ppk) ? ml.pubkeys[ppk] : Set{Symbol}())
+                            if length(tag.fields) >= 2
+                                if tag.fields[1] == "p"
+                                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                                        cmr.pubkeys[pk] = (; parent=ppk, 
+                                                           scopes=haskey(ml.pubkeys, ppk) ? ml.pubkeys[ppk] : Set{Symbol}())
+                                    end
+                                elseif tag.fields[1] == "e"
+                                    try push!(cmr.blocked_threads, Nostr.EventId(tag.fields[2])) catch _ end
+                                elseif tag.fields[1] == "t"
+                                    push!(cmr.blocked_hashtags, tag.fields[2])
+                                elseif tag.fields[1] == "word"
+                                    push!(cmr.blocked_words, tag.fields[2])
                                 end
                             end
                         end
@@ -417,6 +467,11 @@ function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
                     :cmr_pubkeys_parent,
                     :cmr_groups,
                     :cmr_pubkeys_allowed,
+                    :cmr_threads,
+                    :cmr_hashtags,
+                    :cmr_words,
+                    :cmr_hashtags_2,
+                    :cmr_words_2,
                    ]
             Postgres.execute(sess, "delete from $tbl where user_pubkey = \$1", [user_pubkey])
         end
@@ -433,6 +488,34 @@ function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
         end
         for pk in cmr.pubkeys_allowed
             Postgres.execute(sess, "insert into cmr_pubkeys_allowed values (\$1, \$2)", [user_pubkey, pk])
+        end
+        for scope in [:content, :trending]
+            for eid in cmr.blocked_threads
+                Postgres.execute(sess, "insert into cmr_threads values (\$1, \$2, \$3::cmr_scope)", [user_pubkey, eid, scope])
+            end
+            for ht in cmr.blocked_hashtags
+                Postgres.execute(sess, "insert into cmr_hashtags values (\$1, \$2, \$3::cmr_scope)", [user_pubkey, ht, scope])
+            end
+            for w in cmr.blocked_words
+                Postgres.execute(sess, "insert into cmr_words values (\$1, \$2, \$3::cmr_scope)", [user_pubkey, w, scope])
+            end
+            function make_tsquery(ws)
+                res = []
+                for w in ws
+                    w = replace(w, r"[^a-zA-Z0-9_]" => " ")
+                    w = replace(w, r"\s+" => " ")
+                    w = string(strip(w))
+                    w = "\"$(replace(w, " "=>"\\ "))\""
+                    push!(res, w)
+                end
+                res = join(res, " | ")
+                # @show ws=>res
+                res
+            end
+            isempty(cmr.blocked_hashtags) || Postgres.execute(sess, "insert into cmr_hashtags_2 values (\$1, \$2::cmr_scope, to_tsquery('simple', \$3))", 
+                                                              [user_pubkey, scope, make_tsquery(cmr.blocked_hashtags)])
+            isempty(cmr.blocked_words) || Postgres.execute(sess, "insert into cmr_words_2 values (\$1, \$2::cmr_scope, to_tsquery('simple', \$3))", 
+                                                           [user_pubkey, scope, make_tsquery(cmr.blocked_words)])
         end
     end
 end
@@ -852,7 +935,8 @@ end
 function thread_view(est::DB.CacheStorage; 
         event_id, 
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
-        usepgfuncs=false, 
+        # usepgfuncs=false, 
+        usepgfuncs=true, 
         user_pubkey=nothing, 
         apply_humaness_check=false,
         kwargs...)
@@ -864,8 +948,9 @@ function thread_view(est::DB.CacheStorage;
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
     if usepgfuncs
-        res = map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from thread_view(\$1, \$2, \$3, \$4, \$5, \$6, \$7)",
-                                      [event_id, limit, since, until, offset, user_pubkey, apply_humaness_check]))
+        include_parent_posts = get(kwargs, :include_parent_posts, true)
+        res = map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from thread_view(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)",
+                                      [event_id, limit, since, until, offset, user_pubkey, apply_humaness_check, include_parent_posts]))
         return res
     end
 
@@ -953,12 +1038,26 @@ function network_stats(est::DB.CacheStorage)
 end
 
 function user_scores(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
+    d = Dict()
+    # for pk in pubkeys
+    #     rs = DB.exec(est.dyn[:pubkey_trustrank], "select rank from pubkey_trustrank where pubkey = ?1", [pk])
+    #     isempty(rs) || (d[Nostr.hex(pk)] = trunc(Int, rs[1][1]*10000000000))
+    # end
     d = Dict([(Nostr.hex(pubkey), get(est.pubkey_followers_cnt, pubkey, 0))
               for pubkey in pubkeys])
     isempty(d) ? [] : [(; kind=Int(USER_SCORES), content=JSON.json(d))]
 end
 function user_scores(est::DB.CacheStorage, res_meta_data)
     user_scores(est, Nostr.PubKeyId[e.pubkey for e in collect(res_meta_data)])
+end
+
+function user_trustranks(est::DB.CacheStorage, pubkeys::Vector{Nostr.PubKeyId})
+    d = Dict()
+    for pk in pubkeys
+        rs = DB.exec(est.dyn[:pubkey_trustrank], "select rank from pubkey_trustrank where pubkey = ?1", [pk])
+        isempty(rs) || (d[Nostr.hex(pk)] = rs[1][1])
+    end
+    isempty(d) ? [] : [(; kind=Int(USER_TRUSTRANKS), content=JSON.json(d))]
 end
 
 function contact_list(est::DB.CacheStorage; pubkey, extended_response=true)
@@ -1009,7 +1108,8 @@ end
 function castnamedtuple(d)
     if     d isa NamedTuple; d
     elseif d isa Dict; d["kind"] < 10_000_000 ? Nostr.Event(d) : (; [Symbol(k)=>v for (k, v) in d]...)
-    else; error("invalid argument")
+    elseif d isa Missing; nothing
+    else; error("invalid argument: $d")
     end
 end
         
@@ -1052,12 +1152,18 @@ function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
     # res
 end
 
+function user_follower_counts(est::DB.CacheStorage, pubkeys::Vector)
+    [(; kind=USER_FOLLOWER_COUNTS,
+      content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys])))]
+end
+
 function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=true, apply_humaness_check=false)
     pubkeys = [pk isa Nostr.PubKeyId ? pk : Nostr.PubKeyId(pk) for pk in pubkeys]
 
     if usepgfuncs
         return [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from user_infos(\$1::text[])", 
-                                                           ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}'])]
+                                                           ['{'*join(['"'*Nostr.hex(pk)*'"' for pk in pubkeys], ',')*'}']
+                                                           ) if !(e isa Missing)]
     end
 
     res_meta_data = Dict() |> ThreadSafe
@@ -1075,8 +1181,7 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector, usepgfuncs=true, ap
     end
     res = [
            res_meta_data_arr..., user_scores(est, res_meta_data_arr)..., 
-           (; kind=USER_FOLLOWER_COUNTS,
-            content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys]))),
+           user_follower_counts(est, pubkeys)...,
            primal_verified_names(est, pubkeys)...,
           ]
     ext_user_infos(est, res, res_meta_data_arr)
@@ -1239,8 +1344,38 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     append!(res, primal_verified_names(est, [pubkey]))
 
     !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
+    
+    append!(res, user_profile_live_streams(est, pubkey))
 
     res.wrapped
+end
+
+function user_profile_live_streams(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    res = []
+    for (e,) in Postgres.execute(:p0, "
+        SELECT get_event_jsonb(pre.event_id)
+        FROM parametrized_replaceable_events pre, basic_tags bt
+        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8
+          AND pre.event_id = bt.id AND bt.tag = 'p' AND bt.arg1 = \$1
+          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
+                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
+                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
+        ", [pubkey])[2]
+        e = castnamedtuple(e) 
+        push!(res, e)
+    end
+    for (e,) in Postgres.execute(:p0, "
+        SELECT get_event_jsonb(pre.event_id)
+        FROM parametrized_replaceable_events pre
+        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8 AND pre.pubkey = \$1
+          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
+                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
+                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
+        ", [pubkey])[2]
+        e = castnamedtuple(e) 
+        push!(res, e)
+    end
+    collect(Set(res))
 end
 
 function user_profile_followed_by(est::DB.CacheStorage; pubkey, user_pubkey, limit=10)
@@ -1288,7 +1423,7 @@ end
 
 function parse_event_from_user(event_from_user::Dict)
     e = Nostr.Event(event_from_user)
-    e.created_at > time() - 300 || error("event is too old")
+    # e.created_at > time() - 300 || error("event is too old")
     e.created_at < time() + 300 || error("event from the future")
     Nostr.verify(e) || error("verification failed")
     e
@@ -1694,6 +1829,16 @@ function parametrized_replaceable_events(est::DB.CacheStorage; events::Vector, e
     res
 end
 
+function replaceable_event(est::DB.CacheStorage; pubkey, kind::Int)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    res = []
+    for (eid,) in Postgres.execute(:p0, "select event_id from replaceable_events where pubkey = \$1 and kind = \$2", [pubkey, kind])[2]
+        eid = Nostr.EventId(eid) 
+        eid in est.events && push!(res, est.events[eid])
+    end
+    res
+end
+
 function search_filterlist(est::DB.CacheStorage; pubkey, user_pubkey)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
@@ -1721,29 +1866,40 @@ function search_filterlist(est::DB.CacheStorage; pubkey, user_pubkey)
     isnothing(res) ? [] : [ (; kind=Int(FILTERING_REASON), content=JSON.json(res))]
 end
 
+IMPORT_EVENTS_SERVER = Ref{Any}(nothing)
+
 function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false)
     replicated || replicate_request(:import_events; events)
     est.readonly[] && return []
+    isnothing(IMPORT_EVENTS_SERVER[]) && return []
 
     cnt = Ref(0)
     errcnt = Ref(0)
     for e in events
         e = Nostr.Event(e)
         try
-            add_human_override(e.pubkey, true, "import_events")
-            msg = JSON.json([time(), nothing, ["EVENT", "", e]])
-            if DB.import_msg_into_storage(msg, est)
-                cnt[] += 1
-            end
-            try
-                o = DAG_OUTPUTS[][2]
-                Main.DAG.import_basic_tags(DAG_OUTPUTS_DB[], o.events, o.basic_tags, e.created_at, e.created_at)
-                Main.DAG.import_event_mentions(est, o.event_mentions, e)
-            catch ex
-                println("import_events: import_event_mentions error: $ex")
-            end
-            ext_import_event(est, e)
-        catch _ 
+            DB.add_human_override(est, e.pubkey, true, "import_events")
+            cnt[] += Main.rex(IMPORT_EVENTS_SERVER[]..., :(let e = $e
+                                                               msg = JSON.json([time(), nothing, ["EVENT", "", e]])
+                                                               est = Main.cache_storage
+                                                               cnt = 0
+                                                               if DB.import_msg_into_storage(msg, est)
+                                                                   cnt += 1
+                                                               end
+                                                               try
+                                                                   o = Main.App.DAG_OUTPUTS[][2]
+                                                                   Main.DAG.import_basic_tags(Main.App.DAG_OUTPUTS_DB[], o.events, o.basic_tags, e.created_at, e.created_at)
+                                                                   Main.DAG.import_event_mentions(est, o.event_mentions, e)
+                                                               catch ex
+                                                                   println("import_events: import_event_mentions error: $ex")
+                                                               end
+                                                               Main.App.ext_import_event(est, e)
+                                                               cnt
+                                                           end
+                                                          ))
+        catch ex
+            println("import_events: error: $ex")
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
             errcnt[] += 1
         end
     end
@@ -2594,12 +2750,20 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
             elseif kind == Int(NOTIFICATION)
                 d = JSON.parse(content)
                 for (k, v) in d
-                    length(v) == 64 && try
-                        if is_hidden_(est, cmr, user_pubkey, :content, Nostr.PubKeyId(v))
-                            ok = false
-                            break
-                        end
-                    catch _ end
+                    if length(v) == 64
+                        try
+                            if is_hidden_(est, cmr, user_pubkey, :content, Nostr.PubKeyId(v))
+                                ok = false
+                                break
+                            end
+                        catch _ end
+                        try
+                            if is_hidden_(est, cmr, user_pubkey, :content, Nostr.EventId(v))
+                                ok = false
+                                break
+                            end
+                        catch _ end
+                    end
                 end
             end
         end
@@ -2719,6 +2883,8 @@ function mega_feed_directive(
             return feed(est; skwa..., kwargs..., usepgfuncs, apply_humaness_check)
         elseif id == "search"
             return search(est; skwa..., kwargs...)
+        elseif id == "muted-threads"
+            return muted_threads_feed(est; skwa..., kwargs...)
         end
 
     elseif id == "explore-media"
@@ -2994,7 +3160,7 @@ function dvm_feed(
     #     end
     # end
     relays = collect(Set(relays))
-                    
+
     req_id = UUIDs.uuid4()
 
     jobreq = Nostr.Event(DVM_REQUESTER_KEYPAIR[].seckey, DVM_REQUESTER_KEYPAIR[].pubkey,
@@ -3032,7 +3198,7 @@ function dvm_feed(
 
     end
 
-    cond = Condition()
+    chn = Channel(Inf)
 
     function handle_result(client, m)
         m[1] == "EVENT" || return
@@ -3043,11 +3209,11 @@ function dvm_feed(
             for t in JSON.parse(e.content)
                 t[1] == "e" && push!(eids, Nostr.EventId(t[2]))
             end
-            notify(cond, eids)
+            put!(chn, eids)
         elseif e.kind == 7000
             for t in e.tags; t = t.fields
                 if t[1] == "status" && t[2] == "error"
-                    notify(cond, ErrorException("dvm_feed error: $(t[3])"); error=true)
+                    put!(chn, ErrorException("dvm_feed error: $(t[3])"))
                 end
             end
         end
@@ -3055,7 +3221,7 @@ function dvm_feed(
 
     @async begin
         sleep(timeout)
-        notify(cond, NostrClient.Timeout("dvm_feed"); error=true)
+        put!(chn, NostrClient.Timeout("dvm_feed"))
     end
 
     clients = []
@@ -3069,7 +3235,8 @@ function dvm_feed(
     end
 
     try
-        eids = wait(cond)
+        eids = take!(chn)
+        eids isa Exception && throw(eids)
         response(eids)
     finally
         for client in clients
@@ -3511,14 +3678,18 @@ function membership_media_management_uploads(
     res = []
     urls = []
     us = []
-    for (url, size, mimetype, created_at) in 
+    for (sha256, path, size, mimetype, created_at) in 
         Postgres.execute(:membership, 
-                         "select 'https://m.primal.net/' || su.path || su.ext, mu.size, mu.mimetype, mu.created_at
-                         from media_uploads mu, short_urls su
-                         where mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and su.url = 'https://media.primal.net' || mu.path
+                         "select mu.sha256, mu.path, mu.size, mu.mimetype, mu.created_at
+                         from media_uploads mu
+                         where 
+                            mu.pubkey = \$1 and mu.created_at >= \$2 and mu.created_at <= \$3 and 
+                            mu.media_block_id is null
                          order by mu.created_at desc
                          limit \$4 offset \$5", 
                          [e.pubkey, since, until, limit, offset])[2]
+        ext = splitext(path)[end]
+        url = "https://blossom.primal.net/$(bytes2hex(sha256))$(ext)"
         push!(us, (url, created_at))
         push!(res, (; url, size, mimetype, created_at))
         push!(urls, url)
@@ -3530,13 +3701,21 @@ end
 MEDIA_SERVER_HOST = Ref("")
 
 function membership_media_management_delete(est::DB.CacheStorage; event_from_user::Dict)
+    try
     e = membership_event_from_user(event_from_user)
 
     surl = JSON.parse(e.content)["url"]
 
-    String(HTTP.request("POST", "$(MEDIA_SERVER_HOST[])/purge-media", [], JSON.json((; e.pubkey, url=surl))).body) == "ok" || error("deletion failed")
+    @show sha256 = hex2bytes(splitext(splitpath(URIs.parse_uri(surl).path)[end])[1])
+    isempty(Postgres.execute(:membership, "select 1 from media_uploads where sha256 = \$1 and pubkey = \$2", [sha256, e.pubkey])[2]) && error("invalid url")
+
+    String(HTTP.request("POST", "$(MEDIA_SERVER_HOST[])/purge-media", [], JSON.json((; e.pubkey, url=surl, reason="deleted"))).body) == "ok" || error("deletion failed")
 
     []
+catch _
+    Utils.print_exceptions()
+    rethrow()
+end
 end
 
 function membership_recovery_contact_lists(
@@ -3545,7 +3724,10 @@ function membership_recovery_contact_lists(
         kwargs...
     )
     e = membership_event_from_user(event_from_user)
+    membership_recovery_contact_lists_(est, e.pubkey)
+end
 
+function membership_recovery_contact_lists_(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     es = []
     for (_, eid, created_at) in Postgres.execute(:p0timelimit, "
                                                  with cls as (
@@ -3557,7 +3739,7 @@ function membership_recovery_contact_lists(
                                                  order by day desc, follows desc, id
                                                  limit 30
                                                  ",
-                                                 [e.pubkey])[2]
+                                                 [pubkey])[2]
         push!(es, (Nostr.EventId(eid), created_at))
     end
     # es = sort(es; by=x->-x[2])
@@ -3704,12 +3886,317 @@ function membership_content_rebroadcast_status(est::DB.CacheStorage; event_from_
     [(; kind=Int(MEMBERSHIP_CONTENT_REBROADCAST_STATUS), content=JSON.json(res))]
 end
 
+function membership_legends_leaderboard(est::DB.CacheStorage; order_by="donated_btc", limit=100, since=0, until=typemax(Int), offset=0)
+    order_by in ["donated_btc", "last_donation", "index"] || error("invalid order_by")
+    limit = min(limit, 300)
+    dir = order_by in ["donated_btc", "last_donation"] ? "desc" : "asc"
+    res = []
+    rs = []
+    ks = []
+    for (k, index, pubkey, last_donation, donated_btc) in 
+        Postgres.execute(:membership, "
+                         with a as (
+                             select row_number() over () as index, * from (
+                                 select 
+                                     ls.pubkey, 
+                                     extract(epoch from ls.last_donation)::int8 as last_donation,
+                                     (ls.donated_btc*100000000)::int8 as donated_btc
+                                 from legend_users ls, memberships ms, membership_legend_customization mlc
+                                 where ms.pubkey = ls.pubkey and ms.pubkey = mlc.pubkey and mlc.in_leaderboard and ls.donated_btc > 0
+                                 order by ls.donated_btc desc
+                            ) b
+                         )
+                         select $order_by, * from a
+                         where $order_by >= \$1 and $order_by <= \$2
+                         order by $order_by $dir limit \$3 offset \$4
+                         ", [since, until, limit, offset])[2]
+        pubkey = Nostr.PubKeyId(pubkey)
+        push!(ks, (pubkey, k))
+        push!(rs, (; index, pubkey, donated_btc=string(donated_btc), last_donation))
+        append!(res, user_infos(est; pubkeys=[pubkey]))
+        append!(res, primal_verified_names(est, [pubkey]))
+    end
+    push!(res, (; kind=Int(MEMBERSHIP_LEGEND_LEADERBOARD), content=JSON.json(rs)))
+    append!(res, range(ks, order_by))
+    res
+end
+
+function membership_premium_leaderboard(est::DB.CacheStorage; order_by="premium_since", limit=100, since=0, until=typemax(Int), offset=0)
+    order_by in ["index", "premium_since"] || error("invalid order_by")
+    limit = min(limit, 300)
+    dir = order_by in ["premium_since"] ? "desc" : "asc"
+    res = []
+    rs = []
+    ks = []
+    for (k, index, pubkey, premium_since) in 
+        Postgres.execute(:membership, "
+                         with a as (
+                             select row_number() over () as index, * from (
+                                 select 
+                                     pu.pubkey,
+                                     extract(epoch from ms.premium_since)::int8 as premium_since
+                                 from premium_users pu, memberships ms
+                                 where ms.pubkey = pu.pubkey
+                                 order by ms.premium_since
+                            ) b
+                         )
+                         select $order_by, * from a
+                         where $order_by >= \$1 and $order_by <= \$2
+                         order by $order_by $dir limit \$3 offset \$4
+                         ", [since, until, limit, offset])[2]
+        pubkey = Nostr.PubKeyId(pubkey)
+        push!(ks, (pubkey, k))
+        push!(rs, (; index, pubkey, premium_since))
+        append!(res, user_infos(est; pubkeys=[pubkey]))
+        append!(res, primal_verified_names(est, [pubkey]))
+    end
+    push!(res, (; kind=Int(MEMBERSHIP_PREMIUM_LEADERBOARD), content=JSON.json(rs)))
+    append!(res, range(ks, order_by))
+    res
+end
+
 function fetch_content(est::DB.CacheStorage, pubkey::Nostr.PubKeyId; withfollows=true, days=7)
     DB.fetch_user_metadata(est, pubkey)
     pks = [pubkey]
     withfollows && append!(pks, follows(est, pubkey))
     DB.fetch((; kinds=[0], authors=pks))
     DB.fetch((; since=Utils.current_time()-days*24*3600, kinds=DB.kindints, authors=pks))
+end
+
+function nip19_decode(est::DB.CacheStorage; ids::Vector)
+    function ser(r)
+        if     r isa Nostr.EventId
+            [("EventId", r)]
+        elseif r isa Nostr.PubKeyId
+            [("PubKeyId", r)]
+        elseif r isa Vector
+            res = []
+            for e in r
+                append!(res, ser(e))
+            end
+            res
+        elseif r isa Tuple
+            res = []
+            for e in r
+                append!(res, ser(e))
+            end
+            res
+        else
+            [r]
+        end
+    end
+    res = Dict([id=>ser(Bech32.nip19_decode(id)) for id in ids])
+    [(; kind=Int(NIP19_DECODE_RESULT), content=JSON.json(res))]
+end
+
+# function mute_thread(est::DB.CacheStorage; event_from_user)
+#     e = membership_event_from_user(event_from_user)
+#     root_eid = cast(JSON.parse(e.content)["root_event_id"], Nostr.EventId)
+#     Postgres.execute(:membership, "
+#                      insert into muted_threads values (\$1, \$2, now())
+#                      on conflict do nothing
+#                      ", [e.pubkey, root_eid])
+#     []
+# end
+
+# function unmute_thread(est::DB.CacheStorage; event_from_user)
+#     e = membership_event_from_user(event_from_user)
+#     root_eid = cast(JSON.parse(e.content)["root_event_id"], Nostr.EventId)
+#     Postgres.execute(:membership, "
+#                      delete from muted_threads where pubkey = \$1 and root_eid = \$2
+#                      ", [e.pubkey, root_eid])
+#     []
+# end
+
+function parse_event_from_user_for_push_notification_token(event_from_user::Dict)
+    e = Nostr.Event(event_from_user)
+    e.created_at < time() + 300 || error("event from the future")
+    Nostr.verify(e) || error("event_from_user verification failed")
+    d = JSON.parse(e.content)
+    (; e, token=d["token"])
+end
+
+function update_push_notification_token(est::DB.CacheStorage; events_from_users::Vector, platform::String, token::String, environment=nothing)
+    # push!(Main.stuff, (:update_push_notification_token, (; events_from_users, platform, token, environment)))
+    platform = lowercase(platform)
+    tokens = [parse_event_from_user_for_push_notification_token(e) for e in events_from_users]
+    Postgres.transaction(:membership) do sess
+        Postgres.execute(sess, "delete from notification_tokens where platform = \$1 and token = \$2", [platform, token])
+        for t in tokens
+            @assert t.token == token
+            Postgres.execute(sess, "insert into notification_tokens values (\$1, \$2, \$3, now(), \$4, \$5)", 
+                             [platform, token, t.e.pubkey, environment, JSON.json(t.e)])
+        end
+    end
+    []
+end
+
+function articles_stats(est::DB.CacheStorage; pubkey, kind=30023)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    res = (; 
+           articles=Postgres.execute(:p0, "select count(1) from reads where pubkey = \$1", [pubkey])[2][1][1],
+           drafts=Postgres.execute(:p0, "
+                                   with ts as (select id, jsonb_array_elements(tags) ->> 0 as tag, jsonb_array_elements(tags) ->> 1 as arg
+                                               from events where pubkey = \$1 and kind = 31234)
+                                   select count(distinct id) from ts where ts.tag = 'k' and ts.arg = \$2::varchar",
+                                   [pubkey, kind])[2][1][1],
+           satszapped=Postgres.execute(:p0, "select coalesce(sum(satszapped), 0) from reads where pubkey = \$1", [pubkey])[2][1][1],
+          )
+    [(; kind=Int(ARTICLES_STATS), content=JSON.json(res))]
+end
+
+function drafts(est::DB.CacheStorage; pubkey, kind, since=0, until=Utils.current_time(), limit=20, offset=0)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    limit = min(100, limit)
+    res = []
+    for r in Postgres.execute(:p0, "
+                              with ts as (select id, jsonb_array_elements(tags) ->> 0 as tag, jsonb_array_elements(tags) ->> 1 as arg
+                                          from events where pubkey = \$1 and kind = 31234)
+                              select es.* from ts, events es
+                              where ts.arg = \$2::varchar and ts.id = es.id and es.created_at >= \$3 and es.created_at <= \$4
+                              order by es.created_at desc 
+                              limit \$5 offset \$6", [pubkey, kind, since, until, limit, offset])[2]
+        push!(res, event_from_row(r))
+    end
+    res
+end
+
+function top_article(est::DB.CacheStorage; pubkey, by)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    by = cast(by, Symbol)
+    eid = nothing
+    if     by == :satszapped
+        for r in Postgres.execute(:p0, "
+                                  select latest_eid from reads where pubkey = \$1
+                                  order by satszapped desc limit 1", 
+                                  [pubkey])[2]
+            eid = Nostr.EventId(r[1])
+        end
+    elseif by == :interactions
+        for r in Postgres.execute(:p0, "
+                                  select latest_eid from reads where pubkey = \$1
+                                  order by (likes + zaps + replies + reposts) desc limit 1", 
+                                  [pubkey])[2]
+            eid = Nostr.EventId(r[1])
+        end
+    end
+    res = []
+    if eid in est.events
+        push!(res, est.events[eid])
+        for r in Postgres.pexnt(:p0, "
+                             select latest_eid as event_id, likes, replies, 0 AS mentions, reposts, zaps, satszapped, 0 AS score, 0 AS score24h, 0 as bookmarks 
+                             from reads where latest_eid = \$1
+                             ", [eid])
+            push!(res, (; kind=Int(EVENT_STATS), content=JSON.json(r)))
+        end
+    end
+    res
+end
+
+function get_recommended_blossom_servers(est::DB.CacheStorage)
+    d = try JSON.parse(read(content_moderation_repo_file("recommended-blossom-servers.json"), String)) catch _; nothing end
+    [(; kind=Int(RECOMMENDED_BLOSSOM_SERVERS), content=JSON.json(d))]
+end
+
+function muted_threads_feed(
+        est::DB.CacheStorage;
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        user_pubkey=nothing
+    )
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    posts = Tuple{Nostr.EventId, Int}[]
+    for r in p0"
+        select es.id, es.created_at from replaceable_events re, basic_tags bt, events es
+        where re.pubkey = $user_pubkey and re.kind = $(Int(Nostr.MUTE_LIST)) 
+          and re.event_id = bt.id and bt.tag = 'e' and bt.arg1 = es.id 
+          and es.created_at >= $since and es.created_at <= $until 
+        order by es.created_at desc limit $limit offset $offset"
+        push!(posts, (Nostr.EventId(r.id), r.created_at))
+    end
+    enrich_feed_events_pg(est; posts, user_pubkey)
+end
+
+function parse_follow_list(e::Nostr.Event)
+    pks = Set{Nostr.PubKeyId}()
+    for t in e.tags
+        if length(t.fields) >= 2 && t.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(t.fields[2]) catch _ end)
+            push!(pks, pk)
+        end
+    end
+    pks
+end
+
+function follow_lists(
+        est::DB.CacheStorage;
+        since=0, until=Utils.current_time(), 
+        limit=5, offset=0,
+    )
+    limit = min(20, limit)
+
+    es = []
+    res = []
+
+    pks = Set{Nostr.PubKeyId}()
+    for r in p0"
+        select es.* from parametrized_replaceable_events pre, events es 
+        where pre.kind = 39089 and pre.created_at >= $since and pre.created_at <= $until and pre.event_id = es.id
+          and not exists (select 1 from filterlist fl where fl.target = pre.pubkey and fl.target_type = 'pubkey' and fl.grp = 'spam' and fl.blocked)
+        order by pre.created_at desc limit $limit offset $offset"
+        e = event_from_row(collect(r))
+
+        has_image = false
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "image"
+                has_image = true
+                break
+            end
+        end
+        has_image || continue
+
+        push!(res, e)
+
+        append!(res, map(castnamedtuple, p0"select * from event_media_response($(e.id))"))
+
+        push!(es, (e.id, e.created_at))
+
+        push!(pks, e.pubkey)
+
+        pks_param = "{$(join(["\\\\x$(Nostr.hex(pk))" for pk in parse_follow_list(e)], ','))}"
+        rs = p0"select key as pubkey, value as cnt from pubkey_followers_cnt where key = any ($(pks_param)::bytea[]) order by cnt desc limit 5"
+        union!(pks, [r.pubkey for r in rs])
+    end
+
+    [res..., user_infos(est; pubkeys=collect(pks), usepgfuncs=true)..., range(es, :created_at)...]
+end
+
+function follow_list(
+        est::DB.CacheStorage;
+        pubkey, identifier::String,
+    )
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    rs = p0"
+    select es.* from parametrized_replaceable_events pre, events es 
+    where pre.kind = 39089 and pre.pubkey = $pubkey and pre.identifier = $identifier and pre.event_id = es.id
+    "
+    isempty(rs) && error("no such follow list")
+    e = event_from_row(collect(rs[1]))
+    pks = parse_follow_list(e)
+    [e, user_infos(est; pubkeys=collect(pks), usepgfuncs=true)...]
+end
+
+function invoices_to_zap_receipts(
+        est::DB.CacheStorage;
+        invoices::Vector,
+    )
+    invoices_param = "{$(join(["$invoice" for invoice in invoices], ','))}"
+    res = Dict()
+    for r in p0"
+        select zri.invoice, get_event_jsonb(zri.zap_receipt_eid) as e from zap_receipt_invoices zri
+        where zri.invoice = any ($(invoices_param)::varchar[])
+        "
+        res[r.invoice] = r.e
+    end
+    [(; kind=Int(INVOICES_TO_ZAP_RECEIPTS), content=JSON.json(res))]
 end
 
 end

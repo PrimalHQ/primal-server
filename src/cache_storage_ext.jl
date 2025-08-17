@@ -280,7 +280,7 @@ end
 
 function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)
     event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :like, 1))
-    event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_LIKED, e.id))
+    # event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_LIKED, e.id, e.content))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED, "make_event_hooks", e.id))
 end
@@ -321,7 +321,7 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
     #         e.id, e.content)
     # end
 
-    for_mentiones(est, e; pubkeys_in_content=false) do tag
+    for_mentiones(est, e; pubkeys_in_content=true) do tag
         if tag.fields[1] == "p" 
             if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
                 event_hook(est, e.id, (:notifications_cb, YOU_WERE_MENTIONED_IN_POST, pk))
@@ -329,6 +329,14 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
         elseif tag.fields[1] == "e" 
             if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
                 event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_MENTIONED_IN_POST, e.id))
+                try
+                    if !ext_is_hidden(est, e.id)
+                        event_hook(est, eid, (:event_stats_cb, :reposts, +1))
+                        event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 7))
+                    end
+                catch ex
+                    PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+                end
             end
         end
     end
@@ -370,13 +378,14 @@ end
 
 function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
     event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, :reply, 10))
+
     event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_REPLIED_TO, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO, e.id, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO, "make_event_hooks", e.id, e.id))
 end
 
 function ext_repost(est::CacheStorage, e::Nostr.Event, eid)
-    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 3))
+    event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 7))
     event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED, "make_event_hooks", e.id))
@@ -387,8 +396,14 @@ function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
     sender = zap_sender(e)
     event_hook(est, parent_eid, (:score_event_cb, sender, e.created_at, :zap, 5))
     if ext_is_human(est, sender)
+        msg = ""
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "description"
+                try msg = JSON.parse(t.fields[2])["content"] catch _ end
+            end
+        end
         event_hook(est, parent_eid, (:event_stats_cb, :satszapped, amount_sats))
-        event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats))
+        event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_ZAPPED, e.id, amount_sats, msg))
         event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, e.id, amount_sats))
         event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED, "make_event_hooks", e.id, amount_sats))
         import_zap_receipt(est, e, parent_eid, amount_sats)
@@ -433,6 +448,29 @@ end
 function score_event_cb(est::CacheStorage, e::Nostr.Event, initiator, scored_at, action, increment)
     initiator = Nostr.PubKeyId(initiator)
     action = Symbol(action)
+
+    # if 1==1 && ext_is_human(est, initiator)
+    #     increment2 = increment
+    #     if action == :reply
+    #         increment2 = 
+    #         if     length(e.content) <= 20;  1
+    #         elseif length(e.content) <= 100; 5
+    #         else;  10
+    #         end
+    #     end
+    #     Postgres.execute(:p0, "
+    #                      insert into event_stats_2 values (\$1, \$2)
+    #                      on conflict (event_id) do update set score2 = event_stats_2.score2 + \$2
+    #                      ", [e.id, increment2])
+    # end
+
+    if action == :reply
+        increment = 
+        if     length(e.content) <= 20;  1
+        elseif length(e.content) <= 100; 5
+        else;  10
+        end
+    end
 
     increment_ = increment
     increment = ext_is_human(est, initiator) ? trunc(Int, 1e10*increment/91) : 0
@@ -480,6 +518,10 @@ function notif2namedtuple(notif::Tuple)
     nt
 end
 
+PUSH_NOTIFICATIONS_ENABLED = Ref(false)
+
+notification_periodic = Utils.Throttle(; period=5.0)
+
 function notification(
         est::CacheStorage,
         pubkey::Nostr.PubKeyId, notif_created_at::Int, notif_type::NotificationType,
@@ -488,6 +530,7 @@ function notification(
     pubkey in est.app_settings || return
 
     callargs = (; pubkey, notif_created_at, notif_type, args)
+    # @show callargs
 
     for a in args
         a isa Nostr.PubKeyId && a == pubkey && return
@@ -507,15 +550,78 @@ function notification(
     #     end
     # end
 
-    catch_exception(est, :notification_settings, callargs) do
-        if !isempty(local r = exe(est.notification_settings, 
-                                  @sql("select enabled from notification_settings where pubkey = ?1 and type = ?2 limit 1"),
-                                  pubkey, string(notif_type)))
-            r[1][1]
-        else
-            true
+    block = Ref(false)
+
+    catch_exception(est, :block_notifications_for_hellthreads, callargs) do
+        if notif_type in [YOU_WERE_MENTIONED_IN_POST, 
+                          POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED, 
+                          POST_YOU_WERE_MENTIONED_IN_WAS_LIKED, 
+                          POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED, 
+                          POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO,
+                         ]
+            eid = args[1]
+            if eid in est.events
+                mentions = 0
+                for_mentiones(est, est.events[eid]; pubkeys_in_content=true) do tag
+                    if tag.fields[1] == "p" 
+                        mentions += 1
+                    end
+                end
+                if mentions > 10
+                    for (blockit,) in Postgres.execute(:membership, "
+                                          select coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'ignore_events_with_too_many_mentions')::bool, true)
+                                          from app_settings where key = \$1 limit 1", [pubkey])[2]
+                        block[] = blockit
+                    end
+                end
+            end
         end
-    end || return
+    end
+    block[] && return
+
+    block[] |= catch_exception(est, :notification_blocked_by_mutelist, callargs) do
+        notification_blocked_by_mutelist(est, pubkey, args)
+    end
+    block[] && return
+
+    catch_exception(est, :notification_additional_settings, callargs) do
+        if notif_type == NEW_DIRECT_MESSAGE
+            pk = args[2] # sender
+            if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_dm_notifications_from_users_i_follow')::bool, true) limit 1", [pubkey])[2])
+                if isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, pk])[2])
+                    block[] = true
+                end
+            end
+        else
+            pk =
+            if     notif_type in [NEW_USER_FOLLOWED_YOU, USER_UNFOLLOWED_YOU]
+                args[1] # follower
+            elseif notif_type in [YOUR_POST_WAS_ZAPPED,
+                                  YOUR_POST_WAS_LIKED,
+                                  YOUR_POST_WAS_REPOSTED]
+                args[2] # who_liked_it
+            elseif notif_type == YOUR_POST_WAS_REPLIED_TO
+                args[2] # who_replied_to_it
+            elseif notif_type == YOU_WERE_MENTIONED_IN_POST
+                args[2] # who_mentioned_it
+            elseif notif_type == YOUR_POST_WAS_MENTIONED_IN_POST
+                args[3] # who_mentioned_it
+            elseif notif_type == YOUR_POST_WAS_HIGHLIGHTED
+                args[2] # who_highlighted_it
+            elseif notif_type == YOUR_POST_WAS_BOOKMARKED
+                args[2] # who_bookmarked_it
+            else
+                nothing
+            end
+            # @show (notif_type, pk)
+            if !isnothing(pk)
+                if notification_blocked_sender_not_follower(pubkey, pk)
+                    block[] = true
+                end
+            end
+        end
+    end
+    block[] && return
 
     @assert length(args) <= 4
     @assert length(notification_args[notif_type]) == length(args)
@@ -523,10 +629,28 @@ function notification(
     args = (args..., [nothing for _ in 1:4-length(args)]...)
 
     notif = (pubkey, notif_created_at, notif_type, args...)
+    notif_d = notif2namedtuple(notif)
+
+    if PUSH_NOTIFICATIONS_ENABLED[]
+        try
+            Base.invokelatest(Main.eval(:(PushNotifications.notification)), est, notif_d)
+        catch ex
+            @show callargs
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        end
+    end
+
+    catch_exception(est, :notification_settings, callargs) do
+        if !isempty(local r = exe(est.notification_settings, 
+                                  @sql("select enabled from notification_settings where pubkey = ?1 and type = ?2 limit 1"),
+                                  pubkey, string(notif_type)))
+            if !r[1][1]; block[] = true; end
+        end
+    end
+    block[] && return
+
     exe(est.pubkey_notifications, @sql("insert into pubkey_notifications values (?1, ?2, ?3, ?4, ?5, ?6, ?7)"),
         pubkey, notif[2:5]..., [JSON.json(x) for x in notif[6:7]]...)
-
-    notif_d = notif2namedtuple(notif)
 
     lock(est.notification_processors) do notification_processors
         for func in values(notification_processors)
@@ -535,6 +659,58 @@ function notification(
             end
         end
     end
+
+    notification_periodic() do
+        Main.PushGatewayExporter.set!("notification_latest", Utils.current_time())
+    end
+end
+
+function notification_blocked_sender_not_follower(pubkey::Nostr.PubKeyId, initiator::Union{Nostr.PubKeyId, Nothing})
+    if !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'only_show_reactions_from_users_i_follow')::bool, false) limit 1", [pubkey])[2])
+        if isnothing(initiator) || isempty(Postgres.execute(:p0, "select 1 from pubkey_followers pf where pf.follower_pubkey = \$1 and pf.pubkey = \$2 limit 1", [pubkey, initiator])[2])
+            return true
+        end
+    end
+    false
+end
+
+function notification_blocked_by_mutelist(est::CacheStorage, pubkey::Nostr.PubKeyId, notif_args)
+    if pubkey in est.mute_list
+        for t in est.events[est.mute_list[pubkey]].tags
+            if length(t.fields) >= 2
+                if     t.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(t.fields[2]) catch _ end)
+                    for eid0 in notif_args
+                        if eid0 isa Nostr.EventId && eid0 in est.events 
+                            for t0 in est.events[eid0].tags
+                                if length(t0.fields) >= 2 && t0.fields[1] == "e" && !isnothing(local eid1 = try Nostr.EventId(t0.fields[2]) catch _ end)
+                                    eid1 == eid && @goto blocked
+                                end
+                            end
+                        end
+                    end
+                elseif t.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(t.fields[2]) catch _ end)
+                    for a in notif_args
+                        a isa Nostr.PubKeyId && a == pk && @goto blocked
+                    end
+                elseif t.fields[1] == "t"
+                    ht = t.fields[2]
+                    eid = notif_args[1]
+                    b = Ref(false)
+                    eid isa Nostr.EventId && eid in est.events && for_hashtags(est, est.events[eid]) do hashtag
+                        hashtag == ht && (b[] = true)
+                    end
+                    b[] && @goto blocked
+                elseif t.fields[1] == "word"
+                    w = t.fields[2]
+                    eid = notif_args[1]
+                    eid isa Nostr.EventId && eid in est.events && occursin(w, est.events[eid].content) && @goto blocked
+                end
+            end
+        end
+    end
+    return false
+    @label blocked
+    true
 end
 
 function notifications_cb(est::CacheStorage, e::Nostr.Event, notif_type, args...)
@@ -562,45 +738,73 @@ function notifications_cb(est::CacheStorage, e::Nostr.Event, notif_type, args...
 
     elseif notif_type == YOUR_POST_WAS_MENTIONED_IN_POST
         e0 = est.events[conv(Nostr.EventId, args[1])]
-        notification(est, e.pubkey, e.created_at, notif_type,
+        notification(est, e.pubkey, e0.created_at, notif_type,
                      #= your_post =# e.id, #= their_post =# e0.id, #= mentioned_by =# e0.pubkey)
 
-    elseif notif_type in [POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED,
-                          POST_YOU_WERE_MENTIONED_IN_WAS_LIKED,
-                          POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED,
-                          POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO,
-                         ]
+    # elseif notif_type in [POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED,
+    #                       POST_YOU_WERE_MENTIONED_IN_WAS_LIKED,
+    #                       POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED,
+    #                       POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO,
+    #                      ]
+    #     e0 = est.events[conv(Nostr.EventId, args[1])]
+    #     e0_pubkey = notif_type == POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED ? zap_sender(e0) : e0.pubkey
+    #     for_mentiones(est, e; pubkeys_in_content=false) do tag
+    #         if tag.fields[1] == "p" 
+    #             if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+    #                 notification(est, pk, e0.created_at, notif_type,
+    #                              e.id, e0_pubkey, args[2:end]...)
+    #             end
+    #         end
+    #     end
+
+    # elseif notif_type in [POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED,
+    #                       POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED,
+    #                       POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED,
+    #                       POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO,
+    #                      ]
+    #     if args[1] == "make_event_hooks"
+    #         e0 = est.events[conv(Nostr.EventId, args[2])]
+    #         for_mentiones(est, e) do tag
+    #             if tag.fields[1] == "e" 
+    #                 if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+    #                     event_hook(est, eid, (:notifications_cb, notif_type, "make_notification", e0.id, e.id, args[3:end]...))
+    #                 end
+    #             end
+    #         end
+    #     elseif args[1] == "make_notification"
+    #         e0 = est.events[conv(Nostr.EventId, args[2])]
+    #         e1 = est.events[conv(Nostr.EventId, args[3])]
+    #         e0_pubkey = notif_type == POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED ? zap_sender(e0) : e0.pubkey
+    #         notification(est, e.pubkey, e0.created_at, notif_type,
+    #                      e1.id, #= your_post =# e.id, #= who =# e0_pubkey, args[4:end]...)
+    #     end
+
+    elseif notif_type == YOUR_POST_WAS_HIGHLIGHTED
         e0 = est.events[conv(Nostr.EventId, args[1])]
-        e0_pubkey = notif_type == POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED ? zap_sender(e0) : e0.pubkey
-        for_mentiones(est, e; pubkeys_in_content=false) do tag
-            if tag.fields[1] == "p" 
-                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                    notification(est, pk, e0.created_at, notif_type,
-                                 e.id, e0_pubkey, args[2:end]...)
-                end
+        notification(est, e.pubkey, e0.created_at, notif_type,
+                     #= your post =# e.id, #= who =# e0.pubkey, #= highlight =# e0.id, args[2:end]...)
+
+    elseif notif_type == YOUR_POST_WAS_BOOKMARKED
+        e0 = est.events[conv(Nostr.EventId, args[1])]
+        notification(est, e.pubkey, e0.created_at, notif_type,
+                     #= your post =# e.id, #= who =# e0.pubkey, args[2:end]...)
+
+    # elseif notif_type == YOUR_POST_HAD_REACTION
+    #     e0 = est.events[conv(Nostr.EventId, args[1])]
+    #     notification(est, e.pubkey, e0.created_at, notif_type,
+    #                  #= your post =# e.id, #= who =# e0.pubkey, args[2:end]...)
+        
+    elseif notif_type == NEW_DIRECT_MESSAGE
+        receiver = nothing
+        for t in e.tags
+            if length(t.fields) >= 2 && t.fields[1] == "p"
+                try receiver = Nostr.PubKeyId(t.fields[2]) catch _ end
+                break
             end
         end
-
-    elseif notif_type in [POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED,
-                          POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED,
-                          POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED,
-                          POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO,
-                         ]
-        if args[1] == "make_event_hooks"
-            e0 = est.events[conv(Nostr.EventId, args[2])]
-            for_mentiones(est, e) do tag
-                if tag.fields[1] == "e" 
-                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                        event_hook(est, eid, (:notifications_cb, notif_type, "make_notification", e0.id, e.id, args[3:end]...))
-                    end
-                end
-            end
-        elseif args[1] == "make_notification"
-            e0 = est.events[conv(Nostr.EventId, args[2])]
-            e1 = est.events[conv(Nostr.EventId, args[3])]
-            e0_pubkey = notif_type == POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED ? zap_sender(e0) : e0.pubkey
-            notification(est, e.pubkey, e0.created_at, notif_type,
-                         e1.id, #= your_post =# e.id, #= who =# e0_pubkey, args[4:end]...)
+        if !isnothing(receiver)
+            notification(est, receiver, e.created_at, notif_type,
+                         #= direct message =# e.id, #= sender =# e.pubkey)
         end
     end
 end
