@@ -2,7 +2,7 @@
 
 use primal_cache::{parse_parent_eid, parse_zap_receipt, EventRow};
 use primal_cache::{
-    event_to_json, log, parse_event, Config, Event, EventAddr, EventId, EventReference, PubKeyId, RollingMap, State, Tag
+    log, parse_event, Config, Event, EventAddr, EventId, EventReference, PubKeyId, RollingMap, State, Tag
 };
 
 use sha2::{Sha256, Digest};

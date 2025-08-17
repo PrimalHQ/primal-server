@@ -36,3 +36,12 @@ tokio-util = { version = "0.7.15", features = ["compat", "io"] }
 futures-util = { version = "0.3.31", features = ["compat"] }
 
 lightning-invoice = "0.33.2"
+
+[[bin]]
+name = "scratch"
+path = "src/bin/scratch.rs"
+
+[[bin]]
+name = "live-events-proof-stats"
+path = "src/bin/live-events-proof-stats.rs"
+

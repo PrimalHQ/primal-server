@@ -1,6 +1,6 @@
-[build]
+[target.x86_64-unknown-linux-gnu]
 rustflags = [
-    "-Awarnings", 
+    "-Awarnings",
     "--cfg", "tokio_unstable", 
     "--cfg", "tokio_taskdump",
 ]

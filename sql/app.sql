@@ -27,6 +27,7 @@ CREATE OR REPLACE FUNCTION public.c_USER_PRIMAL_NAMES() RETURNS int LANGUAGE sql
 CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_LEGEND_CUSTOMIZATION() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000168';
 CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_COHORTS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000169';
 /* CREATE OR REPLACE FUNCTION public.c_COLLECTION_ORDER() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000161'; */
+CREATE OR REPLACE FUNCTION public.c_LIVE_EVENT_STATS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000176';
 
 -- types
 
@@ -1236,17 +1237,73 @@ where m.url = a_url and m.size = sz.newsize and ms.media_block_id is null
 order by m.animated desc, m.media_url, msp.priority
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.live_feed_is_hidden(
+    a_event_id bytea,
+    a_user_pubkey bytea, 
+    a_host_pubkeys bytea[], 
+    a_content_moderation_mode varchar 
+) 
+	RETURNS bool
+    LANGUAGE 'plpgsql'
+AS $BODY$
+DECLARE
+    pubkey bytea;
+BEGIN
+    SELECT es.pubkey INTO pubkey FROM events es WHERE es.id = a_event_id LIMIT 1;
+
+    IF a_content_moderation_mode = 'all' THEN
+        RETURN false;
+    ELSIF a_content_moderation_mode = 'moderated' THEN
+        RETURN is_event_hidden(a_user_pubkey, 'content', a_event_id)
+            OR EXISTS (SELECT 1 FROM UNNEST(a_host_pubkeys) hpks(host_pubkey) WHERE is_event_hidden(host_pubkey, 'content', a_event_id));
+    ELSE
+        RETURN false;
+    END IF;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.live_feed_hosts(
+    a_kind bigint,
+    a_pubkey bytea,
+    a_identifier varchar
+) 
+	RETURNS bytea[]
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    host_pubkeys bytea[];
+BEGIN
+    host_pubkeys := ARRAY (
+        SELECT DECODE(tag.value->>1, 'hex')
+        FROM parametrized_replaceable_events pre, events es, jsonb_array_elements(es.tags) AS tag(value)
+        WHERE pre.pubkey = a_pubkey AND pre.identifier = a_identifier AND pre.kind = 30311
+          AND es.id = pre.event_id 
+          AND tag.value->>0 = 'p' AND LOWER(tag.value->>3) = 'host'
+    );
+    IF array_length(host_pubkeys, 1) IS NULL THEN
+        host_pubkeys := ARRAY[a_pubkey];
+    END IF;
+    RETURN host_pubkeys;
+END
+$BODY$;
+
 CREATE OR REPLACE FUNCTION public.live_feed_initial_response(
     a_kind bigint,
     a_pubkey bytea,
     a_identifier varchar,
     a_user_pubkey bytea, 
+    a_content_moderation_mode varchar,
     a_limit bigint DEFAULT 20,
     a_apply_humaness_check bool DEFAULT true
 ) 
 	RETURNS SETOF jsonb
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
+DECLARE
+    zap_eid bytea;
+    total_zaps int8 := 0;
+    total_satszapped int8 := 0;
+    host_pubkeys bytea[] := live_feed_hosts(a_kind, a_pubkey, a_identifier);
 BEGIN
     -- RETURN QUERY SELECT * FROM enrich_feed_events(
     --     ARRAY (
@@ -1263,13 +1320,35 @@ BEGIN
                 a_pubkey,
                 a_identifier,
                 a_limit
-            ) r;
+            ) r WHERE NOT live_feed_is_hidden(r.event_id, a_user_pubkey, host_pubkeys, a_content_moderation_mode);
 
     RETURN QUERY SELECT get_event_jsonb(eid)
         FROM a_tags 
         WHERE kind in (7, 9735)
           AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier
+          AND NOT live_feed_is_hidden(eid, a_user_pubkey, host_pubkeys, a_content_moderation_mode)
         ORDER BY created_at DESC LIMIT 1000;
+
+    RETURN QUERY SELECT get_event_jsonb(eid) FROM a_tags 
+        WHERE kind = 9735 AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier 
+          AND NOT live_feed_is_hidden(eid, a_user_pubkey, host_pubkeys, a_content_moderation_mode)
+        ORDER BY get_zap_receipt_satszapped(eid) DESC LIMIT 5;
+
+    FOR zap_eid in SELECT eid FROM a_tags 
+        WHERE kind = 9735 AND ref_kind = a_kind AND ref_pubkey = a_pubkey AND ref_identifier = a_identifier 
+          AND NOT live_feed_is_hidden(eid, a_user_pubkey, host_pubkeys, a_content_moderation_mode)
+    LOOP
+        total_zaps := total_zaps + 1;
+        total_satszapped := total_satszapped + get_zap_receipt_satszapped(zap_eid);
+    END LOOP;
+
+    RETURN NEXT jsonb_build_object(
+        'kind', c_LIVE_EVENT_STATS(),
+        'created_at', EXTRACT(EPOCH FROM NOW())::int8,
+        'content', json_build_object(
+            'total_zaps', total_zaps,
+            'total_satszapped', total_satszapped 
+        )::text);
 END
 $BODY$;
 
@@ -1302,4 +1381,38 @@ WHERE lep.participant_pubkey = a_pubkey
   AND lep.kind = a_kind
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.parse_bolt11_amount_sats(a_bolt11 VARCHAR) RETURNS int8 LANGUAGE SQL
+AS $BODY$
+WITH extracted AS (
+    SELECT
+        SUBSTRING(a_bolt11 FROM 'lnbc(\d+)([mun])') AS amount,
+        SUBSTRING(a_bolt11 FROM 'lnbc\d+([mun])') AS unit
+)
+SELECT
+    CASE unit
+        WHEN 'm' THEN CAST(amount AS DECIMAL) * 100000000 / 1000
+        WHEN 'u' THEN CAST(amount AS DECIMAL) * 100000000 / 1000000
+        WHEN 'n' THEN CAST(amount AS DECIMAL) * 100000000 / 1000000000
+        ELSE CAST(amount AS DECIMAL) * 100000000
+        END
+FROM extracted;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.extract_bolt11(tags JSONB) RETURNS TEXT LANGUAGE plpgsql AS $BODY$
+BEGIN
+    RETURN (
+        SELECT tag.value ->> 1
+        FROM jsonb_array_elements(tags) AS tag(value)
+        WHERE tag.value ->> 0 = 'bolt11'
+        LIMIT 1
+    );
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.get_zap_receipt_satszapped(
+    a_eid bytea
+) RETURNS int8 LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT parse_bolt11_amount_sats(extract_bolt11(es.tags)) FROM events es WHERE es.id = a_eid
+$BODY$;
 

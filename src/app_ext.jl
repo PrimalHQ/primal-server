@@ -343,7 +343,16 @@ function scored_content(
                 from event_stats $q_wheres 
                 order by $field desc limit \$1 offset \$2"
             end
-            # println(q); @show params
+            if 1==0
+                q2 = replace(q, r"\$[0-9]+"=>s->let v = params[parse(Int, replace(s,"\$"=>""))]
+                                    if v isa Nostr.PubKeyId || v isa Nostr.EventId
+                                        v = "'\\x$(Nostr.hex(v))'"
+                                    else
+                                        v = string(v)
+                                    end
+                                end)
+                push!(Main.stuff, (:scored_content, (; q=q2)))
+            end
             pkseen = Set{Nostr.PubKeyId}()
             for (pk, eid, v) in Postgres.execute(:p0timelimit, q, params)[2]
                 pk = Nostr.PubKeyId(pk)
@@ -536,25 +545,100 @@ function scored_users(est::DB.CacheStorage; limit::Int=20, since::Int=0, user_pu
     res
 end
 
+OLLAMA_HOST = Ref{Any}(nothing)
+GAMING_REPORT_COMMAND = Ref{Any}(nothing)
+
+function text_query(
+        query::String;
+        model="llama3.2:1b",
+        endpoint="http://$(OLLAMA_HOST[])/api/chat",
+        num_predict=1024,
+        timeout=10)
+    req = (;
+           model,
+           # keep_alive="180m",
+           options=(; num_predict),
+           stream=false,
+           messages=[
+                     (;
+                      role="user",
+                      content=query,
+                     ),
+                    ])
+    s = String(HTTP.request("POST", endpoint;
+                            headers=["Content-Type"=>"application/json"],
+                            body=JSON.json(req), retry=false,
+                            readtimeout=timeout, connect_timeout=timeout).body)
+    r = JSON.parse(s)
+    Dict(["model"=>model, "output"=>r])
+end
+
+function does_note_game_trending(content)
+    text_query("""
+               Does the author of this note explicitly and literally ask users to zap his note, repost his note, or reply to it?
+               The response should begin with either "yes" or "no" as the answer to the question.
+               The response's second line should include an explanation. 
+
+               If note contains phrases like this answer "no":
+               - "share this around"
+               - "do you know anyone who would be willing"
+               - "would love to hear people's thoughts on this"
+
+               <note>
+               $(content)
+               </note>
+               """; 
+               num_predict=2048, 
+               # model="llama3.2:3b-instruct-q8_0",
+               model="gemma3n:e4b",
+               # model="gemma3n:e4b-it-fp16",
+              )["output"]["message"]["content"]
+end
+
 function precalculate_analytics(est::DB.CacheStorage)
-    for selector in [
-        "trending_24h",
-        "trending_12h",
-        "trending_4h",
-        "trending_1h",
-        "gm_trending_24h",
-        "gm_trending_12h",
-        "gm_trending_4h",
-        "gm_trending_1h",
-        "classic_trending_24h",
-        "classic_trending_12h",
-        "classic_trending_4h",
-        "classic_trending_1h",
-        "mostzapped_24h",
-        "mostzapped_12h",
-        "mostzapped_4h",
-        "mostzapped_1h",
+    precals = [
+         ("trending_24h", true),
+         ("trending_12h", true),
+         ("trending_4h", true),
+         ("trending_1h", true),
+         ("gm_trending_24h", false),
+         ("gm_trending_12h", false),
+         ("gm_trending_4h", false),
+         ("gm_trending_1h", false),
+         ("classic_trending_24h", false),
+         ("classic_trending_12h", false),
+         ("classic_trending_4h", false),
+         ("classic_trending_1h", false),
+         ("mostzapped_24h", true),
+         ("mostzapped_12h", true),
+         ("mostzapped_4h", true),
+         ("mostzapped_1h", true),
        ]
+
+    loglock = ReentrantLock()
+    report_lines = []
+    push!(report_lines, "updated at $(Dates.now())")
+
+    cached_results = Dict{String, Any}() |> ThreadSafe
+    function process_content(content::String)
+        if haskey(cached_results, content)
+            cached_results[content]
+        else
+            content = replace(content, Main.InternalServices.re_mention => "")
+            content = replace(content, DB.re_url => "")
+            r = (content, does_note_game_trending(content))
+            cached_results[content] = r
+            r
+        end
+    end
+
+    # for (selector, gaming_detection) in precals
+    asyncmap(precals; ntasks=8) do pc
+        selector, gaming_detection = pc
+        if isnothing(OLLAMA_HOST[])
+            gaming_detection = false
+        end
+
         kinds = [
                  Int(Nostr.SET_METADATA), 
                  Int(Nostr.TEXT_NOTE), 
@@ -565,9 +649,36 @@ function precalculate_analytics(est::DB.CacheStorage)
                  MEMBERSHIP_COHORTS,
                 ]
         res = scored_(est; selector)
+
+        res2 = []
+        for e in res
+            if gaming_detection && e.kind == 1
+                content, r = process_content(e.content)
+                push!(Main.stuff, (:trending_gaming_detection, (; selector, content, r)))
+                if startswith(lowercase(r), "yes")
+                    push!(report_lines, "-------------------------------")
+                    push!(report_lines, content)
+                    push!(report_lines, "------")
+                    push!(report_lines, r)
+                    e = Nostr.Event(e.id, e.pubkey, e.created_at, e.kind, e.tags, "[G] " * e.content, e.sig)
+                end
+            end
+            push!(res2, e)
+        end
+        res = res2
+        
         r = [e for e in res if safekind(e) in kinds]
         est.dyn[:cache]["precalculated_analytics_$selector"] = r
     end
+
+    if !isnothing(GAMING_REPORT_COMMAND[]) && 1==1
+        report_str = join(report_lines, '\n')
+        open(GAMING_REPORT_COMMAND[], "w+") do f; println(f, "<pre>$report_str</pre>"); end
+        lock(loglock) do
+            println(report_str)
+        end
+    end
+
     est.dyn[:cache]["precalculated_analytics_explore_topics"] = explore_topics_(est)
 
     update_trending_24h_scores(est)
@@ -578,7 +689,7 @@ end
 trending_24h_scores = [] |> ThreadSafe
 function update_trending_24h_scores(est::DB.CacheStorage)
     lock(trending_24h_scores) do trending_24h_scores
-        res = explore(est; timeframe="trending", scope="global", limit2=1000, created_after=trunc(Int, time()-24*3600), user_pubkey=nothing) 
+        res = explore(est; timeframe="trending", scope="global", limit2=300, created_after=trunc(Int, time()-24*3600), user_pubkey=nothing) 
         rs = sort([JSON.parse(e.content)["score24h"] for e in res if safekind(e) == EVENT_STATS])
         empty!(trending_24h_scores)
         append!(trending_24h_scores, rs)
@@ -1368,10 +1479,10 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     # q = "^" * repr(query) * ":*"
     q = query * ":*"
 
-    res = Dict()
+    users = Dict()
 
     if !isnothing(local pk = try Nostr.bech32_decode(query) catch _ nothing end)
-        res[pk] = est.pubkey_followers_cnt[pk]
+        users[pk] = est.pubkey_followers_cnt[pk]
     elseif isnothing(pubkey)
         catch_exception(:user_search, (; query)) do
             for (pk, cnt) in Postgres.execute(:p0timelimit, "
@@ -1391,14 +1502,14 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
                                          order by pfc.value desc limit \$7
                                          ", [q, q, q, q, q, q, limit])[2]
                 pk = Nostr.PubKeyId(pk)
-                res[pk] = cnt
+                users[pk] = cnt
             end
         end
     else
         pubkey = cast(pubkey, Nostr.PubKeyId)
         if isempty(query)
             for pk in follows(est, pubkey)
-                res[pk] = est.pubkey_followers_cnt[pk]
+                users[pk] = est.pubkey_followers_cnt[pk]
             end
         else
             for (pk,) in DB.exec(est.dyn[:user_search],
@@ -1414,14 +1525,14 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
                                          "),
                                  (pubkey, q, q, q))
                 pk = Nostr.PubKeyId(pk)
-                res[pk] = est.pubkey_followers_cnt[pk]
+                users[pk] = est.pubkey_followers_cnt[pk]
             end
         end
     end
 
     res_meta_data = OrderedSet()
 
-    for (pk, _) in sort(collect(res); by=r->-r[2])[1:min(limit, length(res))]
+    for (pk, _) in sort(collect(users); by=r->-r[2])[1:min(limit, length(users))]
         if pk in est.meta_data
             eid = est.meta_data[pk]
             if eid in est.events
@@ -1439,6 +1550,8 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     append!(res, primal_verified_names(est, [e.pubkey for e in res_meta_data]))
     append!(res, user_follower_counts(est, [e.pubkey for e in res_meta_data]))
     append!(res, primal_verified_names(est, [e.pubkey for e in res_meta_data]))
+    append!(res, map(first, Postgres.execute(:p0, "select user_live_events(30311, pks.pubkey) from (select unnest(\$1::bytea[]) as pubkey) pks",
+                                             ["{$(join(["\\\\x$(Nostr.hex(pk))" for pk in keys(users)], ','))}"])[2]))
     res
 end
 

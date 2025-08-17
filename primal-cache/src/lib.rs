@@ -6,6 +6,9 @@ use utils::*;
 pub mod nostr;
 pub use nostr::*;
 
+#[cfg(test)]
+mod proof_test;
+
 pub mod import;
 pub use import::*;
 

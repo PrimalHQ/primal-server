@@ -109,6 +109,8 @@ exposed_functions = Set([:feed,
 
                          :follow_lists,
                          :follow_list,
+
+                         :invoices_to_zap_receipts,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -174,6 +176,8 @@ NIP19_DECODE_RESULT=10_000_173
 ARTICLES_STATS=10_000_174
 
 RECOMMENDED_BLOSSOM_SERVERS=10_000_175
+
+INVOICES_TO_ZAP_RECEIPTS=10_000_177
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -4178,6 +4182,21 @@ function follow_list(
     e = event_from_row(collect(rs[1]))
     pks = parse_follow_list(e)
     [e, user_infos(est; pubkeys=collect(pks), usepgfuncs=true)...]
+end
+
+function invoices_to_zap_receipts(
+        est::DB.CacheStorage;
+        invoices::Vector,
+    )
+    invoices_param = "{$(join(["$invoice" for invoice in invoices], ','))}"
+    res = Dict()
+    for r in p0"
+        select zri.invoice, get_event_jsonb(zri.zap_receipt_eid) as e from zap_receipt_invoices zri
+        where zri.invoice = any ($(invoices_param)::varchar[])
+        "
+        res[r.invoice] = r.e
+    end
+    [(; kind=Int(INVOICES_TO_ZAP_RECEIPTS), content=JSON.json(res))]
 end
 
 end

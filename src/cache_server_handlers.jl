@@ -143,7 +143,8 @@ function metrics_logged(body::Function, funcall::Symbol, kwargs; ws_id=nothing, 
 end
 
 function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing, est_=nothing)
-    # @show funcall
+    # @show (funcall, kwargs)
+
     isnothing(est_) && (est_ = est())
     metrics_logged(funcall, kwargs; ws_id, subid) do
         fetch(Threads.@spawn with_time_limit() do time_exceeded

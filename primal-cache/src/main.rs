@@ -9,7 +9,7 @@ use primal_cache::{
     recent_items,
 };
 use primal_cache::{Ref, insert_edge};
-use primal_cache::{FOLLOW_LIST, LIVE_EVENT, parse_live_event, LiveEventStatus, LiveEventParticipantType};
+use primal_cache::{FOLLOW_LIST, LIVE_EVENT, ZAP_RECEIPT, parse_live_event, LiveEventStatus, LiveEventParticipantType};
 
 use serde_json::json;
 use serde_json::Value;
@@ -75,16 +75,22 @@ async fn import_event(state: &State, e: &Event) -> Result<(), anyhow::Error> {
                             delete from live_event_participants where kind = $1 and pubkey = $2 and identifier = $3
                             "#, e.kind, e.pubkey.0, le.identifier,
                         ).execute(&mut *tx).await?;
+                        let mut pks = Vec::new();
+                        pks.push(e.pubkey.clone());
                         for (pk, ptype) in le.participants {
                             if ptype == LiveEventParticipantType::Host {
-                                sqlx::query!(r#"
-                                    insert into live_event_participants (kind, pubkey, identifier, participant_pubkey, event_id, created_at)
-                                    values ($1, $2, $3, $4, $5, $6)
-                                    "#,
-                                    e.kind, e.pubkey.0, le.identifier, pk.0,
-                                    e.id.0, e.created_at, 
-                                ).execute(&mut *tx).await?;
+                                pks.push(pk);
                             }
+                        }
+                        for pk in pks {
+                            sqlx::query!(r#"
+                                insert into live_event_participants (kind, pubkey, identifier, participant_pubkey, event_id, created_at)
+                                values ($1, $2, $3, $4, $5, $6)
+                                on conflict do nothing
+                                "#,
+                                e.kind, e.pubkey.0, le.identifier, pk.0,
+                                e.id.0, e.created_at, 
+                            ).execute(&mut *tx).await?;
                         }
                         tx.commit().await?;
                     },
@@ -99,6 +105,19 @@ async fn import_event(state: &State, e: &Event) -> Result<(), anyhow::Error> {
             }
         }
 
+        ZAP_RECEIPT => {
+            if let Some(zr) = parse_zap_receipt(e) {
+                println!("eid: {}, invoice: {}", e.id, zr.invoice);
+                sqlx::query!(r#"
+                    insert into zap_receipt_invoices (zap_receipt_eid, invoice)
+                    values ($1, $2) on conflict do nothing
+                    "#,
+                    e.id.0, zr.invoice,
+                ).execute(&state.cache_pool).await?;
+            } else {
+                println!("error parsing zap receipt: {}", e.id);
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -107,7 +126,7 @@ async fn import_event(state: &State, e: &Event) -> Result<(), anyhow::Error> {
 async fn main_2(config: Config, state: State) -> anyhow::Result<()> {{
     let mut seen_events = recent_items::RecentItems::new(10000);
 
-    let kinds = format!("{{{}}}", vec![FOLLOW_LIST, LIVE_EVENT].iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
+    let kinds = format!("{{{}}}", vec![FOLLOW_LIST, LIVE_EVENT, ZAP_RECEIPT].iter().map(|k| k.to_string()).collect::<Vec<_>>().join(","));
 
     let mut since = state.since;
 

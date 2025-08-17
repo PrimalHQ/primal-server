@@ -30,3 +30,6 @@ primal_cache = { path = "../primal-cache" }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "time", "uuid"] }
 anyhow = "1.0.98"
 chrono = "0.4.41"
+
+[profile.release]
+debug = 2 # full

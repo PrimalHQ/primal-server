@@ -12,7 +12,7 @@ pub use serde_json::Value;
 pub use serde_json::json;
 
 use std::fmt;
-
+use sha2::{Sha256, Digest};
 use serde::Serialize;
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -58,6 +58,12 @@ macro_rules! impl_traits {
                     write!(f, "\"{hex}\"")
                 }
             }
+            impl fmt::Display for $name {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    let hex = hex::encode(&self.0);
+                    write!(f, "{hex}")
+                }
+            }
             impl $name {
                 pub fn from_hex(hex: &str) -> Result<Self, anyhow::Error> {
                     let bytes = Vec::from_hex(hex)?;
@@ -85,6 +91,12 @@ pub struct EventAddr {
 impl EventAddr {
     pub fn new(kind: i64, pubkey: PubKeyId, identifier: String) -> Self {
         EventAddr { kind, pubkey, identifier }
+    }
+}
+
+impl fmt::Display for EventAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.kind, hex::encode(&self.pubkey.0), self.identifier)
     }
 }
 
@@ -239,6 +251,7 @@ pub fn parse_parent_eid(e: &Event) -> Result<Option<EventReference>, anyhow::Err
 pub struct ZapReceipt {
     pub sender_pubkey: PubKeyId,
     pub receiver_pubkey: PubKeyId,
+    pub invoice: String,
     pub amount_msats: i64,
     pub event: Option<EventReference>,
 }
@@ -250,6 +263,7 @@ pub fn parse_zap_receipt(e: &Event) -> Option<ZapReceipt> {
 
     let mut sender_pubkey: Option<PubKeyId> = None;
     let mut receiver_pubkey: Option<PubKeyId> = None;
+    let mut invoice: Option<String> = None;
     let mut amount_msats: Option<i64> = None;
     let mut event: Option<EventReference> = None;
 
@@ -264,6 +278,7 @@ pub fn parse_zap_receipt(e: &Event) -> Option<ZapReceipt> {
                 }
             }
             Tag::Any(tag_data) if tag_data.len() >= 2 && tag_data[0] == "bolt11" => {
+                invoice = Some(tag_data[1].clone());
                 let signed_invoice = tag_data[1].parse::<lightning_invoice::SignedRawBolt11Invoice>();
                 amount_msats = signed_invoice.ok().and_then(|i| i.amount_pico_btc()).map(|v| v as i64 / 10);
             }
@@ -286,8 +301,8 @@ pub fn parse_zap_receipt(e: &Event) -> Option<ZapReceipt> {
         }
     }
 
-    if let (Some(sender_pubkey), Some(receiver_pubkey), Some(amount_msats)) = (sender_pubkey, receiver_pubkey, amount_msats) {
-        Some(ZapReceipt { sender_pubkey, receiver_pubkey, amount_msats, event })
+    if let (Some(sender_pubkey), Some(receiver_pubkey), Some(invoice), Some(amount_msats)) = (sender_pubkey, receiver_pubkey, invoice, amount_msats) {
+        Some(ZapReceipt { sender_pubkey, receiver_pubkey, invoice, amount_msats, event })
     } else {
         None
     }
@@ -316,19 +331,70 @@ pub struct LiveEvent {
     pub e: Event,
 }
 
+/// Verifies participant proof for event participation
+/// Proof should be a signed SHA256 of the complete a Tag (kind:pubkey:dTag) by participant's private key
+pub fn verify_participant_proof(participant_pubkey: &PubKeyId, proof_hex: &str, event_kind: i64, event_pubkey: &PubKeyId, identifier: &str) -> Result<bool, anyhow::Error> {
+    // Decode the hex proof
+    let proof_bytes = hex::decode(proof_hex).map_err(|_| anyhow::anyhow!("Invalid hex proof"))?;
+    if proof_bytes.len() != 64 {
+        return Err(anyhow::anyhow!("Proof must be 64 bytes"));
+    }
+    
+    // Create the expected message: "kind:pubkey:dTag"
+    let event_pubkey_hex = hex::encode(&event_pubkey.0);
+    let message = format!("{}:{}:{}", event_kind, event_pubkey_hex, identifier);
+    
+    // Hash the message
+    let mut hasher = Sha256::new();
+    hasher.update(message.as_bytes());
+    let message_hash = hasher.finalize();
+    
+    // Use Schnorr signatures as used in Nostr
+    use nostr_sdk::secp256k1::{schnorr::Signature as SchnorrSignature, XOnlyPublicKey, Message, Secp256k1};
+    
+    let secp = Secp256k1::verification_only();
+    
+    // Convert participant public key to x-only format (32-byte Schnorr public key)
+    let x_only_pubkey = XOnlyPublicKey::from_slice(&participant_pubkey.0)
+        .map_err(|_| anyhow::anyhow!("Invalid participant public key format"))?;
+    
+    // Create message from hash
+    let message = Message::from_digest_slice(&message_hash)
+        .map_err(|_| anyhow::anyhow!("Invalid message hash"))?;
+    
+    // Convert proof to Schnorr signature format
+    let schnorr_sig = SchnorrSignature::from_slice(&proof_bytes)
+        .map_err(|_| anyhow::anyhow!("Invalid Schnorr signature format"))?;
+    
+    // Verify the Schnorr signature
+    Ok(secp.verify_schnorr(&schnorr_sig, &message, &x_only_pubkey).is_ok())
+}
+
 pub fn parse_live_event(e: &Event) -> Option<LiveEvent> {
     if e.kind != LIVE_EVENT {
         return None;
     }
     let mut identifier = None;
     let mut status = LiveEventStatus::Unknown;
-    let mut participants = Vec::new();
+    let mut participant_candidates: Vec<(PubKeyId, LiveEventParticipantType, Option<String>)> = Vec::new();
+    
+    // First pass: collect all tags
     for t in &e.tags {
         match t {
             Tag::PubKeyId(pk, rest) => {
-                participants.push((
-                        pk.clone(), 
-                        if rest.len() >= 2 && rest[1] == "host" { LiveEventParticipantType::Host } else { LiveEventParticipantType::Unknown }));
+                let participant_type = if rest.len() >= 2 && rest[1].to_lowercase() == "host" { 
+                    LiveEventParticipantType::Host 
+                } else { 
+                    LiveEventParticipantType::Unknown 
+                };
+                
+                let proof = if rest.len() >= 3 { 
+                    Some(rest[2].clone()) 
+                } else { 
+                    None 
+                };
+                
+                participant_candidates.push((pk.clone(), participant_type, proof));
             }
             Tag::Any(fields) if fields.len() >= 2 => {
                 match fields[0].as_str() {
@@ -348,7 +414,35 @@ pub fn parse_live_event(e: &Event) -> Option<LiveEvent> {
             _ => {}
         }
     }
-    if let Some(identifier) = identifier {
+    
+    // Second pass: verify participants with proofs if we have an identifier
+    let mut participants = Vec::new();
+    if let Some(ref identifier) = identifier {
+        for (pk, participant_type, proof_opt) in participant_candidates {
+            match proof_opt {
+                Some(proof_hex) => {
+                    // Proof provided - verify it
+                    match verify_participant_proof(&pk, &proof_hex, e.kind, &e.pubkey, identifier) {
+                        Ok(true) => {
+                            eprintln!("Verified proof for participant {}", hex::encode(&pk.0));
+                            participants.push((pk, participant_type));
+                        },
+                        Ok(false) => {
+                            eprintln!("Invalid proof for participant {}", hex::encode(&pk.0));
+                        },
+                        Err(err) => {
+                            eprintln!("Error verifying proof for participant {}: {}", hex::encode(&pk.0), err);
+                        }
+                    }
+                },
+                None => {
+                    // No proof provided - allow for backward compatibility but log warning
+                    eprintln!("No proof provided for participant {}", hex::encode(&pk.0));
+                    participants.push((pk, participant_type));
+                }
+            }
+        }
+        
         Some(LiveEvent {
             kind: e.kind,
             pubkey: e.pubkey.clone(),
@@ -358,7 +452,7 @@ pub fn parse_live_event(e: &Event) -> Option<LiveEvent> {
             e: e.clone(),
         })
     } else {
-        return None;
+        None
     }
 }
 

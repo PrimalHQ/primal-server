@@ -96,6 +96,8 @@ const USE_TASK_LOCAL_STORAGE = Ref(true)
 const pg_to_jl_type_conversion = Dict{Int32, Function}()
 const jl_to_pg_type_conversion = Dict{Type, Function}()
 
+PG_TO_JL_TYPE_CONVERSION_STRING_FALLBACK_ENABLED = Ref(true)
+
 prepared_queries = Threads.Atomic{Int}(0)
 executed_queries = Threads.Atomic{Int}(0)
 received_message_bytes = Threads.Atomic{Int}(0)
@@ -628,6 +630,7 @@ function recv_rows(
                       elseif f.type_oid == 1114; Dates.DateTime(first(replace(String(d), ' '=>'T'), 23)) # timestamp
                       elseif f.type_oid == 1700; decimal(String(d)) # numeric
                       elseif f.type_oid == 3802; String(d) # jsonb
+                      elseif PG_TO_JL_TYPE_CONVERSION_STRING_FALLBACK_ENABLED[]; String(d)
                       else; @show (; type_oid=f.type_oid, data=d)
                       end
                       for (f, d) in zip(row_desc, msg.fields)]

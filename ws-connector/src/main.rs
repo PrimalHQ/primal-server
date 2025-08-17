@@ -65,26 +65,26 @@ struct Stats {
     connections: AtomicI64,
 }
 
-type EventCoordinate = String;
 type SubscriptionId = String;
 // type WS = Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>;
 type WS = Arc<Mutex<MessageSink<SplitSink<WebSocketStream<TcpStream>, Message>>>>;
 type WebSocketId = i64;
+type ContentModerationMode = String;
 
-struct KeyedSubscriptions<K> {
-    key_to_subs: HashMap<K, HashSet<(WebSocketId, SubscriptionId)>>,
+struct KeyedSubscriptions<K, ExtraData> {
+    key_to_subs: HashMap<K, HashSet<(WebSocketId, (SubscriptionId, ExtraData))>>,
     sub_to_key: HashMap<(WebSocketId, SubscriptionId), K>,
 }
-impl<K: Clone + Eq + Hash> KeyedSubscriptions<K> {
+impl<K: Clone + Eq + Hash, ExtraData: Eq + Hash> KeyedSubscriptions<K, ExtraData> {
     fn new() -> Self {
         Self { key_to_subs: HashMap::new(), sub_to_key: HashMap::new() }
     }
-    fn register(&mut self, ws_id: WebSocketId, sub_id: SubscriptionId, key: K) {
+    fn register(&mut self, ws_id: WebSocketId, sub_id: SubscriptionId, key: K, extra_data: ExtraData) {
         if !self.key_to_subs.contains_key(&key.clone()) {
             self.key_to_subs.insert(key.clone(), HashSet::new());
         }
         if let Some(subs) = self.key_to_subs.get_mut(&key.clone()) {
-            subs.insert((ws_id, sub_id.clone()));
+            subs.insert((ws_id, (sub_id.clone(), extra_data)));
         }
 
         self.sub_to_key.insert((ws_id, sub_id.clone()), key);
@@ -125,8 +125,8 @@ struct State {
     ws_to_subs: HashMap<WebSocketId, HashSet<SubscriptionId>>,
     subs_to_ws: HashMap<(WebSocketId, SubscriptionId), WebSocketId>,
 
-    live_events: KeyedSubscriptions<EventCoordinate>,
-    live_events_from_follows: KeyedSubscriptions<PubKeyId>,
+    live_events: KeyedSubscriptions<EventAddr, (PubKeyId, ContentModerationMode)>,
+    live_events_from_follows: KeyedSubscriptions<PubKeyId, ()>,
 }
 
 // fn register_subscription<K: Clone + Eq + Hash>(
@@ -438,9 +438,44 @@ async fn main() -> Result<(), Error> {
             loop {
                 sig.recv().await;
                 println!("got signal USR2");
-                runtime_dump().await;
+                runtime_dump("tasks.txt").await;
             }
         });
+    }
+
+    {
+        let t_last_locking = Arc::new(Mutex::new(get_sys_time_in_secs()));
+        {
+            let state = state.clone();
+            let t_last_locking = t_last_locking.clone();
+            tokio::task::spawn(async move {
+                let _tt = TaskTrace::new("locking-watchdog", None, &state).await;
+                let mut interval = time::interval(Duration::from_millis(1000));
+                loop {
+                    interval.tick().await;
+                    let dt = get_sys_time_in_secs() - *t_last_locking.lock().await;
+                    if dt >= 15 {
+                        let filename = format!("locking-watchdog-tasks-{}.txt", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+                        eprintln!("locking watchdog: no locking for {} seconds, dumping runtime info ({}), exiting", dt, filename);
+                        runtime_dump(filename.as_str()).await;
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
+        {
+            let state = state.clone();
+            let t_last_locking = t_last_locking.clone();
+            tokio::task::spawn(async move {
+                let _tt = TaskTrace::new("locking-watchdog-helper", None, &state).await;
+                let mut interval = time::interval(Duration::from_millis(1000));
+                loop {
+                    state.lock().await;
+                    *t_last_locking.lock().await = get_sys_time_in_secs();
+                    interval.tick().await;
+                }
+            });
+        }
     }
 
     {
@@ -716,8 +751,6 @@ async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>
             let state = self.state.clone();
             let conn_id = self.conn_id;
             tokio::spawn(async move {
-                cw.lock().await.sink.close().await;
-                bw.lock().await.close().await;
                 {
                     let mut state = state.lock().await;
                     decr(&state.stats.connections);
@@ -728,6 +761,8 @@ async fn accept_websocket_connection(stream: TcpStream, state: Arc<Mutex<State>>
                         state.live_events_from_follows.unregister(conn_id, sub.clone());
                     }
                 }
+                cw.lock().await.sink.close().await;
+                bw.lock().await.close().await;
                 // println!("cleanup done");
                 // info!("ws disconnection: {}", _addr);
             });
@@ -1002,6 +1037,8 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         for row in rows {
             if let Ok(r) = row.try_get::<_, &str>(0) {
                 res.push(r.to_string().clone());
+            } else {
+                eprintln!("failed to get row as string: {:?}", row);
             }
         }
         res
@@ -1395,25 +1432,27 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         let pubkey = fa.kwargs["pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok()).ok_or("pubkey argument required")?;
         let identifier = fa.kwargs["identifier"].as_str().ok_or("identifier argument required")?;
 
-        let user_pubkey = 
-            if let Some(v) = fa.kwargs["user_pubkey"].as_str() {
-                hex::decode(v.to_string()).ok()
-            } else { fa.state.lock().await.primal_pubkey.clone() };
+        let user_pubkey = fa.kwargs["user_pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok()).ok_or("user_pubkey argument required")?;
+
+        let content_moderation_mode = fa.kwargs["content_moderation_mode"].as_str().unwrap_or("all").to_string();
 
         let res = Self::rows_to_vec(
             &Self::pool_get(&fa.pool).await?.query(
-                "select distinct e::text from live_feed_initial_response($1, $2, $3, $4) f(e)",
-                &[&kind, &pubkey, &identifier, &user_pubkey]).await?);
+                "select distinct e::text from live_feed_initial_response($1, $2, $3, $4, $5) f(e)",
+                &[&kind, &pubkey, &identifier, &user_pubkey, &content_moderation_mode]).await?);
 
-        let cw = &mut fa.client_write.lock().await;
-        Self::send_response(fa.subid, cw, &res).await;
+        {
+            let cw = &mut fa.client_write.lock().await;
+            Self::send_response(fa.subid, cw, &res).await;
+        }
 
         let event_coord = format!("{}:{}:{}", kind, hex::encode(pubkey.clone()), identifier);
 
         {
             let sub_id = fa.subid.to_string();
             let mut state = fa.state.lock().await;
-            state.live_events.register(conn_id, sub_id.clone(), event_coord);
+            let eaddr = EventAddr::new(kind, PubKeyId(pubkey), identifier.to_string());
+            state.live_events.register(conn_id, sub_id.clone(), eaddr, (PubKeyId(user_pubkey), content_moderation_mode));
             register_subscription(&mut state, conn_id, sub_id.clone());
         }
 
@@ -1428,21 +1467,23 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
         let res = Self::rows_to_vec(
             &Self::pool_get(&fa.pool).await?.query(
                 r#"
-                select get_event_jsonb(lep.event_id) 
+                select get_event_jsonb(lep.event_id)::text
                 from live_event_participants lep, pubkey_followers pf 
-                where pf.follower_pubkey = $1 
+                where pf.follower_pubkey = decode($1, 'hex')
                   and pf.pubkey = lep.participant_pubkey
                   and lep.kind = 30311 
                 "#,
-                &[&user_pubkey]).await?);
+                &[&hex::encode(&user_pubkey)]).await?);
 
-        let cw = &mut fa.client_write.lock().await;
-        Self::send_response(fa.subid, cw, &res).await;
+        {
+            let cw = &mut fa.client_write.lock().await;
+            Self::send_response(fa.subid, cw, &res).await;
+        }
 
         {
             let sub_id = fa.subid.to_string();
             let mut state = fa.state.lock().await;
-            state.live_events_from_follows.register(conn_id, sub_id.clone(), PubKeyId(user_pubkey));
+            state.live_events_from_follows.register(conn_id, sub_id.clone(), PubKeyId(user_pubkey), ());
             register_subscription(&mut state, conn_id, sub_id.clone());
         }
 
@@ -1460,24 +1501,32 @@ impl<T: Sink<Message> + Unpin> ReqHandlers<T> where <T as Sink<Message>>::Error:
 async fn import_event(imp_state: Arc<primal_cache::State>, e: Event, state: Arc<Mutex<State>>) -> anyhow::Result<()> {
     // println!("{:?} {:?} {}", e.id, e.kind, chrono::Utc.timestamp_opt(e.created_at, 0).single().unwrap_or_default().to_rfc3339());
     
-    async fn distribute_live_event(state: &Arc<Mutex<State>>, event_coord: &String, e: &Event) -> anyhow::Result<()> {
-        let mut state = state.lock().await;
-        if let Some(subs) = state.live_events.key_to_subs.get(event_coord) {
-            let mut res = Vec::new();
-            for (ws_id, sub) in subs {
-                if let Some(cw) = state.websockets.get(ws_id) {
+    async fn distribute_live_event(imp_state: &Arc<primal_cache::State>, state: &Arc<Mutex<State>>, eaddr: &EventAddr, e: &Event) -> anyhow::Result<()> {
+        let subs = state.lock().await.live_events.key_to_subs.get(eaddr).map_or_else(Vec::new, |x| x.iter().cloned().collect());
+
+        let mut res = Vec::new();
+        for (ws_id, (sub, (user_pubkey, content_moderation_mode))) in &subs {
+            let r = sqlx::query!(r#"select live_feed_is_hidden($1, $2, live_feed_hosts($4, $5, $6), $3) as hidden"#,
+                e.id.0, user_pubkey.0, content_moderation_mode, 
+                eaddr.kind, eaddr.pubkey.0, eaddr.identifier,
+            ).fetch_one(&imp_state.cache_pool).await?;
+            if let Some(false) = r.hidden {
+                let cw = state.lock().await.websockets.get(ws_id).map(|cw| cw.clone());
+                if let Some(cw) = cw {
                     let e_json = serde_json::to_string(&e)?;
                     println!("{}", e_json);
-                    let cw = &mut cw.lock().await;
-                    if let Err(err) = ReqHandlers::send_event_str(sub, &e_json, cw).await {
-                        println!("error sending event to sub {}: {:?}", sub, err);
+                    {
+                        let cw = &mut cw.lock().await;
+                        if let Err(err) = ReqHandlers::send_event_str(sub, &e_json, cw).await {
+                            println!("error sending event to sub {}: {:?}", sub, err);
+                        }
                     }
                     res.push(sub.clone());
                 }
             }
-            if !res.is_empty() {
-                println!("sent live feed {} event {:?} to subs: {:?}", event_coord, e.id, res);
-            }
+        }
+        if !res.is_empty() {
+            println!("sent live feed {} event {:?} to subs: {:?}", eaddr, e.id, res);
         }
         Ok(())
     }
@@ -1485,8 +1534,7 @@ async fn import_event(imp_state: Arc<primal_cache::State>, e: Event, state: Arc<
     for t in &e.tags {
         match t {
             Tag::EventAddr(eaddr, _) => {
-                let event_coord = format!("{}:{}:{}", eaddr.kind, hex::encode(eaddr.pubkey.clone()), eaddr.identifier);
-                distribute_live_event(&state, &event_coord, &e).await;
+                distribute_live_event(&imp_state, &state, &eaddr, &e).await;
             }
             _ => {}
         }
@@ -1496,12 +1544,13 @@ async fn import_event(imp_state: Arc<primal_cache::State>, e: Event, state: Arc<
         primal_cache::LIVE_EVENT => {
             if let Some(le) = primal_cache::parse_live_event(&e) {
                 {
-                    let event_coord = format!("{}:{}:{}", le.kind, hex::encode(le.pubkey.clone()), le.identifier);
-                    distribute_live_event(&state, &event_coord, &e).await;
+                    let eaddr = EventAddr::new(le.kind, le.pubkey.clone(), le.identifier);
+                    distribute_live_event(&imp_state, &state, &eaddr, &e).await;
                 }
 
                 {
                     let mut participants = Vec::new();
+                    participants.push(le.pubkey);
                     for (pk, ptype) in le.participants {
                         if ptype == primal_cache::LiveEventParticipantType::Host {
                             participants.push(pk);
@@ -1510,13 +1559,16 @@ async fn import_event(imp_state: Arc<primal_cache::State>, e: Event, state: Arc<
                     let participants_arr = format!("{{{}}}", participants.iter().map(|pk| format!("\\\\x{}", hex::encode(pk))).collect::<Vec<_>>().join(","));
                     dbg!(&participants_arr);
 
-                    let mut state = state.lock().await;
-                    let mut users = Vec::new();
-                    for (_, user_pubkey) in state.live_events_from_follows.sub_to_key.iter() {
-                        users.push(user_pubkey.clone());
-                    }
-                    let users_arr = format!("{{{}}}", users.iter().map(|pk| format!("\\\\x{}", hex::encode(pk))).collect::<Vec<_>>().join(","));
-                    dbg!(&users_arr);
+                    let users_arr = {
+                        let state = state.lock().await;
+                        let mut users = Vec::new();
+                        for (_, user_pubkey) in state.live_events_from_follows.sub_to_key.iter() {
+                            users.push(user_pubkey.clone());
+                        }
+                        let users_arr = format!("{{{}}}", users.iter().map(|pk| format!("\\\\x{}", hex::encode(pk))).collect::<Vec<_>>().join(","));
+                        dbg!(&users_arr);
+                        users_arr
+                    };
 
                     for r in sqlx::query!(r#"
                         select distinct pf.follower_pubkey from pubkey_followers pf
@@ -1526,12 +1578,15 @@ async fn import_event(imp_state: Arc<primal_cache::State>, e: Event, state: Arc<
                         &users_arr, &participants_arr,
                     ).fetch_all(&imp_state.cache_pool).await? {
                         if let Some(user_pubkey) = r.follower_pubkey {
+                            let user_pubkey = PubKeyId(user_pubkey);
                             dbg!(&user_pubkey);
-                            if let Some(subs) = state.live_events_from_follows.key_to_subs.get(&PubKeyId(user_pubkey)) {
-                                for (ws_id, sub) in subs {
-                                    dbg!(&sub);
-                                    if let Some(cw) = state.websockets.get(ws_id) {
-                                        let e_json = serde_json::to_string(&e)?;
+                            let subs = state.lock().await.live_events_from_follows.key_to_subs.get(&user_pubkey).map_or_else(Vec::new, |x| x.iter().cloned().collect());
+                            for (ws_id, (sub, ())) in &subs {
+                                dbg!(&sub);
+                                let cw = state.lock().await.websockets.get(ws_id).map(|cw| cw.clone());
+                                if let Some(cw) = cw {
+                                    let e_json = serde_json::to_string(&e)?;
+                                    {
                                         let cw = &mut cw.lock().await;
                                         if let Err(err) = ReqHandlers::send_event_str(sub, &e_json, cw).await {
                                             println!("error sending event to sub {}: {:?}", sub, err);
@@ -1559,18 +1614,18 @@ fn req_error<R>(description: &str) -> Result<R, ReqError> {
 
 use tokio::runtime::Handle;
 
-async fn runtime_dump() {
+async fn runtime_dump(filename: &str) {
     let handle = Handle::current();
     let mut s = String::new();
     if let Ok(dump) = timeout(Duration::from_secs(5), handle.dump()).await {
         for task in dump.tasks().iter() {
             let trace = task.trace();
-            let tokio_task_id = get_tokio_task_id();
+            let tokio_task_id = parse_tokio_task_id(task.id());
             s.push_str(format!("TASK {tokio_task_id}:\n").as_str());
             s.push_str(format!("{trace}\n\n").as_str());
         }
     }
-    tokio::fs::write("tasks.txt", s).await;
+    tokio::fs::write(filename, s).await;
 }
 
 ////
