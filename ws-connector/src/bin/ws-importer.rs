@@ -15,7 +15,7 @@ use serde_json::json;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    #[arg(short, long, default_value="/home/pr/work/itk/primal/content-moderation")]
+    #[arg(short, long, default_value="content-moderation")]
     content_moderation_root: String,
 
     #[arg(long, default_value="tmp")]

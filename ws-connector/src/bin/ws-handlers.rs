@@ -15,7 +15,7 @@ struct Cli {
     #[arg(short, long)]
     servername: String,
 
-    #[arg(short, long, default_value="/home/pr/work/itk/primal/content-moderation")]
+    #[arg(short, long, default_value="content-moderation")]
     content_moderation_root: String,
 
     #[arg(long, default_value="tmp")]
