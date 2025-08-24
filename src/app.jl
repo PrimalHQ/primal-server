@@ -2068,7 +2068,7 @@ end
 function event_zaps_by_satszapped(
         est::DB.CacheStorage;
         event_id=nothing,
-        pubkey=nothing, identifier=nothing,
+        kind=nothing, pubkey=nothing, identifier=nothing,
         limit::Int=20, since::Int=0, until=nothing, offset::Int=0,
         user_pubkey=nothing,
     )
@@ -2085,7 +2085,7 @@ function event_zaps_by_satszapped(
                                           order by amount_sats desc limit ?4 offset ?5"),
                 (event_id, since, until, limit, offset))
 
-    elseif !isnothing(pubkey) && !isnothing(identifier) 
+    elseif !isnothing(pubkey) && !isnothing(identifier) && (isnothing(kind) || kind == Nostr.LONG_FORM_CONTENT)
         Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
                       SELECT
                           zap_receipts.eid        as zap_receipt_id,
@@ -2105,6 +2105,30 @@ function event_zaps_by_satszapped(
                           zap_receipts.satszapped <= $(@P until)
                       ORDER BY
                           zap_receipts.satszapped DESC
+                      LIMIT $(@P limit) OFFSET $(@P offset)
+                  " end...)
+    elseif !isnothing(pubkey) && !isnothing(identifier) && !isnothing(kind)
+        Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
+                      SELECT
+                          zr.eid        as zap_receipt_id,
+                          zr.created_at as created_at,
+                          zr.target_eid as event_id,
+                          zr.sender     as sender,
+                          zr.receiver   as receiver,
+                          zr.satszapped as amount_sats 
+                      FROM
+                          a_tags at,
+                          zap_receipts zr
+                      WHERE 
+                          at.ref_kind = $(@P kind) AND 
+                          at.ref_pubkey = $(@P pubkey) AND 
+                          at.ref_identifier = $(@P identifier) AND 
+                          at.kind = $(@P Int(Nostr.ZAP_RECEIPT)) AND
+                          at.eid = zr.eid AND 
+                          zr.satszapped >= $(@P since) AND 
+                          zr.satszapped <= $(@P until)
+                      ORDER BY
+                          zr.satszapped DESC
                       LIMIT $(@P limit) OFFSET $(@P offset)
                   " end...)
     else

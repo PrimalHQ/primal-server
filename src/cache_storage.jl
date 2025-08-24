@@ -1641,7 +1641,38 @@ function import_reporting(est::CacheStorage, e::Nostr.Event)
 end
 
 function update_content_moderation_rules(est::CacheStorage, pubkey::Nostr.PubKeyId)
-    pubkey in est.app_settings && Main.App.import_content_moderation_rules(est, pubkey)
+    if pubkey in est.app_settings
+        Main.App.import_content_moderation_rules(est, pubkey)
+        try 
+            kind = 30311
+            for (e,) in Postgres.execute(:p0, "select * from user_live_events(\$1, \$2)", [kind, pubkey])[2]
+                e = Nostr.Event(e)
+                host_detected = false
+                identifier = nothing
+                for tag in e.tags
+                    if     length(tag.fields) >= 2 && tag.fields[1] == "d"
+                        identifier = tag.fields[2]
+                    elseif length(tag.fields) >= 4 && tag.fields[1] == "p" && lowercase(tag.fields[4]) == "host"
+                        host_detected = true
+                    end
+                end
+                host_detected && send_event_to_ws_connector(; kind=11_000_001, tags=[["a", "$kind:$(Nostr.hex(pubkey)):$identifier"]])[2]
+            end
+        catch _ Utils.print_exceptions() end
+    end
+end
+
+function send_event_to_ws_connector(; kind::Int, content="", tags=[])
+    d = (;
+         id=join(['0' for _ in 1:32]), 
+         pubkey=join(['0' for _ in 1:32]), 
+         sig=join(['0' for _ in 1:64]), 
+         created_at=Utils.current_time(), 
+         kind, 
+         content, 
+         tags,
+        )
+    Postgres.execute(:p0, "select pg_notify('primal_events', \$1)", [JSON.json(d)])
 end
 
 function run_scheduled_hooks(est::CacheStorage)

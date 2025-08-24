@@ -13,7 +13,7 @@ pub use serde_json::json;
 
 use std::fmt;
 use sha2::{Sha256, Digest};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 pub struct EventId(pub Vec<u8>);
@@ -52,6 +52,16 @@ macro_rules! impl_traits {
                     serializer.serialize_str(&hex)
                 }
             }
+            impl<'de> serde::Deserialize<'de> for $name {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    let hex: String = serde::Deserialize::deserialize(deserializer)?;
+                    let bytes = hex::decode(&hex).map_err(serde::de::Error::custom)?;
+                    Ok($name(bytes))
+                }
+            }
             impl fmt::Debug for $name {
                 fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     let hex = hex::encode(&self.0);
@@ -69,6 +79,9 @@ macro_rules! impl_traits {
                     let bytes = Vec::from_hex(hex)?;
                     Ok($name(bytes))
                 }
+                pub fn to_hex(&self) -> String {
+                    hex::encode(&self.0)
+                }
             }
             impl From<Vec<u8>> for $name {
                 fn from(v: Vec<u8>) -> Self {
@@ -81,7 +94,7 @@ macro_rules! impl_traits {
 
 impl_traits!(EventId, PubKeyId, Sig);
 
-#[derive(PartialEq, Eq, Serialize, Debug, Hash, Clone)]
+#[derive(PartialEq, Eq, Serialize, Deserialize, Debug, Hash, Clone)]
 pub struct EventAddr {
     pub kind: i64,
     pub pubkey: PubKeyId,
@@ -114,7 +127,67 @@ pub enum Tag {
     Any(Vec<String>),
 }
 
-#[derive(Debug, Serialize, Clone, Default)]
+impl<'de> Deserialize<'de> for Tag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let tag_data = Value::deserialize(deserializer)?
+            .as_array()
+            .ok_or_else(|| serde::de::Error::custom("Expected an array for Tag"))?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        match tag_data[0].as_str() {
+            "e" if tag_data.len() >= 2 => {
+                if let Ok(eid) = EventId::from_hex(&tag_data[1]) {
+                    return Ok(Tag::EventId(eid, tag_data[2..].to_vec()))
+                }
+            }
+            "p" if tag_data.len() >= 2 => {
+                if let Ok(pk) = PubKeyId::from_hex(&tag_data[1]) {
+                    return Ok(Tag::PubKeyId(pk, tag_data[2..].to_vec()))
+                }
+            }
+            "a" if tag_data.len() >= 2 => {
+                let parts = tag_data[1].split(':').collect::<Vec<_>>();
+                if parts.len() == 3 {
+                    if let (Ok(kind), Ok(pubkey)) = (parts[0].parse::<i64>(), PubKeyId::from_hex(parts[1])) {
+                        return Ok(Tag::EventAddr(EventAddr {
+                            kind, pubkey, identifier: parts[2].to_string(),
+                        }, tag_data[2..].to_vec()));
+                    }
+                }
+            }
+            _ => return Ok(Tag::Any(tag_data)),
+        }
+
+        Err(serde::de::Error::custom("Invalid tag format"))
+    }
+}
+
+impl Serialize for Tag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        fn tag_to_value(v: &Vec<String>, rest: &Vec<String>) -> Value {
+            let mut a = v.clone();
+            a.extend(rest.iter().map(|s| s.to_string()));
+            json!(a)
+        }
+        let sv = match self {
+            Tag::EventId(event_id, rest) => tag_to_value(&vec!["e".to_string(), hex::encode(event_id)], rest),
+            Tag::PubKeyId(pubkey, rest) => tag_to_value(&vec!["p".to_string(), hex::encode(pubkey)], rest),
+            Tag::EventAddr(addr, rest) =>  tag_to_value(&vec!["a".to_string(), format!("{}:{}:{}", addr.kind, hex::encode(&addr.pubkey), addr.identifier)], rest),
+            Tag::Any(rest) => tag_to_value(&vec![], rest),
+        };
+        sv.serialize(serializer)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Event {
     pub id: EventId,
     pub pubkey: PubKeyId,

@@ -1,6 +1,6 @@
 pub fn log(s: String) {
     // return;
-    println!("{} [{}]  {}", 
+    eprintln!("{} [{}]  {}", 
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S.%6f"), 
         std::process::id(), 
         s);

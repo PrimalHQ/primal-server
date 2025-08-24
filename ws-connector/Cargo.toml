@@ -30,6 +30,28 @@ primal_cache = { path = "../primal-cache" }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "time", "uuid"] }
 anyhow = "1.0.98"
 chrono = "0.4.41"
+uuid = { version = "1.0", features = ["v4"] }
+serde = { version = "1.0", features = ["derive"] }
+nostr-sdk = { version = "0.43.0", features = ["all-nips"] }
+rustls = { version = "0.23.31", features = ["ring"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["fmt"] }
+
+[[bin]]
+name = "ws-connector"
+path = "src/bin/ws-connector.rs"
+
+[[bin]]
+name = "ws-handlers"
+path = "src/bin/ws-handlers.rs"
+
+[[bin]]
+name = "ws-importer"
+path = "src/bin/ws-importer.rs"
+
+[[bin]]
+name = "ws-replay"
+path = "src/bin/ws-replay.rs"
 
 [profile.release]
 debug = 2 # full

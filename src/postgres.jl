@@ -639,6 +639,10 @@ function recv_rows(
             else
                 callbacks.on_row(row)
             end
+        elseif msg.type == :notification_response
+            if !isnothing(callbacks)
+                callbacks.on_notification_response(msg)
+            end
         end
     end
     recv_until(io, msg->msg.type == :ready_for_query)

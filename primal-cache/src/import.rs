@@ -74,7 +74,7 @@ where
                 if let Some(v) = self.map.remove(&old_key) {
                     removed.push((old_key, v));
                 } else {
-                    println!("KeyedStats: remove failed for key {old_key:?}");
+                    eprintln!("KeyedStats: remove failed for key {old_key:?}");
                 }
             }
             self.oldest += 1;
@@ -119,32 +119,12 @@ pub fn parse_event(r: EventRow) -> Result<Event, anyhow::Error> {
                     "content": content,
                     "sig": hex::encode(&sig),
                 });
-                println!("{}", serde_json::to_string_pretty(&e).unwrap());
+                eprintln!("{}", serde_json::to_string_pretty(&e).unwrap());
                 Err(anyhow::anyhow!("error parsing tags: {err:?}, for event: {e:?}"))
             }
         }
     } else {
         Err(anyhow::anyhow!("error parsing event: {:?}", r.id.clone()))
-    }
-}
-
-impl serde::Serialize for Tag {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        fn tag_to_value(v: &Vec<String>, rest: &Vec<String>) -> Value {
-            let mut a = v.clone();
-            a.extend(rest.iter().map(|s| s.to_string()));
-            json!(a)
-        }
-        let sv = match self {
-            Tag::EventId(event_id, rest) => tag_to_value(&vec!["e".to_string(), hex::encode(event_id)], rest),
-            Tag::PubKeyId(pubkey, rest) => tag_to_value(&vec!["p".to_string(), hex::encode(pubkey)], rest),
-            Tag::EventAddr(addr, rest) =>  tag_to_value(&vec!["a".to_string(), format!("{}:{}:{}", addr.kind, hex::encode(&addr.pubkey), addr.identifier)], rest),
-            Tag::Any(rest) => tag_to_value(&vec![], rest),
-        };
-        sv.serialize(serializer)
     }
 }
 
@@ -362,7 +342,7 @@ where
             for table in config.tables.iter() {
                 let table_without_schema = table.split('.').next_back().unwrap_or(table);
                 let q = &format!("ALTER TABLE {}{} RENAME TO {}{}", table, from_table_suffix, table_without_schema, to_table_suffix);
-                println!("{q}");
+                eprintln!("{q}");
                 sqlx::query(q).execute(&mut *tx).await?;
             }
             tx.commit().await?;
@@ -378,7 +358,7 @@ where
             let mut tx = pool.begin().await?;
             for table in config.tables.iter() {
                 let q = &format!("DROP TABLE IF EXISTS {}{}", table, table_suffix);
-                println!("{q}");
+                eprintln!("{q}");
                 sqlx::query(q).execute(&mut *tx).await?;
             }
             tx.commit().await?;
@@ -394,7 +374,7 @@ where
             let mut tx = pool.begin().await?;
             for table in config.tables.iter() {
                 let q = &format!("TRUNCATE {}{}", table, table_suffix);
-                println!("{q}");
+                eprintln!("{q}");
                 sqlx::query(q).execute(&mut *tx).await?;
             }
             tx.commit().await?;
@@ -478,7 +458,7 @@ pub fn make_got_sig() -> Arc<AtomicBool> {
     let watcher = got_sig.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
-        println!("interrupted, stopping...");
+        eprintln!("interrupted, stopping...");
         watcher.store(true, Ordering::SeqCst);
     });
     got_sig
@@ -507,19 +487,21 @@ where
 
     loop {
         let until = chrono::Utc::now().timestamp() as i64;
-        if let Some(res) = sqlx::query_as!(EventRow, r#"select * from events where imported_at >= $1 and imported_at <= $2 order by created_at"#, since, until).fetch_all(&imp_state.cache_pool).await.ok() {
+        if let Some(res) = sqlx::query_as!(EventRow, r#"
+            select * from events where imported_at >= $1 and imported_at <= $2 order by created_at"#, 
+            since, until).fetch_all(&imp_state.cache_pool).await.ok() {
             for r in res {
                 match parse_event(r) {
                     Ok(e) => {
                         if seen_events.push(e.id.clone()) {
                             let res = import_event_f(imp_state.clone(), e.clone(), state.clone()).await;
                             if let Err(err) = res {
-                                println!("Error importing event: {err:?}");
+                                eprintln!("Error importing event: {err:?}");
                             }
                         }
                     }
                     Err(err) => {
-                        println!("error parsing event: {err:?}");
+                        eprintln!("error parsing event: {err:?}");
                     }
                 }
             }

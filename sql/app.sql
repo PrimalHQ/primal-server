@@ -103,6 +103,8 @@ SELECT EXISTS (
     WHERE e.id = a_event_id AND (
         public.is_pubkey_hidden(a_user_pubkey, a_scope, e.pubkey)
 
+        OR EXISTS (SELECT 1 FROM zap_receipts zr WHERE zr.eid = a_event_id AND public.is_pubkey_hidden(a_user_pubkey, a_scope, zr.sender))
+
         -- Check for muted words in content
         OR EXISTS (
             SELECT 1

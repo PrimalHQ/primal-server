@@ -25,6 +25,8 @@
     YOUR_POST_WAS_BOOKMARKED=302
 
     NEW_DIRECT_MESSAGE=401
+
+    LIVE_EVENT_HAPPENING=501
 end
 
 JSON.lower(type::NotificationType) = Int(type)
@@ -61,5 +63,7 @@ notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           YOUR_POST_WAS_BOOKMARKED=>((:your_post, Nostr.EventId), (:who_bookmarked_it, Nostr.PubKeyId)),
 
                           NEW_DIRECT_MESSAGE=>((:event_id, Nostr.EventId), (:sender, Nostr.PubKeyId)),
+
+                          LIVE_EVENT_HAPPENING=>((:live_event_id, Nostr.EventId), (:host, Nostr.PubKeyId)),
                          ])
 ##
