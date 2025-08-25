@@ -424,12 +424,13 @@ impl ReqHandlers {
             &Self::pool_get(&pool).await?.query(
                 r#"
                 select get_event_jsonb(lep.event_id)::text
-                from live_event_participants lep, pubkey_followers pf 
-                where pf.follower_pubkey = decode($1, 'hex')
+                from live_event_participants lep, pubkey_followers pf
+                where pf.follower_pubkey = $1
                   and pf.pubkey = lep.participant_pubkey
                   and lep.kind = 30311 
+                  and not exists (select 1 from live_event_pubkey_filterlist lepf where lepf.user_pubkey = pf.follower_pubkey and lepf.blocked_pubkey = lep.participant_pubkey)
                 "#,
-                &[&hex::encode(&user_pubkey)]).await?);
+                &[&user_pubkey]).await?);
 
         Ok((ReqStatus::Handled, 
                 Response {

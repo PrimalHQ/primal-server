@@ -9,6 +9,35 @@ use tokio::io::AsyncWriteExt;
 
 use crate::shared::{State, TaskTrace};
 
+/// RAII guard that ensures cleanup of active_requests entries on drop
+/// This prevents request leaks when futures are cancelled
+struct RequestGuard<TResponse: Send + 'static> {
+    active_requests: Arc<Mutex<HashMap<String, mpsc::Sender<TResponse>>>>,
+    request_id: String,
+}
+
+impl<TResponse: Send + 'static> RequestGuard<TResponse> {
+    fn new(active_requests: Arc<Mutex<HashMap<String, mpsc::Sender<TResponse>>>>, request_id: String) -> Self {
+        Self {
+            active_requests,
+            request_id,
+        }
+    }
+}
+
+impl<TResponse: Send + 'static> Drop for RequestGuard<TResponse> {
+    fn drop(&mut self) {
+        let active_requests = self.active_requests.clone();
+        let request_id = self.request_id.clone();
+        
+        // Spawn task to avoid blocking Drop
+        tokio::spawn(async move {
+            let mut ar = active_requests.lock().await;
+            ar.remove(&request_id);
+        });
+    }
+}
+
 /// Maximum number of concurrent in-flight requests per subprocess
 const MAX_IN_FLIGHT_REQUESTS: usize = 10_000;
 
@@ -52,6 +81,7 @@ where
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
 
         let stdin = process.stdin.take().ok_or("Failed to get stdin")?;
@@ -88,8 +118,11 @@ where
                         
                         match serde_json::from_str::<TResponse>(&line) {
                             Ok(response) => {
-                                let mut active_requests = active_requests_clone.lock().await;
-                                if let Some(tx) = active_requests.remove(response.get_id()) {
+                                let tx_opt = {
+                                    let mut active_requests = active_requests_clone.lock().await;
+                                    active_requests.remove(response.get_id())
+                                };
+                                if let Some(tx) = tx_opt {
                                     let _ = tx.send(response).await;
                                 } else {
                                     eprintln!("ws-connector: Received response for unknown {} request ID: {}", task_name_prefix, response.get_id());
@@ -200,6 +233,7 @@ where
         *self.last_check.lock().await = metadata.modified()?;
         
         *self.current_process.lock().await = Some(process);
+        *self.last_successful_ping.lock().await = SystemTime::now();
         Ok(())
     }
 
@@ -276,7 +310,7 @@ where
                         .duration_since(last_ping)
                         .unwrap_or(Duration::from_secs(u64::MAX))
                         .as_secs();
-                    eprintln!("ws-connector: {} process last, {} seconds elapsed", &process_name, elapsed);
+                    // eprintln!("ws-connector: {} process last, {} seconds elapsed", &process_name, elapsed);
                     elapsed > ping_timeout_seconds
                 };
                 
@@ -326,7 +360,15 @@ where
                                     };
                                     
                                     if let Some(old_process) = old_process {
-                                        *previous_process.lock().await = Some(old_process);
+                                        // Replace previous_process safely and shutdown the replaced one
+                                        let replaced = {
+                                            let mut guard = previous_process.lock().await;
+                                            guard.replace(old_process)
+                                        };
+                                        if let Some(prev) = replaced {
+                                            let _ = prev.shutdown().await;
+                                            eprintln!("ws-connector: Shutdown older previous {} process", process_name);
+                                        }
                                         
                                         // Start cleanup task for previous process
                                         let previous_process_cleanup = previous_process.clone();
@@ -356,6 +398,11 @@ where
                                                     break;
                                                 }
                                             }
+                                            // Force shutdown if still present after timeout
+                                            if let Some(old) = previous_process_cleanup.lock().await.take() {
+                                                let _ = old.shutdown().await;
+                                                eprintln!("ws-connector: Forced shutdown of previous {} process after timeout", process_name_cleanup);
+                                            }
                                         });
                                     }
                                     
@@ -379,12 +426,18 @@ where
                 Ok(response) => return Ok(response),
                 Err(err) => {
                     // Check if this is a broken pipe error or the process has died
-                    let error_str = err.to_string();
-                    let is_broken_pipe = error_str.contains("Broken pipe") || 
-                                       error_str.contains("os error 32") ||
-                                       error_str.contains("Response channel closed");
+                    let should_restart = if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                        matches!(io_err.kind(), 
+                                std::io::ErrorKind::BrokenPipe | 
+                                std::io::ErrorKind::ConnectionReset |
+                                std::io::ErrorKind::UnexpectedEof)
+                    } else {
+                        // Handle custom error messages for cases like channel closure
+                        let error_str = err.to_string();
+                        error_str.contains("Response channel closed")
+                    };
                     
-                    if is_broken_pipe && attempt == 0 {
+                    if should_restart && attempt == 0 {
                         eprintln!("ws-connector: {} process appears to have died ({}), attempting restart", self.process_name, err);
                         
                         // Attempt to restart the process
@@ -437,31 +490,41 @@ where
         
         // Track the request with max in-flight check
         {
-            let mut active_requests = active_requests.lock().await;
-            if active_requests.len() >= MAX_IN_FLIGHT_REQUESTS {
-                return Err(format!("Too many concurrent in-flight requests ({}/{})", active_requests.len(), MAX_IN_FLIGHT_REQUESTS).into());
+            let mut active_requests_guard = active_requests.lock().await;
+            if active_requests_guard.len() >= MAX_IN_FLIGHT_REQUESTS {
+                return Err(format!("Too many concurrent in-flight requests ({}/{})", active_requests_guard.len(), MAX_IN_FLIGHT_REQUESTS).into());
             }
-            active_requests.insert(request_id.clone(), tx);
+            active_requests_guard.insert(request_id.clone(), tx);
         }
         
-        // Send the request
+        // Create guard that ensures cleanup on drop (cancellation safety)
+        let _guard = RequestGuard::new(active_requests.clone(), request_id.clone());
+        
+        // Send the request with timeout protection
         let json = serde_json::to_string(request)?;
         {
-            let mut stdin = stdin.lock().await;
-            stdin.write_all(json.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await?;
+            use tokio::time::timeout;
+            let write_fut = async {
+                let mut stdin = stdin.lock().await;
+                stdin.write_all(json.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await?;
+                Ok::<(), std::io::Error>(())
+            };
+            match timeout(Duration::from_secs(5), write_fut).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => {
+                    // Treat as write timeout: restart process
+                    return Err("timeout writing to subprocess stdin".into());
+                }
+            }
         }
         
-        use tokio::time::{timeout, Duration};
-
-        let response = timeout(Duration::from_secs(30), rx.recv()).await;
+        let response = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await;
         
-        // Remove the request from tracking
-        {
-            let mut active_requests = active_requests.lock().await;
-            active_requests.remove(&request_id);
-        }
+        // Note: No need to manually remove from active_requests - the guard will handle it
+        // when this function exits (either normally or via cancellation)
 
         match response {
             Ok(Some(response)) => {
@@ -487,7 +550,7 @@ where
         ).await {
             Ok(Ok(_response)) => {
                 *self.last_successful_ping.lock().await = SystemTime::now();
-                eprintln!("ws-connector: {} health check successful - timestamp updated", self.process_name);
+                // eprintln!("ws-connector: {} health check successful - timestamp updated", self.process_name);
                 Ok(true)
                 // if response.is_successful() {
                 //     *self.last_successful_ping.lock().await = SystemTime::now();

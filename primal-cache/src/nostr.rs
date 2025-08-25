@@ -247,6 +247,8 @@ pub const BOOKMARKS: i64 = 10003;
 pub const FOLLOW_LIST: i64 = 39089;
 pub const LIVE_EVENT: i64 = 30311;
 
+pub const LIVE_EVENT_MUTELIST: i64 = 10555;
+
 impl Tag {
     pub fn into_vec(self) -> Vec<String> {
         match self {

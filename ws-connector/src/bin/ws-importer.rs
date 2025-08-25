@@ -6,7 +6,7 @@ use tokio::signal::unix::{signal, SignalKind};
 // use tokio::time::Duration;
 // use futures_util::future::FutureExt;
 
-use primal_cache::{Event, EventAddr, PubKeyId, Tag, LIVE_EVENT, ZAP_RECEIPT, FOLLOW_LIST, LiveEventStatus, LiveEventParticipantType, parse_zap_receipt, parse_live_event};
+use primal_cache::{Event, EventAddr, PubKeyId, Tag, LIVE_EVENT, ZAP_RECEIPT, FOLLOW_LIST, LIVE_EVENT_MUTELIST, LiveEventStatus, LiveEventParticipantType, parse_zap_receipt, parse_live_event};
 use ws_connector::shared::{ImporterRequest, ImporterResponse, ProcessedEventDistribution, DistributionType};
 use ws_connector::shared::task_dump::runtime_dump;
 
@@ -203,6 +203,7 @@ async fn process_event_import(
                         select distinct pf.follower_pubkey from pubkey_followers pf
                         where pf.follower_pubkey = any($1::varchar::bytea[])
                           and pf.pubkey = any($2::varchar::bytea[])
+                          and not exists (select 1 from live_event_pubkey_filterlist lepf where lepf.user_pubkey = pf.follower_pubkey and lepf.blocked_pubkey = pf.pubkey)
                         "#,
                         &users_arr, &participants_arr,
                     ).fetch_all(&imp_state.cache_pool).await? {
@@ -276,6 +277,50 @@ async fn process_event_import(
             } else {
                 eprintln!("ws-importer: error parsing zap receipt: {}", e.id);
             }
+        }
+
+        LIVE_EVENT_MUTELIST => {
+            /*
+            create table live_event_pubkey_filterlist (
+                user_pubkey bytea not null,
+                blocked_pubkey bytea not null,
+                event_id bytea not null,
+                created_at int8 not null,
+                primary key (user_pubkey, blocked_pubkey)
+            );
+            */
+
+            // import live event pubkey filterlist
+            let mut pks = Vec::new();
+            for t in &e.tags {
+                match t {
+                    Tag::PubKeyId(pk, _) => {
+                        pks.push(pk.clone());
+                    }
+                    _ => {}
+                }
+            }
+            dbg!(&pks);
+
+            let mut tx = imp_state.cache_pool.begin().await?;
+            sqlx::query!(
+                r#"delete from live_event_pubkey_filterlist where user_pubkey = $1"#,
+                e.pubkey.0,
+            ).execute(&mut *tx).await?;
+            for pk in &pks {
+                sqlx::query!(r#"
+                    insert into live_event_pubkey_filterlist (user_pubkey, blocked_pubkey, event_id, created_at)
+                    values ($1, $2, $3, $4)
+                    on conflict (user_pubkey, blocked_pubkey) do nothing
+                    "#,
+                    e.pubkey.0,
+                    pk.0,
+                    e.id.0,
+                    e.created_at,
+                ).execute(&mut *tx).await?;
+            }
+            tx.commit().await?;
+            dbg!(&pks);
         }
 
         _ => {}
