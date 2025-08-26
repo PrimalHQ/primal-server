@@ -87,9 +87,12 @@ function handle_notifications(notifs)
                                                  on conflict do nothing
                                                  returning 1
                                                  ", [kind, pubkey, identifier, follower_pubkey, Utils.current_time()])[2]
-                                @show (DB.LIVE_EVENT_HAPPENING, follower_pubkey, e.created_at, e.id, host_pubkey)
-                                DB.notification(cache_storage[], follower_pubkey, e.created_at, DB.LIVE_EVENT_HAPPENING,
-                                                #= live_event =# e.id, #= host =# host_pubkey)
+                                # @show (DB.LIVE_EVENT_HAPPENING, follower_pubkey, e.created_at, e.id, host_pubkey)
+                                if isempty(Postgres.execute(:p0, "select 1 from live_event_pubkey_filterlist where user_pubkey = \$1 and blocked_pubkey = \$2 limit 1", [follower_pubkey, pubkey])[2])
+                                    coord = "$(kind):$(Nostr.hex(pubkey)):$(identifier)"
+                                    DB.notification(cache_storage[], follower_pubkey, e.created_at, DB.LIVE_EVENT_HAPPENING,
+                                                    #= live_event =# e.id, #= host =# host_pubkey, #= coord =# coord)
+                                end
                             end
                         end
                     end

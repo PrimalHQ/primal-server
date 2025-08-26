@@ -186,7 +186,10 @@ SELECT
     WHEN 301 THEN user_is_human(arg2, a_user_pubkey)
     WHEN 302 THEN user_is_human(arg2, a_user_pubkey)
 
+    WHEN 501 THEN user_is_human(arg2, a_user_pubkey)
+
     ELSE false
+
     END CASE
 $BODY$;
 

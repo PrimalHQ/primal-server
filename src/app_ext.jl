@@ -1384,8 +1384,18 @@ function get_notifications(
                 if !haskey(res_meta_data, pk) && pk in est.meta_data && est.meta_data[pk] in est.events
                     res_meta_data[pk] = est.events[est.meta_data[pk]]
                 end
-            elseif arg isa Nostr.EventId
+            elseif arg isa Nostr.EventId && notif_d.type != DB.LIVE_EVENT_HAPPENING
                 eid = arg
+                push!(posts, (eid, notif_d.created_at))
+            end
+        end
+
+        if notif_d.type == DB.LIVE_EVENT_HAPPENING
+            kind, pk, identifier = map(string, split(notif_d.coordinate, ':'))
+            for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                                  DB.@sql("select event_id from parametrized_replaceable_events 
+                                          where pubkey = ?1 and kind = ?2 and identifier = ?3"), 
+                                  (Nostr.PubKeyId(pk), kind, identifier))
                 push!(posts, (eid, notif_d.created_at))
             end
         end
