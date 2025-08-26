@@ -390,6 +390,58 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                           end)
             return md
 
+        elseif !isnothing(local md = begin
+                              md = nothing
+                              pubkey = identifier = nothing
+                              m = match(r"^/p/([^/]*)/live/([^?]*)", path)
+                              if !isnothing(m)
+                                  pk, identifier = string(m[1]), string(m[2])
+                                  pubkey = (Bech32.nip19_decode_wo_tlv(pk) isa Nostr.PubKeyId) ? Bech32.nip19_decode_wo_tlv(pk) : Nostr.PubKeyId(pk)
+                              else
+                                  m = match(r"^/([^/]*)/live/([^?]*)", path)
+                                  if !isnothing(m)
+                                      name, identifier = string(m[1]), string(m[2])
+                                      identifier = URIs.unescapeuri(identifier)
+                                      for pk in nostr_json_query_by_name(name)
+                                          pubkey = pk
+                                          break
+                                      end
+                                  end
+                              end
+                              if !isnothing(pubkey) && !isnothing(identifier)
+                                  kind = 30311
+                                  for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
+                                                        DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                                        (pubkey, kind, identifier))
+                                      eid = Nostr.EventId(eid)
+                                      if eid in cache_storage.events
+                                          e = cache_storage.events[eid]
+                                          naddr = Bech32.nip19_encode_naddr(kind, pubkey, identifier)
+                                          url = "https://$(host)/e/$(naddr)"
+                                          for t in e.tags
+                                              if length(t.fields) >= 2
+                                                  t.fields[1] == "title" && (title = t.fields[2])
+                                                  t.fields[1] == "summary" && (description = t.fields[2])
+                                                  if t.fields[1] == "image"
+                                                      image = t.fields[2]
+                                                      for (media_url,) in Postgres.execute(:p0, "select media_url from media where url = \$1 and size = 'medium' and animated = 0 limit 1", [image])[2]
+                                                          image = media_url
+                                                      end
+                                                  end
+                                              end
+                                          end
+                                          twitter_card = "summary_large_image"
+                                          if isempty(image)
+                                              image = mdpubkey(cache_storage, pubkey).image
+                                          end
+                                          md = (; title, description, image, url, twitter_card)
+                                      end
+                                  end
+                              end
+                              md
+                          end)
+            return md
+
         elseif !isnothing(local m = match(r"^/downloads?", path)) && 1==1
             return (; 
                     title="Download Primal apps and source code", 
