@@ -151,3 +151,46 @@ pub async fn compare_backend_api_response(backend1_addr: &str, backend2_addr: &s
     Ok(diff)
 }
 
+
+use primal_cache::Event;
+
+pub fn fixup_live_event_p_tags(e: &Event) -> Event {
+    if let Ok(v) = serde_json::to_value(e) {
+        if let Ok(e) = serde_json::from_str::<Event>(fixup_live_event_p_tags_str(v.to_string()).as_str()) {
+            e
+        } else {
+            e.clone()
+        }
+    } else {
+        e.clone()
+    }
+}
+
+pub fn fixup_live_event_p_tags_str(s: String) -> String {
+    if let Some(e) = serde_json::from_str::<Value>(s.as_str()).ok() {
+        if let Some(e) = e.as_object() {
+            if let Some(30311) = e["kind"].as_i64() {
+                if let Some(tags) = e["tags"].as_array() {
+                    let mut e = e.clone();
+                    let mut newtags = vec![];
+                    for t in tags {
+                        if let Some(t) = t.as_array() {
+                            let mut t = t.clone();
+                            if t.len() >= 4 && t[0] == "p" {
+                                if let Some(role) = t[3].as_str() {
+                                    t[3] = Value::String(role.to_lowercase());
+                                }
+                            }
+                            newtags.push(Value::Array(t));
+                        }
+                    }
+                    e["tags"] = Value::Array(newtags);
+                    let e = Value::Object(e);
+                    return e.to_string();
+                }
+            }
+        }
+    }
+    s
+}
+

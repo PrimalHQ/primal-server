@@ -403,6 +403,8 @@ impl ReqHandlers {
                 "select distinct e::text from live_feed_initial_response($1, $2, $3, $4, $5) f(e) where e is not null",
                 &[&kind, &pubkey, &identifier, &user_pubkey, &content_moderation_mode]).await?);
 
+        let res = res.iter().map(|s| crate::shared::utils::fixup_live_event_p_tags_str(s.clone())).collect::<_>();
+        
         Ok((ReqStatus::Handled, 
                 Response {
                     messages: res, 
@@ -428,9 +430,12 @@ impl ReqHandlers {
                 where pf.follower_pubkey = $1
                   and pf.pubkey = lep.participant_pubkey
                   and lep.kind = 30311 
+                  and lep.created_at >= extract(epoch from now() - interval '1h')::int8
                   and not exists (select 1 from live_event_pubkey_filterlist lepf where lepf.user_pubkey = pf.follower_pubkey and lepf.blocked_pubkey = lep.participant_pubkey)
                 "#,
                 &[&user_pubkey]).await?);
+
+        let res = res.iter().map(|s| crate::shared::utils::fixup_live_event_p_tags_str(s.clone())).collect::<_>();
 
         Ok((ReqStatus::Handled, 
                 Response {

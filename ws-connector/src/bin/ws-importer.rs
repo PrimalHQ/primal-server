@@ -132,7 +132,7 @@ async fn process_event_import(
             Tag::EventAddr(eaddr, _) => {
                 distributions.push(ProcessedEventDistribution {
                     distribution_type: DistributionType::EventAddr { eaddr: eaddr.clone() },
-                    event: e.clone(),
+                    event: ws_connector::shared::utils::fixup_live_event_p_tags(e),
                 });
             }
             _ => {}
@@ -182,7 +182,7 @@ async fn process_event_import(
                     let eaddr = EventAddr::new(le.kind, le.pubkey.clone(), le.identifier.clone());
                     distributions.push(ProcessedEventDistribution {
                         distribution_type: DistributionType::EventAddr { eaddr },
-                        event: e.clone(),
+                        event: ws_connector::shared::utils::fixup_live_event_p_tags(e),
                     });
                 }
 
@@ -211,7 +211,7 @@ async fn process_event_import(
                             let user_pubkey = PubKeyId(user_pubkey);
                             distributions.push(ProcessedEventDistribution {
                                 distribution_type: DistributionType::FollowsBased { user_pubkey },
-                                event: e.clone(),
+                                event: ws_connector::shared::utils::fixup_live_event_p_tags(e),
                             });
                         }
                     }
@@ -280,16 +280,6 @@ async fn process_event_import(
         }
 
         LIVE_EVENT_MUTELIST => {
-            /*
-            create table live_event_pubkey_filterlist (
-                user_pubkey bytea not null,
-                blocked_pubkey bytea not null,
-                event_id bytea not null,
-                created_at int8 not null,
-                primary key (user_pubkey, blocked_pubkey)
-            );
-            */
-
             // import live event pubkey filterlist
             let mut pks = Vec::new();
             for t in &e.tags {
@@ -300,7 +290,6 @@ async fn process_event_import(
                     _ => {}
                 }
             }
-            dbg!(&pks);
 
             let mut tx = imp_state.cache_pool.begin().await?;
             sqlx::query!(
@@ -320,7 +309,6 @@ async fn process_event_import(
                 ).execute(&mut *tx).await?;
             }
             tx.commit().await?;
-            dbg!(&pks);
         }
 
         _ => {}
