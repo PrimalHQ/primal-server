@@ -1384,6 +1384,7 @@ SELECT get_event_jsonb(lep.event_id)
 FROM live_event_participants lep
 WHERE lep.participant_pubkey = a_pubkey
   AND lep.kind = a_kind
+  AND lep.created_at >= EXTRACT(EPOCH FROM NOW() - INTERVAL '1 hour')::int8
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.parse_bolt11_amount_sats(a_bolt11 VARCHAR) RETURNS int8 LANGUAGE SQL
