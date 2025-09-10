@@ -380,6 +380,15 @@ function ext_long_form_note(est::CacheStorage, e::Nostr.Event)
     end
 end
 
+function ext_live_event(est::CacheStorage, e::Nostr.Event)
+    for t in e.tags
+        if length(t.fields) >= 2 && t.fields[1] == "image"
+            url = t.fields[2]
+            DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
+        end
+    end
+end
+
 function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
     event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, :reply, 10))
 

@@ -1373,6 +1373,8 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             init_event_pubkey_action(est, e.id, e)
         elseif e.kind == Nostr.ZAP_POLL
             init_event_pubkey_action(est, e.id, e)
+        elseif e.kind == Nostr.LIVE_EVENT
+            ext_live_event(est, e)
         end
     end
 

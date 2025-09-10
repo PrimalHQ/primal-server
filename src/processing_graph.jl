@@ -517,9 +517,10 @@ arg_map = Dict([
                 "EventId"=>v->Nostr.EventId(v["_v"]),
                 "Event"=>v->CACHE_STORAGE[].events[Nostr.EventId(v["_v"])],
                 "Tuple"=>v->tuple([arg_deserialize(e) for e in v["_v"]]...),
-                "NamedTuple"=>v->(; [Symbol(k)=>arg_deserialize(e) for (k, e) in v["_v"]]...),
+                "NamedTuple"=>v->(; [Symbol(k)=>arg_deserialize(e) for (k, e) in v["_v"] if !(k in ["hnd"])]...), # FIXME
                 "UUID"=>Base.UUID,
                 "Function"=>v->error("function deserialization not supported yet: $(v["_v"])"),
+                "CacheStorage"=>v->CACHE_STORAGE[],
                 "Vector{UInt8}"=>function (v)
                     if haskey(v, "_cache_sha256")
                         hh = v["_cache_sha256"]

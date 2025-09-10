@@ -279,7 +279,6 @@ end
         url::String; 
         variant_specs::Vector=all_variants, 
         key=(;),
-        hnd=DEFAULT_HANDLERS,
     )
     E(; url)
 
@@ -294,9 +293,9 @@ end
     extralog((; url, k, mi_h=mi.h, cleaned_url))
 
     if isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2])
-        dldur = @elapsed (data = hnd.download(est, cleaned_url))
+        dldur = @elapsed (data = download(est, cleaned_url))
         extralog((; url, cleaned_url, dldur, dlsize=length(data)))
-        hnd.media_import((_)->data, k)
+        media_import((_)->data, k)
     end
 
     rs = Postgres.execute(:p0, "
@@ -310,7 +309,7 @@ end
 
     ext == ".bin" && return nothing
 
-    dldur = @elapsed (orig_data = hnd.download(est, orig_media_url))
+    dldur = @elapsed (orig_data = download(est, orig_media_url))
     extralog((; url, orig_media_url, dldur, dlsize=length(orig_data)))
 
     for (size, animated) in variant_specs
@@ -322,7 +321,7 @@ end
         else
             convopts = []
             filters = []
-            if !animated || (startswith(mimetype, "image/") && !startswith(mimetype, "image/gif"))
+            if !startswith(mimetype, "image/gif") && (!animated || startswith(mimetype, "image/"))
                 append!(convopts, ["-frames:v", "1", "-update", "1"])
             end
             if size in [:small, :medium]
@@ -351,7 +350,7 @@ end
                 logfile = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext).log"
                 cmd = Cmd([MEDIA_SSH_COMMAND[]..., "nice", "ionice", "-c3", "ffmpeg", "-y", "-i", "-", convopts..., outfn])
                 try
-                    hnd.run(pipeline(cmd, stdin=IOBuffer(orig_data), stdout=logfile, stderr=logfile))
+                    run(pipeline(cmd, stdin=IOBuffer(orig_data), stdout=logfile, stderr=logfile))
                     extralog((; v, cmd=string(cmd), outfn, logfile, status=true))
                 catch _
                     DB.incr(est, :media_processing_errors)
@@ -360,7 +359,7 @@ end
                 end
                 # fn = stat(original_mi.path).size <= stat(outfn).size ? original_mi.path : outfn
                 fn = outfn #!!!
-                (_, _, murl) = hnd.media_import((_)->read(fn), k)
+                (_, _, murl) = media_import((_)->read(fn), k)
                 variants[(size, animated)] = murl
                 extralog((; v, murl))
                 try rm(outfn) catch _ end
@@ -496,12 +495,12 @@ end
 
 function media_import_local(
         fetchfunc::Union{Function,Nothing}, key, host::String, media_path::String;
-        hnd=(; Postgres.execute))
+    )
     funcname = "media_import_local"
     @tr key host media_path ()
     mi = MediaImport(; key, media_path)
-    rs = hnd.execute(:p0, "select h, ext, media_url from media_storage where storage_provider = \$1 and h = \$2 limit 1",
-                     [host, mi.h])[2]
+    rs = Postgres.execute(:p0, "select h, ext, media_url from media_storage where storage_provider = \$1 and h = \$2 limit 1",
+                          [host, mi.h])[2]
     if @tr key mi.h isempty(rs)
         data = fetchfunc(key)
         sha256 = SHA.sha256(data)
@@ -526,8 +525,8 @@ function media_import_local(
         end
         p = "$(splitpath(media_path)[end])/$(mi.subdir)/$(mi.h)"
         @tr key mi.h url = "https://media.primal.net/"*p*ext
-        hnd.execute(:p0, "insert into media_storage values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) on conflict do nothing",
-                    [url, host, Utils.current_time(), mi.k, mi.h, ext, mt, length(data), sha256])
+        Postgres.execute(:p0, "insert into media_storage values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) on conflict do nothing",
+                         [url, host, Utils.current_time(), mi.k, mi.h, ext, mt, length(data), sha256])
         lnk = readlink(mi.path)
     else
         lnk = "$(rs[1][1])$(rs[1][2])"
@@ -863,13 +862,16 @@ function parse_video_dimensions(data::Vector{UInt8})
     Main.Logging.with_logger(Main.Logging.NullLogger()) do
         try 
             width = height = duration = rotation = 0
+            display_aspect_ratio = nothing
             for s in split(read(pipeline(`ffprobe -v error -probesize 10M -select_streams v:0 -show_entries stream -`; stdin=IOBuffer(data)), String), '\n')
                 ps = split(s, '=')
+                # println(JSON.json(ps))
                 if length(ps) == 2
                     if     ps[1] == "width";    width    = parse(Int, ps[2])
                     elseif ps[1] == "height";   height   = parse(Int, ps[2])
                     elseif ps[1] == "duration"; try duration = parse(Float64, ps[2]) catch _ end
                     elseif ps[1] == "rotation"; rotation = parse(Int, ps[2])
+                    elseif ps[1] == "display_aspect_ratio"; display_aspect_ratio = string(ps[2])
                     end
                 end
             end
@@ -884,6 +886,14 @@ function parse_video_dimensions(data::Vector{UInt8})
             end
             if rotation == 90 || rotation == -90 || rotation == 270
                 width, height = height, width
+            elseif display_aspect_ratio != nothing
+                dar = split(display_aspect_ratio, ':')
+                if length(dar) == 2
+                    w, h = parse(Float64, dar[1]), parse(Float64, dar[2])
+                    if h > w && width > height
+                        width, height = height, width
+                    end
+                end
             end
             res = (width, height, duration)
         catch _ end
@@ -1363,18 +1373,21 @@ Resolution = Tuple{Int,Int}
 
 @procnode function media_video_variants_pn(url::URL, media_url::URL, input_resolution::Resolution, input_duration::Real)
     E(; url, input_resolution, input_duration)
-    variants = Dict{Resolution, URL}()
+    @assert !isempty(VIDEO_TRANSCODING_SERVER[])
+    variants = Dict()
     horiz = input_resolution[1] > input_resolution[2]
-    for (target, bitrate) in [
-                         (1080, 6_000_000), 
-                         (720, 3_000_000), 
-                         (360, 1_000_000), 
+    for (size, target, bitrate) in [
+                         # (:large, 1080, 5_000_000), 
+                         # (:medium, 720, 2_000_000), 
+                         # (:small, 360, 700_000), 
+                         (:large, 180, 300_000), 
                         ]
-        target >= input_resolution[horiz ? 2 : 1] && continue
+        target > input_resolution[horiz ? 2 : 1] && continue
         r = transcode_video_pn(url, media_url, input_resolution, input_duration, target, bitrate).r
         if !isnothing(r)
             murl, dims = r
-            variants[dims] = murl
+            anim = true
+            variants[(size, anim)] = (murl, dims)
         end
     end
     variants
@@ -1391,7 +1404,8 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
         target::Int, 
         bitrate::Int;
     )
-    ext = splitext(media_url)[2]
+    # ext = splitext(media_url)[2]
+    ext = ".mp4"
 
     iw, ih = input_resolution
     @assert iw > 0 && ih > 0
@@ -1402,7 +1416,7 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
     (trunc(Int, target * ratio), target) : 
     (target, trunc(Int, target / ratio))
 
-    # @show ((iw, ih), horiz, (ow, oh))
+    @show ((iw, ih), horiz, (ow, oh))
 
     remoteoutfn = "/home/pr/tmp/transcoding/$(bytes2hex(rand(UInt8, 16)))$(ext)"
 
@@ -1411,6 +1425,9 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
     mkpath(MEDIA_TMP_DIR[])
     outfn = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext)"
     logfile = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext).log"
+
+    @show outfn
+    @show logfile
 
     v = (; 
          url, media_url,
@@ -1428,7 +1445,14 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
         Postgres.execute(:p0, "update processing_nodes set progress = \$2 where id = \$1", [_id.id, progress])
     end
 
-    cmd = Cmd(["ssh", 
+    timeout = input_duration/5 + 120
+
+    infotxt = "$(iw)x$(ih)-$(ow)x$(oh)"
+    infotxt = replace(infotxt, " "=>"\\ ")
+
+    # TODO remove drawtext
+    cmd = Cmd(["timeout", string(timeout),
+               "ssh", 
                "-o", "ConnectTimeout=10", 
                "-o", "ServerAliveInterval=20", 
                "-o", "ServerAliveCountMax=3", 
@@ -1436,11 +1460,14 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
                "$(VIDEO_TRANSCODING_FFMPEG_PATH[]) -nostats -progress /dev/stderr -y -hide_banner \
                -hwaccel cuda -hwaccel_output_format cuda \
                -i $media_url \
-               -vf 'scale_cuda=$ow:$oh' \
+               -vf 'scale_cuda=$ow:$oh,hwdownload,format=nv12,drawtext=fontfile=/nix/store/mvdzir9i07ik4hgh6hbgrbin81ahb38s-dejavu-fonts-minimal-2.37/share/fonts/truetype/DejaVuSans.ttf:text='$infotxt':fontcolor=orange:fontsize=24:x=10:y=15,hwupload_cuda' \
                -c:v h264_nvenc \
                -b:v $bitrate -maxrate $bitrate -bufsize 5M \
                -c:a copy \
+               -movflags +faststart \
                $remoteoutfn && cat $remoteoutfn && rm -f $remoteoutfn",])
+
+    println(cmd)
 
     err_pipe = Pipe()
 
@@ -1450,7 +1477,7 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
 
     @async begin
         for line in eachline(err_pipe)
-            # println("[STDERR] ", line)
+            println("[STDERR] ", line)
             if startswith(line, "out_time_ms=")
                 t = parse(Float64, split(line, '=')[2])/1_000_000
                 progress = t/input_duration
@@ -1465,6 +1492,8 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
     end
 
     wait(p)
+
+    update_progress(1.0)
 
     delete!(video_transcodings, tkey)
 

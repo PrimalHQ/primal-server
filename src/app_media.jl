@@ -466,15 +466,14 @@ end
 function upload_check_similarity_by_sha256(pubkey::Nostr.PubKeyId, sha256s::Vector, surl::String; dry_run=false)
     try
         for (matching_sha256, matching_media_block_id, matching_reason) in Postgres.execute(:p0, "
-                   select mu.sha256, mb.id, mb.d->>'reason'
-                   from 
-                       media_uploads mu,
-                       media_block mb
-                   where 
-                       mu.sha256 = any (\$1::bytea[]) and 
-                       mu.media_block_id = mb.id and mb.d->>'reason' like 'csam%'
-                   limit 1", 
-                   ['{'*join(["\\\\x"*bytes2hex(sha256) for sha256 in sha256s], ',')*'}'])[2]
+                    select mumb.sha256, mumb.id, mumb.reason
+                    from
+                        media_uploads_media_block_csam mumb
+                    where
+                        mumb.sha256 = any (\$1::bytea[])
+                    limit 1
+                    ",
+                    ['{'*join(["\\\\x"*bytes2hex(sha256) for sha256 in sha256s], ',')*'}'])[2]
             kwa = (; reason = "$matching_reason; blocked by matching sha256",
                    block_all_uploads=true,
                    extra = (; 
@@ -505,14 +504,14 @@ function upload_check_similarity_by_embedding(pubkey::Nostr.PubKeyId, sha256s::V
         end
         if !isnothing(emb)
             for (matching_sha256, matching_media_block_id, matching_reason, cosinedist) in Postgres.execute(:p0, "
-                     select mu.sha256, mb.id, mb.d->>'reason', me.emb <=> \$2
-                     from media_embedding me, media_uploads mu, media_block mb
-                     where 
-                         me.model = \$1 and me.emb <=> \$2 <= 0.02 and
-                         mu.sha256 = me.sha256 and 
-                         mu.media_block_id = mb.id and mb.d->>'reason' like 'csam%'
-                     order by me.emb <=> \$2
-                     limit 1", [model, JSON.json(emb)])[2]
+                    select mumb.sha256, mumb.id, mumb.reason, me.emb <=> \$2
+                    from media_embedding me, media_uploads_media_block_csam mumb
+                    where 
+                        me.model = \$1 and me.emb <=> \$2 <= 0.02 and
+                        mumb.sha256 = me.sha256
+                    order by me.emb <=> \$2
+                    limit 1
+                    ", [model, JSON.json(emb)])[2]
                 kwa = (; reason = "$matching_reason; blocked by matching embedding",
                        block_all_uploads=true,
                        extra = (; 

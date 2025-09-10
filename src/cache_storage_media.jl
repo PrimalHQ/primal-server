@@ -136,18 +136,17 @@ end
 @procnode function import_media_pn(
         est::CacheStorage, eid::Union{Nostr.EventId, Nothing}, url::String, variant_specs::Vector;
         no_media_analysis=false,
-        hnd=(; low_trust_user, Main.Media.download, Postgres.execute, Main.Media.DEFAULT_HANDLERS...),
     )
     E(; (isnothing(eid) ? [] : [:eid=>Nostr.hex(eid)])..., url)
     
-    isnothing(eid) || hnd.low_trust_user(est, est.events[eid].pubkey) && return :low_trust_user
+    isnothing(eid) || low_trust_user(est, est.events[eid].pubkey) && return :low_trust_user
 
-    vr = Main.Media.media_variants_pn(est, url; variant_specs, hnd).r
+    vr = Main.Media.media_variants_pn(est, url; variant_specs).r
     isnothing(vr) && return
 
     isnothing(eid) || lock(import_media_lock) do
         extralog((; op="insert", table="event_media", eid, url))
-        hnd.execute(:p0, "insert into event_media values (\$1, \$2, nextval('event_media_rowid_seq')) on conflict do nothing", [eid, url])
+        Postgres.execute(:p0, "insert into event_media values (\$1, \$2, nextval('event_media_rowid_seq')) on conflict do nothing", [eid, url])
     end
 
     orig_sha256 = nothing
@@ -155,9 +154,9 @@ end
     for ((size, anim), media_url) in vr
         if size == :original && anim == 1
             orig_data = try
-                hnd.download(est, media_url)
+                Main.Media.download(est, media_url)
             catch _
-                hnd.download(est, url)
+                Main.Media.download(est, url)
             end
             orig_sha256 = SHA.sha256(orig_data)
         end
@@ -165,7 +164,7 @@ end
     isnothing(orig_sha256) || extralog((; orig_sha256=bytes2hex(orig_sha256)))
 
     for ((size, anim), media_url) in vr
-        import_media_variant_pn(est, eid, url, size, anim, media_url, orig_sha256, orig_data; hnd)
+        import_media_variant_pn(est, eid, url, size, anim, media_url, orig_sha256, orig_data)
     end
 
     if !isnothing(orig_sha256) && !no_media_analysis && 1==1
@@ -181,12 +180,11 @@ end
         est::CacheStorage, eid::Union{Nostr.EventId, Nothing}, url::String, 
         size::Symbol, anim::Bool, media_url::String, 
         orig_sha256::Union{Nothing, Vector{UInt8}}, orig_data::Union{Nothing, Vector{UInt8}};
-        hnd
     )
     v = (; eid, url, size, anim, media_url)
     E(; v...)
 
-    dldur = @elapsed (data = hnd.download(est, media_url))
+    dldur = @elapsed (data = Main.Media.download(est, media_url))
     mimetype = try
         Main.Media.parse_mimetype(data)
     catch _
@@ -213,24 +211,29 @@ end
             end
         elseif ftype == "video"
             if !isnothing(local d = Main.Media.extract_video_thumbnail(data))
-                (mi, lnk, murl) = hnd.media_import((_)->d, (; url, type=:video_thumbnail))
+                (mi, lnk, murl) = Main.Media.media_import((_)->d, (; url, type=:video_thumbnail))
                 thumbnail_media_url = murl
                 extralog((; v, thumbnail_media_url))
                 extralog((; op="insert", table="video_thumbnails", url, thumbnail_media_url))
-                hnd.execute(:p0, "insert into video_thumbnails values (\$1, \$2, nextval('video_thumbnails_rowid_seq')) on conflict do nothing",
-                            [url, thumbnail_media_url])
-                import_media_pn(est, eid, thumbnail_media_url, Main.Media.all_variants; hnd)
+                Postgres.execute(:p0, "insert into video_thumbnails values (\$1, \$2, nextval('video_thumbnails_rowid_seq')) on conflict do nothing",
+                                 [url, thumbnail_media_url])
+                import_media_pn(est, eid, thumbnail_media_url, Main.Media.all_variants)
             end
-            # @pnd Main.Media.media_video_variants_pn(media_url, (dims[1], dims[2]), dims[3]; url, hnd)
+            try
+                @show eid
+                if est.events[eid].pubkey == Main.test_pubkeys[:qa]
+                    @pnd import_media_video_variants_pn(est; mimetype, url, media_url, width=dims[1], height=dims[2], duration=dims[3], orig_sha256)
+                end
+            catch _ Utils.print_exceptions() end
         end
 
         extralog((; op="insert", table="media", url, media_url, size, anim, dldur, width, height, mimetype, duration, (isnothing(orig_sha256) ? [] : [:orig_sha256=>bytes2hex(orig_sha256)])...))
-        hnd.execute(:p0, "insert into media_1_16fa35f2dc values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, nextval('media_rowid_seq'), \$13) on conflict do nothing",
-                    [url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob, duration, orig_sha256])
+        Postgres.execute(:p0, "insert into media_1_16fa35f2dc values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, nextval('media_rowid_seq'), \$13) on conflict do nothing",
+                         [url, media_url, size, anim, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob, duration, orig_sha256])
     
         # try
-        #     @time "update media" @show hnd.execute(:p0, "update media_1_16fa35f2dc set orig_sha256 = \$4 where url = \$1 and media_url = \$2 and size = \$3 and animated = \$4 where orig_sha256 is null",
-        #                                    [url, size, anim, orig_sha256])
+        #     @time "update media" @show Postgres.execute(:p0, "update media_1_16fa35f2dc set orig_sha256 = \$4 where url = \$1 and media_url = \$2 and size = \$3 and animated = \$4 where orig_sha256 is null",
+        #                                                 [url, size, anim, orig_sha256])
         # catch _
         #     Utils.print_exceptions()
         # end
@@ -280,6 +283,28 @@ end
                      [url, media_url, size, animated, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob, duration, nothing])
 
     nothing
+end
+
+@procnode function import_media_video_variants_pn(est::CacheStorage; mimetype, url, media_url, width, height, duration, orig_sha256=nothing)
+    E(; url)
+    
+    if isnothing(orig_sha256)
+        orig_data = SHA.sha256(Main.Media.download(est, media_url))
+    end
+
+    r = Main.Media.media_video_variants_pn(url, media_url, (width, height), duration).r
+    isnothing(r) && return :no_variants
+
+    for ((size, animated), (murl, dims)) in r
+        category, category_prob = "", 1.0
+        dldur = 0.0
+        width, height = dims
+        extralog(@show (; op="insert", table="media", url, murl, size, animated, dldur, width, height, mimetype, duration))
+        Postgres.execute(:p0, "insert into media_1_16fa35f2dc values (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, nextval('media_rowid_seq'), \$13) on conflict do nothing",
+                         [url, murl, size, animated, trunc(Int, time()), dldur, width, height, mimetype, category, category_prob, duration, orig_sha256])
+    end
+
+    (length(r), :variants)
 end
 
 import_preview_lock = ReentrantLock()
