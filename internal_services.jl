@@ -789,8 +789,9 @@ function media_cache_handler(req::HTTP.Request)
             # println((:media_cache_ok, url))
         end
 
-        tr = @elapsed (r = Media.media_variants(est[], url; variant_specs, sync=true, already_imported=true))
+        # tr = @elapsed (r = Media.media_variants(est[], url; variant_specs, sync=true, already_imported=true))
         # println("$tr  $query  $(isnothing(r))")
+        r = nothing
 
         if 1==1 || isnothing(r)
             HTTP.Response(302, HTTP.Headers(["Location"=>url, "Cache-Control"=>"no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"]))

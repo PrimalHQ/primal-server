@@ -6,8 +6,8 @@ import URIs
 import Dates
 using DataStructures: CircularBuffer
 import HTTP
-import EzXML
-import Gumbo, Cascadia
+# import EzXML
+# import Gumbo, Cascadia
 import Base64
 import Random
 
@@ -33,8 +33,8 @@ MEDIA_PROXY = Ref{Any}(nothing)
 MEDIA_METADATA_PROXY = Ref{Any}(nothing)
 MEDIA_SSH_COMMAND = Ref([])
 
-max_task_duration = Ref(0.0) |> ThreadSafe
-tasks_per_period = Ref(0) |> ThreadSafe
+# max_task_duration = Ref(0.0) |> ThreadSafe
+# tasks_per_period = Ref(0) |> ThreadSafe
 
 max_download_duration = Ref(0.0) |> ThreadSafe
 downloads_per_period = Ref(0) |> ThreadSafe
@@ -125,10 +125,10 @@ Base.@kwdef struct MediaImport
     path = "$(dirpath)/$(h)"
 end
 
-media_tasks = Dict() |> ThreadSafe # relpath(key) => Task
+# media_tasks = Dict() |> ThreadSafe # relpath(key) => Task
 
-media_variants_lock = ReentrantLock()
-media_variants_log = CircularBuffer(500)
+# media_variants_lock = ReentrantLock()
+# media_variants_log = CircularBuffer(500)
 
 all_variants = [(size, animated)
                 for size in [:original, :small, :medium, :large]
@@ -136,143 +136,143 @@ all_variants = [(size, animated)
 
 # make_media_url(mi::MediaImport, ext::String) = "$(MEDIA_URL_ROOT[])/$(mi.subdir)/$(mi.h)$(ext)"
 
-function media_variants(
-        est::DB.CacheStorage, 
-        url::String; 
-        variant_specs::Vector=all_variants, 
-        key=(;), 
-        proxy=nothing,
-        sync=false, 
-        already_imported=false,
-    )
-    # sync || @show (sync, url)
-    funcname = "media_variants"
-    @tr "media_variants_lock" url variant_specs key proxy sync lock(sync ? ReentrantLock() : media_variants_lock) do
-        variants = Dict{Tuple{Symbol, Bool}, String}() |> ThreadSafe
+#function media_variants(
+#        est::DB.CacheStorage, 
+#        url::String; 
+#        variant_specs::Vector=all_variants, 
+#        key=(;), 
+#        proxy=nothing,
+#        sync=false, 
+#        already_imported=false,
+#    )
+#    # sync || @show (sync, url)
+#    funcname = "media_variants"
+#    @tr "media_variants_lock" url variant_specs key proxy sync lock(sync ? ReentrantLock() : media_variants_lock) do
+#        variants = Dict{Tuple{Symbol, Bool}, String}() |> ThreadSafe
 
-        k = (; key..., url, type=:original)
-        mi = MediaImport(; key=k)
+#        k = (; key..., url, type=:original)
+#        mi = MediaImport(; key=k)
 
-        if @tr url k mi.h already_imported (isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2]) && !already_imported)
-            if @tr url k :original !haskey(media_tasks, k)
-                media_tasks[k] = 
-                let k=k
-                    tsk = @task task_wrapper(est, k, max_download_duration, downloads_per_period) do
-                        @tr "import original and variants" url k proxy try
-                            data = nothing
-                            @tr url k @elapsed (data = download(est, (@tr url k clean_url(url)); proxy))
-                            @tr url k length(data)
-                            @tr url k media_import((_)->data, k)
-                            @tr url k media_variants(est, url; variant_specs, key, proxy, sync)
-                        finally
-                            update_media_queue_executor_taskcnt(-1)
-                            delete!(media_tasks, k)
-                        end
-                    end
-                    if sync
-                        update_media_queue_executor_taskcnt(+1)
-                        schedule(tsk)
-                        wait(tsk)
-                        @goto cont
-                    else
-                        media_queue(tsk)
-                    end
-                end
-            end
-            return nothing
-        end
-        @label cont
+#        if @tr url k mi.h already_imported (isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2]) && !already_imported)
+#            if @tr url k :original !haskey(media_tasks, k)
+#                media_tasks[k] = 
+#                let k=k
+#                    tsk = @task task_wrapper(est, k, max_download_duration, downloads_per_period) do
+#                        @tr "import original and variants" url k proxy try
+#                            data = nothing
+#                            @tr url k @elapsed (data = download(est, (@tr url k clean_url(url)); proxy))
+#                            @tr url k length(data)
+#                            @tr url k media_import((_)->data, k)
+#                            @tr url k media_variants(est, url; variant_specs, key, proxy, sync)
+#                        finally
+#                            update_media_queue_executor_taskcnt(-1)
+#                            delete!(media_tasks, k)
+#                        end
+#                    end
+#                    if sync
+#                        update_media_queue_executor_taskcnt(+1)
+#                        schedule(tsk)
+#                        wait(tsk)
+#                        @goto cont
+#                    else
+#                        media_queue(tsk)
+#                    end
+#                end
+#            end
+#            return nothing
+#        end
+#        @label cont
 
-        rs = Postgres.execute(:p0, "select media_url, ext from media_storage where h = \$1 limit 1", [mi.h])[2]
-        (@tr url mi.h isempty(rs)) && return nothing
-        orig_media_url, ext = rs[1]
-        @tr url orig_media_url ext ()
+#        rs = Postgres.execute(:p0, "select media_url, ext from media_storage where h = \$1 limit 1", [mi.h])[2]
+#        (@tr url mi.h isempty(rs)) && return nothing
+#        orig_media_url, ext = rs[1]
+#        @tr url orig_media_url ext ()
 
-        orig_data = nothing
+#        orig_data = nothing
 
-        ext == ".bin" && return nothing
+#        ext == ".bin" && return nothing
 
-        # original_mi = mi
+#        # original_mi = mi
 
-        variant_missing = false
-        for (size, animated) in variant_specs
-            if size == :original
-                variants[(size, animated)] = orig_media_url
-                continue
-            end
-            convopts = []
-            filters = []
-            if !animated
-                append!(convopts, ["-frames:v", "1", "-update", "1"])
-            end
-            if size in [:small, :medium]
-                w, h = media_resolutions[size]
-                push!(filters, "scale=-1:'min($h,ih)'")
-            elseif size in [:large]
-                w, h = media_resolutions[size]
-                push!(filters, "scale='min($w,iw)':-1")
-            end
-            #push!(filters, "colorchannelmixer=1:0:0:0:0:0:0:0:0:0:0:0")
-            append!(convopts, ["-vf", isempty(MEDIA_SSH_COMMAND[]) ? join(filters, ',') : '"'*join(filters, ',')*'"'])
-            k = (; key..., url, type=:resized, size, animated)
-            mi = MediaImport(; key=k)
-            rs = Postgres.execute(:p0, "select media_url from media_storage where h = \$1 limit 1", [mi.h])[2]
-            if @tr url k mi.h already_imported :variant (isempty(rs) && !already_imported)
-                if @tr k :variant !haskey(media_tasks, k)
-                    if isnothing(orig_data)
-                        @tr @elapsed (orig_data = download(est, orig_media_url; proxy))
-                        @tr url orig_media_url length(orig_data)
-                    end
-                    media_tasks[k] = 
-                    let k=k, mi=mi, convopts=convopts, size=size, animated=animated, variants=variants
-                        tsk = @task task_wrapper(est, k, max_task_duration, tasks_per_period) do
-                            @tr "media_task_processing_variant" url k try
-                                mkpath(MEDIA_TMP_DIR[])
-                                outfn = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext)"
-                                logfile = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext).log"
-                                cmd = Cmd([MEDIA_SSH_COMMAND[]..., "nice", "ionice", "-c3", "ffmpeg", "-y", "-i", "-", convopts..., outfn])
-                                try
-                                    @tr url k cmd run(pipeline(cmd, stdin=IOBuffer(orig_data), stdout=logfile, stderr=logfile))
-                                catch _
-                                    DB.incr(est, :media_processing_errors)
-                                    rethrow()
-                                end
-                                # fn = stat(original_mi.path).size <= stat(outfn).size ? original_mi.path : outfn
-                                fn = outfn #!!!
-                                @tr url k fn (_, _, murl) = media_import((_)->read(fn), k)
-                                variants[(size, animated)] = murl
-                                try rm(outfn) catch _ end
-                                try rm(logfile) catch _ end
-                                nothing
-                            finally
-                                update_media_queue_executor_taskcnt(-1)
-                                delete!(media_tasks, k)
-                                nothing
-                            end
-                        end
-                        if sync
-                            update_media_queue_executor_taskcnt(+1)
-                            schedule(tsk)
-                            wait(tsk)
-                            @goto cont2
-                        else
-                            media_queue(tsk)
-                        end
-                    end
-                end
-                variant_missing = true
-            else
-                if !isempty(rs)
-                    variants[(size, animated)] = rs[1][1]
-                end
-            end
-            @label cont2
-        end
-        variant_missing && return nothing
+#        variant_missing = false
+#        for (size, animated) in variant_specs
+#            if size == :original
+#                variants[(size, animated)] = orig_media_url
+#                continue
+#            end
+#            convopts = []
+#            filters = []
+#            if !animated
+#                append!(convopts, ["-frames:v", "1", "-update", "1"])
+#            end
+#            if size in [:small, :medium]
+#                w, h = media_resolutions[size]
+#                push!(filters, "scale=-1:'min($h,ih)'")
+#            elseif size in [:large]
+#                w, h = media_resolutions[size]
+#                push!(filters, "scale='min($w,iw)':-1")
+#            end
+#            #push!(filters, "colorchannelmixer=1:0:0:0:0:0:0:0:0:0:0:0")
+#            append!(convopts, ["-vf", isempty(MEDIA_SSH_COMMAND[]) ? join(filters, ',') : '"'*join(filters, ',')*'"'])
+#            k = (; key..., url, type=:resized, size, animated)
+#            mi = MediaImport(; key=k)
+#            rs = Postgres.execute(:p0, "select media_url from media_storage where h = \$1 limit 1", [mi.h])[2]
+#            if @tr url k mi.h already_imported :variant (isempty(rs) && !already_imported)
+#                if @tr k :variant !haskey(media_tasks, k)
+#                    if isnothing(orig_data)
+#                        @tr @elapsed (orig_data = download(est, orig_media_url; proxy))
+#                        @tr url orig_media_url length(orig_data)
+#                    end
+#                    media_tasks[k] = 
+#                    let k=k, mi=mi, convopts=convopts, size=size, animated=animated, variants=variants
+#                        tsk = @task task_wrapper(est, k, max_task_duration, tasks_per_period) do
+#                            @tr "media_task_processing_variant" url k try
+#                                mkpath(MEDIA_TMP_DIR[])
+#                                outfn = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext)"
+#                                logfile = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext).log"
+#                                cmd = Cmd([MEDIA_SSH_COMMAND[]..., "nice", "ionice", "-c3", "ffmpeg", "-y", "-i", "-", convopts..., outfn])
+#                                try
+#                                    @tr url k cmd run(pipeline(cmd, stdin=IOBuffer(orig_data), stdout=logfile, stderr=logfile))
+#                                catch _
+#                                    DB.incr(est, :media_processing_errors)
+#                                    rethrow()
+#                                end
+#                                # fn = stat(original_mi.path).size <= stat(outfn).size ? original_mi.path : outfn
+#                                fn = outfn #!!!
+#                                @tr url k fn (_, _, murl) = media_import((_)->read(fn), k)
+#                                variants[(size, animated)] = murl
+#                                try rm(outfn) catch _ end
+#                                try rm(logfile) catch _ end
+#                                nothing
+#                            finally
+#                                update_media_queue_executor_taskcnt(-1)
+#                                delete!(media_tasks, k)
+#                                nothing
+#                            end
+#                        end
+#                        if sync
+#                            update_media_queue_executor_taskcnt(+1)
+#                            schedule(tsk)
+#                            wait(tsk)
+#                            @goto cont2
+#                        else
+#                            media_queue(tsk)
+#                        end
+#                    end
+#                end
+#                variant_missing = true
+#            else
+#                if !isempty(rs)
+#                    variants[(size, animated)] = rs[1][1]
+#                end
+#            end
+#            @label cont2
+#        end
+#        variant_missing && return nothing
 
-        variants.wrapped
-    end
-end
+#        variants.wrapped
+#    end
+#end
 
 @procnode function media_variants_pn(
         est::DB.CacheStorage, 
@@ -564,103 +564,103 @@ function media_import_s3(fetchfunc::Union{Function,Nothing}, key, provider, dir)
     @tr (mi, lnk, url)
 end
 
-function media_variants_2(
-        est::DB.CacheStorage, 
-        url::String; 
-        variant_specs::Vector=all_variants, 
-        key=(;), 
-        proxy=MEDIA_PROXY[], 
-        sync=false, 
-        already_imported=false,
-    )
-    funcname = "media_variants_2"
-    @assert sync
-    @tr url variant_specs key proxy begin
-        variants = Dict{Tuple{Symbol, Bool}, String}() |> ThreadSafe
+#function media_variants_2( # don't remove yet
+#        est::DB.CacheStorage, 
+#        url::String; 
+#        variant_specs::Vector=all_variants, 
+#        key=(;), 
+#        proxy=MEDIA_PROXY[], 
+#        sync=false, 
+#        already_imported=false,
+#    )
+#    funcname = "media_variants_2"
+#    @assert sync
+#    @tr url variant_specs key proxy begin
+#        variants = Dict{Tuple{Symbol, Bool}, String}() |> ThreadSafe
 
-        k = (; key..., url, type=:original)
-        mi = MediaImport(; key=k)
+#        k = (; key..., url, type=:original)
+#        mi = MediaImport(; key=k)
 
-        if @tr url k mi.h already_imported (isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2]) && !already_imported)
-            @tr "import original and variants" url k proxy begin
-                data = nothing
-                @tr url k @elapsed (data = download(est, (@tr url k clean_url(url)); proxy))
-                @tr url k length(data)
-                @tr url k media_import_2((_)->data, k, SHA.sha256(data))
-                @tr url k media_variants(est, url; variant_specs, key, proxy, sync)
-            end
-        end
+#        if @tr url k mi.h already_imported (isempty(Postgres.execute(:p0, "select 1 from media_storage where h = \$1 limit 1", [mi.h])[2]) && !already_imported)
+#            @tr "import original and variants" url k proxy begin
+#                data = nothing
+#                @tr url k @elapsed (data = download(est, (@tr url k clean_url(url)); proxy))
+#                @tr url k length(data)
+#                @tr url k media_import_2((_)->data, k, SHA.sha256(data))
+#                @tr url k media_variants_2(est, url; variant_specs, key, proxy, sync)
+#            end
+#        end
 
-        rs = Postgres.execute(:p0, "select media_url, ext from media_storage where h = \$1 limit 1", [mi.h])[2]
-        @assert !isempty(rs)
-        orig_media_url, ext = rs[1]
-        @tr url orig_media_url ext mi.h ()
+#        rs = Postgres.execute(:p0, "select media_url, ext from media_storage where h = \$1 limit 1", [mi.h])[2]
+#        @assert !isempty(rs)
+#        orig_media_url, ext = rs[1]
+#        @tr url orig_media_url ext mi.h ()
 
-        orig_data = nothing
+#        orig_data = nothing
 
-        ext == ".bin" && return nothing
+#        ext == ".bin" && return nothing
 
-        variant_missing = false
-        for (size, animated) in variant_specs
-            if size == :original
-                variants[(size, animated)] = orig_media_url
-                continue
-            end
-            convopts = []
-            filters = []
-            if !animated
-                append!(convopts, ["-frames:v", "1", "-update", "1"])
-            end
-            if size in [:small, :medium]
-                w, h = media_resolutions[size]
-                push!(filters, "scale=-1:'min($h,ih)'")
-            elseif size in [:large]
-                w, h = media_resolutions[size]
-                push!(filters, "scale='min($w,iw)':-1")
-            end
-            #push!(filters, "colorchannelmixer=1:0:0:0:0:0:0:0:0:0:0:0")
-            append!(convopts, ["-vf", isempty(MEDIA_SSH_COMMAND[]) ? join(filters, ',') : '"'*join(filters, ',')*'"'])
-            k = (; key..., url, type=:resized, size, animated)
-            mi = MediaImport(; key=k)
-            rs = Postgres.execute(:p0, "select media_url from media_storage where h = \$1 limit 1", [mi.h])[2]
-            if @tr url k mi.h already_imported :variant (isempty(rs) && !already_imported)
-                if isnothing(orig_data)
-                    @tr @elapsed (orig_data = download(est, orig_media_url; proxy))
-                    @tr url orig_media_url length(orig_data)
-                end
-                @tr "media_task_processing_variant" url k begin
-                    mkpath(MEDIA_TMP_DIR[])
-                    outfn = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext)"
-                    logfile = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext).log"
-                    cmd = Cmd([MEDIA_SSH_COMMAND[]..., "nice", "ionice", "-c3", "ffmpeg", "-y", "-i", "-", convopts..., outfn])
-                    try
-                        @tr url k cmd run(pipeline(cmd, stdin=IOBuffer(orig_data), stdout=logfile, stderr=logfile))
-                    catch _
-                        DB.incr(est, :media_processing_errors)
-                        rethrow()
-                    end
-                    # fn = stat(original_mi.path).size <= stat(outfn).size ? original_mi.path : outfn
-                    fn = outfn #!!!
-                    variant_data = read(fn)
-                    @tr url k fn murl = media_import_2((_)->variant_data, k, SHA.sha256(variant_data))
-                    variants[(size, animated)] = murl
-                    try rm(outfn) catch _ end
-                    try rm(logfile) catch _ end
-                    nothing
-                end
-                variant_missing = true
-            else
-                if !isempty(rs)
-                    variants[(size, animated)] = rs[1][1]
-                end
-            end
-            @label cont2
-        end
-        variant_missing && return nothing
+#        variant_missing = false
+#        for (size, animated) in variant_specs
+#            if size == :original
+#                variants[(size, animated)] = orig_media_url
+#                continue
+#            end
+#            convopts = []
+#            filters = []
+#            if !animated
+#                append!(convopts, ["-frames:v", "1", "-update", "1"])
+#            end
+#            if size in [:small, :medium]
+#                w, h = media_resolutions[size]
+#                push!(filters, "scale=-1:'min($h,ih)'")
+#            elseif size in [:large]
+#                w, h = media_resolutions[size]
+#                push!(filters, "scale='min($w,iw)':-1")
+#            end
+#            #push!(filters, "colorchannelmixer=1:0:0:0:0:0:0:0:0:0:0:0")
+#            append!(convopts, ["-vf", isempty(MEDIA_SSH_COMMAND[]) ? join(filters, ',') : '"'*join(filters, ',')*'"'])
+#            k = (; key..., url, type=:resized, size, animated)
+#            mi = MediaImport(; key=k)
+#            rs = Postgres.execute(:p0, "select media_url from media_storage where h = \$1 limit 1", [mi.h])[2]
+#            if @tr url k mi.h already_imported :variant (isempty(rs) && !already_imported)
+#                if isnothing(orig_data)
+#                    @tr @elapsed (orig_data = download(est, orig_media_url; proxy))
+#                    @tr url orig_media_url length(orig_data)
+#                end
+#                @tr "media_task_processing_variant" url k begin
+#                    mkpath(MEDIA_TMP_DIR[])
+#                    outfn = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext)"
+#                    logfile = "$(MEDIA_TMP_DIR[])/$(mi.h)$(ext).log"
+#                    cmd = Cmd([MEDIA_SSH_COMMAND[]..., "nice", "ionice", "-c3", "ffmpeg", "-y", "-i", "-", convopts..., outfn])
+#                    try
+#                        @tr url k cmd run(pipeline(cmd, stdin=IOBuffer(orig_data), stdout=logfile, stderr=logfile))
+#                    catch _
+#                        DB.incr(est, :media_processing_errors)
+#                        rethrow()
+#                    end
+#                    # fn = stat(original_mi.path).size <= stat(outfn).size ? original_mi.path : outfn
+#                    fn = outfn #!!!
+#                    variant_data = read(fn)
+#                    @tr url k fn murl = media_import_2((_)->variant_data, k, SHA.sha256(variant_data))
+#                    variants[(size, animated)] = murl
+#                    try rm(outfn) catch _ end
+#                    try rm(logfile) catch _ end
+#                    nothing
+#                end
+#                variant_missing = true
+#            else
+#                if !isempty(rs)
+#                    variants[(size, animated)] = rs[1][1]
+#                end
+#            end
+#            @label cont2
+#        end
+#        variant_missing && return nothing
 
-        variants.wrapped
-    end
-end
+#        variants.wrapped
+#    end
+#end
 
 BLOSSOM_HOST = Ref("blossom-dev.primal.net")
 
@@ -777,62 +777,62 @@ function media_import_s3_2(fetchfunc::Union{Function,Nothing}, key, sha256::Vect
     url
 end
 
-media_processing_channel_lock = ReentrantLock()
-media_processing_channel = Channel(100_000)
+# media_processing_channel_lock = ReentrantLock()
+# media_processing_channel = Channel(100_000)
 
-media_queue_executor_running = Ref(false)
-media_queue_executor = Ref{Any}(nothing)
+# media_queue_executor_running = Ref(false)
+# media_queue_executor = Ref{Any}(nothing)
 
-function media_queue(task::Task)
-    lock(media_processing_channel_lock) do
-        if !Utils.isfull(media_processing_channel)
-            put!(media_processing_channel, task)
-        else
-            @warn "media_processing_channel is full"
-        end
-    end
-end
+# function media_queue(task::Task)
+#     lock(media_processing_channel_lock) do
+#         if !Utils.isfull(media_processing_channel)
+#             put!(media_processing_channel, task)
+#         else
+#             @warn "media_processing_channel is full"
+#         end
+#     end
+# end
 
-media_queue_executor_taskcnt = Ref(0) |> ThreadSafe
+# media_queue_executor_taskcnt = Ref(0) |> ThreadSafe
 
-update_media_queue_executor_taskcnt(by=1) = lock(media_queue_executor_taskcnt) do taskcnt; taskcnt[] += by; end
+# update_media_queue_executor_taskcnt(by=1) = lock(media_queue_executor_taskcnt) do taskcnt; taskcnt[] += by; end
 
-MEDIA_PROCESSING_TASKS = Ref(8)
+# MEDIA_PROCESSING_TASKS = Ref(8)
 
-function start_media_queue()
-    while !isempty(media_processing_channel); take!(media_processing_channel); end
-    media_queue_executor_running[] = true
-    media_queue_executor[] = 
-    errormonitor(@async while media_queue_executor_running[]
-                     r = take!(media_processing_channel)
-                     r == :exit && break
-                     update_media_queue_executor_taskcnt(+1)
-                     schedule(r)
-                     while media_queue_executor_running[] && media_queue_executor_taskcnt[] >= MEDIA_PROCESSING_TASKS[]
-                         sleep(0.01)
-                     end
-                 end)
-end
+# function start_media_queue()
+#     while !isempty(media_processing_channel); take!(media_processing_channel); end
+#     media_queue_executor_running[] = true
+#     media_queue_executor[] = 
+#     errormonitor(@async while media_queue_executor_running[]
+#                      r = take!(media_processing_channel)
+#                      r == :exit && break
+#                      update_media_queue_executor_taskcnt(+1)
+#                      schedule(r)
+#                      while media_queue_executor_running[] && media_queue_executor_taskcnt[] >= MEDIA_PROCESSING_TASKS[]
+#                          sleep(0.01)
+#                      end
+#                  end)
+# end
 
-function stop_media_queue()
-    media_queue_executor_running[] = false
-    put!(media_processing_channel, :exit)
-    wait(media_queue_executor[])
-    media_queue_executor[] = nothing
-end
+# function stop_media_queue()
+#     media_queue_executor_running[] = false
+#     put!(media_processing_channel, :exit)
+#     wait(media_queue_executor[])
+#     media_queue_executor[] = nothing
+# end
 
-function task_wrapper(body, est, k, maxdur, perperiod)
-    tdur = Ref(0.0)
-    DB.catch_exception(est, :media_variants, k) do
-        tdur[] = @elapsed body()
-    end
-    lock(maxdur) do maxdur
-        maxdur[] = max(maxdur[], tdur[]) 
-    end
-    lock(perperiod) do perperiod
-        perperiod[] += 1
-    end
-end
+# function task_wrapper(body, est, k, maxdur, perperiod)
+#     tdur = Ref(0.0)
+#     DB.catch_exception(est, :media_variants, k) do
+#         tdur[] = @elapsed body()
+#     end
+#     lock(maxdur) do maxdur
+#         maxdur[] = max(maxdur[], tdur[]) 
+#     end
+#     lock(perperiod) do perperiod
+#         perperiod[] += 1
+#     end
+# end
 
 function parse_image_dimensions(data::Vector{UInt8})
     data = collect(data)
@@ -923,121 +923,121 @@ function cdn_url(url, size, animated)
     "https://primal.b-cdn.net/media-cache?s=$(string(size)[1])&a=$(Int(animated))&u=$(URIs.escapeuri(url))"
 end
 ##
-import Distributed
-mutable struct DistSlot
-    proc::Union{Nothing,Int}
-    active::Bool
-    activations::Int
-end
-execute_distributed_lock = ReentrantLock()
-execute_distributed_slots = [DistSlot(nothing, false, 0) for _ in 1:20]
-execute_distributed_active = Ref(true)
-execute_distributed_active_slots = Ref(0) |> ThreadSafe
-EXECUTE_DISTRIBUTED_MAX_ACTIVATIONS = Ref(200)
-function execute_distributed(expr; timeout=20, includes=[])
-    @show expr
-    function update_active_slots()
-        execute_distributed_active_slots[] = count([s.active for s in execute_distributed_slots])
-    end
+# import Distributed
+# mutable struct DistSlot
+#     proc::Union{Nothing,Int}
+#     active::Bool
+#     activations::Int
+# end
+# execute_distributed_lock = ReentrantLock()
+# execute_distributed_slots = [DistSlot(nothing, false, 0) for _ in 1:20]
+# execute_distributed_active = Ref(true)
+# execute_distributed_active_slots = Ref(0) |> ThreadSafe
+# EXECUTE_DISTRIBUTED_MAX_ACTIVATIONS = Ref(200)
+# function execute_distributed(expr; timeout=20, includes=[])
+#     @show expr
+#     function update_active_slots()
+#         execute_distributed_active_slots[] = count([s.active for s in execute_distributed_slots])
+#     end
 
-    lock(execute_distributed_lock) do
-        for s in execute_distributed_slots
-            if s.activations >= EXECUTE_DISTRIBUTED_MAX_ACTIVATIONS[]
-                kill(Distributed.worker_from_id(s.proc).config.process, 15)
-                s.proc = nothing
-                s.active = false
-                s.activations = 0
-            end
-            if isnothing(s.proc)
-                newpid, = Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
-                for fn in includes
-                    Distributed.remotecall_eval(Main, newpid, quote; include($fn); nothing; end)
-                end
-                s.proc = newpid
-            end
-        end
-    end
+#     lock(execute_distributed_lock) do
+#         for s in execute_distributed_slots
+#             if s.activations >= EXECUTE_DISTRIBUTED_MAX_ACTIVATIONS[]
+#                 kill(Distributed.worker_from_id(s.proc).config.process, 15)
+#                 s.proc = nothing
+#                 s.active = false
+#                 s.activations = 0
+#             end
+#             if isnothing(s.proc)
+#                 newpid, = Distributed.addprocs(1; topology=:master_worker, exeflags="--project")
+#                 for fn in includes
+#                     Distributed.remotecall_eval(Main, newpid, quote; include($fn); nothing; end)
+#                 end
+#                 s.proc = newpid
+#             end
+#         end
+#     end
 
-    slot = nothing
-    while execute_distributed_active[] && isnothing(slot)
-        lock(execute_distributed_lock) do
-            for (i, s) in enumerate(execute_distributed_slots)
-                if !s.active
-                    slot = s
-                    s.active = true
-                    s.activations += 1
-                    break
-                end
-            end
-        end
-        sleep(1)
-    end
-    execute_distributed_active[] || return
+#     slot = nothing
+#     while execute_distributed_active[] && isnothing(slot)
+#         lock(execute_distributed_lock) do
+#             for (i, s) in enumerate(execute_distributed_slots)
+#                 if !s.active
+#                     slot = s
+#                     s.active = true
+#                     s.activations += 1
+#                     break
+#                 end
+#             end
+#         end
+#         sleep(1)
+#     end
+#     execute_distributed_active[] || return
 
-    update_active_slots()
+#     update_active_slots()
 
-    pid = slot.proc
+#     pid = slot.proc
 
-    r = Ref{Any}(nothing)
-    restart = Ref(false)
+#     r = Ref{Any}(nothing)
+#     restart = Ref(false)
 
-    @sync begin
-        @async begin
-            tstart = time()
-            while isnothing(r[]) && (time() - tstart < timeout); sleep(0.1); end
-            if isnothing(r[])
-                restart[] = true
-            end
-        end
-        try
-            r[] = Distributed.remotecall_eval(Main, pid, expr)
-        catch ex
-            r[] = ex
-            # println(ex)
-        end
-    end
+#     @sync begin
+#         @async begin
+#             tstart = time()
+#             while isnothing(r[]) && (time() - tstart < timeout); sleep(0.1); end
+#             if isnothing(r[])
+#                 restart[] = true
+#             end
+#         end
+#         try
+#             r[] = Distributed.remotecall_eval(Main, pid, expr)
+#         catch ex
+#             r[] = ex
+#             # println(ex)
+#         end
+#     end
 
-    lock(execute_distributed_lock) do
-        if restart[]
-            kill(Distributed.worker_from_id(pid).config.process, 15)
-            slot.proc = nothing
-            slot.activations = 0
-        end
-        slot.active = false
-    end
+#     lock(execute_distributed_lock) do
+#         if restart[]
+#             kill(Distributed.worker_from_id(pid).config.process, 15)
+#             slot.proc = nothing
+#             slot.activations = 0
+#         end
+#         slot.active = false
+#     end
 
-    update_active_slots()
+#     update_active_slots()
 
-    r[]
-end
+#     r[]
+# end
 
-function execute_distributed_kill_all()
-    lock(execute_distributed_lock) do
-        for (p, s) in Media.execute_distributed_slots
-            println("killing process $(p[])")
-            try kill(Distributed.worker_from_id(p[]).config.process, 15) catch _ end
-            s[] = false
-        end
-    end
-    for p in Distributed.workers()
-        println("killing process $(p)")
-        try kill(Distributed.worker_from_id(p).config.process, 15) catch _ end
-    end
-end
+# function execute_distributed_kill_all()
+#     lock(execute_distributed_lock) do
+#         for (p, s) in Media.execute_distributed_slots
+#             println("killing process $(p[])")
+#             try kill(Distributed.worker_from_id(p[]).config.process, 15) catch _ end
+#             s[] = false
+#         end
+#     end
+#     for p in Distributed.workers()
+#         println("killing process $(p)")
+#         try kill(Distributed.worker_from_id(p).config.process, 15) catch _ end
+#     end
+# end
 ##
 
-function fetch_resource_metadata_(url; proxy=MEDIA_PROXY[]) 
-    includes = []
-    fn = "fetch-web-page-meta-data.jl"
-    for d in [".", "primal-server"]
-        isfile("$d/$fn") && push!(includes, "$d/$fn")
-    end
-    @assert length(includes) == 1
-    r = execute_distributed(:(fetch_meta_data($url, $proxy)); includes)
-    # @show (url, r)
-    # r isa Exception && println((url, r))
-    r isa NamedTuple ? r : (; mimetype="", title="", image="", description="", icon_url="")
-end
+# function fetch_resource_metadata_(url; proxy=MEDIA_PROXY[]) 
+#     includes = []
+#     fn = "fetch-web-page-meta-data.jl"
+#     for d in [".", "primal-server"]
+#         isfile("$d/$fn") && push!(includes, "$d/$fn")
+#     end
+#     @assert length(includes) == 1
+#     r = execute_distributed(:(fetch_meta_data($url, $proxy)); includes)
+#     # @show (url, r)
+#     # r isa Exception && println((url, r))
+#     r isa NamedTuple ? r : (; mimetype="", title="", image="", description="", icon_url="")
+# end
 
 import Conda
 #Conda.add(["beautifulsoup4", "requests", "html5lib", "boto3"]) # FIXME
@@ -1051,24 +1051,24 @@ function fetch_resource_metadata(url; proxy=MEDIA_METADATA_PROXY[])
     r
 end
 
-function image_category(img_path)
-    return ("", 1.0)
-    try
-        fn = "/home/pr"*img_path
-        r = JSON.parse(String(HTTP.request("POST", "http://192.168.15.1:5000/classify";
-                                           headers=["Content-Type"=>"application/json"],
-                                           body=JSON.json([fn]), retry=false).body))[1]
-        sfw_prob = r["drawings"] + r["neutral"]
-        if sfw_prob >= 0.7
-            (:sfw, sfw_prob)
-        else
-            (:nsfw, 1-sfw_prob)
-        end
-    catch _
-        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
-        ("", 1.0)
-    end
-end
+# function image_category(img_path)
+#     return ("", 1.0)
+#     try
+#         fn = "/home/pr"*img_path
+#         r = JSON.parse(String(HTTP.request("POST", "http://192.168.15.1:5000/classify";
+#                                            headers=["Content-Type"=>"application/json"],
+#                                            body=JSON.json([fn]), retry=false).body))[1]
+#         sfw_prob = r["drawings"] + r["neutral"]
+#         if sfw_prob >= 0.7
+#             (:sfw, sfw_prob)
+#         else
+#             (:nsfw, 1-sfw_prob)
+#         end
+#     catch _
+#         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+#         ("", 1.0)
+#     end
+# end
 
 EXIFTOOL_RO_BINDS = []
 
@@ -1121,11 +1121,6 @@ function resize_image(data::Vector{UInt8}; size=(512, 512))
 end
 
 function extract_video_beginning(data::Vector{UInt8}; duration=20, timeout=15)
-    # input = IOBuffer(data)
-    # output = IOBuffer()
-    # run(pipeline(`ffmpeg -v error -i - -t $duration -c copy -f matroska -`; stdin=input, stdout=output))
-    # seekstart(output)
-    # take!(output)
     fn  = "/tmp/extract-video-beginning-"*join(rand('a':'z', 30))
     fn1 = fn*"-1"
     fn2 = fn*"-2.mp4"
@@ -1139,250 +1134,37 @@ function extract_video_beginning(data::Vector{UInt8}; duration=20, timeout=15)
     end
 end
 
-DEFAULT_AI_HOST   = Ref("192.168.52.1")
-task_ai_host()    = get(task_local_storage(), :ai_host, DEFAULT_AI_HOST[])
-task_ai_timeout() = get(task_local_storage(), :ai_timeout, 30)
-
-function async_tls_pass(body::Function)
-    ai_host    = task_ai_host()
-    ai_timeout = task_ai_timeout()
-    function f(g::Function)
-        task_local_storage(:ai_host, ai_host) do
-            task_local_storage(:ai_timeout, ai_timeout) do
-                g()
-            end
-        end
-    end
-    body(f)
-end
-
-function image_query(
-        imgdata::Vector{UInt8}, query::String; 
-        num_predict=1024, 
-        model="llama3.2-vision", 
-        endpoint="http://$(task_ai_host()):11434/api/chat",
-        timeout=task_ai_timeout())
-    req = (;
-           model,
-           keep_alive="180m",
-           options=(; num_predict),
-           messages=[
-                     (;
-                      role="user",
-                      content=query,
-                      images=[Base64.base64encode(imgdata)]
-                     ),
-                    ])
-
-    s = String(HTTP.request("POST", endpoint;
-                            headers=["Content-Type"=>"application/json"],
-                            body=JSON.json(req), retry=false,
-                            readtimeout=timeout, connect_timeout=timeout).body)
-    res = []
-    for s1 in split(s, '\n')
-        # println(s1)
-        r = JSON.parse(s1)
-        r["done"] && break
-        m = r["message"]
-        m["role"] != "assistant" && break
-        push!(res, m["content"])
-    end
-    join(res)
-end
-
-function media_classify(type::Symbol, model::String, data::Vector{UInt8}; timeout=task_ai_timeout())
-    port =
-    if     type == :image && model == "Falconsai/nsfw_image_detection"; 5012
-    elseif type == :video && model == "Falconsai/nsfw_image_detection"; 5012
-    elseif type == :image && model == "nudenet"; 5015
-    elseif type == :image && model == "marqo_nsfw"; 5017
-    elseif type == :image && model == "nsfw_detector"; 5018
-    elseif type == :image && model == "opennsfw2"; 5016
-    elseif type == :video && model == "opennsfw2"; 5016
-    else; error("unknown model $model")
-    end
-    endpoint = "http://$(task_ai_host()):$port/classify"
-    req = (; model, [type=>Base64.base64encode(data)]...)
-    s = String(HTTP.request("POST", endpoint;
-                            headers=["Content-Type"=>"application/json"],
-                            body=JSON.json(req), retry=false,
-                            readtimeout=timeout, connect_timeout=timeout).body)
-    r = JSON.parse(s)
-    haskey(r, "error") && error(r["error"])
-    @assert r["model"] == model
-    r
-end
-
-function image_features(
-        imgdata::Vector{UInt8}; 
-        model="google/vit-base-patch16-384", 
-        endpoint="http://$(task_ai_host()):5013/features", 
-        timeout=task_ai_timeout(),
-        pool=true)
-    req = (; model, pool, image=Base64.base64encode(imgdata))
-    s = String(HTTP.request("POST", endpoint;
-                            headers=["Content-Type"=>"application/json"],
-                            body=JSON.json(req), retry=false,
-                            readtimeout=timeout, connect_timeout=timeout).body)
-    r = JSON.parse(s)
-    haskey(r, "error") && error(r["error"])
-    @assert r["model"] == model
-    r
-end
-
-function video_features(
-        videodata::Vector{UInt8}; 
-        model="google/vivit-b-16x2-kinetics400", 
-        endpoint="http://$(task_ai_host()):5014/features",
-        timeout=task_ai_timeout())
-    req = (; model, video=Base64.base64encode(videodata))
-    s = String(HTTP.request("POST", endpoint;
-                            headers=["Content-Type"=>"application/json"],
-                            body=JSON.json(req), retry=false,
-                            readtimeout=timeout, connect_timeout=timeout).body)
-    r = JSON.parse(s)
-    haskey(r, "error") && error(r["error"])
-    @assert r["model"] == model
-    r
-end
-
-function text_features(
-        text::String; 
-        model="nomic-embed-text", 
-        endpoint="http://$(task_ai_host()):11434/api/embeddings",
-        timeout=task_ai_timeout())
-    req = (;
-           model,
-           keep_alive="180m",
-           prompt=text,
-          )
-
-    s = String(HTTP.request("POST", endpoint;
-                            headers=["Content-Type"=>"application/json"],
-                            body=JSON.json(req), retry=false,
-                            readtimeout=timeout, connect_timeout=timeout).body)
-    r = JSON.parse(s)
-    Dict(["model"=>model, "output"=>r["embedding"]])
-end
-
-function text_query(
-        query::String; 
-        model="llama3.2:1b", 
-        endpoint="http://$(task_ai_host()):11434/api/chat",
-        num_predict=1024, 
-        timeout=task_ai_timeout())
-    req = (;
-           model,
-           keep_alive="180m",
-           options=(; num_predict),
-           stream=false,
-           messages=[
-                     (;
-                      role="user",
-                      content=query,
-                     ),
-                    ])
-    s = String(HTTP.request("POST", endpoint;
-                            headers=["Content-Type"=>"application/json"],
-                            body=JSON.json(req), retry=false,
-                            readtimeout=timeout, connect_timeout=timeout).body)
-    r = JSON.parse(s)
-    Dict(["model"=>model, "output"=>r])
-end
-
-S3_TOOL_PATH = Ref("")
-S3_CALL_IMPLEMENTATION = Ref(:s3_py)
-
-function s3_call(provider::Symbol, req, data=UInt8[]; proxy=MEDIA_PROXY[], implementation=S3_CALL_IMPLEMENTATION[])
-    # push!(Main.stuff, (:s3_call, (provider, req, data), (; proxy)))
-    iob = IOBuffer()
-    println(iob, JSON.json(req))
-    write(iob, data)
-    seek(iob, 0)
-    timeout = trunc(Int, length(data)/(512*1024)) + 10
-    try
-        if     implementation == :s3_py
-            JSON.parse(read(pipeline(`nice timeout $timeout $(Conda.ROOTENV)/bin/python primal-server/s3.py`, stdin=iob), String))
-        elseif implementation == :s3_tool
-            JSON.parse(read(pipeline(`nice timeout $timeout $S3_TOOL_PATH`, stdin=iob), String))
-        end
-    catch _
-        println("s3_call failed: ", JSON.json(req))
-        rethrow()
-    end
-end
-
-function s3_upload(provider::Symbol, object::String, data::Vector{UInt8}, content_type::String; proxy=MEDIA_PROXY[])
-    req = (; operation="upload", object, content_type, Main.S3_CONFIGS[provider]...)
-    r = s3_call(provider, req, data; proxy)
-    @assert r["status"]
-    nothing
-end
-
-function s3_check(provider::Symbol, object::String; proxy=MEDIA_PROXY[])
-    req = (; operation="check", object, Main.S3_CONFIGS[provider]...)
-    r = s3_call(provider, req; proxy)
-    r["exists"]
-end
-
-function s3_get(provider::Symbol, object::String; proxy=MEDIA_PROXY[], implementation=S3_CALL_IMPLEMENTATION[])::Vector{UInt8}
-    req = (; operation="get", object, Main.S3_CONFIGS[provider]...)
-    iob = IOBuffer()
-    println(iob, JSON.json(req))
-    seek(iob, 0)
-    timeout = 120
-    try
-        if     implementation == :s3_py
-            read(pipeline(`nice timeout 10 $(Conda.ROOTENV)/bin/python primal-server/s3.py`, stdin=iob))
-        elseif implementation == :s3_tool
-            read(pipeline(`nice timeout $timeout $S3_TOOL_PATH`, stdin=iob))
-        end
-    catch _
-        println("s3_get failed: ", JSON.json(req))
-        rethrow()
-    end
-end
-
-function s3_delete(provider::Symbol, object::String; proxy=MEDIA_PROXY[])
-    req = (; operation="delete", object, Main.S3_CONFIGS[provider]...)
-    r = s3_call(provider, req; proxy)
-    @assert r["status"]
-end
-
-function s3_copy(
-        provider::Symbol, 
-        source_bucket::String, source_object::String, 
-        destination_bucket::String, destination_object::String; 
-        proxy=MEDIA_PROXY[])
-    req = (; operation="copy", Main.S3_CONFIGS[provider]...,
-           source_bucket, source_object, destination_bucket, destination_object)
-    r = s3_call(provider, req; proxy)
-    @assert r["status"]
-    nothing
-end
-
-function s3_presign_url(provider::Symbol, object::String, bucket=Main.S3_CONFIGS[provider].bucket; proxy=MEDIA_PROXY[])
-    req = (; operation="pre-sign-url", object, Main.S3_CONFIGS[provider]..., bucket)
-    r = s3_call(provider, req; proxy)
-    @assert r["status"]
-    r["url"]
-end
+include("media_ai.jl")
+include("media_s3.jl")
 
 URL = String
 Resolution = Tuple{Int,Int}
 
 @procnode function media_video_variants_pn(url::URL, media_url::URL, input_resolution::Resolution, input_duration::Real)
     E(; url, input_resolution, input_duration)
+
     @assert !isempty(VIDEO_TRANSCODING_SERVER[])
+
     variants = Dict()
-    horiz = input_resolution[1] > input_resolution[2]
-    for (size, target, bitrate) in [
-                         # (:large, 1080, 5_000_000), 
-                         # (:medium, 720, 2_000_000), 
-                         # (:small, 360, 700_000), 
-                         (:large, 180, 300_000), 
-                        ]
-        target > input_resolution[horiz ? 2 : 1] && continue
+
+    targets = input_resolution[1] > input_resolution[2] ?
+    [
+     # ((:height, 1080), 5_000_000),
+     # ((:height, 720), 3_400_000),
+     (:medium, (:height, 480), 1_500_000),
+     # ((:height, 360), 630000),
+     # ((:height, 180), 230000),
+    ] : [
+     # ((:width, 1080), 3_800_000),
+     (:medium, (:width, 720), 2_400_000),
+     # ((:width, 480), 1_500_000),
+     # ((:width, 360), 630000),
+     # ((:width, 180), 230000),
+    ]
+
+    for (size, target, bitrate) in targets
+        if target[1] == :height && target[2] > input_resolution[2]; continue; end
+        if target[1] == :width  && target[2] > input_resolution[1]; continue; end
         r = transcode_video_pn(url, media_url, input_resolution, input_duration, target, bitrate).r
         if !isnothing(r)
             murl, dims = r
@@ -1390,18 +1172,19 @@ Resolution = Tuple{Int,Int}
             variants[(size, anim)] = (murl, dims)
         end
     end
+
     variants
 end
 
 VIDEO_TRANSCODING_SERVER = Ref("")
 VIDEO_TRANSCODING_FFMPEG_PATH = Ref("")
 
-video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
+video_transcodings = Dict() |> ThreadSafe
 
 @procnode function transcode_video_pn(
         url::String, media_url::String, 
         input_resolution::Resolution, input_duration::Real, 
-        target::Int, 
+        target::Tuple{Symbol, Int}, 
         bitrate::Int;
     )
     # ext = splitext(media_url)[2]
@@ -1410,13 +1193,17 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
     iw, ih = input_resolution
     @assert iw > 0 && ih > 0
 
-    horiz = iw > ih
     ratio = Float64(iw)/Float64(ih)
-    ow, oh = horiz ? 
-    (trunc(Int, target * ratio), target) : 
-    (target, trunc(Int, target / ratio))
+    ow, oh = 
+    if     target[1] == :height
+        (trunc(Int, target[2] * ratio), target[2])
+    elseif target[1] == :width
+        (target[2], trunc(Int, target[2] / ratio))
+    else
+        error("invalid target")
+    end
 
-    @show ((iw, ih), horiz, (ow, oh))
+    @show ((iw, ih), (ow, oh))
 
     remoteoutfn = "/home/pr/tmp/transcoding/$(bytes2hex(rand(UInt8, 16)))$(ext)"
 
@@ -1447,10 +1234,6 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
 
     timeout = input_duration/5 + 120
 
-    infotxt = "$(iw)x$(ih)-$(ow)x$(oh)"
-    infotxt = replace(infotxt, " "=>"\\ ")
-
-    # TODO remove drawtext
     cmd = Cmd(["timeout", string(timeout),
                "ssh", 
                "-o", "ConnectTimeout=10", 
@@ -1460,10 +1243,11 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
                "$(VIDEO_TRANSCODING_FFMPEG_PATH[]) -nostats -progress /dev/stderr -y -hide_banner \
                -hwaccel cuda -hwaccel_output_format cuda \
                -i $media_url \
-               -vf 'scale_cuda=$ow:$oh,hwdownload,format=nv12,drawtext=fontfile=/nix/store/mvdzir9i07ik4hgh6hbgrbin81ahb38s-dejavu-fonts-minimal-2.37/share/fonts/truetype/DejaVuSans.ttf:text='$infotxt':fontcolor=orange:fontsize=24:x=10:y=15,hwupload_cuda' \
+               -vf 'scale_cuda=w=$ow:h=$oh:format=nv12,fps=30' \
                -c:v h264_nvenc \
+               -profile:v main -level:v 4.0 \
                -b:v $bitrate -maxrate $bitrate -bufsize 5M \
-               -c:a copy \
+               -c:a aac -profile:a aac_low -b:a 128k \
                -movflags +faststart \
                $remoteoutfn && cat $remoteoutfn && rm -f $remoteoutfn",])
 
@@ -1510,7 +1294,5 @@ video_transcodings = Dict{Tuple{URL, Int}, NamedTuple}() |> ThreadSafe
         nothing
     end
 end
-
-DEFAULT_HANDLERS = (; download, media_import, run)
 
 end

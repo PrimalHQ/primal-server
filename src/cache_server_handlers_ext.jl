@@ -30,11 +30,11 @@ function ext_periodic()
         for (ref, name, ty) in [[(max_request_duration, :max_request_duration, :nonrate),
                                  (requests_per_period, :requests_per_second, :rate),
                                  (max_time_between_requests, :max_time_between_requests, :nonrate),
-                                 (Main.Media.max_task_duration, :media_max_task_duration, :nonrate),
-                                 (Main.Media.tasks_per_period, :media_tasks_per_second, :rate),
+                                 # (Main.Media.max_task_duration, :media_max_task_duration, :nonrate),
+                                 # (Main.Media.tasks_per_period, :media_tasks_per_second, :rate),
                                  (Main.Media.max_download_duration, :media_max_download_duration, :nonrate),
                                  (Main.Media.downloads_per_period, :media_downloads_per_second, :rate),
-                                 (Main.Media.execute_distributed_active_slots, :media_execute_distributed_active_slots, :nonrate),
+                                 # (Main.Media.execute_distributed_active_slots, :media_execute_distributed_active_slots, :nonrate),
                                 ]; (hasproperty(Main, :spamdetector) ? 
                                     [
                                      (Main.spamdetector.max_msg_duration, :spam_max_msg_duration, :nonrate),
