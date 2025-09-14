@@ -1013,11 +1013,12 @@ end
 function media_moderation_handler(req::HTTP.Request)
     catch_exception(:media_moderation_handler, req) do
         r = JSON.parse(String(req.body))
-        @show (:media_moderation_handler, req.target)
+        # @show (:media_moderation_handler, req.target)
         if     req.target == "/purge-media"
             purge_media_(isnothing(r["pubkey"]) ? nothing : Nostr.PubKeyId(r["pubkey"]), r["url"];
                          reason=get(r, "reason", nothing),
                          block_all_uploads=get(r, "block_all_uploads", false),
+                         clear_cache=get(r, "clear_cache", false),
                          extra=(; initiator_pubkey=get(r, "initiator_pubkey", nothing)))
             return HTTP.Response(200, api_headers, "ok")
         # elseif req.target == "/restore-media"
@@ -1042,8 +1043,8 @@ function bunny_purge()
     @assert HTTP.request("POST", "https://api.bunny.net/pullzone/1425721/purgeCache", ["AccessKey"=>BUNNY_API_KEY[]]).status == 204
 end
 
-function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reason=nothing, extra=(;), verbose=false, block_all_uploads=false)
-    @show (:purge_media, pubkey, surl, reason)
+function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reason=nothing, extra=(;), verbose=false, block_all_uploads=false, clear_cache=false)
+    verbose && @show (:purge_media, pubkey, surl, reason)
 
     media_block_id = string(UUIDs.uuid4())
     mb = (; surl, files=[], media_urls=[], thumbnail_urls=[], short_urls=[], blossom_urls=[], upload_urls=[], extra...)
@@ -1053,8 +1054,14 @@ function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reaso
 
     update_mb() = Postgres.execute(:membership, "update media_block set d = \$2 where id = \$1", [media_block_id, JSON.json(mb)])
 
+    purged_urls = Set()
+
     function purge(url)
-        @show (:purge, url)
+        url in purged_urls && return
+        push!(purged_urls, url)
+
+        verbose && @show (:purge, url)
+
         path_ext = string(URIs.parse_uri(url).path)
         path = splitext(path_ext)[1]
         kh = splitpath(path)[end]
@@ -1116,14 +1123,13 @@ function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reaso
     if host in ["blossom.primal.net", "blossom-dev.primal.net"]
         push!(mb.blossom_urls, surl)
         sha256 = hex2bytes(spath)
-        clear_cache = false
         if !isnothing(pubkey)
             Postgres.execute(:membership, "update media_uploads set media_block_id = \$3 where sha256 = \$1 and pubkey = \$2",
                              [sha256, pubkey, media_block_id])
 
             ulcnt    = Postgres.execute(:membership, "select count(1) from media_uploads where sha256 = \$1 and pubkey = \$2", [sha256, pubkey])[2][1][1]
             ulallcnt = Postgres.execute(:membership, "select count(1) from media_uploads where sha256 = \$1", [sha256])[2][1][1]
-            @show (surl, ulcnt, ulallcnt)
+            verbose && @show (surl, ulcnt, ulallcnt)
             if ulcnt != 0 && ulcnt == ulallcnt
                 for (path,) in Postgres.execute(:membership, "select path from media_uploads where sha256 = \$1 and pubkey = \$2 group by path", [sha256, pubkey])[2]
                     upload_url = "https://_media.primal.net$path"
@@ -1161,6 +1167,11 @@ function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reaso
 
         if block_all_uploads
             Postgres.execute(:membership, "update media_uploads set media_block_id = \$2 where sha256 = \$1", [sha256, media_block_id])
+            for (media_url,) in Postgres.execute(:p0, "select media_url from media_storage where sha256 = \$1", [sha256])[2]
+                push!(mb.media_urls, media_url)
+                purge(media_url)
+            end
+            Postgres.execute(:p0, "update media_storage set media_block_id = \$2 where sha256 = \$1", [sha256, media_block_id])
         end
     elseif host == "m.primal.net"
         for (url,) in Postgres.execute(:membership,
@@ -1197,7 +1208,7 @@ function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reaso
 
     update_mb()
 
-    @show media_block_id
+    verbose && @show media_block_id
     nothing
 end
 

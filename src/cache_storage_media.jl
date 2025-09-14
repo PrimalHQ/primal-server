@@ -100,12 +100,16 @@ end
                                  [url, thumbnail_media_url])
                 import_media_pn(est, eid, thumbnail_media_url, Main.Media.all_variants)
             end
-            try
-                # @show eid
-                # if est.events[eid].pubkey == Main.test_pubkeys[:qa]
-                #     @pnd import_media_video_variants_pn(est; mimetype, url, media_url, width=dims[1], height=dims[2], duration=dims[3], orig_sha256)
-                # end
-            catch _ Utils.print_exceptions() end
+            # @pnd import_media_hls_pn(est, eid, url, media_url)
+            # try
+            #     if !isnothing(eid)
+            #         # if est.events[eid].pubkey == Main.test_pubkeys[:qa]
+            #         if est.events[eid].pubkey == Nostr.PubKeyId("e1b2a69cb6e3ea702412292fc2a6ebabc69cc7a4389a0be9934d6cfdec1b40e0")
+            #             @show (:import_media_video_variants_pn, eid)
+            #             @pnd import_media_video_variants_pn(est; mimetype, url, media_url, width=dims[1], height=dims[2], duration=dims[3], orig_sha256)
+            #         end
+            #     end
+            # catch _ Utils.print_exceptions() end
         end
 
         extralog((; op="insert", table="media", url, media_url, size, anim, dldur, width, height, mimetype, duration, (isnothing(orig_sha256) ? [] : [:orig_sha256=>bytes2hex(orig_sha256)])...))

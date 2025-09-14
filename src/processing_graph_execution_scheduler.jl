@@ -74,15 +74,17 @@ function task_execute()
                    (:task_execute_once_1, ()->errormonitor(@async task_execute_once_1())),
                    (:import_upload_3, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_upload_3; limit=10, ntasks=10))),
                    ## (:import_media_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_media_pn; limit=500, ntasks=100))),
-                   (:import_media_fast_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_media_fast_pn; limit=100, ntasks=20))),
-                   (:task_execute_import_media_pns_1, ()->errormonitor(@async task_execute_import_media_pns_1(; limit=100, ntasks=25))),
+                   # (:import_media_fast_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_media_fast_pn; limit=100, ntasks=20))),
+                   ### (:task_execute_import_media_pns_1, ()->errormonitor(@async task_execute_import_media_pns_1(; limit=100, ntasks=25))),
                    # (:task_execute_import_media_pns_2, ()->errormonitor(@async task_execute_import_media_pns_2(; limit=100, ntasks=25))),
                    ## (:import_preview_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_preview_pn; limit=500, ntasks=100))),
 
-                   (:import_media_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_media_pn; limit=150, ntasks=30))),
-                   (:import_preview_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_preview_pn; limit=150, ntasks=30))),
+                   ### (:import_media_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_media_pn; limit=150, ntasks=30))),
+                   ### (:import_preview_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_preview_pn; limit=150, ntasks=30))),
 
                    # (:import_media_video_variants_pn, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:import_media_video_variants_pn; limit=2, ntasks=2))),
+
+                   # (:ext_after_import_upload_2, ()->errormonitor(@async ProcessingGraph.execute_delayed_nodes(:ext_after_import_upload_2; limit=10, ntasks=10))),
                   ]
         if !haskey(subtasks, n)
             subtasks[n] = f()

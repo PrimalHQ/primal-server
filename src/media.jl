@@ -90,7 +90,20 @@ function download(est::DB.CacheStorage, url::String; proxy=nothing, timeout=30, 
 
     DB.incr(est, :media_downloads)
     exc = nothing
-    proxies = isnothing(proxy) ? Random.shuffle(DOWNLOAD_PROXIES) : [proxy]
+
+    proxies = []
+    if isnothing(proxy)
+        append!(proxies, Random.shuffle(DOWNLOAD_PROXIES))
+    else
+        push!(proxies, proxy)
+    end
+    if occursin("primal.net", url) || occursin("primaldata.s3", url) || occursin("primaldata.fsn1", url)
+        if !(nothing in proxies)
+            pushfirst!(proxies, nothing)
+        end
+    end
+    # @show (url, proxies)
+
     for proxy in proxies
         try
             @tr url timeout proxy ()
@@ -549,7 +562,7 @@ function parse_image_dimensions(data::Vector{UInt8})
         w = parse(Int, m1[1])
         h = parse(Int, m2[1])
         x = 500
-        (x, x*h/w, 0.0)
+        (x, trunc(Int, x*h/w), 0.0)
     else
         m = mktemp() do fn, io
             write(io, data)
@@ -628,14 +641,18 @@ end
 
 import Conda
 #Conda.add(["beautifulsoup4", "requests", "html5lib", "boto3"]) # FIXME
-function fetch_resource_metadata(url; proxy=MEDIA_METADATA_PROXY[]) 
-    proxy = isnothing(proxy) ? "null" : proxy
-    r = try
-        NamedTuple([Symbol(k)=>v for (k, v) in JSON.parse(read(pipeline(`nice timeout 10 $(Conda.ROOTENV)/bin/python primal-server/link-preview.py $url $proxy`, stderr=devnull), String))])
-    catch _
-        (; mimetype="", title="", image="", description="", icon_url="")
+# function fetch_resource_metadata(url; proxy=MEDIA_METADATA_PROXY[]) 
+function fetch_resource_metadata(url) 
+    for proxy in Random.shuffle(DOWNLOAD_PROXIES)
+        proxy = isnothing(proxy) ? "null" : proxy
+        r = try
+            NamedTuple([Symbol(k)=>v for (k, v) in JSON.parse(read(pipeline(`nice timeout 10 $(Conda.ROOTENV)/bin/python primal-server/link-preview.py $url $proxy`, stderr=devnull), String))])
+        catch _
+            continue
+        end
+        isempty(r.title) || return r
     end
-    r
+    (; mimetype="", title="", image="", description="", icon_url="")
 end
 
 EXIFTOOL_RO_BINDS = []
@@ -676,11 +693,19 @@ function is_image_rotated(data::Vector{UInt8})
 end
 
 function extract_video_thumbnail(data::Vector{UInt8})
+    _, _, dur = parse_video_dimensions(data)
     mktemp() do fn, io
         write(io, data)
         close(io)
+        # ss = dur >= 5 ? 3 : 0
+        ss = 0
         # try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull, stdout=`magick - -`)) catch _ end
-        try read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss 0 -c:v png -f image2pipe -`; stdin=devnull, stdout=`magick - -quality 90 jpg:-`)) catch _ end
+        try 
+            # read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss $ss -c:v png -f image2pipe -`; stdin=devnull, stdout=`magick - -quality 90 jpg:-`)) 
+            read(pipeline(`ffmpeg -v error -i $fn -vframes 1 -an -ss $ss -vf "scale=iw*sar:ih,scale='min(1280,iw)':'-1'" -c:v png -f image2pipe -`; stdin=devnull, stdout=`magick - -quality 90 jpg:-`)) 
+        catch ex
+            println(ex)
+        end
     end
 end
 

@@ -1,0 +1,49 @@
+[package]
+name = "primal-media"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+bytes = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+dateparser = "0.2"
+env_logger = "0.11"
+futures = "0.3"
+once_cell = "1"
+parking_lot = "0.12"
+hex = "0.4"
+indexmap = { version = "2", features = ["serde"] }
+infer = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"] }
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "gzip", "brotli", "deflate", "rustls-tls", "socks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "uuid", "time", "json", "macros"] }
+thiserror = "1"
+time = { version = "0.3", features = ["serde", "parsing", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "taskdump"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+urlencoding = "2.1"
+tempfile = "3"
+rand = "0.8"
+regex = "1"
+shell-escape = "0.1"
+aws-config = "1"
+aws-sdk-mediaconvert = "1"
+aws-sdk-s3 = "1"
+aws-types = "1"
+url = { version = "2.5.7", features = ["serde"] }
+primal-media-macros = { path = "primal-media-macros" }
+
+#[features]
+# No special features; video support uses `ffmpeg`/`ffprobe` executables.
+
+[profile.release]
+debug = true
+
