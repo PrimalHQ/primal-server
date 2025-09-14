@@ -284,6 +284,15 @@ function ext_reaction(est::CacheStorage, e::Nostr.Event, eid)
     # event_hook(est, eid, (:notifications_cb, YOUR_POST_WAS_LIKED, e.id, e.content))
     event_hook(est, eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_LIKED, e.id))
     event_hook(est, eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED, "make_event_hooks", e.id))
+
+    if eid in est.events
+        ee = est.events[eid]
+        if ee.kind == Int(Nostr.TEXT_NOTE)
+            import_note_urls(est, ee)
+        elseif ee.kind == Int(Nostr.LONG_FORM_CONTENT)
+            import_long_form_note_urls(est, ee)
+        end
+    end
 end
 
 DOWNLOAD_MEDIA    = Ref(false)
@@ -305,8 +314,10 @@ function import_note_urls(est::CacheStorage, e::Nostr.Event)
             # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, Main.Media.all_variants))
             DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
             DOWNLOAD_MEDIA[] && @pnd import_media_fast_pn(est, e.id, url)
+            # DOWNLOAD_MEDIA[] && @pnd import_media_fast_pn_2(est, e.id, url)
         elseif any((startswith(ext, ext2) for ext2 in video_exts))
             # DOWNLOAD_MEDIA[] && Main.Media.media_queue(@task @ti @tr e.id url import_media(est, e.id, url, [(:original, true)]))
+            @show (:import_media_pn, e.id, url, [(:original, true)])
             DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, [(:original, true)])
             DOWNLOAD_MEDIA[] && @pnd import_media_fast_pn(est, e.id, url)
         else
@@ -362,13 +373,13 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
             schedule_hook(est, trunc(Int, time()+4*3600), (:expire_hashtag_score_cb, hashtag, d_score))
         end
     end
+
+    # DOWNLOAD_MEDIA[] && @pnd import_text_event_pn(est, e.id)
 end
 
-function ext_long_form_note(est::CacheStorage, e::Nostr.Event)
-    funcname = "ext_long_form_note"
-
+function import_long_form_note_urls(est::CacheStorage, e::Nostr.Event)
     # DB.ext_is_human(est, e.pubkey; threshold=0.0) || return
-
+    
     import_note_urls(est, e)
 
     for t in e.tags
@@ -378,6 +389,14 @@ function ext_long_form_note(est::CacheStorage, e::Nostr.Event)
             DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
         end
     end
+
+    # DOWNLOAD_MEDIA[] && @pnd import_text_event_pn(est, e.id)
+end
+
+function ext_long_form_note(est::CacheStorage, e::Nostr.Event)
+    funcname = "ext_long_form_note"
+
+    import_long_form_note_urls(est, e)
 end
 
 function ext_live_event(est::CacheStorage, e::Nostr.Event)
