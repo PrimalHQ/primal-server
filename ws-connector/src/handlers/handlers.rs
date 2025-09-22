@@ -67,6 +67,9 @@ impl ReqHandlers {
             "live_events_from_follows" => {
                 Self::live_events_from_follows(conn_id, sub_id, kwargs, pool).await
             }
+            "find_live_events" => {
+                Self::find_live_events(conn_id, sub_id, kwargs, pool).await
+            }
             _ => Ok((ReqStatus::NotHandled, Response::empty()))
         }
     }
@@ -448,4 +451,26 @@ impl ReqHandlers {
                     ],
                 }))
     }
+
+    async fn find_live_events(_conn_id: i64, _sub_id: &str, kwargs: &Value, pool: &Pool) -> Result<(ReqStatus, Response), ReqError> {
+        let host_pubkey = kwargs["host_pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok()).ok_or("host_pubkey argument required")?;
+        let identifier = kwargs["identifier"].as_str().ok_or("identifier argument required")?;
+
+        let res = Self::rows_to_vec(
+            &Self::pool_get(&pool).await?.query(
+                r#"
+                select get_event_jsonb(lep.event_id)::text
+                from live_event_participants lep
+                where lep.kind = 30311 
+                  and lep.participant_pubkey = $1
+                  and lep.identifier = $2
+                  and lep.created_at >= extract(epoch from now() - interval '1h')::int8
+                "#,
+                &[&host_pubkey, &identifier]).await?);
+
+        let res = res.iter().map(|s| crate::shared::utils::fixup_live_event_p_tags_str(s.clone())).collect::<_>();
+
+        Ok((ReqStatus::Handled, Response { messages: res, registrations: vec![]}))
+    }
 }
+

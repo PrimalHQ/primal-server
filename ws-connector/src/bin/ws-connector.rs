@@ -535,11 +535,31 @@ async fn distribute_live_event(state: &Arc<Mutex<State>>, eaddr: &EventAddr, e: 
 
     let mut res = Vec::new();
     for ((ws_id, sub), (user_pubkey, content_moderation_mode)) in &subs {
-        let r = sqlx::query!(r#"select live_feed_is_hidden($1, $2, live_feed_hosts($4, $5, $6), $3) as hidden"#,
+        let mut hidden = false;
+
+        if let Some(true) = sqlx::query!(r#"select live_feed_is_hidden($1, $2, live_feed_hosts($4, $5, $6), $3) as hidden"#,
             e.id.0, user_pubkey.0, content_moderation_mode, 
             eaddr.kind, eaddr.pubkey.0, eaddr.identifier,
-        ).fetch_one(cache_pool).await?;
-        if let Some(false) = r.hidden {
+            ).fetch_one(cache_pool).await?.hidden 
+        {
+            hidden = true;
+        }
+
+        if content_moderation_mode == "moderated" {
+            if let Some(true) = sqlx::query!(
+                r#"select exists (
+                    select 1 from live_event_pubkey_filterlist lepf 
+                    where lepf.user_pubkey = $1 and lepf.blocked_pubkey = any (select unnest(live_feed_hosts($2, $3, $4)))
+                ) as hidden"#,
+                user_pubkey.0, 
+                eaddr.kind, eaddr.pubkey.0, eaddr.identifier,
+                ).fetch_one(cache_pool).await?.hidden 
+            {
+                hidden = true;
+            }
+        }
+
+        if !hidden {
             let cw = state.lock().await.websockets.get(ws_id).map(|cw| cw.clone());
             if let Some(cw) = cw {
                 let e_json = serde_json::to_string(&e)?;

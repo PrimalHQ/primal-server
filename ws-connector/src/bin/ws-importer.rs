@@ -150,7 +150,6 @@ async fn process_event_import(
                             "#, e.kind, e.pubkey.0, le.identifier,
                         ).execute(&mut *tx).await?;
                         let mut pks = Vec::new();
-                        pks.push(e.pubkey.clone());
                         for (pk, ptype) in &le.participants {
                             if *ptype == LiveEventParticipantType::Host {
                                 pks.push(pk.clone());
