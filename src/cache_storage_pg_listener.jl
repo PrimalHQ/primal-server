@@ -8,6 +8,7 @@ import ..DB
 import ..Postgres
 
 ENABLED = Ref{Bool}(false)
+RATE_LIMIT_PERIOD = Ref(3600)
 
 LOG = Ref{Bool}(false)
 
@@ -17,6 +18,8 @@ task = Ref{Any}(nothing)
 running = Ref{Bool}(true)
 
 cache_storage = Ref{Any}(nothing)
+
+last_notification = Dict{Tuple{Nostr.PubKeyId, Nostr.PubKeyId}, Float64}() # (event_pubkey, follower_pubkey) => last_notification_time
 
 function start(est)
     @assert isnothing(task[])
@@ -38,16 +41,16 @@ function listener()
     try
         Postgres.execute_simple(session, "listen cache_storage")
         while running[]
-            notifs = []
-            Postgres.execute_simple(session, "select 1"; 
-                                    callbacks=(; 
-                                               on_notice=(_)->nothing,
-                                               on_row_description=(_)->nothing,
-                                               on_row=(_)->nothing,
-                                               on_notification_response=(n)->push!(notifs, n),
-                                              ))
             if ENABLED[]
                 try
+                    notifs = []
+                    Postgres.execute_simple(session, "select 1"; 
+                                            callbacks=(; 
+                                                       on_notice=(_)->nothing,
+                                                       on_row_description=(_)->nothing,
+                                                       on_row=(_)->nothing,
+                                                       on_notification_response=(n)->push!(notifs, n),
+                                                      ))
                     Base.invokelatest(handle_notifications, notifs)
                 catch _
                     PRINT_EXCEPTIONS[] && Utils.print_exceptions()
@@ -87,11 +90,16 @@ function handle_notifications(notifs)
                                                  on conflict do nothing
                                                  returning 1
                                                  ", [kind, pubkey, identifier, follower_pubkey, Utils.current_time()])[2]
-                                # @show (DB.LIVE_EVENT_HAPPENING, follower_pubkey, e.created_at, e.id, host_pubkey)
-                                if isempty(Postgres.execute(:p0, "select 1 from live_event_pubkey_filterlist where user_pubkey = \$1 and blocked_pubkey = \$2 limit 1", [follower_pubkey, pubkey])[2])
+                                if isempty(Postgres.execute(:p0, "select 1 from live_event_pubkey_filterlist where user_pubkey = \$1 and blocked_pubkey = \$2 limit 1", [follower_pubkey, host_pubkey])[2])
                                     coord = "$(kind):$(Nostr.hex(pubkey)):$(identifier)"
-                                    DB.notification(cache_storage[], follower_pubkey, e.created_at, DB.LIVE_EVENT_HAPPENING,
-                                                    #= live_event =# e.id, #= host =# host_pubkey, #= coord =# coord)
+                                    k = (host_pubkey, follower_pubkey)
+                                    t = Utils.current_time()
+                                    if !haskey(last_notification, k) || (t - last_notification[k] >= RATE_LIMIT_PERIOD[])
+                                        @show coord
+                                        last_notification[k] = t
+                                        DB.notification(cache_storage[], follower_pubkey, e.created_at, DB.LIVE_EVENT_HAPPENING,
+                                                        #= live_event =# e.id, #= host =# host_pubkey, #= coord =# coord)
+                                    end
                                 end
                             end
                         end
@@ -104,8 +112,6 @@ function handle_notifications(notifs)
         end
     end
 end
-#= handle_notifications (generic function with 1 method) =#
-#= handle_notifications (generic function with 1 method) =#
 
 end
 

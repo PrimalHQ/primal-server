@@ -33,7 +33,7 @@ CREATE OR REPLACE FUNCTION public.c_LIVE_EVENT_STATS() RETURNS int LANGUAGE sql 
 
 CREATE TYPE cmr_scope AS ENUM ('content', 'trending');
 CREATE TYPE cmr_grp AS ENUM ('primal_spam', 'primal_nsfw');
-CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw', 'csam', 'impersonation');
+CREATE TYPE filterlist_grp AS ENUM ('spam', 'nsfw', 'csam', 'impersonation', 'in_app_purchase');
 CREATE TYPE filterlist_target AS ENUM ('pubkey', 'event');
 CREATE TYPE media_size AS ENUM ('original', 'small', 'medium', 'large');
 CREATE TYPE response_messages_for_post_res AS (e jsonb, is_referenced_event bool);
