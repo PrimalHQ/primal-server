@@ -268,7 +268,10 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
     title = description = image = url = ""
     twitter_card = "summary"
 
-    mdpubkey_(pk) = (; url="https://$host$path", twitter_card, mdpubkey(cache_storage, pk)...)
+    function mdpubkey_(pk)
+        md = mdpubkey(cache_storage, pk)
+        (; url="https://$host$path", twitter_card, twitter_image=md.image, md...)
+    end
 
     if host in ["primal.net", "dev.primal.net"]
         if !isnothing(local m = match(r"^/(profile|p)/(.*)", path))
@@ -306,7 +309,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                         image = media_urls[1][1]
                         thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
                         if !isempty(thumbnails)
-                            image = (thumbnails[1][1],)
+                            image = thumbnails[1][1]
                         else
                             if !isempty(local r = DB.exec(cache_storage.media, DB.@sql("select media_url, width, height from media where url = ?1 and animated = 0 and size != 'small' order by (width*height) limit 1"), (image,)))
                                 image = r[1][1]
@@ -336,7 +339,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                     end
                 end
             end
-            return (; title, description, image, url, twitter_card)
+            return (; title, description, image, url, twitter_card, twitter_image=image)
 
         elseif !isnothing(local md = begin
                               md = nothing
@@ -381,7 +384,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                                               if isempty(image)
                                                   image = mdpubkey(cache_storage, pubkey).image
                                               end
-                                              md = (; title, description, image, url, twitter_card)
+                                              md = (; title, description, image, url, twitter_card, twitter_image=image)
                                           end
                                       end
                                   end
@@ -410,9 +413,13 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                               end
                               if !isnothing(pubkey) && !isnothing(identifier)
                                   kind = 30311
-                                  for (eid,) in DB.exec(cache_storage.dyn[:parametrized_replaceable_events], 
-                                                        DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                                        (pubkey, kind, identifier))
+                                  for (eid,) in Postgres.execute(:p0, "
+                                      select event_id 
+                                      from parametrized_replaceable_events pre
+                                      where pre.kind = \$1 
+                                        and pre.pubkey = (select pubkey from basic_tags where kind = 30311 and tag = 'p' and arg1 = \$2 and lower(arg3) = 'host' order by created_at desc limit 1)
+                                        and pre.identifier = \$3
+                                        ", [kind, pubkey, identifier])[2]
                                       eid = Nostr.EventId(eid)
                                       if eid in cache_storage.events
                                           e = cache_storage.events[eid]
@@ -434,7 +441,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                                           if isempty(image)
                                               image = mdpubkey(cache_storage, pubkey).image
                                           end
-                                          md = (; title, description, image, url, twitter_card)
+                                          md = (; title, description, image, url, twitter_card, twitter_image=image)
                                       end
                                   end
                               end
@@ -476,7 +483,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         elseif !isnothing(local m = match(r"^/(\?.|$)", path)) && 1==1
             return (; 
                     title="Primal", 
-                    description="Discover the best of Nostr",
+                    description="Live Free",
                     image=("https://$host/public/primal-link-preview.jpg",),
                     url="https://$host/",
                     twitter_card = "summary_large_image",
@@ -485,7 +492,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         elseif !isnothing(local m = match(r"^/landing$", path)) && 1==1
             return (; 
                     title="Primal", 
-                    description="Discover the best of Nostr",
+                    description="Live Free",
                     image=("https://$host/public/primal-link-preview.jpg",),
                     url="https://primal.net/",
                     twitter_card = "summary_large_image",
@@ -494,7 +501,7 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
         # elseif !isnothing(local m = match(r"^/join$", path)) && 1==1
         #     return (; 
         #             title="Primal", 
-        #             description="Discover the best of Nostr",
+        #             description="Live Free",
         #             image=("https://$host/public/primal-link-preview.jpg",),
         #             url="https://$host/",
         #             twitter_card = "summary_large_image",
