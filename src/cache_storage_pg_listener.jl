@@ -95,10 +95,13 @@ function handle_notifications(notifs)
                                     k = (host_pubkey, follower_pubkey)
                                     t = Utils.current_time()
                                     if !haskey(last_notification, k) || (t - last_notification[k] >= RATE_LIMIT_PERIOD[])
-                                        @show coord
                                         last_notification[k] = t
-                                        DB.notification(cache_storage[], follower_pubkey, e.created_at, DB.LIVE_EVENT_HAPPENING,
-                                                        #= live_event =# e.id, #= host =# host_pubkey, #= coord =# coord)
+                                        if !Postgres.execute(:p0, "select live_feed_is_hidden(\$1, \$2, live_feed_hosts(\$3, \$4, \$5), 'moderated')",
+                                                             [e.id, follower_pubkey, 
+                                                              kind, pubkey, identifier])[2][1][1]
+                                            DB.notification(cache_storage[], follower_pubkey, e.created_at, DB.LIVE_EVENT_HAPPENING,
+                                                            #= live_event =# e.id, #= host =# host_pubkey, #= coord =# coord)
+                                        end
                                     end
                                 end
                             end

@@ -592,6 +592,12 @@ function notification(
                     block[] = true
                 end
             end
+        elseif notif_type == REPLY_TO_REPLY
+            pk = args[2] # who_replied_to_it
+            enabled = !isempty(Postgres.execute(:membership, "select 1 from app_settings where key = \$1 and coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'include_deep_replies')::bool, true) limit 1", [pubkey])[2])
+            if !enabled
+                block[] = true
+            end
         else
             pk =
             if     notif_type in [NEW_USER_FOLLOWED_YOU, USER_UNFOLLOWED_YOU]

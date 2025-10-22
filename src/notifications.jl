@@ -27,6 +27,8 @@
     NEW_DIRECT_MESSAGE=401
 
     LIVE_EVENT_HAPPENING=501
+
+    REPLY_TO_REPLY=601
 end
 
 JSON.lower(type::NotificationType) = Int(type)
@@ -65,5 +67,7 @@ notification_args = Dict([NEW_USER_FOLLOWED_YOU=>((:follower, Nostr.PubKeyId),),
                           NEW_DIRECT_MESSAGE=>((:event_id, Nostr.EventId), (:sender, Nostr.PubKeyId)),
 
                           LIVE_EVENT_HAPPENING=>((:live_event_id, Nostr.EventId), (:host, Nostr.PubKeyId), (:coordinate, String)),
+
+                          REPLY_TO_REPLY=>((:your_post, Nostr.EventId), (:who_replied_to_it, Nostr.PubKeyId), (:reply, Nostr.EventId)),
                          ])
 ##

@@ -433,7 +433,7 @@ function load_changed_code(; directory=pwd(), target_server=nothing, target_node
                     if isnothing(target_server)
                         getproperty(Main, mod).eval(expr)
                     else
-                        rex(target_server, target_node, :(Main.$mod.eval($expr)))
+                        rex(target_server, target_node, :(Main.$mod.eval($(QuoteNode(expr)))))
                     end
                 end
                 println("$mod: $(length(changes)) changes loaded")

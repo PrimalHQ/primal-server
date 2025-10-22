@@ -111,6 +111,7 @@ exposed_functions = Set([:feed,
                          :follow_list,
 
                          :invoices_to_zap_receipts,
+                         :find_reposts,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -1352,26 +1353,7 @@ end
 
 function user_profile_live_streams(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     res = []
-    for (e,) in Postgres.execute(:p0, "
-        SELECT get_event_jsonb(pre.event_id)
-        FROM parametrized_replaceable_events pre, basic_tags bt
-        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8
-          AND pre.event_id = bt.id AND bt.tag = 'p' AND bt.arg1 = \$1
-          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
-                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
-                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
-        ", [pubkey])[2]
-        e = castnamedtuple(e) 
-        push!(res, e)
-    end
-    for (e,) in Postgres.execute(:p0, "
-        SELECT get_event_jsonb(pre.event_id)
-        FROM parametrized_replaceable_events pre
-        WHERE pre.kind = 30311 AND pre.created_at >= extract(epoch from now() - interval '2d')::int8 AND pre.pubkey = \$1
-          AND EXISTS (SELECT 1 FROM events es WHERE pre.event_id = es.id
-                                                AND 'status' IN (SELECT jsonb_array_elements(es.tags)->>0)
-                                                AND 'live' IN (SELECT jsonb_array_elements(es.tags)->>1))
-        ", [pubkey])[2]
+    for (e,) in Postgres.execute(:p0, "SELECT user_live_events(30311, \$1)", [pubkey])[2]
         e = castnamedtuple(e) 
         push!(res, e)
     end
@@ -3635,7 +3617,7 @@ function fetch_results(
 
         done[] && break
 
-        if i[] > 0
+        if i[] > 0 && !isempty(res)
             t = res[end][2]
             dt = dt_start
         else
@@ -4221,6 +4203,19 @@ function invoices_to_zap_receipts(
         res[r.invoice] = r.e
     end
     [(; kind=Int(INVOICES_TO_ZAP_RECEIPTS), content=JSON.json(res))]
+end
+
+function find_reposts(est::DB.CacheStorage; pubkey, event_id)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    event_id = cast(event_id, Nostr.EventId)
+    res = []
+    for r in p0"
+        select es.* from basic_tags bt, events es
+        where bt.tag = 'e' and bt.arg1 = $event_id and bt.id = es.id and es.kind = $(Int(Nostr.REPOST)) and bt.pubkey = $pubkey
+        "
+        push!(res, event_from_row(collect(r)))
+    end
+    res
 end
 
 end

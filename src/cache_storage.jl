@@ -1205,6 +1205,8 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
                 ext_reply(est, e, parent_eid)
             end
 
+            import_replies_to_replies(est, e)
+
             fetch_missing_events(est, e)
 
         elseif e.kind == Int(Nostr.DIRECT_MESSAGE)
@@ -1462,6 +1464,70 @@ function parse_parent_eid(est::CacheStorage, e::Nostr.Event)
     parent_eid
 end
 
+function import_replies_to_replies(est::CacheStorage, e::Nostr.Event)
+    notified_pks = Set()
+
+    # replies in thread
+
+    chain = []
+    for (eid,) in Postgres.execute(:p0, "select p.event_id from thread_view_parent_posts(\$1) p", [e.id])[2]
+        eid = Nostr.EventId(eid)
+        if eid in est.events
+            e1 = est.events[eid]
+            pks = Set()
+            push!(chain, (eid, pks))
+            push!(pks, e1.pubkey)
+        end
+    end
+    chain = reverse(chain)
+    # display(chain)
+
+    if !(length(chain) <= 2 || length(chain) > 15)
+        for i in 1:length(chain)-1
+            (eid, pks) = chain[i]
+            # @show (:reply, eid, pks)
+            for pk in pks
+                pk in notified_pks && continue
+                notification(est, pk, e.created_at, REPLY_TO_REPLY,
+                             #= your_post =# eid, #= who_replied_to_it =# e.pubkey, #= reply =# e.id)
+                push!(notified_pks, pk)
+            end
+        end
+    end
+
+    # mentions in thread
+
+    chain = []
+    for (eid,) in Postgres.execute(:p0, "select p.event_id from thread_view_parent_posts(\$1) p", [e.id])[2]
+        eid = Nostr.EventId(eid)
+        if eid in est.events
+            e1 = est.events[eid]
+            pks = Set()
+            push!(chain, (eid, pks))
+            for_mentiones(est, e1; pubkeys_in_content=true) do tag
+                if tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                    push!(pks, pk)
+                end
+            end
+        end
+    end
+    chain = reverse(chain)
+    # display(chain)
+
+    if !(length(chain) <= 1 || length(chain) > 15)
+        for i in 1:length(chain)-1
+            (eid, pks) = chain[i]
+            # @show (:mention, eid, pks)
+            for pk in pks
+                pk in notified_pks && continue
+                notification(est, pk, e.created_at, REPLY_TO_REPLY,
+                             #= your_post =# eid, #= who_replied_to_it =# e.pubkey, #= reply =# e.id)
+                push!(notified_pks, pk)
+            end
+        end
+    end
+end
+
 function import_contact_list(est::CacheStorage, e::Nostr.Event; notifications=true, newonly=false)
     old_follows = Set{Nostr.PubKeyId}()
 
@@ -1549,6 +1615,7 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
 end
 
 function import_delete_event(est::CacheStorage, e::Nostr.Event; dryrun=false)
+    # @show e.id
     deleted = Ref(false)
 
     function delete_event(eid)
@@ -1568,6 +1635,20 @@ function import_delete_event(est::CacheStorage, e::Nostr.Event; dryrun=false)
                     de = est.events[eid]
                     if de.pubkey == e.pubkey
                         delete_event(eid)
+                        if de.kind == Int(Nostr.REPOST)
+                            for tag2 in de.tags
+                                if length(tag2.fields) >= 2 && tag2.fields[1] == "e"
+                                    if !isnothing(local reid = try Nostr.EventId(tag2.fields[2]) catch _ end)
+                                        # @show (de.pubkey, de.id, reid)
+                                        if !dryrun
+                                            Postgres.execute(:p0, "update event_pubkey_actions set reposted = 0 where event_id = \$1 and pubkey = \$2", [reid, de.pubkey])
+                                            Postgres.execute(:p0, "delete from event_pubkey_action_refs where ref_event_id = \$1 and ref_pubkey = \$2", [de.id, de.pubkey])
+                                            Postgres.execute(:p0, "update event_stats set reposts = reposts - 1 where event_id = \$1", [reid])
+                                        end
+                                    end
+                                end
+                            end
+                        end
                     end
                 end
             end

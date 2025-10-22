@@ -188,6 +188,8 @@ SELECT
 
     WHEN 501 THEN user_is_human(arg2, a_user_pubkey)
 
+    WHEN 601 THEN user_is_human(arg2, a_user_pubkey)
+
     ELSE false
 
     END CASE

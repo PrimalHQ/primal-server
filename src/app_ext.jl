@@ -1294,6 +1294,7 @@ function get_notifications(
                                 ]
     elseif type_group == :replies; [
                                     DB.YOUR_POST_WAS_REPLIED_TO,
+                                    DB.REPLY_TO_REPLY,
                                    ]
     elseif type_group == :mentions; [
                                      DB.YOU_WERE_MENTIONED_IN_POST,
