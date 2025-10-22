@@ -435,6 +435,7 @@ impl ReqHandlers {
                   and lep.kind = 30311 
                   and lep.created_at >= extract(epoch from now() - interval '1h')::int8
                   and not exists (select 1 from live_event_pubkey_filterlist lepf where lepf.user_pubkey = pf.follower_pubkey and lepf.blocked_pubkey = lep.participant_pubkey)
+                  and not live_feed_is_hidden(lep.event_id, $1, live_feed_hosts(lep.kind, lep.pubkey, lep.identifier), 'moderated')
                 "#,
                 &[&user_pubkey]).await?);
 
@@ -454,7 +455,7 @@ impl ReqHandlers {
 
     async fn find_live_events(_conn_id: i64, _sub_id: &str, kwargs: &Value, pool: &Pool) -> Result<(ReqStatus, Response), ReqError> {
         let host_pubkey = kwargs["host_pubkey"].as_str().and_then(|v| hex::decode(v.to_string()).ok()).ok_or("host_pubkey argument required")?;
-        let identifier = kwargs["identifier"].as_str().ok_or("identifier argument required")?;
+        let identifier = kwargs.get("identifier").and_then(|v| v.as_str());
 
         let res = Self::rows_to_vec(
             &Self::pool_get(&pool).await?.query(
@@ -463,10 +464,12 @@ impl ReqHandlers {
                 from live_event_participants lep
                 where lep.kind = 30311 
                   and lep.participant_pubkey = $1
-                  and lep.identifier = $2
+                  and ($2::varchar is null or lep.identifier = $2::varchar)
                   and lep.created_at >= extract(epoch from now() - interval '1h')::int8
                 "#,
                 &[&host_pubkey, &identifier]).await?);
+
+        dbg!(&res);
 
         let res = res.iter().map(|s| crate::shared::utils::fixup_live_event_p_tags_str(s.clone())).collect::<_>();
 

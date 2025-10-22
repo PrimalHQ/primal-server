@@ -134,12 +134,21 @@ async fn main() -> Result<(), Error> {
     let pool = make_dbconn_pool("127.0.0.1", 54017, "pr", "primal1", 16, Some(30000));
     let membership_pool = make_dbconn_pool("192.168.11.7", 5432, "primal", "primal", 16, None);
 
-    // Test database connections
-    {
-        management_pool.get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
-        pool.get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
-        membership_pool.get().await.unwrap().query_one("select 1", &[]).await.unwrap().get::<_, i32>(0);
+    // Initial health check on startup
+    eprintln!("ws-connector: Performing initial PostgreSQL health checks...");
+    if let Err(e) = check_postgresql_health(&management_pool, "management_pool").await {
+        eprintln!("ws-connector: Initial health check failed: {}", e);
+        std::process::exit(1);
     }
+    if let Err(e) = check_postgresql_health(&pool, "pool").await {
+        eprintln!("ws-connector: Initial health check failed: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = check_postgresql_health(&membership_pool, "membership_pool").await {
+        eprintln!("ws-connector: Initial health check failed: {}", e);
+        std::process::exit(1);
+    }
+    eprintln!("ws-connector: All initial PostgreSQL health checks passed");
 
     // Signal handlers
     {
@@ -208,6 +217,35 @@ async fn main() -> Result<(), Error> {
                     loop {
                         interval.tick().await;
                         print_status(&state, &pool, &membership_pool).await;
+                    }
+                });
+            }
+
+            // PostgreSQL health check task
+            {
+                let management_pool = management_pool.clone();
+                let pool = pool.clone();
+                let membership_pool = membership_pool.clone();
+                tokio::task::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_millis(15000));
+                    loop {
+                        interval.tick().await;
+
+                        let mut failed = false;
+                        if let Err(_) = check_postgresql_health(&management_pool, "management_pool").await {
+                            failed = true;
+                        }
+                        if let Err(_) = check_postgresql_health(&pool, "pool").await {
+                            failed = true;
+                        }
+                        if let Err(_) = check_postgresql_health(&membership_pool, "membership_pool").await {
+                            failed = true;
+                        }
+
+                        if failed {
+                            eprintln!("ws-connector: PostgreSQL health check failed, exiting");
+                            std::process::exit(1);
+                        }
                     }
                 });
             }
@@ -445,6 +483,27 @@ fn make_dbconn_pool(host: &str, port: u16, username: &str, dbname: &str, size: u
     };
     let mgr = Manager::from_config(pg_config, NoTls, mgr_config);
     Pool::builder(mgr).max_size(size).build().unwrap()
+}
+
+async fn check_postgresql_health(pool: &Pool, pool_name: &str) -> Result<(), String> {
+    match pool.get().await {
+        Ok(client) => {
+            match client.query_one("SELECT 1", &[]).await {
+                Ok(_) => {
+                    eprintln!("ws-connector: PostgreSQL health check passed for {}", pool_name);
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("ws-connector: PostgreSQL health check failed for {} - query error: {}", pool_name, e);
+                    Err(format!("Query failed: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("ws-connector: PostgreSQL health check failed for {} - connection error: {}", pool_name, e);
+            Err(format!("Connection failed: {}", e))
+        }
+    }
 }
 
 async fn read_var(management_pool: &Pool, name: &str) -> Value {
