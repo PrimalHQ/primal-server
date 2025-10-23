@@ -379,7 +379,7 @@ end
 function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
     event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, :reply, 10))
 
-    event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_REPLIED_TO, e.id))
+    # event_hook(est, parent_eid, (:notifications_cb, YOUR_POST_WAS_REPLIED_TO, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO, e.id, e.id))
     event_hook(est, parent_eid, (:notifications_cb, POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO, "make_event_hooks", e.id, e.id))
 end

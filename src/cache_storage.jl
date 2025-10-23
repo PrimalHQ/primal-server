@@ -1205,7 +1205,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
                 ext_reply(est, e, parent_eid)
             end
 
-            import_replies_to_replies(est, e)
+            import_reply_notifications(est, e)
 
             fetch_missing_events(est, e)
 
@@ -1464,8 +1464,19 @@ function parse_parent_eid(est::CacheStorage, e::Nostr.Event)
     parent_eid
 end
 
-function import_replies_to_replies(est::CacheStorage, e::Nostr.Event)
+function import_reply_notifications(est::CacheStorage, e::Nostr.Event)
     notified_pks = Set()
+
+    # direct reply
+    
+    if !isnothing(local parent_eid = parse_parent_eid(est, e))
+        if parent_eid in est.events
+            ep = est.events[parent_eid]
+            notification(est, ep.pubkey, e.created_at, YOUR_POST_WAS_REPLIED_TO,
+                         #= your_post =# ep.id, #= who =# e.pubkey, #= reply =# e.id)
+            push!(notified_pks, ep.pubkey)
+        end
+    end
 
     # replies in thread
 
