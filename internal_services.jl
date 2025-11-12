@@ -298,14 +298,15 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                     e = cache_storage.events[eid]
                     url = "https://$(host)/e/$(m[2])"
                     description = replace(content_refs_resolved(e), re_url => "")
-                    if e.pubkey in cache_storage.meta_data
-                        c = JSON.parse(cache_storage.events[cache_storage.meta_data[e.pubkey]].content)
-                        title = mdtitle(c)
-                        image = get(c, "picture", "")
-                    end
+
+                    md = mdpubkey(cache_storage, e.pubkey)
+                    image = md.image
+                    title = md.title
+
+                    twitter_card = "summary_large_image"
+
                     media_urls = DB.exec(cache_storage.event_media, "select url from event_media where event_id = ?1 limit 1", (eid,))
                     if !isempty(media_urls)
-                        twitter_card = "summary_large_image"
                         image = media_urls[1][1]
                         thumbnails = DB.exec(cache_storage.dyn[:video_thumbnails], DB.@sql("select thumbnail_url from video_thumbnails where video_url = ?1 limit 1"), (image,))
                         if !isempty(thumbnails)
@@ -331,10 +332,18 @@ function get_meta_elements(host::AbstractString, path::AbstractString)
                                 if length(t.fields) >= 2
                                     t.fields[1] == "title" && (title = t.fields[2])
                                     t.fields[1] == "summary" && (description = t.fields[2])
-                                    t.fields[1] == "image" && (image = t.fields[2])
+                                    if t.fields[1] == "image"
+                                        image = t.fields[2]
+                                        for (media_url,) in Postgres.execute(:p0, "select media_url from media where url = \$1 and size = 'medium' and animated = 0 limit 1", [image])[2]
+                                            image = media_url
+                                        end
+                                    end
                                 end
                             end
                             twitter_card = "summary_large_image"
+                            if isempty(image)
+                                image = mdpubkey(cache_storage, e.pubkey).image
+                            end
                         end
                     end
                 end
