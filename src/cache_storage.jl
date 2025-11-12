@@ -1506,6 +1506,18 @@ function import_reply_notifications(est::CacheStorage, e::Nostr.Event)
         end
     end
 
+    # mentions in note
+    
+    for_mentiones(est, e; pubkeys_in_content=true) do tag
+        if tag.fields[1] == "p" 
+            if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                notification(est, pk, e.created_at, YOU_WERE_MENTIONED_IN_POST,
+                             #= their_post =# e.id, #= mentioned_by =# e.pubkey)
+                push!(notified_pks, pk)
+            end
+        end
+    end
+
     # mentions in thread
 
     chain = []

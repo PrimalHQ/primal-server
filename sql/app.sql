@@ -63,7 +63,7 @@ CREATE OR REPLACE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope 
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
-    IF EXISTS (SELECT 1 FROM filterlist WHERE target = a_pubkey AND target_type = 'pubkey' AND blocked AND grp = 'impersonation') THEN
+    IF EXISTS (SELECT 1 FROM filterlist WHERE target = a_pubkey AND target_type = 'pubkey' AND blocked AND grp in ('impersonation', 'csam')) THEN
         RETURN true;
     END IF;
 
@@ -162,33 +162,33 @@ LANGUAGE 'sql' STABLE PARALLEL SAFE
 AS $BODY$
 SELECT
     CASE type
-    WHEN 1 THEN user_is_human(arg1, a_user_pubkey)
-    WHEN 2 THEN user_is_human(arg1, a_user_pubkey)
+    WHEN 1 THEN user_is_human(arg1, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg1)
+    WHEN 2 THEN user_is_human(arg1, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg1)
 
-    WHEN 3 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 4 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 5 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 6 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 3 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 4 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 5 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 6 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
 
-    WHEN 7 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 8 THEN user_is_human(decode(arg3 #>> '{}', 'hex'), a_user_pubkey)
+    WHEN 7 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 8 THEN user_is_human(decode(arg3 #>> '{}', 'hex'), a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', decode(arg3 #>> '{}', 'hex'))
 
-    WHEN 101 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 102 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 103 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 104 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 101 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 102 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 103 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 104 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
 
     /* WHEN 201 THEN user_is_human(arg3, a_user_pubkey) */
     /* WHEN 202 THEN user_is_human(arg3, a_user_pubkey) */
     /* WHEN 203 THEN user_is_human(arg3, a_user_pubkey) */
     /* WHEN 204 THEN user_is_human(arg3, a_user_pubkey) */
 
-    WHEN 301 THEN user_is_human(arg2, a_user_pubkey)
-    WHEN 302 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 301 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 302 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
 
-    WHEN 501 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 501 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
 
-    WHEN 601 THEN user_is_human(arg2, a_user_pubkey)
+    WHEN 601 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
 
     ELSE false
 
@@ -643,7 +643,7 @@ BEGIN
                 IF e_kind = 6 AND (
                     EXISTS (SELECT 1 FROM basic_tags WHERE id = e_id AND tag = 'p' AND is_pubkey_hidden(a_user_pubkey, 'content', arg1))
                     OR
-                    EXISTS (SELECT 1 FROM basic_tags WHERE id = e_id AND tag = 'e' AND event_is_deleted(arg1))
+                    EXISTS (SELECT 1 FROM basic_tags WHERE id = e_id AND tag = 'e' AND (event_is_deleted(arg1) OR is_event_hidden(a_user_pubkey, 'content', arg1)))
                 ) THEN
                     CONTINUE;
                 END IF;

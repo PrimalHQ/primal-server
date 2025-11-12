@@ -99,6 +99,8 @@ exposed_functions = Set([:feed,
                          # :unmute_thread,
                         
                          :update_push_notification_token,
+                         :update_push_notification_token_for_nip46,
+                         :events_nip46,
 
                          :articles_stats,
                          :drafts,
@@ -4019,7 +4021,7 @@ function parse_event_from_user_for_push_notification_token(event_from_user::Dict
     e.created_at < time() + 300 || error("event from the future")
     Nostr.verify(e) || error("event_from_user verification failed")
     d = JSON.parse(e.content)
-    (; e, token=d["token"])
+    (; e, token=d["token"], d)
 end
 
 function update_push_notification_token(est::DB.CacheStorage; events_from_users::Vector, platform::String, token::String, environment=nothing)
@@ -4035,6 +4037,35 @@ function update_push_notification_token(est::DB.CacheStorage; events_from_users:
         end
     end
     []
+end
+
+function update_push_notification_token_for_nip46(est::DB.CacheStorage; events_from_users::Vector, platform::String, token::String, environment=nothing)
+    platform = lowercase(platform)
+    tokens = [parse_event_from_user_for_push_notification_token(e) for e in events_from_users]
+    Postgres.transaction(:membership) do sess
+        Postgres.execute(sess, "delete from nip46_notification_tokens where platform = \$1 and token = \$2", [platform, token])
+        for t in tokens
+            @assert t.token == token
+            Postgres.execute(sess, "insert into nip46_notification_tokens values (\$1, \$2, \$3, \$4, now(), \$5, \$6)", 
+                             [platform, token, t.e.pubkey, JSON.json(t.d["relays"]), environment, JSON.json(t.e)])
+        end
+    end
+    []
+end
+
+function events_nip46(est::DB.CacheStorage; event_ids::Vector)
+    res = []
+    session = Postgres.make_session(Postgres.PGConnStr("host=192.168.44.7 port=54017 dbname=primal1 user=pr"))
+    try
+        for eid in event_ids 
+            eid = castmaybe(eid, Nostr.EventId)
+            e = event_from_row(Postgres.execute(session, "select * from nip46_events where id = \$1", [eid])[2][1])
+            push!(res, e)
+        end
+    finally
+        try close(session) catch _ end
+    end
+    res
 end
 
 function articles_stats(est::DB.CacheStorage; pubkey, kind=30023)

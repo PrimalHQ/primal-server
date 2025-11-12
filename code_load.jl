@@ -15,7 +15,8 @@ function get_changed_code(; directory=pwd(), target_server=nothing)
     end
 
     # Initialize result dictionary
-    changed_code = Dict{String,Vector{Expr}}()
+    # changed_code = Dict{String,Vector{Expr}}()
+    changed_code = Dict{String,Vector}()
     
     # Get list of modified and added .jl files using git status
     status_output = ex("git status --porcelain --ignore-submodules=all")
@@ -140,8 +141,8 @@ function extract_changed_parts(old_ast::Expr, new_ast::Expr)
         end
     end
     
-    @show changed_functions
-    @show changed_globals
+    # @show changed_functions
+    # @show changed_globals
 
     # Extract the actual code for changed parts
     changed_code = Expr[]
@@ -288,7 +289,7 @@ function get_changed_sql_elements(filename::String, new_content::String, old_con
         end
     end
     
-    @show length(changed_elements), "SQL elements changed"
+    # @show length(changed_elements), "SQL elements changed"
     
     return changed_elements
 end
@@ -404,40 +405,61 @@ function normalize_sql(sql::String)
     return strip(sql)
 end
 
-function load_changed_code(; directory=pwd(), target_server=nothing, target_node=17, dry_run=false)
+function load_changed_code(; directory=pwd(), target_server=nothing, target_node=17, dry_run=false, verbose=false)
+    @show directory
     for (mod, changes) in get_changed_code(; directory, target_server)
         if endswith(mod, ".sql")
-            # Handle SQL files differently - just print the changes
-            if dry_run || true  # Always dry-run for SQL for now
-                println("================================")
-                println("SQL FILE: $mod")
-                for element in changes
-                    println(element)
-                    println("===============")
+            println("SQL FILE: $mod")
+            for element in changes
+                if verbose; println(expr); else println(first(string(element), 80), "..."); end
+                if !dry_run
+                    if isnothing(target_server)
+                        Main.Postgres.execute(:p0, element)
+                    else
+                        rex(target_server, target_node, :(Main.Postgres.execute(:p0, $element)))
+                    end
                 end
-                println()
+                verbose && println("===============")
             end
+            println("$mod: $(length(changes)) changes loaded")
         else
             # Handle Julia modules
             mod = Symbol(mod)
-            if dry_run
-                println("================================")
-                println("MODULE: $mod")
-                for expr in changes
-                    println(expr)
-                    println("===============")
-                end
-                println()
-            else
-                for expr in changes
+            println("MODULE: $mod")
+            for expr in changes
+                if verbose; println(expr); else println(first(string(expr), 80), "..."); end
+                if !dry_run
                     if isnothing(target_server)
                         getproperty(Main, mod).eval(expr)
                     else
                         rex(target_server, target_node, :(Main.$mod.eval($(QuoteNode(expr)))))
                     end
                 end
-                println("$mod: $(length(changes)) changes loaded")
+                verbose && println("===============")
             end
+            println("$mod: $(length(changes)) changes loaded")
+        end
+    end
+end
+
+function load_changed_code_on_all_servers(; 
+        directory=pwd(), 
+        target_nodes=[
+                      (30, 31), (30, 32), (30, 33), (30, 34), (30, 35), (30, 36), (30, 18),
+                      (34, 31), (34, 32), (34, 33), (34, 34), (34, 35), (34, 36), (34, 18),
+                      (33, 31), (33, 18),
+                     ], 
+        dry_run=false, verbose=false, async=false)
+    if async
+        asyncmap(target_nodes; ntasks=100) do x
+            (target_server, target_node) = x
+            println("========= server:node $target_server:$target_node =========")
+            load_changed_code(; directory, target_server, target_node, dry_run, verbose)
+        end
+    else
+        for (target_server, target_node) in target_nodes
+            println("========= server:node $target_server:$target_node =========")
+            load_changed_code(; directory, target_server, target_node, dry_run, verbose)
         end
     end
 end

@@ -324,7 +324,7 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
     for_mentiones(est, e; pubkeys_in_content=true) do tag
         if tag.fields[1] == "p" 
             if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                event_hook(est, e.id, (:notifications_cb, YOU_WERE_MENTIONED_IN_POST, pk))
+                # event_hook(est, e.id, (:notifications_cb, YOU_WERE_MENTIONED_IN_POST, pk))
             end
         elseif tag.fields[1] == "e" 
             if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
@@ -333,6 +333,9 @@ function ext_text_note(est::CacheStorage, e::Nostr.Event)
                     if !ext_is_hidden(est, e.id)
                         event_hook(est, eid, (:event_stats_cb, :reposts, +1))
                         event_hook(est, eid, (:score_event_cb, e.pubkey, e.created_at, :repost, 7))
+                        # event_pubkey_action(est, eid, e, :reposted)
+                        # exe(est.event_pubkey_action_refs, @sql("insert into event_pubkey_action_refs values (?1, ?2, ?3, ?4, ?5)"), 
+                        #     eid, e.id, e.pubkey, e.created_at, 50_000_001)
                     end
                 catch ex
                     PRINT_EXCEPTIONS[] && Utils.print_exceptions()
