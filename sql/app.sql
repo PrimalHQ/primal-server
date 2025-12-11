@@ -28,6 +28,7 @@ CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_LEGEND_CUSTOMIZATION() RETURNS in
 CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_COHORTS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000169';
 /* CREATE OR REPLACE FUNCTION public.c_COLLECTION_ORDER() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000161'; */
 CREATE OR REPLACE FUNCTION public.c_LIVE_EVENT_STATS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000176';
+CREATE OR REPLACE FUNCTION public.c_MEDIA_HLS_URLS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000178';
 
 -- types
 
@@ -318,6 +319,39 @@ BEGIN
             'kind', c_MEDIA_METADATA(),
             'content', res::text);
     END IF;
+
+    DECLARE
+        res jsonb := jsonb_build_object('event_id', ENCODE(a_event_id, 'hex'));
+        cnt int8 := 0;
+    BEGIN
+        -- res[r.url] = [{"provider": r.provider, "hls_url": r.hls_url}, ...]
+        FOR r IN SELECT url, provider, hls_url FROM event_hls_media WHERE event_id = a_event_id LOOP
+            cnt := cnt + 1;
+            IF res ? r.url THEN
+                res := jsonb_set(
+                    res,
+                    array[r.url],
+                    (res -> r.url) || jsonb_build_array(jsonb_build_object(
+                        'provider', r.provider,
+                        'hls_url', r.hls_url))
+                );
+            ELSE
+                res := jsonb_set(
+                    res,
+                    array[r.url],
+                    jsonb_build_array(jsonb_build_object(
+                        'provider', r.provider,
+                        'hls_url', r.hls_url))
+                );
+            END IF;
+        END LOOP;
+        IF cnt > 0 THEN
+            RETURN NEXT jsonb_build_object(
+                'kind', c_MEDIA_HLS_URLS(),
+                'content', res::text
+            );
+        END IF;
+    END;
 END $BODY$;
 
 CREATE OR REPLACE FUNCTION public.event_preview_response(a_event_id bytea) RETURNS SETOF jsonb 
@@ -1241,6 +1275,7 @@ from (values ('small', 'medium'), ('medium', 'large'), ('large', 'large'), ('ori
        left join media_storage ms on ms.h = split_part(split_part(m.media_url, '/', -1), '.', 1)
        left join media_storage_priority msp on ms.storage_provider = msp.storage_provider
 where m.url = a_url and m.size = sz.newsize and ms.media_block_id is null
+  and not (m.mimetype like 'video/%' and m.animated = 0)
 order by m.animated desc, m.media_url, msp.priority
 $BODY$;
 

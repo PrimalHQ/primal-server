@@ -1,6 +1,7 @@
 ##
 import Base64, JSON
 using Serialization: serialize, deserialize
+import IOCapture
 FirehoseServer.message_processors[:server] = function (msg)
     if startswith(msg, "[\"EVAL\"")
         try

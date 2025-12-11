@@ -1281,7 +1281,7 @@ function get_notifications(
     )
     # limit <= 1000 || error("limit too big")
     # limit = min(limit, 1000) # iOS app was requesting limit=~13000
-    limit = min(limit, 100)
+    limit = min(limit, 50)
 
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
@@ -1418,6 +1418,9 @@ function get_notifications(
 
     # @time "resp" append!(res, response_messages_for_posts(est, collect(map(first, posts)); res_meta_data, user_pubkey, time_exceeded))
     
+    t = Utils.current_time()
+    posts = collect(Set([(eid, t) for (eid, _) in posts]))
+
     # @time "resp" begin
     append!(res, enrich_feed_events_pg(est; posts, user_pubkey, apply_humaness_check=false))
     for md in values(res_meta_data)

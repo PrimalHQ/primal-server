@@ -182,6 +182,8 @@ RECOMMENDED_BLOSSOM_SERVERS=10_000_175
 
 INVOICES_TO_ZAP_RECEIPTS=10_000_177
 
+MEDIA_HLS_URLS=10_000_178
+
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
@@ -3718,6 +3720,20 @@ function membership_media_management_delete(est::DB.CacheStorage; event_from_use
     isempty(Postgres.execute(:membership, "select 1 from media_uploads where sha256 = \$1 and pubkey = \$2", [sha256, e.pubkey])[2]) && error("invalid url")
 
     String(HTTP.request("POST", "$(MEDIA_SERVER_HOST[])/purge-media", [], JSON.json((; e.pubkey, url=surl, reason="deleted"))).body) == "ok" || error("deletion failed")
+
+    # Update total used storage in memberships table by summing all distinct uploads for this user
+    Postgres.execute(:membership, "
+        update memberships
+        set used_storage = (
+            select coalesce(sum(size), 0)
+            from (
+                select distinct on (sha256) size
+                from media_uploads
+                where pubkey = \$1 and sha256 is not null and media_block_id is null
+            ) distinct_uploads
+        )
+        where pubkey = \$1
+    ", [e.pubkey])
 
     []
 catch _

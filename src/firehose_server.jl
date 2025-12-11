@@ -116,7 +116,13 @@ function start_reader_task(sock)
                                          push!(latest_exceptions, (s, mproc, ex))
                                          ["ERROR", string(typeof(ex))]
                                      end
-                                     try println(sock, JSON.json(r)) catch _ end
+                                     try 
+                                         # @show (isopen(sock), isreadable(sock), iswritable(sock), JSON.json(r))
+                                         println(sock, JSON.json(r)) 
+                                         flush(sock)
+                                     catch ex
+                                         println(ex)
+                                     end
                                  end
                              end
                          end
