@@ -102,6 +102,7 @@ exposed_functions = Set([:feed,
                          :update_push_notification_token,
                          :update_push_notification_token_for_nip46,
                          :events_nip46,
+                         :get_queued_events_for_nip46,
 
                          :articles_stats,
                          :drafts,
@@ -4209,15 +4210,18 @@ function update_push_notification_token(est::DB.CacheStorage; events_from_users:
     []
 end
 
-function update_push_notification_token_for_nip46(est::DB.CacheStorage; events_from_users::Vector, platform::String, token::String, environment=nothing)
+function update_push_notification_token_for_nip46(est::DB.CacheStorage; events_from_users::Vector, platform::String, token::String, environment=nothing, scope="nip46")
+    @show (events_from_users, platform, token, environment)
     platform = lowercase(platform)
     tokens = [parse_event_from_user_for_push_notification_token(e) for e in events_from_users]
     Postgres.transaction(:membership) do sess
-        Postgres.execute(sess, "delete from nip46_notification_tokens where platform = \$1 and token = \$2", [platform, token])
+        Postgres.execute(sess, "delete from monitoring_notification_tokens where platform = \$1 and token = \$2", [platform, token])
         for t in tokens
             @assert t.token == token
-            Postgres.execute(sess, "insert into nip46_notification_tokens values (\$1, \$2, \$3, \$4, now(), \$5, \$6)", 
-                             [platform, token, t.e.pubkey, JSON.json(t.d["relays"]), environment, JSON.json(t.e)])
+            @show t
+            client_pks = '{'*join(["\\\\x"*Nostr.hex(Nostr.PubKeyId(pk)) for pk in t.d["clientPubKeys"]], ',')*'}'
+            @show Postgres.execute(sess, "insert into monitoring_notification_tokens values (\$1, \$2, \$3, \$4, now(), \$5, \$6, \$7::bytea[], \$8)",
+                             [platform, token, t.e.pubkey, JSON.json(t.d["relays"]), environment, JSON.json(t.e), client_pks, scope])
         end
     end
     []
@@ -4229,13 +4233,26 @@ function events_nip46(est::DB.CacheStorage; event_ids::Vector)
     try
         for eid in event_ids 
             eid = castmaybe(eid, Nostr.EventId)
-            e = event_from_row(Postgres.execute(session, "select * from nip46_events where id = \$1", [eid])[2][1])
+            e = event_from_row(Postgres.execute(session, "select * from monitoring_events where id = \$1", [eid])[2][1])
             push!(res, e)
         end
     finally
         try close(session) catch _ end
     end
     res
+end
+
+function get_queued_events_for_nip46(est::DB.CacheStorage; event_from_signer)
+    @show (:get_queued_events_for_nip46, event_from_signer)
+    e = Nostr.Event(event_from_signer)
+    e.created_at < time() + 300 || error("event from the future")
+    Nostr.verify(e) || error("event_from_signer verification failed")
+
+    Postgres.transaction(:membership) do sess
+        res = [e for (e,) in Postgres.execute(sess, "select event from monitoring_request_queue where remote_signer_pubkey = \$1", [e.pubkey])[2]]
+        Postgres.execute(sess, "delete from monitoring_request_queue where remote_signer_pubkey = \$1", [e.pubkey])
+        res
+    end
 end
 
 function articles_stats(est::DB.CacheStorage; pubkey, kind=30023)

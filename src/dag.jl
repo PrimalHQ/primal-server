@@ -1276,7 +1276,7 @@ function reads_node(
                             if t.fields[1] == "published_at"
                                 published_at = parse(Int, t.fields[2])
                             end
-                            if t.fields[1] == "image"
+                            if t.fields[1] == "image" && t.fields[2] isa String
                                 image = t.fields[2]
                             end
                             if t.fields[1] == "summary"
@@ -1878,6 +1878,7 @@ function import_event_mentions(est::DB.CacheStorage, event_mentions::ServerTable
                 if !isnothing(local args = try
                                   kind, pk, identifier = map(string, split(tag[2], ':'))
                                   kind = parse(Int, kind)
+                                  identifier = String(map(c -> isvalid(c) ? c : '\ufffd', collect(identifier)))
                                   (Nostr.PubKeyId(pk), kind, identifier)
                               catch _ end)
                     argpubkey, argkind, argid = args

@@ -598,6 +598,10 @@ function preview_handler(req::HTTP.Request)
             return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json", cache_headers...]), read(APPLE_APP_SITE_ASSOCIATION_FILE[], String))
         elseif req.target == "/.well-known/assetlinks.json"
             return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json", cache_headers...]), read(ANDROID_ASSETLINKS_FILE[], String))
+        elseif req.target == "/.well-known/remote-signer-nip46-defaults.json"
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json", cache_headers...]), read("$(Main.content_moderation_dir)/remote-signer-nip46-defaults.json", String))
+        elseif req.target == "/.well-known/remote-signer-nip46-permissions.json"
+            return HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json", cache_headers...]), read("$(Main.content_moderation_dir)/remote-signer-nip46-permissions.json", String))
         end
 
         host = Dict(req.headers)["Host"]

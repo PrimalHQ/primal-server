@@ -24,6 +24,7 @@ function notification_counter_update(est, notif)
             end
         catch ex
             println("notification_counter_update: ", typeof(ex))
+            Utils.print_exceptions()
         end
         if !(notif.pubkey in est.pubkey_notification_cnts)
             DB.exe(est.pubkey_notification_cnts, DB.@sql("insert into pubkey_notification_cnts (pubkey) values (?1)"), notif.pubkey)
