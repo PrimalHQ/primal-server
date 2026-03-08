@@ -76,6 +76,9 @@ impl ReqHandlers {
             "find_live_events" => {
                 Self::find_live_events(conn_id, sub_id, kwargs, pool).await
             }
+            "events" => {
+                Self::events(conn_id, sub_id, kwargs, pool, primal_pubkey).await
+            }
             _ => Ok((ReqStatus::NotHandled, Response::empty()))
         }
     }
@@ -576,6 +579,49 @@ impl ReqHandlers {
         let res = res.iter().map(|s| crate::shared::utils::fixup_live_event_p_tags_str(s.clone())).collect::<_>();
 
         Ok((ReqStatus::Handled, Response { messages: res, registrations: vec![]}))
+    }
+
+    async fn events(_conn_id: i64, _sub_id: &str, kwargs: &Value, pool: &Pool, primal_pubkey: &Option<Vec<u8>>) -> Result<(ReqStatus, Response), ReqError> {
+        let extended_response = kwargs.get("extended_response").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !extended_response {
+            return Ok((ReqStatus::NotHandled, Response::empty()));
+        }
+
+        let event_ids = match kwargs.get("event_ids").and_then(|v| v.as_array()) {
+            Some(arr) if !arr.is_empty() => arr,
+            _ => return Ok((ReqStatus::NotHandled, Response::empty())),
+        };
+
+        // Validate event_ids are valid hex strings
+        let hex_ids: Vec<&str> = event_ids.iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| s.len() == 64 && hex::decode(s).is_ok())
+            .collect();
+
+        if hex_ids.is_empty() {
+            return Ok((ReqStatus::NotHandled, Response::empty()));
+        }
+
+        let user_pubkey =
+            if let Some(v) = kwargs["user_pubkey"].as_str() {
+                hex::decode(v.to_string()).ok()
+            } else { primal_pubkey.clone() };
+
+        let apply_humaness_check = true;
+        let orderby = "created_at";
+
+        let event_ids_json = json!(hex_ids);
+
+        let res = Self::rows_to_vec(
+            &Self::pool_get(&pool).await?.query(
+                r#"select distinct e::text from enrich_feed_events(
+                    array(select row(e.id, e.created_at)::post from events e
+                          where e.id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($1::jsonb) x(a)))),
+                    $2, $3, $4
+                ) f(e) where e is not null"#,
+                &[&event_ids_json, &user_pubkey, &apply_humaness_check, &orderby]).await?);
+
+        Ok((ReqStatus::Handled, Response::messages(res)))
     }
 }
 
