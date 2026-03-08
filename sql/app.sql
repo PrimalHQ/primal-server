@@ -924,17 +924,15 @@ BEGIN
 
     RETURN QUERY SELECT * FROM enrich_feed_events(
         ARRAY (
-            select (e.id, e.created_at)::post
+            select (e.id, pe.created_at)::post
             from
-                events e
-                LEFT JOIN pubkey_events pe ON pe.event_id = e.id
+                pubkey_events pe
+                JOIN events e ON e.id = pe.event_id
             where
-                e.pubkey = a_pubkey and e.created_at >= a_since and e.created_at <= a_until and
-                e.kind = ANY(a_kinds) and
-                (
-                    pe.event_id IS NULL OR pe.is_reply = a_include_replies
-                )
-            order by e.created_at desc limit a_limit offset a_offset
+                pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and
+                pe.is_reply = a_include_replies and
+                e.kind = ANY(a_kinds)
+            order by pe.created_at desc limit a_limit offset a_offset
         ),
         a_user_pubkey, a_apply_humaness_check);
 END
