@@ -29,7 +29,7 @@ hashfunc(::Type{Nostr.PubKeyId}) = pk->pk.pk[32]
 hashfunc(::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) = p->p[1].pk[32]
 
 MAX_MESSAGE_SIZE = Ref(500_000) |> ThreadSafe
-kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT, Nostr.REPORTING]]
+kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT, Nostr.REPORTING, Nostr.POLL, Nostr.POLL_VOTE, Nostr.ZAP_POLL]]
 
 term_lines = try parse(Int, strip(read(`tput lines`, String))) catch _ 15 end
 threadprogress = Dict{Int, Any}() |> ThreadSafe
@@ -179,7 +179,8 @@ function catch_exception(body::Function, est::EventStorage, args...)
         body()
     catch ex
         incr(est, :exceptions)
-        push!(est.commons.exceptions, (Dates.now(), ex, args...))
+        callstack = 1==0 ? Utils.get_exceptions() : ""
+        push!(est.commons.exceptions, (; t=Dates.now(), ex, args, callstack))
         PRINT_EXCEPTIONS[] && print_exceptions()
     end
 end
@@ -718,9 +719,13 @@ function track_user_stats(body::Function, est::CacheStorage, pubkey::Nostr.PubKe
     end
 end
 
-function event_pubkey_action(est::CacheStorage, eid::Nostr.EventId, re::Nostr.Event, action::Symbol)
-    exe(est.event_pubkey_actions, @sql("insert into event_pubkey_actions values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) on conflict do nothing"), 
+function init_event_pubkey_action(est::CacheStorage, eid::Nostr.EventId, re::Nostr.Event)
+    exe(est.event_pubkey_actions, @sql("insert into event_pubkey_actions values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) on conflict do nothing"),
         eid, re.pubkey, re.created_at, 0, false, false, false, false)
+end
+
+function event_pubkey_action(est::CacheStorage, eid::Nostr.EventId, re::Nostr.Event, action::Symbol)
+    init_event_pubkey_action(est, eid, re)
     exe(est.event_pubkey_actions, "update event_pubkey_actions set $(action) = 1, updated_at = ?3 where event_id = ?1 and pubkey = ?2", 
         eid, re.pubkey, re.created_at)
     exe(est.event_pubkey_action_refs, @sql("insert into event_pubkey_action_refs values (?1, ?2, ?3, ?4, ?5)"), 
@@ -1095,7 +1100,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     begin
         local is_pubkey_event = false
         local is_reply = false
-        if e.kind == Int(Nostr.TEXT_NOTE)
+        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL)
             is_pubkey_event = true
             for tag in e.tags
                 if length(tag.fields) >= 2 && (tag.fields[1] == "e" || tag.fields[1] == "a")
@@ -1364,6 +1369,10 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             import_follow_list_media(est, e)
         elseif e.kind == Int(Nostr.REPORTING)
             IMPORT_REPORTING_EVENTS[] && import_reporting(est, e)
+        elseif e.kind == Nostr.POLL
+            init_event_pubkey_action(est, e.id, e)
+        elseif e.kind == Nostr.ZAP_POLL
+            init_event_pubkey_action(est, e.id, e)
         end
     end
 

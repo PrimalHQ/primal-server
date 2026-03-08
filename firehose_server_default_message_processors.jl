@@ -81,7 +81,7 @@ FirehoseServer.message_processors[:server] = function (msg)
         serialize(bio, r)
         Base64.base64encode(take!(bio))
     else
-        DB.import_msg_into_storage(msg, cache_storage)
+        DB.import_msg_into_storage(msg, Main.cache_storage)
     end
 end
 ##

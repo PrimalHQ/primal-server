@@ -45,6 +45,9 @@ HIGHLIGHT=9802
 PICTURE=20 # NIP-68
 FOLLOW_PACK=39089
 REPORTING=1984
+POLL=1068
+POLL_VOTE=1018
+ZAP_POLL=6969
 
 struct Event
     id::EventId # <32-bytes lowercase hex-encoded sha256 of the the serialized event data>
@@ -66,6 +69,7 @@ end
 function dict2event(d::Dict{Symbol, Any})
     dict2event(Dict([string(k)=>v for (k, v) in d]))
 end
+dict2event(d::AbstractDict{String, Any}) = dict2event(Dict{String,Any}(d))
 function dict2event(d::Dict{String, Any})
     Event(EventId(d["id"]),
           PubKeyId(d["pubkey"]),
@@ -76,6 +80,7 @@ function dict2event(d::Dict{String, Any})
           Sig(d["sig"]))
 end
 Event(d::Dict) = dict2event(d)
+Event(d::AbstractDict) = dict2event(Dict{String,Any}(d))
 
 function event2dict(e::Event) # TODO compare with Utils.obj2dict
     Dict(:id=>JSON.lower(e.id),

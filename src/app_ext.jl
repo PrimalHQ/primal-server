@@ -250,6 +250,7 @@ function scored_content(
         apply_humaness_check=false,
         limit2=nothing,
         gm_mode=nothing,
+        kinds=nothing,
     )
     # @show (; timeframe, limit, created_after, since, until, offset, group_by_pubkey, user_pubkey, include_top_zaps, usepgfuncs, apply_humaness_check, limit2, gm_mode)
 
@@ -289,6 +290,7 @@ function scored_content(
 
     posts = [] |> ThreadSafe
     posts_filtered = Tuple{Nostr.EventId, Int}[]
+    pk_cache = Dict{Nostr.EventId, Nostr.PubKeyId}()
 
     n = limit
     while true
@@ -298,50 +300,102 @@ function scored_content(
         empty!(posts)
         if isempty(pubkeys)
             params = Any[n, offset]
+            kinds_join = ""
+            kinds_filter = ""
+            kinds_filter2 = ""
+            if !isnothing(kinds)
+                kinds_pg = "{" * join(map(string, kinds), ",") * "}"
+                push!(params, kinds_pg)
+                kinds_param_idx = length(params)
+                kinds_join = "join events ek on ek.id = es.event_id and ek.kind = any(\$$kinds_param_idx::bigint[])"
+                kinds_filter2 = "and exists (select 1 from events e where e.id = es.event_id and e.kind = any(\$$kinds_param_idx::bigint[]))"
+            end
             if group_by_pubkey
                 q_wheres = wheres()
-                extrawhere = 
+                extrawhere =
                 if     isnothing(gm_mode); ""
                 elseif gm_mode == :gmonly; "and     exists (select 1 from events e where es.event_id = e.id and (e.content ilike '%gm%' or e.content ilike '%good morning%'))"
                 elseif gm_mode == :nogm;   "and not exists (select 1 from events e where es.event_id = e.id and (e.content ilike '%gm%' or e.content ilike '%good morning%'))"
                 end
                 push!(params, user_pubkey)
-                q = "
-                with a as (
-                    select author_pubkey, max($field) as maxfield 
-                    from event_stats 
-                    where $field > 0 and $created_after <= created_at 
-                      and not is_event_hidden(\$3, 'trending', event_id)
-                      and not exists (
-                        select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
-                        where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey 
-                          and cmr.user_pubkey = \$3 and cmr.scope = 'trending' 
-                        limit 1
-                      )
-                    group by author_pubkey 
-                    order by maxfield desc 
-                    limit \$1 offset \$2
-                ) 
-                select a.author_pubkey, es.event_id, es.$field
-                from a, event_stats es
-                where a.author_pubkey = es.author_pubkey and a.maxfield = es.$field
-                and es.$field > 0 and $created_after <= es.created_at $extrawhere
-                "
+                user_pubkey_idx = length(params)
+                if !isnothing(kinds)
+                    q = "
+                    with candidates as materialized (
+                        select es.author_pubkey, es.event_id, es.$field, es.created_at
+                        from event_stats es
+                        $kinds_join
+                        where es.$field > 0 and $created_after <= es.created_at
+                    ),
+                    a as (
+                        select author_pubkey, max($field) as maxfield
+                        from candidates c
+                        where not is_event_hidden(\$$user_pubkey_idx, 'trending', c.event_id)
+                          and not exists (select 1 from filterlist where target = c.event_id and target_type = 'event' and grp = 'trending' and blocked)
+                          and not exists (
+                            select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
+                            where bt.id = c.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey
+                              and cmr.user_pubkey = \$$user_pubkey_idx and cmr.scope = 'trending'
+                            limit 1
+                          )
+                        group by author_pubkey
+                        order by maxfield desc
+                        limit \$1 offset \$2
+                    )
+                    select a.author_pubkey, es.event_id, es.$field
+                    from a, event_stats es
+                    where a.author_pubkey = es.author_pubkey and a.maxfield = es.$field
+                    and es.$field > 0 and $created_after <= es.created_at $extrawhere $kinds_filter2
+                    "
+                else
+                    q = "
+                    with a as (
+                        select author_pubkey, max($field) as maxfield
+                        from event_stats
+                        where $field > 0 and $created_after <= created_at
+                          and not is_event_hidden(\$$user_pubkey_idx, 'trending', event_id)
+                          and not exists (select 1 from filterlist where target = event_id and target_type = 'event' and grp = 'trending' and blocked)
+                          and not exists (
+                            select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
+                            where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey
+                              and cmr.user_pubkey = \$$user_pubkey_idx and cmr.scope = 'trending'
+                            limit 1
+                          )
+                        group by author_pubkey
+                        order by maxfield desc
+                        limit \$1 offset \$2
+                    )
+                    select a.author_pubkey, es.event_id, es.$field
+                    from a, event_stats es
+                    where a.author_pubkey = es.author_pubkey and a.maxfield = es.$field
+                    and es.$field > 0 and $created_after <= es.created_at $extrawhere
+                    "
+                end
             else
-                push!(where_exprs, "not is_event_hidden(\$3, 'trending', event_id)")
-                push!(where_exprs, "not exists (
-                        select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
-                        where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey 
-                          and cmr.user_pubkey = \$3 and cmr.scope = 'trending' 
-                        limit 1
-                      )")
-                push!(params, user_pubkey)
-                q_wheres = wheres()
-                # q = "with a as materialized (select author_pubkey, event_id, $field from event_stats $q_wheres) select * from a order by $field desc limit ?1 offset ?2"
-                q = "
-                select author_pubkey, event_id, $field 
-                from event_stats $q_wheres 
-                order by $field desc limit \$1 offset \$2"
+                if !isnothing(kinds) && timeframe == :latest
+                    kind_queries = ["(select pubkey, id, created_at from event where kind = $(Int(k)) and $created_after <= created_at order by created_at desc limit \$1 offset \$2)" for k in kinds]
+                    q = "select pubkey as author_pubkey, id as event_id, created_at from ($(join(kind_queries, " union all "))) t order by created_at desc limit \$1 offset \$2"
+                    params = Any[n, offset]  # reset params, kinds are inlined
+                else
+                    push!(params, user_pubkey)
+                    user_pubkey_idx = length(params)
+                    push!(where_exprs, "not is_event_hidden(\$$user_pubkey_idx, 'trending', event_id)")
+                    push!(where_exprs, "not exists (select 1 from filterlist where target = event_id and target_type = 'event' and grp = 'trending' and blocked)")
+                    push!(where_exprs, "not exists (
+                            select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
+                            where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey
+                              and cmr.user_pubkey = \$$user_pubkey_idx and cmr.scope = 'trending'
+                            limit 1
+                          )")
+                    if !isnothing(kinds)
+                        push!(where_exprs, "exists (select 1 from events e where e.id = event_id and e.kind = any(\$$kinds_param_idx::bigint[]))")
+                    end
+                    q_wheres = wheres()
+                    q = "
+                    select author_pubkey, event_id, $field
+                    from event_stats es $q_wheres
+                    order by $field desc limit \$1 offset \$2"
+                end
             end
             if 1==0
                 q2 = replace(q, r"\$[0-9]+"=>s->let v = params[parse(Int, replace(s,"\$"=>""))]
@@ -358,6 +412,7 @@ function scored_content(
                 pk = Nostr.PubKeyId(pk)
                 pk in pkseen && continue
                 push!(pkseen, pk)
+                pk_cache[Nostr.EventId(eid)] = pk
                 push!(posts, (eid, v))
             end
         else # TODO optimize db query
@@ -373,8 +428,12 @@ function scored_content(
         empty!(posts_filtered)
         for (eid, v) in posts.wrapped
             local eid = Nostr.EventId(eid)
-            local pk = DB.exe(est.event_stats, DB.@sql("select event_id, author_pubkey from event_stats where event_id = ?1"), 
-                              eid)[1][2] |> Nostr.PubKeyId
+            local pk = get(pk_cache, eid, nothing)
+            if isnothing(pk)
+                rows = DB.exe(est.event_stats, DB.@sql("select event_id, author_pubkey from event_stats where event_id = ?1"), eid)
+                isempty(rows) && continue
+                pk = Nostr.PubKeyId(rows[1][2])
+            end
             if  pk in Filterlist.access_pubkey_unblocked ||
                 !(pk in Filterlist.import_pubkey_blocked) && 
                 !(pk in Filterlist.analytics_pubkey_blocked) && 
@@ -426,7 +485,7 @@ end
 function explore_global_mostzapped(est::DB.CacheStorage, hours::Int; limit=100, user_pubkey=nothing, kwargs...)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     # with_analytics_cache(est, user_pubkey, :trending, (:explore_global_mostzapped, (; hours))) do # FIXME
-        explore(est; timeframe="mostzapped", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, kwargs...)
+        explore(est; timeframe="mostzapped", scope="global", limit, created_after=trunc(Int, time()-hours*3600), group_by_pubkey=true, user_pubkey, kwargs...)
     # end
 end
 function explore_global_mostzapped_4h(est::DB.CacheStorage; user_pubkey=nothing)
@@ -1488,7 +1547,7 @@ function user_search(est::DB.CacheStorage; query::String, limit::Int=10, pubkey:
     
     occursin("lolicon", query) && return []
 
-    length(query) < 2 && return []
+    length(query) < 1 && return []
 
     # q = "^" * repr(query) * ":*"
     q = query * ":*"

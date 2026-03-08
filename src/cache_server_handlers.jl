@@ -174,6 +174,7 @@ CacheServerHandlers.eval(quote
 app_funcalls_external = Set([
                             :feed,
                             :thread_view,
+                            :multi_kind_thread_view,
                             :contact_list,
                             :is_user_following,
                             :user_infos,
@@ -227,6 +228,7 @@ app_funcalls_with_pgfuncs = Set([
                                  :mega_feed_directive,
                                  :user_infos,
                                  :thread_view,
+                                 :multi_kind_thread_view,
                                  :feed_directive,
                                  :feed_directive_2,
                                  :explore,
@@ -423,8 +425,11 @@ function initial_filter_handler(conn::Conn, subid, filters)
         ex isa TaskFailedException && (ex = ex.task.result)
         try send_error(ex isa ErrorException ? ex.msg : UNKNOWN_ERROR_MESSAGE[]) catch _ end
         if 1==1 && !(ex isa Base.IOError)
-            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
-            # println("initial_filter_handler: ", typeof(ex))
+            if PRINT_EXCEPTIONS[]
+                println()
+                println("initial_filter_handler: subid=$subid filter=$(JSON.json(filters)) ex=$(typeof(ex))")
+                Utils.print_exceptions()
+            end
             # @show err = (; t=Main.App.Dates.now(), extype=typeof(ex), ex=string(ex), filters)
             # push!(Main.stuff, (:cache_server_handler_exception, err))
         end

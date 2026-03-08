@@ -29,6 +29,7 @@ CREATE OR REPLACE FUNCTION public.c_MEMBERSHIP_COHORTS() RETURNS int LANGUAGE sq
 /* CREATE OR REPLACE FUNCTION public.c_COLLECTION_ORDER() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000161'; */
 CREATE OR REPLACE FUNCTION public.c_LIVE_EVENT_STATS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000176';
 CREATE OR REPLACE FUNCTION public.c_MEDIA_HLS_URLS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000178';
+CREATE OR REPLACE FUNCTION public.c_POLL_STATS() RETURNS int LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT 10000179';
 
 -- types
 
@@ -98,7 +99,7 @@ $BODY$;
 CREATE OR REPLACE FUNCTION public.is_event_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_event_id bytea) RETURNS bool
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
-SELECT EXISTS (
+SELECT a_user_pubkey IS NOT NULL AND EXISTS (
     SELECT 1
     FROM public.event e
     WHERE e.id = a_event_id AND (
@@ -158,6 +159,16 @@ SELECT (
 )
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.event_has_excessive_mentions(a_event_id bytea, max_mentions int DEFAULT 50) RETURNS bool
+LANGUAGE 'sql' STABLE PARALLEL SAFE
+AS $BODY$
+SELECT EXISTS (
+    SELECT 1 FROM events e
+    WHERE e.id = a_event_id
+    AND (SELECT count(*) FROM jsonb_array_elements(e.tags) t WHERE t->>0 = 'p') > max_mentions
+)
+$BODY$;
+
 CREATE OR REPLACE FUNCTION public.notification_is_visible(type int8, arg1 bytea, arg2 bytea, arg3 jsonb, a_user_pubkey bytea) RETURNS bool
 LANGUAGE 'sql' STABLE PARALLEL SAFE
 AS $BODY$
@@ -189,7 +200,7 @@ SELECT
 
     WHEN 501 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
 
-    WHEN 601 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2)
+    WHEN 601 THEN user_is_human(arg2, a_user_pubkey) and not is_pubkey_hidden(a_user_pubkey, 'content', arg2) and not event_has_excessive_mentions(arg1)
 
     ELSE false
 
@@ -252,20 +263,23 @@ AS $BODY$
 	) a
 $BODY$;
 
-CREATE OR REPLACE FUNCTION public.event_action_cnt(a_event_id bytea, a_user_pubkey bytea) RETURNS SETOF jsonb 
+CREATE OR REPLACE FUNCTION public.event_action_cnt(a_event_id bytea, a_user_pubkey bytea) RETURNS SETOF jsonb
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
-AS $BODY$	
+AS $BODY$
 	SELECT jsonb_build_object('kind', c_EVENT_ACTIONS_COUNT(), 'content', row_to_json(a)::text)
 	FROM (
-		SELECT 
-            ENCODE(event_id, 'hex') AS event_id, 
-            replied::int4::bool, 
-            liked::int4::bool, 
-            reposted::int4::bool, 
-            zapped::int4::bool
-		FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey
-		LIMIT 1
+		SELECT
+            ENCODE(a_event_id, 'hex') AS event_id,
+            COALESCE((SELECT replied::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS replied,
+            COALESCE((SELECT liked::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS liked,
+            COALESCE((SELECT reposted::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS reposted,
+            COALESCE((SELECT zapped::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS zapped,
+            (SELECT pv.option_id FROM poll_user_votes pv
+             WHERE pv.poll_id = a_event_id AND pv.pubkey = a_user_pubkey
+             LIMIT 1) AS voted_for_option
 	) a
+	WHERE EXISTS (SELECT 1 FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey)
+	   OR EXISTS (SELECT 1 FROM poll_user_votes WHERE poll_id = a_event_id AND pubkey = a_user_pubkey)
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.event_media_response(a_event_id bytea) RETURNS SETOF jsonb 
@@ -497,15 +511,15 @@ BEGIN
 
     IF event_is_deleted(e.id) THEN
         RETURN;
-    ELSIF EXISTS (
-        SELECT 1 FROM pubkey_followers pf 
-        WHERE pf.follower_pubkey = a_user_pubkey AND e.pubkey = pf.pubkey
-    ) THEN
-        -- user follows publisher
     ELSIF is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey) THEN
         RETURN;
     ELSIF is_event_hidden(a_user_pubkey, 'content', a_event_id) THEN
         RETURN;
+    ELSIF EXISTS (
+        SELECT 1 FROM pubkey_followers pf
+        WHERE pf.follower_pubkey = a_user_pubkey AND e.pubkey = pf.pubkey
+    ) THEN
+        -- user follows publisher
     END IF;
 
     DECLARE
@@ -579,45 +593,105 @@ CREATE OR REPLACE FUNCTION public.user_follows_posts(
         a_until bigint,
         a_include_replies bigint,
         a_limit bigint,
-        a_offset bigint) 
+        a_offset bigint,
+        a_kinds bigint[] default '{1}'::bigint[])
+	RETURNS SETOF post
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+    SELECT
+        es.id,
+        es.created_at
+    FROM
+        pubkey_followers pf
+        JOIN LATERAL (
+            SELECT e.id, e.created_at
+            FROM event e
+            WHERE e.pubkey = pf.pubkey
+              AND e.kind = ANY(a_kinds)
+              AND e.created_at >= a_since - 30
+              AND e.created_at <= a_until - 30
+            ORDER BY e.created_at DESC
+            LIMIT a_limit
+        ) es ON true
+        LEFT JOIN pubkey_events pe ON pe.event_id = es.id
+    WHERE
+        pf.follower_pubkey = a_pubkey AND
+        (
+            pe.event_id IS NULL OR
+            pe.is_reply = 0 OR
+            pe.is_reply = a_include_replies
+        )
+    ORDER BY
+        es.created_at DESC
+    LIMIT
+        a_limit
+    OFFSET
+        a_offset
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.user_follows_posts_progressive(
+        a_pubkey bytea,
+        a_since bigint,
+        a_until bigint,
+        a_include_replies bigint,
+        a_limit bigint,
+        a_offset bigint,
+        a_kinds bigint[] default '{1}'::bigint[])
 	RETURNS SETOF post
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 DECLARE
-    follows_cnt int8;
+    days int := 1;
+    effective_until bigint;
+    effective_since bigint;
+    total_needed bigint := a_limit + a_offset;
+    posts post[];
+    start_ts timestamptz := clock_timestamp();
 BEGIN
-    -- a_since := a_since - 24*3600;
-    -- a_until := a_until - 24*3600;
-    a_since := a_since - 30;
-    a_until := a_until - 30;
+    effective_until := a_until;
+    LOOP
+        effective_since := GREATEST(effective_until - days * 86400, a_since);
 
-    select jsonb_array_length(es.tags) into follows_cnt from contact_lists cl, events es where cl.key = a_pubkey and cl.value = es.id;
+        posts := posts || ARRAY(SELECT r FROM user_follows_posts(
+            a_pubkey, effective_since, effective_until,
+            a_include_replies, total_needed, 0, a_kinds) r);
 
-    -- RAISE NOTICE 'user_follows_posts: % % % % % % %', a_pubkey, a_since, a_until, a_include_replies, a_limit, a_offset, follows_cnt;
+        EXIT WHEN array_length(posts, 1) >= total_needed;
+        EXIT WHEN effective_since <= a_since;
+        EXIT WHEN clock_timestamp() - start_ts > interval '7 seconds';
 
-    RETURN QUERY SELECT
-        pe.event_id,
-        pe.created_at
-    FROM
-        pubkey_events pe,
-        pubkey_followers pf
-    WHERE
-        pf.follower_pubkey = a_pubkey AND
-        pf.pubkey = pe.pubkey AND
-        pe.created_at >= a_since AND
-        pe.created_at <= a_until AND
-        (
-            pe.is_reply = 0 OR
-            pe.is_reply = a_include_replies
-        ) 
-        AND (follows_cnt < 5 OR referenced_event_is_note(pe.event_id))
-    ORDER BY
-        pe.created_at DESC
-    LIMIT
-        a_limit
-    OFFSET
-        a_offset;
+        effective_until := effective_since;
+        days := LEAST(days * 2, 64);
+    END LOOP;
+
+    RETURN QUERY SELECT * FROM unnest(posts) OFFSET a_offset LIMIT a_limit;
 END
+$BODY$;
+
+CREATE TABLE IF NOT EXISTS poll_stats (
+    event_id bytea NOT NULL PRIMARY KEY,
+    options jsonb NOT NULL,
+    updated_at bigint NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::bigint
+);
+
+
+CREATE OR REPLACE FUNCTION public.poll_stats(a_event_id bytea)
+RETURNS SETOF jsonb LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    eid_hex text;
+    cached_opts jsonb;
+BEGIN
+    SELECT options INTO cached_opts FROM poll_stats WHERE event_id = a_event_id;
+
+    IF cached_opts IS NOT NULL THEN
+        eid_hex := encode(a_event_id, 'hex');
+        RETURN NEXT jsonb_build_object(
+            'kind', c_POLL_STATS(),
+            'content', jsonb_build_object(eid_hex, cached_opts)::text);
+        RETURN;
+    END IF;
+END;
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.enrich_feed_events(
@@ -643,6 +717,7 @@ DECLARE
     identifier varchar;
     a_posts_sorted post[];
     elements jsonb := '{}';
+    poll_seen bytea[] := '{}';
 BEGIN
     IF presort THEN
         a_posts_sorted := ARRAY (SELECT (event_id, created_at)::post FROM UNNEST(a_posts) p GROUP BY event_id, created_at ORDER BY created_at DESC);
@@ -691,7 +766,12 @@ BEGIN
                     RETURN NEXT e;
                 END IF;
 
-                IF e_kind = 1 OR e_kind = 30023 THEN
+                IF (e_kind = 1068 OR e_kind = 6969) AND NOT (e_id = ANY(poll_seen)) THEN
+                    poll_seen := array_append(poll_seen, e_id);
+                    RETURN QUERY SELECT * FROM poll_stats(e_id);
+                END IF;
+
+                -- IF e_kind = 1 OR e_kind = 30023 THEN
                     /* IF NOT t.is_referenced_event THEN */
                         RETURN QUERY SELECT * FROM event_zaps(e_id, a_user_pubkey);
                     /* END IF; */
@@ -700,12 +780,14 @@ BEGIN
                         RETURN QUERY SELECT * FROM event_zaps(e_pubkey, identifier, a_user_pubkey);
                     END LOOP;
 
-                    IF    e_kind = 1     THEN RETURN QUERY SELECT * FROM event_stats(e_id);
-                    ELSIF e_kind = 30023 THEN RETURN QUERY SELECT * FROM event_stats_for_long_form_content(e_id);
+                    -- IF    e_kind = 1     THEN RETURN QUERY SELECT * FROM event_stats(e_id);
+                    -- ELSIF e_kind = 30023 THEN RETURN QUERY SELECT * FROM event_stats_for_long_form_content(e_id);
+                    IF    e_kind != 30023 THEN RETURN QUERY SELECT * FROM event_stats(e_id);
+                    ELSIF e_kind =  30023 THEN RETURN QUERY SELECT * FROM event_stats_for_long_form_content(e_id);
                     END IF;
 
                     RETURN QUERY SELECT * FROM event_action_cnt(e_id, a_user_pubkey);
-                END IF;
+                -- END IF;
 
                 IF e_kind = 1 OR e_kind = 30023 OR e_kind = 0 THEN
                     FOR r IN SELECT * FROM event_relay WHERE event_id = e_id LOOP
@@ -803,20 +885,22 @@ CREATE OR REPLACE FUNCTION public.feed_user_follows(
         a_limit bigint,
         a_offset bigint,
         a_user_pubkey bytea, 
-        a_apply_humaness_check bool) 
+        a_apply_humaness_check bool,
+        a_kinds bigint[] DEFAULT '{1}'::bigint[]) 
 	RETURNS SETOF jsonb
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
 SELECT * FROM enrich_feed_events(
     ARRAY (
         SELECT r
-        FROM user_follows_posts(
+        FROM user_follows_posts_progressive(
             a_pubkey,
             a_since,
             a_until,
             a_include_replies,
             a_limit,
-            a_offset) r),
+            a_offset,
+            a_kinds) r),
     a_user_pubkey, a_apply_humaness_check)
 $BODY$;
 
@@ -827,8 +911,9 @@ CREATE OR REPLACE FUNCTION public.feed_user_authored(
         a_include_replies bigint,
         a_limit bigint,
         a_offset bigint,
-        a_user_pubkey bytea, 
-        a_apply_humaness_check bool) 
+        a_user_pubkey bytea,
+        a_apply_humaness_check bool,
+        a_kinds bigint[] DEFAULT '{1}'::bigint[])
 	RETURNS SETOF jsonb
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
@@ -839,20 +924,136 @@ BEGIN
 
     RETURN QUERY SELECT * FROM enrich_feed_events(
         ARRAY (
-            select (pe.event_id, pe.created_at)::post
-            from 
-                pubkey_events pe
-            where 
-                pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and pe.is_reply = a_include_replies and
-                referenced_event_is_note(pe.event_id)
-            order by pe.created_at desc limit a_limit offset a_offset
+            select (e.id, e.created_at)::post
+            from
+                events e
+                LEFT JOIN pubkey_events pe ON pe.event_id = e.id
+            where
+                e.pubkey = a_pubkey and e.created_at >= a_since and e.created_at <= a_until and
+                e.kind = ANY(a_kinds) and
+                (
+                    pe.event_id IS NULL OR pe.is_reply = a_include_replies
+                )
+            order by e.created_at desc limit a_limit offset a_offset
         ),
         a_user_pubkey, a_apply_humaness_check);
 END
 $BODY$;
 
+CREATE OR REPLACE FUNCTION public.long_form_content_feed_posts(
+        a_pubkey bytea DEFAULT null,
+        a_notes varchar DEFAULT 'follows',
+        a_topic varchar DEFAULT null,
+        a_curation varchar DEFAULT null,
+        a_minwords int8 DEFAULT 0,
+        a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0, a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0)
+	RETURNS SETOF post
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    IF a_curation IS NOT NULL and a_pubkey IS NOT NULL THEN
+        RETURN QUERY select distinct (r.p).* FROM (
+            select
+                (reads.latest_eid, reads.published_at)::post as p
+            from
+                parametrized_replaceable_events pre,
+                a_tags at,
+                reads
+            where
+                pre.pubkey = a_pubkey and pre.identifier = a_curation and pre.kind = 30004 and
+                pre.event_id = at.eid and
+                at.ref_kind = 30023 and at.ref_pubkey = reads.pubkey and at.ref_identifier = reads.identifier and
+                reads.published_at >= a_since and reads.published_at <= a_until and
+                reads.words >= a_minwords
+            order by reads.published_at desc limit a_limit offset a_offset) r;
+    ELSIF a_pubkey IS NULL THEN
+        RETURN QUERY select distinct (r.p).* FROM (
+            select (latest_eid, published_at)::post as p
+            from reads
+            where
+                published_at >= a_since and published_at <= a_until and
+                words >= a_minwords
+                and (a_topic is null or topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
+            order by published_at desc limit a_limit offset a_offset) r;
+    ELSIF a_notes = 'zappedbyfollows' THEN
+        RETURN QUERY select distinct (r.p).* FROM (
+            select (rs.latest_eid, rs.published_at)::post as p
+            from pubkey_followers pf, reads rs, reads_versions rv, zap_receipts zr
+            where
+                pf.follower_pubkey = a_pubkey and
+                pf.pubkey = zr.sender and zr.target_eid = rv.eid and
+                rv.pubkey = rs.pubkey and rv.identifier = rs.identifier and
+                rs.published_at >= a_since and rs.published_at <= a_until and
+                rs.words >= a_minwords
+            order by rs.published_at desc limit a_limit offset a_offset) r;
+    ELSE
+        IF a_notes = 'follows' AND EXISTS (select 1 from pubkey_followers pf where pf.follower_pubkey = a_pubkey limit 1) THEN
+            RETURN QUERY select distinct (r.p).* FROM (
+                select (reads.latest_eid, reads.published_at)::post as p
+                from reads, pubkey_followers pf
+                where
+                    pf.follower_pubkey = a_pubkey and pf.pubkey = reads.pubkey and
+                    reads.published_at >= a_since and reads.published_at <= a_until and
+                    reads.words >= a_minwords
+                    and (a_topic is null or reads.topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
+                order by reads.published_at desc limit a_limit offset a_offset) r;
+        ELSIF a_notes = 'authored' THEN
+            RETURN QUERY select distinct (r.p).* FROM (
+                select (reads.latest_eid, reads.published_at)::post as p
+                from reads
+                where
+                    reads.pubkey = a_pubkey and
+                    reads.published_at >= a_since and reads.published_at <= a_until and
+                    reads.words >= a_minwords
+                    and (a_topic is null or topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
+                order by published_at desc limit a_limit offset a_offset) r;
+        ELSE
+            RAISE EXCEPTION 'unsupported type of notes';
+        END IF;
+    END IF;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.long_form_content_feed_posts_progressive(
+        a_pubkey bytea DEFAULT null,
+        a_notes varchar DEFAULT 'follows',
+        a_topic varchar DEFAULT null,
+        a_curation varchar DEFAULT null,
+        a_minwords int8 DEFAULT 0,
+        a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0, a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0)
+	RETURNS SETOF post
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    days int := 1;
+    effective_until bigint;
+    effective_since bigint;
+    total_needed bigint := a_limit + a_offset;
+    posts post[];
+    start_ts timestamptz := clock_timestamp();
+BEGIN
+    effective_until := a_until;
+    LOOP
+        effective_since := GREATEST(effective_until - days * 86400, a_since);
+
+        posts := posts || ARRAY(SELECT r FROM long_form_content_feed_posts(
+            a_pubkey, a_notes, a_topic, a_curation, a_minwords,
+            total_needed, effective_since, effective_until, 0) r);
+
+        EXIT WHEN array_length(posts, 1) >= total_needed;
+        EXIT WHEN effective_since <= a_since;
+        EXIT WHEN clock_timestamp() - start_ts > interval '7 seconds';
+
+        effective_until := effective_since;
+        days := LEAST(days * 2, 64);
+    END LOOP;
+
+    RETURN QUERY SELECT * FROM unnest(posts) OFFSET a_offset LIMIT a_limit;
+END
+$BODY$;
+
 CREATE OR REPLACE FUNCTION public.long_form_content_feed(
-        a_pubkey bytea DEFAULT null, 
+        a_pubkey bytea DEFAULT null,
         a_notes varchar DEFAULT 'follows',
         a_topic varchar DEFAULT null,
         a_curation varchar DEFAULT null,
@@ -870,66 +1071,9 @@ BEGIN
         RAISE EXCEPTION 'limit too big';
     END IF;
 
-    IF a_curation IS NOT NULL and a_pubkey IS NOT NULL THEN
-        posts := ARRAY (select distinct r.p FROM (
-            select 
-                (reads.latest_eid, reads.published_at)::post as p
-            from 
-                parametrized_replaceable_events pre,
-                a_tags at,
-                reads
-            where 
-                pre.pubkey = a_pubkey and pre.identifier = a_curation and pre.kind = 30004 and
-                pre.event_id = at.eid and 
-                at.ref_kind = 30023 and at.ref_pubkey = reads.pubkey and at.ref_identifier = reads.identifier and
-                reads.published_at >= a_since and reads.published_at <= a_until and
-                reads.words >= a_minwords
-            order by reads.published_at desc limit a_limit offset a_offset) r);
-    ELSIF a_pubkey IS NULL THEN
-        posts := ARRAY (select distinct r.p FROM (
-            select (latest_eid, published_at)::post as p
-            from reads
-            where 
-                published_at >= a_since and published_at <= a_until and
-                words >= a_minwords
-                and (a_topic is null or topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
-            order by published_at desc limit a_limit offset a_offset) r);
-    ELSIF a_notes = 'zappedbyfollows' THEN
-        posts := ARRAY (select distinct r.p FROM (
-            select (rs.latest_eid, rs.published_at)::post as p
-            from pubkey_followers pf, reads rs, reads_versions rv, zap_receipts zr
-            where 
-                pf.follower_pubkey = a_pubkey and 
-                pf.pubkey = zr.sender and zr.target_eid = rv.eid and
-                rv.pubkey = rs.pubkey and rv.identifier = rs.identifier and
-                rs.published_at >= a_since and rs.published_at <= a_until and
-                rs.words >= a_minwords
-            order by rs.published_at desc limit a_limit offset a_offset) r);
-    ELSE
-        IF a_notes = 'follows' AND EXISTS (select 1 from pubkey_followers pf where pf.follower_pubkey = a_pubkey limit 1) THEN
-            posts := ARRAY (select distinct r.p FROM (
-                select (reads.latest_eid, reads.published_at)::post as p
-                from reads, pubkey_followers pf
-                where 
-                    pf.follower_pubkey = a_pubkey and pf.pubkey = reads.pubkey and 
-                    reads.published_at >= a_since and reads.published_at <= a_until and
-                    reads.words >= a_minwords
-                    and (a_topic is null or reads.topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
-                order by reads.published_at desc limit a_limit offset a_offset) r);
-        ELSIF a_notes = 'authored' THEN
-            posts := ARRAY (select distinct r.p FROM (
-                select (reads.latest_eid, reads.published_at)::post as p
-                from reads
-                where 
-                    reads.pubkey = a_pubkey and 
-                    reads.published_at >= a_since and reads.published_at <= a_until and
-                    reads.words >= a_minwords
-                    and (a_topic is null or topics @@ plainto_tsquery('simple', replace(a_topic, ' ', '-')))
-                order by published_at desc limit a_limit offset a_offset) r);
-        ELSE
-            RAISE EXCEPTION 'unsupported type of notes';
-        END IF;
-    END IF;
+    posts := ARRAY(SELECT r FROM long_form_content_feed_posts_progressive(
+        a_pubkey, a_notes, a_topic, a_curation, a_minwords,
+        a_limit, a_since, a_until, a_offset) r);
 
     RETURN QUERY SELECT * FROM enrich_feed_events(posts, a_user_pubkey, a_apply_humaness_check, 'published_at');
 END
@@ -1089,6 +1233,81 @@ BEGIN
             EXIT;
         END IF;
     END LOOP;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.multi_kind_thread_view_reply_posts(
+    a_event_id bytea,
+    a_kinds bigint[] DEFAULT '{1}'::bigint[],
+    a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0,
+    a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0
+)
+	RETURNS SETOF post
+    LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT id, created_at FROM basic_tags
+WHERE tag = 'e' AND arg1 = a_event_id AND kind = ANY(a_kinds)
+AND created_at >= a_since AND created_at <= a_until
+ORDER BY created_at DESC LIMIT a_limit OFFSET a_offset;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.multi_kind_thread_view_parent_posts(a_event_id bytea)
+	RETURNS SETOF post
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+DECLARE
+    peid bytea := a_event_id;
+BEGIN
+    WHILE true LOOP
+        RETURN QUERY SELECT peid, created_at FROM events WHERE id = peid;
+        SELECT arg1 INTO peid FROM basic_tags
+            WHERE id = peid AND tag = 'e' AND arg3 IN ('reply', 'root')
+            ORDER BY CASE arg3 WHEN 'reply' THEN 0 WHEN 'root' THEN 1 END
+            LIMIT 1;
+        IF NOT FOUND THEN
+            EXIT;
+        END IF;
+    END LOOP;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.multi_kind_thread_view(
+    a_event_id bytea,
+    a_kinds bigint[] DEFAULT '{1}'::bigint[],
+    a_limit int8 DEFAULT 20, a_since int8 DEFAULT 0,
+    a_until int8 DEFAULT EXTRACT(EPOCH FROM NOW())::int8, a_offset int8 DEFAULT 0,
+    a_user_pubkey bytea DEFAULT null,
+    a_apply_humaness_check bool DEFAULT false,
+    a_include_parent_posts bool DEFAULT true
+)
+	RETURNS SETOF jsonb
+    LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    IF  EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'event' AND target = a_event_id AND blocked LIMIT 1) OR
+        EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = a_event_id AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)
+    THEN
+        RETURN;
+    END IF;
+    IF NOT is_event_hidden(a_user_pubkey, 'content', a_event_id) AND NOT event_is_deleted(a_event_id) AND
+        NOT EXISTS (SELECT 1 FROM filterlist WHERE target = a_event_id AND target_type = 'event' AND grp = 'spam' AND blocked)
+    THEN
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT r FROM multi_kind_thread_view_reply_posts(
+                a_event_id, a_kinds,
+                a_limit, a_since, a_until, a_offset) r),
+            a_user_pubkey, a_apply_humaness_check);
+    END IF;
+
+    IF a_include_parent_posts THEN
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT r FROM multi_kind_thread_view_parent_posts(a_event_id) r ORDER BY r.created_at),
+            a_user_pubkey, false);
+    ELSE
+        RETURN QUERY SELECT DISTINCT * FROM enrich_feed_events(
+            ARRAY(SELECT (id, created_at)::post FROM events WHERE id = a_event_id),
+            a_user_pubkey, a_apply_humaness_check);
+    END IF;
 END
 $BODY$;
 
@@ -1457,5 +1676,66 @@ CREATE OR REPLACE FUNCTION public.get_zap_receipt_satszapped(
 ) RETURNS int8 LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
 SELECT parse_bolt11_amount_sats(extract_bolt11(es.tags)) FROM events es WHERE es.id = a_eid
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.poll_votes_posts(
+    a_event_id bytea,
+    a_since bigint,
+    a_until bigint,
+    a_limit bigint,
+    a_offset bigint,
+    a_option varchar DEFAULT NULL
+) RETURNS SETOF post
+LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
+AS $BODY$
+BEGIN
+    IF a_option IS NULL THEN
+        RETURN QUERY
+        SELECT bt.id, bt.created_at
+        FROM basic_tags bt
+        WHERE bt.arg1 = a_event_id
+          AND bt.tag = 'e'
+          AND bt.kind IN (1018, 9735)
+          AND bt.created_at >= a_since
+          AND bt.created_at <= a_until
+        ORDER BY bt.created_at DESC
+        LIMIT a_limit
+        OFFSET a_offset;
+    ELSE
+        RETURN QUERY
+        SELECT bt.id, bt.created_at
+        FROM basic_tags bt
+        WHERE bt.arg1 = a_event_id
+          AND bt.tag = 'e'
+          AND bt.kind IN (1018, 9735)
+          AND bt.created_at >= a_since
+          AND bt.created_at <= a_until
+          AND EXISTS (
+              SELECT 1 FROM poll_user_votes pv
+              WHERE pv.vote_eid = bt.id AND pv.option_id = a_option
+          )
+        ORDER BY bt.created_at DESC
+        LIMIT a_limit
+        OFFSET a_offset;
+    END IF;
+END
+$BODY$;
+
+CREATE OR REPLACE FUNCTION public.poll_votes(
+    a_event_id bytea,
+    a_since bigint,
+    a_until bigint,
+    a_limit bigint,
+    a_offset bigint,
+    a_user_pubkey bytea,
+    a_apply_humaness_check bool,
+    a_option varchar DEFAULT NULL
+) RETURNS SETOF jsonb
+LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+AS $BODY$
+SELECT * FROM enrich_feed_events(
+    ARRAY (SELECT r FROM poll_votes_posts(
+        a_event_id, a_since, a_until, a_limit, a_offset, a_option) r),
+    a_user_pubkey, a_apply_humaness_check)
 $BODY$;
 

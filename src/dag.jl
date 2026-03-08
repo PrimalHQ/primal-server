@@ -124,7 +124,8 @@ function runnode(nodefunc::Function; modname=:DAG_20240803_1, mkviews=false, day
     dag = Main.DAGRunner.dags[modname]
     outputs = dag.successful[end].result.outputs
     r = runsimple(; dag.runtag, [k=>v for (k, v) in dag.runkwargs if !(k in [:pipeline])]..., days) do targetserver, xn, o
-        xn(nodefunc; [n=>getproperty(outputs, n) for n in stargs]...)
+        # xn(nodefunc; [n=>getproperty(outputs, n) for n in stargs]...)
+        xn(nodefunc, [getproperty(outputs, n) for n in stargs]...)
     end
     mkviews && r.runctx.running[] && for schema in [:prod, :public]; mkviews!(r.outputs; schema); end
     r
@@ -246,6 +247,7 @@ function default_pipeline(targetserver, xn, o)
     o.human_override   = ServerTable(:postgres, targetserver, "human_override")
 
     xn(basic_tags_node, o.events)
+    xn(poll_stats_node, o.basic_tags)
     # xn(events_simplified_node, o.events)
     # xn(event_stats_node, o.events, o.events_simplified)
     xn(zap_receipts_node, o.events)
@@ -570,7 +572,7 @@ function mkviews!(outputs::NamedTuple; schema=:public)
 
     function exe(q, args=[])
         # println(q)
-        Postgres.execute(server, q, args)
+        Postgres.execute(server, q, args)[2]
     end
 
     exe("create schema if not exists $schema")
@@ -578,8 +580,13 @@ function mkviews!(outputs::NamedTuple; schema=:public)
     for (k, st) in pairs(outputs)
         k in PROTECTED_TABLES && continue
         isempty(exe("select * from pg_tables where schemaname = \$1 and tablename = \$2", ["public", k])) || continue
-        exe("drop view if exists $schema.$k")
-        exe("create view $schema.$k as (select * from public.$(st.table))")
+        # @show (k, :create)
+        try
+            exe("drop view if exists $schema.$k")
+            exe("create view $schema.$k as (select * from public.$(st.table))")
+        catch ex
+            @show ex
+        end
     end
 end
 
@@ -1761,12 +1768,12 @@ function pubkey_media_cnt_node(
                              with a as (
                                  select
                                     es.pubkey,
-                                    count(1)
-                                 from 
-                                    $(events.table) es, 
+                                    count(distinct es.id)
+                                 from
+                                    $(events.table) es,
                                     $(event_media.table) em
-                                 where 
-                                    es.imported_at >= \$1 and es.imported_at <= \$2 and 
+                                 where
+                                    es.imported_at >= \$1 and es.imported_at <= \$2 and
                                     es.id = em.event_id and es.kind = $(Int(Nostr.TEXT_NOTE))
                                 group by (es.pubkey)
                                 order by (es.pubkey)
@@ -2028,6 +2035,191 @@ function note_stats_node(;
     end
 
     (; note_stats)
+end
+
+function update_single_poll_stats(poll_id, poll_stats::ServerTable, poll_user_votes::ServerTable)
+    rows = Postgres.pex(MAIN_SERVER[], "select kind, tags from event where id = ?1 and kind in ($(Nostr.POLL), $(Nostr.ZAP_POLL))", (poll_id,))
+    isempty(rows) && return nothing
+    poll_kind, poll_tags = rows[1]
+
+    opts = Dict{String, Dict{String, Int}}()
+
+    if poll_kind == Nostr.POLL
+        for tag in poll_tags
+            if length(tag) >= 2 && tag[1] == "option"
+                opts[tag[2]] = Dict("votes" => 0, "satszapped" => 0)
+            end
+        end
+    elseif poll_kind == Nostr.ZAP_POLL
+        for tag in poll_tags
+            if length(tag) >= 2 && tag[1] == "poll_option"
+                opts[tag[2]] = Dict("votes" => 0, "satszapped" => 0)
+            end
+        end
+    end
+
+    isempty(opts) && return nothing
+
+    if poll_kind == Nostr.POLL
+        votes = Postgres.pex(MAIN_SERVER[],
+            "select e.id, e.pubkey, e.created_at, e.tags from basic_tags bt join event e on e.id = bt.id
+             where bt.arg1 = ?1 and bt.tag = 'e' and bt.kind = $(Nostr.POLL_VOTE)",
+            (poll_id,))
+        # Deduplicate: keep latest vote per pubkey
+        user_votes = Dict{Nostr.PubKeyId, @NamedTuple{vote_eid::Nostr.EventId, created_at::Int, option_id::String}}()
+        for (vote_eid, vote_pubkey, vote_created_at, vote_tags) in votes
+            pk = Nostr.PubKeyId(vote_pubkey)
+            DB.ext_is_human(Main.cache_storage, pk) || continue
+            eid = Nostr.EventId(vote_eid)
+            for tag in vote_tags
+                if length(tag) >= 2 && tag[1] == "response" && haskey(opts, tag[2])
+                    prev = get(user_votes, pk, nothing)
+                    if isnothing(prev) || vote_created_at > prev.created_at
+                        user_votes[pk] = (; vote_eid=eid, created_at=vote_created_at, option_id=tag[2])
+                    end
+                end
+            end
+        end
+        # Count from deduplicated votes and upsert
+        for (pubkey, v) in user_votes
+            opts[v.option_id]["votes"] += 1
+            Postgres.pex(MAIN_SERVER[],
+                "insert into $(poll_user_votes.table) (poll_id, pubkey, option_id, created_at, vote_eid)
+                 values (?1, ?2, ?3, ?4, ?5)
+                 on conflict (poll_id, pubkey) do update set option_id = excluded.option_id, created_at = excluded.created_at, vote_eid = excluded.vote_eid",
+                (poll_id, pubkey, v.option_id, v.created_at, v.vote_eid))
+        end
+    end
+
+    if poll_kind == Nostr.ZAP_POLL
+        zaps = Postgres.pex(MAIN_SERVER[],
+            "select e.id, e.created_at, e.tags from basic_tags bt join event e on e.id = bt.id
+             where bt.arg1 = ?1 and bt.tag = 'e' and bt.kind = 9735",
+            (poll_id,))
+        # Deduplicate: keep latest zap per sender pubkey
+        user_zaps = Dict{Nostr.PubKeyId, @NamedTuple{zap_eid::Nostr.EventId, created_at::Int, option_id::String, amount_msats::Int}}()
+        for (zap_eid_raw, zap_created_at, zap_tags) in zaps
+            zap_eid = Nostr.EventId(zap_eid_raw)
+            option_id = nothing
+            amount_msats = 0
+            zap_sender = nothing
+            for tag in zap_tags
+                if length(tag) >= 2 && tag[1] == "poll_option"
+                    option_id = tag[2]
+                elseif length(tag) >= 2 && tag[1] == "description"
+                    try
+                        desc = JSON.parse(tag[2])
+                        zap_sender = get(desc, "pubkey", nothing)
+                        for dtag in get(desc, "tags", [])
+                            if length(dtag) >= 2 && dtag[1] == "amount"
+                                amount_msats = parse(Int, dtag[2])
+                            elseif length(dtag) >= 2 && dtag[1] == "poll_option" && isnothing(option_id)
+                                option_id = dtag[2]
+                            end
+                        end
+                    catch _ end
+                end
+            end
+            if !isnothing(option_id) && haskey(opts, option_id) && !isnothing(zap_sender)
+                try
+                    sender_pk = Nostr.PubKeyId(zap_sender)
+                    DB.ext_is_human(Main.cache_storage, sender_pk) || continue
+                    prev = get(user_zaps, sender_pk, nothing)
+                    if isnothing(prev) || zap_created_at > prev.created_at
+                        user_zaps[sender_pk] = (; zap_eid, created_at=zap_created_at, option_id, amount_msats)
+                    end
+                catch _ end
+            end
+        end
+        # Count from deduplicated zaps and upsert
+        for (pubkey, v) in user_zaps
+            opts[v.option_id]["votes"] += 1
+            opts[v.option_id]["satszapped"] += v.amount_msats ÷ 1000
+            Postgres.pex(MAIN_SERVER[],
+                "insert into $(poll_user_votes.table) (poll_id, pubkey, option_id, created_at, vote_eid)
+                 values (?1, ?2, ?3, ?4, ?5)
+                 on conflict (poll_id, pubkey) do update set option_id = excluded.option_id, created_at = excluded.created_at, vote_eid = excluded.vote_eid",
+                (poll_id, pubkey, v.option_id, v.created_at, v.zap_eid))
+        end
+    end
+
+    opts_json = JSON.json(opts)
+    Postgres.pex(MAIN_SERVER[],
+        "insert into $(poll_stats.table) (event_id, options, updated_at) values (?1, ?2::jsonb, extract(epoch from now())::bigint)
+         on conflict (event_id) do update set options = excluded.options, updated_at = excluded.updated_at",
+        (poll_id, opts_json))
+    opts
+end
+
+function update_poll_stats(poll_stats::ServerTable, poll_user_votes::ServerTable; since=0)
+    polls = Postgres.pex(MAIN_SERVER[],
+        "select id from event where kind in ($(Nostr.POLL), $(Nostr.ZAP_POLL)) and created_at >= ?1 order by created_at desc",
+        (since,))
+    println("update_poll_stats: $(length(polls)) polls found")
+
+    cnt = 0
+    for (poll_id,) in polls
+        !isnothing(update_single_poll_stats(poll_id, poll_stats, poll_user_votes)) && (cnt += 1)
+    end
+    println("update_poll_stats: $cnt polls updated")
+    cnt
+end
+
+function import_poll_votes(connsel, basic_tags::ServerTable, poll_stats::ServerTable, poll_user_votes::ServerTable, since, until)
+    poll_ids = Set{Nostr.EventId}()
+    for (arg1,) in Postgres.execute(connsel,
+            "select distinct bt.arg1 from $(basic_tags.table) bt
+             where bt.imported_at >= \$1 and bt.imported_at <= \$2
+               and bt.tag = 'e' and bt.kind in ($(Nostr.POLL_VOTE), 9735)",
+            [since, until])[2]
+        push!(poll_ids, Nostr.EventId(arg1))
+    end
+    for poll_id in poll_ids
+        update_single_poll_stats(poll_id, poll_stats, poll_user_votes)
+    end
+end
+
+function poll_stats_node(
+        basic_tags::ServerTable;
+        runctx::RunCtx,
+        version=1,
+    )
+    poll_stats = dbtable(:postgres, runctx.targetserver, "poll_stats", version,
+                         [
+                          basic_tags,
+                         ],
+                         [
+                          (:event_id,   EventId),
+                          (:options,    :jsonb),
+                          (:updated_at, Int),
+                          "primary key (event_id)",
+                         ],
+                         [
+                         ];
+                         runtag=runctx.runtag)
+
+    poll_user_votes = dbtable(:postgres, runctx.targetserver, "poll_user_votes", version,
+                         [
+                          basic_tags,
+                         ],
+                         [
+                          (:poll_id,    EventId),
+                          (:pubkey,     PubKeyId),
+                          (:option_id,  String),
+                          (:created_at, Int),
+                          (:vote_eid,   EventId),
+                          "primary key (poll_id, pubkey)",
+                         ],
+                         [:poll_id, :pubkey];
+                         runtag=runctx.runtag)
+
+    process_segments([poll_stats, 1]; runctx, step=24*3600) do t1, t2
+        transaction_with_execution_stats(basic_tags.server; runctx.stats) do session1
+            import_poll_votes(session1, basic_tags, poll_stats, poll_user_votes, t1, t2)
+        end
+    end
+
+    (; poll_stats, poll_user_votes)
 end
 
 function update_user_search_node(;
@@ -3387,6 +3579,9 @@ SEARCH_SERVER = Ref(:p0timelimit)
 function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=nothing, limit=100, offset=0, kind=nothing, explain=false, logextra=(;))
     # @show query
     has_orderby = occursin("orderby:", query)
+
+    # Strip nostr: prefix from identifiers
+    query = replace(query, r"nostr:(?=n(pub|profile|ote|event|addr))" => "")
 
     isnothing(until) && (until = has_orderby ? 1<<61 : Utils.current_time())
 

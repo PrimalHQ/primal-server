@@ -32,6 +32,7 @@
 end
 
 JSON.lower(type::NotificationType) = Int(type)
+JSON.StructUtils.lower(::JSON.JSONStyle, x::NotificationType) = Int(x)
 
 sqltype(::Type{ShardedSqliteDict{K, V}}, ::Type{NotificationType}) where {K, V} = "int8"
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{NotificationType}) where {K, V} = DBConversionFuncs(x->Int(x), x->NotificationType(x))

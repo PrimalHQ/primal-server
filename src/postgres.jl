@@ -862,7 +862,7 @@ columnformatter(v, i, j) = v
 function Base.show(io::IO, x::Result)
     PrettyTables.pretty_table(io, x; 
                               alignment=:l, 
-                              tf=PrettyTables.tf_ascii_dots,
+                              borders=PrettyTables.text_table_borders__ascii_dots,
                               formatters=columnformatter)
 end
 

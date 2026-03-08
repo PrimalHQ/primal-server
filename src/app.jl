@@ -64,6 +64,7 @@ exposed_functions = Set([:feed,
 
                          :get_reads_feeds,
                          :mega_feed_directive,
+                         :multi_kind_mega_feed_directive,
                          :get_dvm_feeds,
                          :dvm_feed_info,
                          :enrich_feed_events,
@@ -114,6 +115,11 @@ exposed_functions = Set([:feed,
 
                          :invoices_to_zap_receipts,
                          :find_reposts,
+
+                         :multi_kind_thread_view,
+
+                         :poll_votes,
+                         :import_poll_vote_event,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -183,6 +189,8 @@ RECOMMENDED_BLOSSOM_SERVERS=10_000_175
 INVOICES_TO_ZAP_RECEIPTS=10_000_177
 
 MEDIA_HLS_URLS=10_000_178
+
+POLL_STATS=10_000_179
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -269,13 +277,21 @@ end
 
 function event_actions_cnt(est::DB.CacheStorage, eid::Nostr.EventId, user_pubkey::Nostr.PubKeyId)
     r = DB.exe(est.event_pubkey_actions, DB.@sql("select replied, liked, reposted, zapped from event_pubkey_actions where event_id = ?1 and pubkey = ?2"), eid, user_pubkey)
-    if isempty(r)
-        []
+    ea = if isempty(r)
+        zip([:replied, :liked, :reposted, :zapped], [false, false, false, false])
     else
-        ea = zip([:replied, :liked, :reposted, :zapped], map(Bool, r[1]))
-        [(; 
+        zip([:replied, :liked, :reposted, :zapped], map(Bool, r[1]))
+    end
+    voted_for_option_rows = Postgres.pex(DAG_OUTPUTS_DB[],
+        "select option_id from poll_user_votes where poll_id = ?1 and pubkey = ?2 limit 1",
+        (eid, user_pubkey))
+    voted_for_option = isempty(voted_for_option_rows) ? nothing : voted_for_option_rows[1][1]
+    if !isempty(r) || !isnothing(voted_for_option)
+        [(;
           kind=Int(EVENT_ACTIONS_COUNT),
-          content=JSON.json((; event_id=eid, ea...)))]
+          content=JSON.json((; event_id=eid, ea..., voted_for_option)))]
+    else
+        []
     end
 end
 
@@ -773,7 +789,7 @@ function feed_2(
         since::Union{Nothing,Int}=nothing, until::Union{Nothing,Int}=nothing, limit::Int=20, offset::Int=0, order::Union{Nothing,Symbol,String}=nothing,
         user_pubkey=nothing,
         time_exceeded=()->false,
-        usepgfuncs=false,
+        usepgfuncs=true,
         apply_humaness_check=false,
     )
     limit <= 1000 || error("limit too big")
@@ -810,9 +826,14 @@ function feed_2(
         # end
     elseif notes == :replies
         if usepgfuncs
-            q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null order by e->>'created_at' desc"
-            res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
-                                              [pubkey, since, until, 1, limit, offset, user_pubkey, false])]
+            replies_kinds = if isnothing(kinds)
+                "{1}"
+            else
+                "{" * join(map(string, kinds), ",") * "}"
+            end
+            q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) f(e) where e is not null order by e->>'created_at' desc"
+            res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q,
+                                              [pubkey, since, until, 1, limit, offset, user_pubkey, false, replies_kinds])]
             return res
         end
         append!(posts, map(Tuple, DB.exe(est.pubkey_events, 
@@ -866,17 +887,17 @@ function feed_2(
             end
         end
     elseif notes == :user_media_thumbnails
+        (is_user_blocked(pubkey, :csam) || is_user_blocked(pubkey, :impersonation)) && return []
         for (eid, created_at) in Postgres.pex(DAG_OUTPUTS_DB[], "
             SELECT
                 DISTINCT es.id, es.created_at
             FROM
                 events es,
                 event_media em
-            WHERE 
-                es.pubkey = \$1 AND 
-                es.kind = $(Int(Nostr.TEXT_NOTE)) AND 
+            WHERE
+                es.pubkey = \$1 AND
+                es.kind = $(Int(Nostr.TEXT_NOTE)) AND
                 es.id = em.event_id AND
-                NOT EXISTS (SELECT 1 FROM event_preview ep WHERE ep.event_id = em.event_id) AND
                 es.created_at >= \$2 AND es.created_at <= \$3
             ORDER BY
                 es.created_at DESC
@@ -888,10 +909,14 @@ function feed_2(
         tdur2 = @elapsed begin
             if notes == :follows
                 if usepgfuncs
+                    if isnothing(kinds)
+                        kinds = [Int(Nostr.TEXT_NOTE)]
+                    end
+                    kinds = "{" * join(map(string, kinds), ",") * "}"
                     if !isempty(Postgres.pex(DAG_OUTPUTS_DB[], "select 1 from pubkey_followers pf where pf.follower_pubkey = ?1 limit 1", (pubkey,)))
-                        q = "select distinct e, e->>'created_at' from feed_user_follows(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null order by e->>'created_at' desc"
+                        q = "select distinct e, e->>'created_at' from feed_user_follows(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) f(e) where e is not null order by e->>'created_at' desc"
                         return [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
-                                                           [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, apply_humaness_check])]
+                                                           [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, apply_humaness_check, kinds])]
                     end
                 end
                 if !isempty(Postgres.pex(DAG_OUTPUTS_DB[], "select 1 from pubkey_followers pf where pf.follower_pubkey = ?1 limit 1", (pubkey,)))
@@ -905,17 +930,32 @@ function feed_2(
             elseif notes == :authored
                 (is_user_blocked(pubkey, :csam) || is_user_blocked(pubkey, :impersonation)) && return []
                 if usepgfuncs
-                    q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null order by e->>'created_at' desc"
-                    res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q, 
-                                                      [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, false])]
+                    authored_kinds = if isnothing(kinds)
+                        "{1}"
+                    else
+                        "{" * join(map(string, kinds), ",") * "}"
+                    end
+                    q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) f(e) where e is not null order by e->>'created_at' desc"
+                    res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q,
+                                                      [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, false, authored_kinds])]
                     return res
                 end
-                append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
-                                                       "select pe.event_id, pe.created_at 
-                                                       from pubkey_events pe
-                                                       where pe.pubkey = ?1 and pe.created_at >= ?2 and pe.created_at <= ?3 and (pe.is_reply = 0 or pe.is_reply = ?4)
-                                                       order by pe.created_at $order limit ?5 offset ?6",
-                                                       (pubkey, since, until, Int(include_replies), limit, offset))))
+                if !isnothing(kinds)
+                    kinds_pg = "{" * join(map(string, kinds), ",") * "}"
+                    append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
+                                                           "select e.id, e.created_at
+                                                           from events e
+                                                           where e.pubkey = ?1 and e.created_at >= ?2 and e.created_at <= ?3 and e.kind = any(?7::bigint[])
+                                                           order by e.created_at $order limit ?5 offset ?6",
+                                                           (pubkey, since, until, Int(include_replies), limit, offset, kinds_pg))))
+                else
+                    append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
+                                                           "select pe.event_id, pe.created_at
+                                                           from pubkey_events pe
+                                                           where pe.pubkey = ?1 and pe.created_at >= ?2 and pe.created_at <= ?3 and (pe.is_reply = 0 or pe.is_reply = ?4)
+                                                           order by pe.created_at $order limit ?5 offset ?6",
+                                                           (pubkey, since, until, Int(include_replies), limit, offset))))
+                end
             else
                 error("unsupported type of notes")
             end
@@ -1015,6 +1055,23 @@ function thread_view_parents(est::DB.CacheStorage; event_id, user_pubkey=nothing
     reids = [reid for (reid, _) in posts]
 
     response_messages_for_posts(est, reids; user_pubkey)
+end
+
+function multi_kind_thread_view(est::DB.CacheStorage;
+        event_id,
+        kinds=[],
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        user_pubkey=nothing,
+        apply_humaness_check=false,
+        kwargs...)
+    event_id = cast(event_id, Nostr.EventId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    kinds_pg = isempty(kinds) ? "{1}" : "{" * join(map(string, kinds), ",") * "}"
+    include_parent_posts = get(kwargs, :include_parent_posts, true)
+    res = map(first, Postgres.pex(DAG_OUTPUTS_DB[], "select * from multi_kind_thread_view(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)",
+                                  [event_id, kinds_pg, limit, since, until, offset, user_pubkey, apply_humaness_check, include_parent_posts]))
+    return res
 end
 
 NETWORK_STATS_URL = Ref{Any}(nothing)
@@ -1875,6 +1932,7 @@ function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false
                                                                try
                                                                    o = Main.App.DAG_OUTPUTS[][2]
                                                                    Main.DAG.import_basic_tags(Main.App.DAG_OUTPUTS_DB[], o.events, o.basic_tags, e.created_at, e.created_at)
+                                                                   Main.DAG.import_poll_votes(Main.App.DAG_OUTPUTS_DB[], o.basic_tags, o.poll_stats, o.poll_user_votes, e.created_at, e.created_at)
                                                                    Main.DAG.import_event_mentions(est, o.event_mentions, e)
                                                                catch ex
                                                                    println("import_events: import_event_mentions error: $ex")
@@ -2647,6 +2705,7 @@ funcall_content_moderation_scope =
 
               :mega_feed_directive,
               # :enrich_feed_events,
+              :multi_kind_mega_feed_directive,
               
               :search,
               :advanced_feed,
@@ -2910,10 +2969,63 @@ function mega_feed_directive(
     elseif id == "important-notes-i-might-have-missed"
     elseif Symbol(id) in exposed_functions
         return getproperty(@__MODULE__, Symbol(id))(est; skwa..., kwargs...)
+    elseif haskey(s, "kinds")
+        s["kinds"] = first(s["kinds"], 1)
+        if     id == "latest"
+            return feed(est; pubkey=kwa[:user_pubkey], kinds=s["kinds"], kwargs...)
+        elseif id == "global-trending"
+            return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kinds=s["kinds"], kwargs...)
+        elseif id == "all-notes"
+            return explore(est; timeframe="latest", scope="global", kinds=s["kinds"], kwargs...)
+        elseif id == "most-zapped"
+            return explore_global_mostzapped(est, s["hours"]; kinds=s["kinds"], kwargs...)
+        elseif id == "feed"
+            return feed(est; skwa..., kinds=s["kinds"], kwargs..., usepgfuncs, apply_humaness_check)
+        end
     else
         for f in try JSON.parse(read(ADVANCED_FEEDS_FILE[], String)) catch _; [] end
             f["id"] == id && return mega_feed_directive(est; spec=f["specification"], kwargs...)
         end
+    end
+
+    []
+end
+
+function multi_kind_mega_feed_directive(
+        est::DB.CacheStorage;
+        spec::String,
+        usepgfuncs=true,
+        apply_humaness_check=false,
+        kwargs...,
+    )
+    kwa = Dict{Any, Any}(kwargs)
+    s = JSON.parse(spec)
+    skwa = [Symbol(k)=>v for (k, v) in s if !(k in ["id", "kind"])]
+
+    # @show (s, kwa)
+    
+    if haskey(kwargs, :user_pubkey) && est.auto_fetch_missing_events 
+        user_pubkey = cast(kwargs[:user_pubkey], Nostr.PubKeyId)
+        DB.fetch_user_metadata(est, user_pubkey)
+    end
+
+    id = get(s, "id", "")
+
+    if haskey(s, "kinds")
+        if     id == "latest"
+            return feed(est; pubkey=kwa[:user_pubkey], kinds=s["kinds"], kwargs...)
+        elseif id == "global-trending"
+            return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kinds=s["kinds"], kwargs...)
+        elseif id == "all-notes"
+            @show (s, kwargs)
+            return explore(est; timeframe="latest", scope="global", kinds=s["kinds"], kwargs...)
+        elseif id == "most-zapped"
+            return explore_global_mostzapped(est, s["hours"]; kinds=s["kinds"], kwargs...)
+        elseif id == "feed"
+            return feed(est; skwa..., kinds=s["kinds"], kwargs..., usepgfuncs, apply_humaness_check)
+        end
+    else
+        return mega_feed_directive(est; spec, usepgfuncs, apply_humaness_check, kwargs...)
     end
 
     []
@@ -2960,6 +3072,48 @@ function enrich_feed_events_pg(
     end
 
     [[pes[eid] for eid in elements if haskey(pes, eid)]; res2]
+end
+
+function poll_votes(est::DB.CacheStorage;
+        event_id=nothing,
+        since::Union{Nothing,Int}=nothing,
+        until::Union{Nothing,Int}=nothing,
+        limit::Int=20, offset::Int=0,
+        user_pubkey=nothing,
+        apply_humaness_check=false,
+        option=nothing,
+        kwargs...)
+    event_id = cast(event_id, Nostr.EventId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    since = isnothing(since) ? 0 : since
+    until = isnothing(until) ? trunc(Int, time()) : until
+
+    q = "select e from poll_votes(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null "
+    [r[1] for r in Postgres.execute(:p0timelimit, q,
+        [event_id, since, until, limit, offset, user_pubkey, apply_humaness_check, option])[2]]
+end
+
+function import_poll_vote_event(est::DB.CacheStorage; event_from_user::Dict)
+    import_res = import_events(est; events=[event_from_user])
+
+    # find the target poll event_id from 'e' tags
+    tags = get(event_from_user, "tags", [])
+    poll_id = nothing
+    for tag in tags
+        if length(tag) >= 2 && tag[1] == "e"
+            poll_id = Nostr.EventId(tag[2])
+            break
+        end
+    end
+    isnothing(poll_id) && return import_res
+
+    # return cached poll stats; DAG will update them after basic_tags are processed
+    eid_hex = Nostr.hex(poll_id)
+    stats_rows = Postgres.pex(DAG_OUTPUTS_DB[], "select options from poll_stats where event_id = ?1", (poll_id,))
+    if !isempty(stats_rows)
+        push!(import_res, (; kind=Int(POLL_STATS), content=JSON.json(Dict(eid_hex => stats_rows[1][1]))))
+    end
+    import_res
 end
 
 HOME_FEEDS_FILE = Ref("home-feeds.json")
@@ -3262,12 +3416,12 @@ function get_dvm_feed_user_actions(est::DB.CacheStorage; dvm_pubkey, dvm_id::Str
 
     for (k,) in Postgres.execute(DAG_OUTPUTS_DB[],
                                  pgparams() do P "
-                                     select 
+                                     select
                                          at.kind
-                                     from 
+                                     from
                                          a_tags at,
                                          event es
-                                     where 
+                                     where
                                          at.ref_kind = $(@P dvm_kind) and
                                          at.ref_pubkey = $(@P dvm_pubkey) and
                                          at.ref_identifier = $(@P dvm_id) and

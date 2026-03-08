@@ -413,6 +413,7 @@ function ext_zap(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
     end
 end
 
+
 function import_zap_receipt(est::CacheStorage, e::Nostr.Event, parent_eid, amount_sats)
     sender = zap_sender(e)
     receiver = zap_receiver(e)

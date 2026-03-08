@@ -145,6 +145,7 @@ EOF
 
   shellHook = ''
     export LD_LIBRARY_PATH=${secp256k1}/lib:$PWD:.
+    export LD_PRELOAD=${julia}/lib/julia/libssl.so.3:${julia}/lib/julia/libcrypto.so.3
     export NIX_LD=${glibc}/lib/ld-linux-x86-64.so.2
     export LIBCLANG_PATH=${libclang.lib}/lib
     export BINDGEN_EXTRA_CLANG_ARGS="$NIX_CFLAGS_COMPILE"
