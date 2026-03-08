@@ -61,6 +61,8 @@ enum Commands {
         handler_executable: String,
         #[arg(long, default_value="./target/release/ws-importer")]
         importer_executable: String,
+        #[arg(long)]
+        log_request: Option<String>,
     },
     Req {
         #[arg(long, required=true)]
@@ -188,7 +190,7 @@ async fn main() -> Result<(), Error> {
     }
 
     match &cli.command {
-        Some(Commands::Run { port, backend_addr, handler_executable, importer_executable }) => {
+        Some(Commands::Run { port, backend_addr, handler_executable, importer_executable, log_request }) => {
             // Initialize run in database
             {
                 let mut state = state.lock().await;
@@ -358,7 +360,7 @@ async fn main() -> Result<(), Error> {
             }
 
             // Initialize handler manager
-            let handler_args = vec![
+            let mut handler_args = vec![
                 "--servername".to_string(),
                 cli.servername.clone(),
                 "--content-moderation-root".to_string(),
@@ -366,6 +368,10 @@ async fn main() -> Result<(), Error> {
                 "--task-dump-path".to_string(),
                 cli.task_dump_path.clone(),
             ];
+            if let Some(log_path) = log_request {
+                handler_args.push("--log-request".to_string());
+                handler_args.push(log_path.clone());
+            }
             
             let handler_manager = Arc::new(HandlerManager::new(handler_executable.clone(), handler_args, state.clone()));
             handler_manager.start().await.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;

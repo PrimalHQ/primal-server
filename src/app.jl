@@ -4203,6 +4203,8 @@ function follow_lists(
         union!(pks, [r.pubkey for r in rs])
     end
 
+    isempty(es) && return []
+
     [res..., user_infos(est; pubkeys=collect(pks), usepgfuncs=true)..., range(es, :created_at)...]
 end
 
