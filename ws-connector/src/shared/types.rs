@@ -139,6 +139,8 @@ pub struct SharedState {
     pub conn_index: i64,
     pub tasks: HashMap<i64, i64>,
     pub conns: HashMap<i64, i64>,
+    pub log_not_handled: bool,
+    pub log_handled: bool,
 }
 
 pub fn parse_tokio_task_id(task_id: tokio::task::Id) -> i64 {

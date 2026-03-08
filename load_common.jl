@@ -1,5 +1,3 @@
-import JSON
-
 for fn in [
            "utils.jl",
            "nostr.jl",

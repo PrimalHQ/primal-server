@@ -57,10 +57,12 @@ impl RequestRouter {
                             funcall: funcall.to_string(),
                         };
 
+                        let t0 = std::time::Instant::now();
                         match self.handler_manager.send_request(request).await {
                             Ok(resp) => {
+                                let elapsed_ms = t0.elapsed().as_millis();
                                 let use_zlib = client_write.lock().await.use_zlib;
-                                
+
                                 if resp.handled {
                                     if use_zlib {
                                         // Use zlib compression - format as EVENTS array like the webapp expects
@@ -123,8 +125,17 @@ impl RequestRouter {
                                 if let Some(error) = &resp.error {
                                     eprintln!("ws-connector: Handler request error: {}", error);
                                 }
-                                
-                                incr(&self.handler_manager.state.lock().await.shared.stats.handlereqcnt);
+
+                                {
+                                    let state = self.handler_manager.state.lock().await;
+                                    if resp.handled && state.shared.log_handled {
+                                        eprintln!("ws-connector: handled: {} sub_id={} {}ms", funcall, sub_id, elapsed_ms);
+                                    }
+                                    if !resp.handled && state.shared.log_not_handled {
+                                        eprintln!("ws-connector: not handled: {} sub_id={} {}ms", funcall, sub_id, elapsed_ms);
+                                    }
+                                    incr(&state.shared.stats.handlereqcnt);
+                                }
 
                                 return Ok((resp.handled, sendcnt));
                             }

@@ -63,6 +63,10 @@ enum Commands {
         importer_executable: String,
         #[arg(long)]
         log_request: Option<String>,
+        #[arg(long, default_value_t = false)]
+        log_not_handled: bool,
+        #[arg(long, default_value_t = false)]
+        log_handled: bool,
     },
     Req {
         #[arg(long, required=true)]
@@ -124,6 +128,8 @@ async fn main() -> Result<(), Error> {
             conn_index: 0,
             tasks: HashMap::new(),
             conns: HashMap::new(),
+            log_not_handled: false,
+            log_handled: false,
         },
         websockets: HashMap::new(),
         ws_to_subs: HashMap::new(),
@@ -190,10 +196,12 @@ async fn main() -> Result<(), Error> {
     }
 
     match &cli.command {
-        Some(Commands::Run { port, backend_addr, handler_executable, importer_executable, log_request }) => {
+        Some(Commands::Run { port, backend_addr, handler_executable, importer_executable, log_request, log_not_handled, log_handled }) => {
             // Initialize run in database
             {
                 let mut state = state.lock().await;
+                state.shared.log_not_handled = *log_not_handled;
+                state.shared.log_handled = *log_handled;
                 state.shared.run = management_pool.get().await.unwrap().query_one(
                     "insert into wsconnruns values (default, now(), $1, $2) returning run", 
                     &[&state.shared.srv_name, &(0 as i64)]).await.unwrap().get::<_, i64>(0);

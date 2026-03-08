@@ -34,6 +34,9 @@ impl ReqHandlers {
             "thread_view" => {
                 Self::thread_view(conn_id, sub_id, kwargs, pool, primal_pubkey).await
             }
+            "multi_kind_thread_view" => {
+                Self::multi_kind_thread_view(conn_id, sub_id, kwargs, pool, primal_pubkey).await
+            }
             "scored" => {
                 Self::scored(conn_id, sub_id, kwargs, pool, primal_pubkey).await
             }
@@ -60,6 +63,9 @@ impl ReqHandlers {
             }
             "mega_feed_directive" => {
                 Self::mega_feed_directive(conn_id, sub_id, kwargs, pool, primal_pubkey).await
+            }
+            "multi_kind_mega_feed_directive" => {
+                Self::multi_kind_mega_feed_directive(conn_id, sub_id, kwargs, pool, primal_pubkey).await
             }
             "live_feed" => {
                 Self::live_feed(conn_id, sub_id, kwargs, pool).await
@@ -118,6 +124,32 @@ impl ReqHandlers {
                 "select e::text from thread_view($1, $2, $3, $4, $5, $6, $7) r(e)", 
                 &[&event_id, &limit, &since, &until, &offset, &user_pubkey, &apply_humaness_check]).await?);
         
+        Ok((ReqStatus::Handled, Response::messages(res)))
+    }
+
+    async fn multi_kind_thread_view(_conn_id: i64, _sub_id: &str, kwargs: &Value, pool: &Pool, primal_pubkey: &Option<Vec<u8>>) -> Result<(ReqStatus, Response), ReqError> {
+        let event_id = hex::decode(kwargs["event_id"].as_str().ok_or("invalid event_id")?.to_string())?;
+        let limit = kwargs["limit"].as_i64().unwrap_or(20);
+        let since = kwargs["since"].as_i64().unwrap_or(0);
+        let until = kwargs["until"].as_i64().unwrap_or(get_sys_time_in_secs().try_into().unwrap());
+        let offset = kwargs["offset"].as_i64().unwrap_or(0);
+        let user_pubkey =
+            if let Some(v) = kwargs["user_pubkey"].as_str() {
+                hex::decode(v.to_string()).ok()
+            } else { primal_pubkey.clone() };
+
+        let kinds: Vec<i64> = kwargs.get("kinds").and_then(|v| {
+            v.as_array().map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
+        }).unwrap_or_else(|| vec![1]);
+
+        let apply_humaness_check = true;
+        let include_parent_posts = kwargs.get("include_parent_posts").and_then(|v| v.as_bool()).unwrap_or(true);
+
+        let res = Self::rows_to_vec(
+            &Self::pool_get(&pool).await?.query(
+                "select e::text from multi_kind_thread_view($1, $2, $3, $4, $5, $6, $7, $8, $9) r(e)",
+                &[&event_id, &kinds, &limit, &since, &until, &offset, &user_pubkey, &apply_humaness_check, &include_parent_posts]).await?);
+
         Ok((ReqStatus::Handled, Response::messages(res)))
     }
 
@@ -247,31 +279,53 @@ impl ReqHandlers {
         let pubkey: Vec<u8> = hex::decode(
             kwargs["pubkey"].as_str().expect("pubkey argument required")
             ).expect("pubkey should be in hex");
-        let user_pubkey = 
+        let user_pubkey =
             if let Some(v) = kwargs["user_pubkey"].as_str() {
                 hex::decode(v.to_string()).ok()
             } else { primal_pubkey.clone() };
         let notes = kwargs["notes"].as_str().unwrap_or("follows");
         let include_replies = kwargs["include_replies"].as_bool().unwrap_or(false) as i64;
 
+        let kinds: Option<Vec<i64>> = kwargs.get("kinds").and_then(|v| {
+            v.as_array().map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
+        });
+
         if notes == "follows" {
-            let r = Self::pool_get(&pool).await?.query("select 1 from pubkey_followers pf where pf.follower_pubkey = $1 limit 1", 
+            let r = Self::pool_get(&pool).await?.query("select 1 from pubkey_followers pf where pf.follower_pubkey = $1 limit 1",
                                                       &[&pubkey]).await?.len();
             if r > 0 {
-                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_follows($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
-                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &true];
-                let res = Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?);
+                let res = if let Some(ref kinds) = kinds {
+                    let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_follows($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
+                    let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &true, kinds];
+                    Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
+                } else {
+                    let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_follows($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
+                    let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &true];
+                    Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
+                };
                 return Ok((ReqStatus::Handled, Response::messages(res)));
             }
         } else if notes == "authored" {
-            let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
-            let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &false];
-            let res = Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?);
+            let res = if let Some(ref kinds) = kinds {
+                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
+                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &false, kinds];
+                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
+            } else {
+                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
+                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &false];
+                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
+            };
             return Ok((ReqStatus::Handled, Response::messages(res)));
         } else if notes == "replies" {
-            let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
-            let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &1i64, &limit, &offset, &user_pubkey, &false];
-            let res = Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?);
+            let res = if let Some(ref kinds) = kinds {
+                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
+                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &1i64, &limit, &offset, &user_pubkey, &false, kinds];
+                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
+            } else {
+                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
+                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &1i64, &limit, &offset, &user_pubkey, &false];
+                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
+            };
             return Ok((ReqStatus::Handled, Response::messages(res)));
         }
 
@@ -389,6 +443,54 @@ impl ReqHandlers {
         }
 
         eprintln!("ws-slave: mega_feed_directive not handled for sub_id: {}", sub_id);
+        Ok((ReqStatus::NotHandled, Response::empty()))
+    }
+
+    async fn multi_kind_mega_feed_directive(conn_id: i64, sub_id: &str, kwargs: &Value, pool: &Pool, primal_pubkey: &Option<Vec<u8>>) -> Result<(ReqStatus, Response), ReqError> {
+        let mut kwargs = kwargs.as_object().unwrap().clone();
+        let spec = kwargs["spec"].as_str().unwrap().to_string();
+        kwargs.remove("spec");
+
+        match serde_json::from_str::<Value>(&spec) {
+            Err(_) => {
+                return Ok((ReqStatus::Notice("invalid spec format".to_string()), Response::empty()));
+            },
+            Ok(Value::Object(s)) => {
+                if let Some(kinds) = s.get("kinds") {
+                    let id = s.get("id").and_then(Value::as_str).unwrap_or("");
+
+                    if id == "latest" {
+                        let mut kwa = kwargs.clone();
+                        kwa.insert("pubkey".to_string(), kwa.get("user_pubkey").expect("user_pubkey argument required").clone());
+                        kwa.insert("kinds".to_string(), kinds.clone());
+
+                        return Self::feed(conn_id, sub_id, &Value::Object(kwa), pool, primal_pubkey).await;
+
+                    } else if id == "feed" {
+                        let mut kwa = kwargs.clone();
+                        // merge spec kwargs (excluding id, kind)
+                        for (k, v) in s.iter() {
+                            if k != "id" && k != "kind" {
+                                kwa.insert(k.clone(), v.clone());
+                            }
+                        }
+                        kwa.insert("kinds".to_string(), kinds.clone());
+
+                        return Self::feed(conn_id, sub_id, &Value::Object(kwa), pool, primal_pubkey).await;
+                    }
+                } else {
+                    // no "kinds" key — delegate to mega_feed_directive
+                    let mut orig_kwargs = kwargs.clone();
+                    orig_kwargs.insert("spec".to_string(), json!(spec));
+                    return Self::mega_feed_directive(conn_id, sub_id, &Value::Object(orig_kwargs), pool, primal_pubkey).await;
+                }
+            },
+            Ok(_) => {
+                return Ok((ReqStatus::Notice("invalid spec format".to_string()), Response::empty()));
+            },
+        }
+
+        eprintln!("ws-slave: multi_kind_mega_feed_directive not handled for sub_id: {}", sub_id);
         Ok((ReqStatus::NotHandled, Response::empty()))
     }
 
