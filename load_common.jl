@@ -1,12 +1,4 @@
-# JSON.jl v1.x returns JSON.Object from parse() instead of Dict.
-# Override to restore Dict{String,Any} as default dicttype for backward compatibility.
 import JSON
-JSON.eval(quote
-    parse(str::Union{AbstractString, AbstractVector{UInt8}}; dicttype=Dict{String,Any}, kw...) =
-        parse(str, Any; dicttype, kw...)
-    parse(io::Union{Base.AbstractCmd, IO}; dicttype=Dict{String,Any}, kw...) =
-        parse(io, Any; dicttype, kw...)
-end)
 
 for fn in [
            "utils.jl",
