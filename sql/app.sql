@@ -1243,10 +1243,11 @@ CREATE OR REPLACE FUNCTION public.multi_kind_thread_view_reply_posts(
 	RETURNS SETOF post
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
-SELECT id, created_at FROM basic_tags
-WHERE tag = 'e' AND arg1 = a_event_id AND kind = ANY(a_kinds)
-AND created_at >= a_since AND created_at <= a_until
-ORDER BY created_at DESC LIMIT a_limit OFFSET a_offset;
+SELECT er.reply_event_id, er.reply_created_at FROM event_replies er
+JOIN events e ON e.id = er.reply_event_id
+WHERE er.event_id = a_event_id AND e.kind = ANY(a_kinds)
+AND er.reply_created_at >= a_since AND er.reply_created_at <= a_until
+ORDER BY er.reply_created_at DESC LIMIT a_limit OFFSET a_offset;
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.multi_kind_thread_view_parent_posts(a_event_id bytea)

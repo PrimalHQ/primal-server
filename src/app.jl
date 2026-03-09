@@ -2995,6 +2995,7 @@ end
 function multi_kind_mega_feed_directive(
         est::DB.CacheStorage;
         spec::String,
+        kinds::Vector=Int[],
         usepgfuncs=true,
         apply_humaness_check=false,
         kwargs...,
@@ -3003,27 +3004,30 @@ function multi_kind_mega_feed_directive(
     s = JSON.parse(spec)
     skwa = [Symbol(k)=>v for (k, v) in s if !(k in ["id", "kind"])]
 
-    # @show (s, kwa)
-    
-    if haskey(kwargs, :user_pubkey) && est.auto_fetch_missing_events 
+    if haskey(kwargs, :user_pubkey) && est.auto_fetch_missing_events
         user_pubkey = cast(kwargs[:user_pubkey], Nostr.PubKeyId)
         DB.fetch_user_metadata(est, user_pubkey)
     end
 
+    # support kinds from spec for backward compatibility
+    if isempty(kinds) && haskey(s, "kinds")
+        kinds = s["kinds"]
+    end
+
     id = get(s, "id", "")
 
-    if haskey(s, "kinds")
+    if !isempty(kinds)
         if     id == "latest"
-            return feed(est; pubkey=kwa[:user_pubkey], kinds=s["kinds"], kwargs...)
+            return feed(est; pubkey=kwa[:user_pubkey], kinds, kwargs...)
         elseif id == "global-trending"
-            return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kinds=s["kinds"], kwargs...)
+            return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kinds, kwargs...)
         elseif id == "all-notes"
             @show (s, kwargs)
-            return explore(est; timeframe="latest", scope="global", kinds=s["kinds"], kwargs...)
+            return explore(est; timeframe="latest", scope="global", kinds, kwargs...)
         elseif id == "most-zapped"
-            return explore_global_mostzapped(est, s["hours"]; kinds=s["kinds"], kwargs...)
+            return explore_global_mostzapped(est, s["hours"]; kinds, kwargs...)
         elseif id == "feed"
-            return feed(est; skwa..., kinds=s["kinds"], kwargs..., usepgfuncs, apply_humaness_check)
+            return feed(est; skwa..., kinds, kwargs..., usepgfuncs, apply_humaness_check)
         end
     else
         return mega_feed_directive(est; spec, usepgfuncs, apply_humaness_check, kwargs...)

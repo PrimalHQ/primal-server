@@ -459,7 +459,9 @@ impl ReqHandlers {
                 return Ok((ReqStatus::Notice("invalid spec format".to_string()), Response::empty()));
             },
             Ok(Value::Object(s)) => {
-                if let Some(kinds) = s.get("kinds") {
+                let kinds = kwargs.get("kinds").cloned().or_else(|| s.get("kinds").cloned());
+
+                if let Some(kinds) = kinds {
                     let id = s.get("id").and_then(Value::as_str).unwrap_or("");
 
                     if id == "latest" {
