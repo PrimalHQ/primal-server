@@ -23,15 +23,23 @@ function rexe(sock, expr)
     end
 end
 
-function rex(srvidx, nodeidx, expr; container=7)
+REX_TIMEOUT = Ref(600.0)
+
+function rex(srvidx, nodeidx, expr; container=7, timeout=REX_TIMEOUT[])
     rsock = Ref{Any}(nothing)
+    timer = Ref{Any}(nothing)
     try
         rsock[] = Sockets.connect("192.168.$(10+srvidx).$(container)", 12000+nodeidx)
+        timer[] = Timer(timeout) do _
+            println("rex timeout ($srvidx, $nodeidx): closing socket after $(timeout)s")
+            try close(rsock[]) catch _ end
+        end
         rexe(rsock[], expr)
     catch _
         println("EXC: $srvidx $nodeidx $(string(expr))")
         rethrow()
     finally
+        isnothing(timer[]) || try close(timer[]) catch _ end
         isnothing(rsock[]) || try close(rsock[]) catch _ end
     end
 end
