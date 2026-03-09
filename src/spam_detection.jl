@@ -164,7 +164,7 @@ function process_spamlist(sd::SpamDetector, spamlist)
         for processor in values(mprocs)
             try Base.invokelatest(processor, spamlist)
             catch ex
-                push!(sd.spamlist_processors_errors, (lst, ex))
+                push!(sd.spamlist_processors_errors, (spamlist, ex))
                 #rethrow()
             end
         end

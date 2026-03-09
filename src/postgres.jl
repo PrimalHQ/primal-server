@@ -863,7 +863,7 @@ function Base.show(io::IO, x::Result)
     PrettyTables.pretty_table(io, x; 
                               alignment=:l, 
                               borders=PrettyTables.text_table_borders__ascii_dots,
-                              formatters=columnformatter)
+                              formatters=(columnformatter,))
 end
 
 Tables.istable(::Type{Result}) = true
