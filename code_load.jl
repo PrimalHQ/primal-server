@@ -7,7 +7,7 @@ and values are the code of changed functions or global variables.
 This function runs `git status` to get the changed files,
 then uses Meta.parse to identify only changed parts of the code.
 """
-function get_changed_code(; directory=pwd(), target_server=nothing)
+function get_changed_code(; directory=pwd(), target_server=nothing, sincecommit=nothing)
     function ex(cmd; server=nothing)
         cmd = "cd $directory && $cmd"
         cmd = isnothing(server) ? Cmd(["sh", "-c", cmd]) : Cmd(["ssh", "ppr$server", cmd])
@@ -17,21 +17,29 @@ function get_changed_code(; directory=pwd(), target_server=nothing)
     # Initialize result dictionary
     # changed_code = Dict{String,Vector{Expr}}()
     changed_code = Dict{String,Vector}()
-    
-    # Get list of modified and added .jl files using git status
-    status_output = ex("git status --porcelain --ignore-submodules=all")
-    lines = split(status_output, "\n")
-    
-    # Filter for modified and added Julia and SQL files
+
     changed_files = String[]
-    for line in lines
-        if !isempty(line) && ((line[2] == 'M') || startswith(line, "A")) && (endswith(line, ".jl") || endswith(line, ".sql"))
-            # Extract filename from git status output
-            m = match(r" ([^ ]+)$", line)
-            file = m[1]
-            push!(changed_files, file)
+
+    # Collect files changed in commits since sincecommit
+    if !isnothing(sincecommit)
+        for line in split(ex("git diff --name-only $sincecommit HEAD"), "\n")
+            file = strip(line)
+            if !isempty(file) && (endswith(file, ".jl") || endswith(file, ".sql"))
+                push!(changed_files, file)
+            end
         end
     end
+
+    # Collect working directory modifications
+    for line in split(ex("git status --porcelain --ignore-submodules=all"), "\n")
+        if !isempty(line) && ((line[2] == 'M') || startswith(line, "A")) && (endswith(line, ".jl") || endswith(line, ".sql"))
+            m = match(r" ([^ ]+)$", line)
+            file = m[1]
+            file in changed_files || push!(changed_files, file)
+        end
+    end
+
+    old_ref = isnothing(sincecommit) ? "" : "$sincecommit"
     
     function is_module_file(content::String)
         # Check if the file starts with a module declaration
@@ -50,7 +58,7 @@ function get_changed_code(; directory=pwd(), target_server=nothing)
                 new_content, new_mod_name = process_module_content(new_content)
                 
                 # Read the full content of the staged or unchanged file 
-                old_content = ex("git show :$file"; server=target_server)
+                old_content = ex("git show $old_ref:$file"; server=target_server)
                 is_module_file(old_content) || continue
                 old_content, old_mod_name = process_module_content(old_content)
 
@@ -63,7 +71,7 @@ function get_changed_code(; directory=pwd(), target_server=nothing)
             elseif endswith(file, ".sql")
                 # Process SQL files
                 new_content = read(joinpath(directory, file), String)
-                old_content = ex("git show :$file"; server=target_server)
+                old_content = ex("git show $old_ref:$file"; server=target_server)
                 
                 # Use filename as module name for SQL files
                 mod_name = basename(file)
@@ -405,9 +413,9 @@ function normalize_sql(sql::String)
     return strip(sql)
 end
 
-function load_changed_code(; directory=pwd(), target_server=nothing, target_node=17, dry_run=false, verbose=false)
+function load_changed_code(; directory=pwd(), target_server=nothing, target_node=17, dry_run=false, verbose=false, sincecommit=nothing)
     @show directory
-    for (mod, changes) in get_changed_code(; directory, target_server)
+    for (mod, changes) in get_changed_code(; directory, target_server, sincecommit)
         if endswith(mod, ".sql")
             println("SQL FILE: $mod")
             for element in changes
@@ -442,24 +450,24 @@ function load_changed_code(; directory=pwd(), target_server=nothing, target_node
     end
 end
 
-function load_changed_code_on_all_servers(; 
-        directory=pwd(), 
+function load_changed_code_on_all_servers(;
+        directory=pwd(),
         target_nodes=[
                       (30, 31), (30, 32), (30, 33), (30, 34), (30, 35), (30, 36), (30, 18),
                       (34, 31), (34, 32), (34, 33), (34, 34), (34, 35), (34, 36), (34, 18),
                       (33, 31), (33, 18),
-                     ], 
-        dry_run=false, verbose=false, async=false)
+                     ],
+        dry_run=false, verbose=false, async=false, sincecommit=nothing)
     if async
         asyncmap(target_nodes; ntasks=100) do x
             (target_server, target_node) = x
             println("========= server:node $target_server:$target_node =========")
-            load_changed_code(; directory, target_server, target_node, dry_run, verbose)
+            load_changed_code(; directory, target_server, target_node, dry_run, verbose, sincecommit)
         end
     else
         for (target_server, target_node) in target_nodes
             println("========= server:node $target_server:$target_node =========")
-            load_changed_code(; directory, target_server, target_node, dry_run, verbose)
+            load_changed_code(; directory, target_server, target_node, dry_run, verbose, sincecommit)
         end
     end
 end
