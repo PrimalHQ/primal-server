@@ -1195,7 +1195,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
 
             fetch_missing_events(est, e)
 
-        elseif e.kind == Int(Nostr.TEXT_NOTE)
+        elseif e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL)
             incr(est, :pubnotes)
 
             ext_text_note(est, e)

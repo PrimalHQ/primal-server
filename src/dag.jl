@@ -757,7 +757,7 @@ function advsearch_node(
                         $(events.table) es
                     where 
                         es.imported_at >= \$1 and es.imported_at <= \$2 and
-                        (es.kind = $(Int(Nostr.TEXT_NOTE)) or es.kind = $(Int(Nostr.LONG_FORM_CONTENT)))
+                        (es.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.POLL)), $(Int(Nostr.ZAP_POLL)), $(Int(Nostr.LONG_FORM_CONTENT))))
                     order by es.id
                 "
 
@@ -4019,15 +4019,20 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
     end
 
     kind = Nostr.TEXT_NOTE
+    has_explicit_kind = false
     for op in expr.ops
         if op isa O.Kind
             cond("$(T(o.advsearch)).kind = $(P(op.kind))")
             kind = Nostr.Kind(op.kind)
+            has_explicit_kind = true
             break
         end
     end
 
     if kind == Nostr.TEXT_NOTE
+        if !has_explicit_kind
+            cond("$(T(o.advsearch)).kind IN ($(P(Int(Nostr.TEXT_NOTE))), $(P(Int(Nostr.POLL))), $(P(Int(Nostr.ZAP_POLL))))")
+        end
         select("$(T(o.advsearch)).id")
         orderkey = "$(T(o.advsearch)).created_at"
         cond("$(T(o.advsearch)).created_at >= $(P(since))")
@@ -4088,7 +4093,7 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             #     error("unsupported repliestokind operator argument")
             # end
         elseif op isa O.PostType && op.type == "root"
-            cond("not exists (select 1 from basic_tags btpt where btpt.id = $(T(o.advsearch)).id and btpt.kind = $(Int(Nostr.TEXT_NOTE)) and btpt.tag = 'e' and btpt.arg3 = 'root' limit 1)")
+            cond("not exists (select 1 from basic_tags btpt where btpt.id = $(T(o.advsearch)).id and btpt.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.POLL)), $(Int(Nostr.ZAP_POLL))) and btpt.tag = 'e' and btpt.arg3 = 'root' limit 1)")
         elseif op isa O.Scope
             if op.scope in ["myfollows", "mynetwork"]
                 if     op.scope == "myfollows"
