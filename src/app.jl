@@ -786,7 +786,7 @@ end
 function feed_2(
         est::DB.CacheStorage;
         pubkey=nothing, notes::Union{Symbol,String}=:follows, include_replies=false,
-        kinds=nothing,
+        kinds=[1, 6],
         since::Union{Nothing,Int}=nothing, until::Union{Nothing,Int}=nothing, limit::Int=20, offset::Int=0, order::Union{Nothing,Symbol,String}=nothing,
         user_pubkey=nothing,
         time_exceeded=()->false,
@@ -827,11 +827,7 @@ function feed_2(
         # end
     elseif notes == :replies
         if usepgfuncs
-            replies_kinds = if isnothing(kinds)
-                "{1}"
-            else
-                "{" * join(map(string, kinds), ",") * "}"
-            end
+            replies_kinds = "{" * join(map(string, kinds), ",") * "}"
             q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) f(e) where e is not null order by e->>'created_at' desc"
             res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q,
                                               [pubkey, since, until, 1, limit, offset, user_pubkey, false, replies_kinds])]
@@ -871,7 +867,7 @@ function feed_2(
             for eid in eids
                 if eid in est.events 
                     e = est.events[eid]
-                    !isnothing(kinds) && !(e.kind in kinds) && continue
+                    !(e.kind in kinds) && continue
                     if eid in est.event_created_at
                         created_at = est.event_created_at[eid]
                         push!(bms, (collect(eid.hash), created_at))
@@ -910,9 +906,6 @@ function feed_2(
         tdur2 = @elapsed begin
             if notes == :follows
                 if usepgfuncs
-                    if isnothing(kinds)
-                        kinds = [Int(Nostr.TEXT_NOTE)]
-                    end
                     kinds = "{" * join(map(string, kinds), ",") * "}"
                     if !isempty(Postgres.pex(DAG_OUTPUTS_DB[], "select 1 from pubkey_followers pf where pf.follower_pubkey = ?1 limit 1", (pubkey,)))
                         q = "select distinct e, e->>'created_at' from feed_user_follows(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) f(e) where e is not null order by e->>'created_at' desc"
@@ -931,32 +924,19 @@ function feed_2(
             elseif notes == :authored
                 (is_user_blocked(pubkey, :csam) || is_user_blocked(pubkey, :impersonation)) && return []
                 if usepgfuncs
-                    authored_kinds = if isnothing(kinds)
-                        "{1}"
-                    else
-                        "{" * join(map(string, kinds), ",") * "}"
-                    end
+                    authored_kinds = "{" * join(map(string, kinds), ",") * "}"
                     q = "select distinct e, e->>'created_at' from feed_user_authored(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9) f(e) where e is not null order by e->>'created_at' desc"
                     res = [r[1] for r in Postgres.pex(DAG_OUTPUTS_DB[], q,
                                                       [pubkey, since, until, Int(include_replies), limit, offset, user_pubkey, false, authored_kinds])]
                     return res
                 end
-                if !isnothing(kinds)
-                    kinds_pg = "{" * join(map(string, kinds), ",") * "}"
-                    append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
-                                                           "select e.id, e.created_at
-                                                           from events e
-                                                           where e.pubkey = ?1 and e.created_at >= ?2 and e.created_at <= ?3 and e.kind = any(?7::bigint[])
-                                                           order by e.created_at $order limit ?5 offset ?6",
-                                                           (pubkey, since, until, Int(include_replies), limit, offset, kinds_pg))))
-                else
-                    append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
-                                                           "select pe.event_id, pe.created_at
-                                                           from pubkey_events pe
-                                                           where pe.pubkey = ?1 and pe.created_at >= ?2 and pe.created_at <= ?3 and (pe.is_reply = 0 or pe.is_reply = ?4)
-                                                           order by pe.created_at $order limit ?5 offset ?6",
-                                                           (pubkey, since, until, Int(include_replies), limit, offset))))
-                end
+                kinds_pg = "{" * join(map(string, kinds), ",") * "}"
+                append!(posts, map(Tuple, Postgres.pex(DAG_OUTPUTS_DB[],
+                                                       "select e.id, e.created_at
+                                                       from events e
+                                                       where e.pubkey = ?1 and e.created_at >= ?2 and e.created_at <= ?3 and e.kind = any(?6::bigint[])
+                                                       order by e.created_at $order limit ?4 offset ?5",
+                                                       (pubkey, since, until, limit, offset, kinds_pg))))
             else
                 error("unsupported type of notes")
             end

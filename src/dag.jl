@@ -3577,7 +3577,7 @@ const grammar = Ref{Any}(nothing)
 
 SEARCH_SERVER = Ref(:p0timelimit)
 
-function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=nothing, limit=100, offset=0, kind=nothing, explain=false, logextra=(;))
+function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=nothing, limit=100, offset=0, kind=nothing, kinds::Vector=Int[], explain=false, logextra=(;))
     # @show query
     has_orderby = occursin("orderby:", query)
 
@@ -3613,7 +3613,7 @@ function search(est, user_pubkey, query; outputs::NamedTuple, since=0, until=not
                                    has_orderby, timeout=9.0, explain,
                                    sql_generator=function (s, u, res)
                                        log && @show (length(res), u-s, Dates.unix2datetime(s), Dates.unix2datetime(u))
-                                       sql, params, orderkey = to_sql(est, user_pubkey, outputs, expr, kind, s, u, limit, offset)
+                                       sql, params, orderkey = to_sql(est, user_pubkey, outputs, expr, kind, s, u, limit, offset; kinds)
                                        sql, params
                                    end)
         end
@@ -3954,7 +3954,7 @@ end
 
 # advanced search SQL codegen
 
-function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, kind, since, until, limit, offset; extra_selects=[], order=:desc)
+function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, kind, since, until, limit, offset; extra_selects=[], order=:desc, kinds::Vector=Int[])
     o = outputs
 
     if !(expr isa O.Or || expr isa O.And)
@@ -4049,6 +4049,10 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
 
     else
         error("unsupported kind")
+    end
+
+    if !isempty(kinds)
+        cond("$(T(o.advsearch)).kind IN ($(join([P(Int(k)) for k in kinds], ", ")))")
     end
 
     for op in expr.ops

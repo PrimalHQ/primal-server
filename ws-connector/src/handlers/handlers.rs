@@ -289,46 +289,28 @@ impl ReqHandlers {
         let notes = kwargs["notes"].as_str().unwrap_or("follows");
         let include_replies = kwargs["include_replies"].as_bool().unwrap_or(false) as i64;
 
-        let kinds: Option<Vec<i64>> = kwargs.get("kinds").and_then(|v| {
-            v.as_array().map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
-        });
+        let kinds: Vec<i64> = kwargs.get("kinds")
+            .and_then(|v| v.as_array().map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect()))
+            .unwrap_or_else(|| vec![1, 6]);
 
         if notes == "follows" {
             let r = Self::pool_get(&pool).await?.query("select 1 from pubkey_followers pf where pf.follower_pubkey = $1 limit 1",
                                                       &[&pubkey]).await?.len();
             if r > 0 {
-                let res = if let Some(ref kinds) = kinds {
-                    let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_follows($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
-                    let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &true, kinds];
-                    Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
-                } else {
-                    let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_follows($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
-                    let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &true];
-                    Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
-                };
+                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_follows($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
+                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &true, &kinds];
+                let res = Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?);
                 return Ok((ReqStatus::Handled, Response::messages(res)));
             }
         } else if notes == "authored" {
-            let res = if let Some(ref kinds) = kinds {
-                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
-                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &false, kinds];
-                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
-            } else {
-                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
-                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &false];
-                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
-            };
+            let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
+            let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &include_replies, &limit, &offset, &user_pubkey, &false, &kinds];
+            let res = Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?);
             return Ok((ReqStatus::Handled, Response::messages(res)));
         } else if notes == "replies" {
-            let res = if let Some(ref kinds) = kinds {
-                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
-                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &1i64, &limit, &offset, &user_pubkey, &false, kinds];
-                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
-            } else {
-                let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8) f(e) where e is not null order by t desc";
-                let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &1i64, &limit, &offset, &user_pubkey, &false];
-                Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?)
-            };
+            let q = "select distinct e::text, coalesce(e->>'created_at', '0')::int8 as t from feed_user_authored($1, $2, $3, $4, $5, $6, $7, $8, $9) f(e) where e is not null order by t desc";
+            let params: &[&(dyn ToSql + Sync)] = &[&pubkey, &since, &until, &1i64, &limit, &offset, &user_pubkey, &false, &kinds];
+            let res = Self::rows_to_vec(&Self::pool_get(&pool).await?.query(q, params).await?);
             return Ok((ReqStatus::Handled, Response::messages(res)));
         }
 
