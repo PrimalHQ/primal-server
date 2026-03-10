@@ -30,6 +30,7 @@ union!(exposed_functions, Set([
                      :get_default_relays,
                      :get_recommended_users,
                      :get_suggested_users,
+                     :get_suggested_users_2,
                      :get_app_releases,
                      :user_profile_scored_content,
                      :user_profile_scored_media_thumbnails,
@@ -921,11 +922,25 @@ function get_recommended_users(est::DB.CacheStorage)
 end
 
 SUGGESTED_USERS_FILE = Ref("suggested-accounts.json")
+SUGGESTED_USERS_FILE_2 = Ref("suggested-accounts-v2.json")
+
+function collect_meta_data(est::DB.CacheStorage, pubkeys)
+    res_meta_data = Set()
+    for pk in pubkeys
+        if pk in est.meta_data
+            eid = est.meta_data[pk]
+            if eid in est.events
+                push!(res_meta_data, est.events[eid])
+            end
+        end
+    end
+    collect(values(res_meta_data))
+end
 
 function get_suggested_users(est::DB.CacheStorage)
     isfile(SUGGESTED_USERS_FILE[]) || return []
 
-    res_meta_data = Set()
+    pubkeys = Nostr.PubKeyId[]
     r = []
     for (group, users) in JSON.parse(read(SUGGESTED_USERS_FILE[], String))
         g = (; group, members=[])
@@ -935,20 +950,39 @@ function get_suggested_users(est::DB.CacheStorage)
                 pubkey = Nostr.hex(Nostr.bech32_decode(pubkey))
             end
             push!(g.members, ((; pubkey, name)))
-            pk = Nostr.PubKeyId(pubkey)
-            if pk in est.meta_data
-                eid = est.meta_data[pk]
-                if eid in est.events
-                    push!(res_meta_data, est.events[eid])
-                end
-            end
+            push!(pubkeys, Nostr.PubKeyId(pubkey))
         end
     end
 
     res = Any[(; kind=SUGGESTED_USERS, content=JSON.json(r))]
-    res_meta_data = collect(values(res_meta_data))
-    append!(res, res_meta_data)
-    append!(res, user_scores(est, res_meta_data))
+    md = collect_meta_data(est, pubkeys)
+    append!(res, md)
+    append!(res, user_scores(est, md))
+    res
+end
+
+function get_suggested_users_2(est::DB.CacheStorage)
+    isfile(SUGGESTED_USERS_FILE_2[]) || return []
+
+    pubkeys = Nostr.PubKeyId[]
+    r = []
+    for group in JSON.parse(read(SUGGESTED_USERS_FILE_2[], String))
+        members = []
+        for user in group["people"]
+            pubkey = user["pubkey"]
+            if startswith(pubkey, "npub")
+                pubkey = Nostr.hex(Nostr.bech32_decode(pubkey))
+            end
+            push!(members, merge(user, Dict("pubkey" => pubkey)))
+            push!(pubkeys, Nostr.PubKeyId(pubkey))
+        end
+        push!(r, merge(group, Dict("people" => members)))
+    end
+
+    res = Any[(; kind=SUGGESTED_USERS, content=JSON.json(r))]
+    md = collect_meta_data(est, pubkeys)
+    append!(res, md)
+    append!(res, user_scores(est, md))
     res
 end
 
