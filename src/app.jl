@@ -3073,7 +3073,7 @@ function poll_votes(est::DB.CacheStorage;
     since = isnothing(since) ? 0 : since
     until = isnothing(until) ? trunc(Int, time()) : until
 
-    q = "select e from poll_votes(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null "
+    q = "select distinct e from poll_votes(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8) f(e) where e is not null "
     [r[1] for r in Postgres.execute(:p0timelimit, q,
         [event_id, since, until, limit, offset, user_pubkey, apply_humaness_check, option])[2]]
 end

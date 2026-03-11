@@ -1730,11 +1730,26 @@ CREATE OR REPLACE FUNCTION public.poll_votes(
     a_apply_humaness_check bool,
     a_option varchar DEFAULT NULL
 ) RETURNS SETOF jsonb
-LANGUAGE 'sql' STABLE PARALLEL UNSAFE
+LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
-SELECT * FROM enrich_feed_events(
-    ARRAY (SELECT r FROM poll_votes_posts(
-        a_event_id, a_since, a_until, a_limit, a_offset, a_option) r),
-    a_user_pubkey, a_apply_humaness_check)
+DECLARE
+    allowed_eids bytea[];
+BEGIN
+    IF a_option IS NULL THEN
+        RETURN QUERY SELECT * FROM enrich_feed_events(
+            ARRAY (SELECT r FROM poll_votes_posts(
+                a_event_id, a_since, a_until, a_limit, a_offset, a_option) r),
+            a_user_pubkey, a_apply_humaness_check);
+    ELSE
+        allowed_eids := ARRAY (SELECT event_id FROM poll_votes_posts(
+            a_event_id, a_since, a_until, a_limit, a_offset, a_option));
+        RETURN QUERY SELECT e FROM enrich_feed_events(
+            ARRAY (SELECT (event_id, created_at)::post FROM poll_votes_posts(
+                a_event_id, a_since, a_until, a_limit, a_offset, a_option)),
+            a_user_pubkey, a_apply_humaness_check) f(e)
+        WHERE e IS NOT NULL
+          AND NOT ((e->>'kind')::int8 = 9735 AND NOT (DECODE(e->>'id', 'hex') = ANY(allowed_eids)));
+    END IF;
+END;
 $BODY$;
 
