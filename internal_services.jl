@@ -139,6 +139,7 @@ function start(cache_storage::DB.CacheStorage; setup_handlers=true)
         HTTP.register!(router[], "/api", api_handler)
 
         HTTP.register!(router[], "/api/suggestions", suggestions_handler)
+        HTTP.register!(router[], "/api/suggestions_2", suggestions_2_handler)
 
         HTTP.register!(router2[], "/**", media_moderation_handler)
     end
@@ -983,29 +984,53 @@ function api_handler(req::HTTP.Request)
     end
 end
 
+function collect_metadata(pubkeys)
+    mds = Dict{Nostr.PubKeyId, Nostr.Event}()
+    for pk in pubkeys
+        if !haskey(mds, pk) && pk in est[].meta_data
+            eid = est[].meta_data[pk]
+            if eid in est[].events
+                mds[pk] = est[].events[eid]
+            end
+        end
+    end
+    Dict([Nostr.hex(pk)=>md for (pk, md) in mds])
+end
+
 function suggestions_handler(req::HTTP.Request)
     catch_exception(:suggestions_handler, req) do
         req.method == "OPTIONS" && return HTTP.Response(200, api_headers, "ok")
-        body = String(req.body)
-        # @show req.method req.target body
-        host = Dict(req.headers)["Host"]
         d = JSON.parse(read(Main.App.SUGGESTED_USERS_FILE[], String))
-        mds = Dict{Nostr.PubKeyId, Nostr.Event}()
-        for (_, ms) in d
-            for (pubkey, name) in ms
-                pubkey = Nostr.PubKeyId(pubkey)
-                if !haskey(mds, pubkey) && pubkey in est[].meta_data
-                    eid = est[].meta_data[pubkey]
-                    if eid in est[].events
-                        mds[pubkey] = est[].events[eid]
-                    end
-                end
-            end
-        end
-        res = (; 
-               metadata=Dict([Nostr.hex(pk)=>md for (pk, md) in mds]), 
+        pubkeys = [Nostr.PubKeyId(pubkey) for (_, ms) in d for (pubkey, _) in ms]
+        res = (;
+               metadata=collect_metadata(pubkeys),
                suggestions=[(; group, members=[(; name, pubkey) for (pubkey, name) in ms])
                             for (group, ms) in d])
+        HTTP.Response(200, api_headers, JSON.json(res))
+    end
+end
+
+function suggestions_2_handler(req::HTTP.Request)
+    catch_exception(:suggestions_2_handler, req) do
+        req.method == "OPTIONS" && return HTTP.Response(200, api_headers, "ok")
+        d = JSON.parse(read(Main.App.SUGGESTED_USERS_FILE_2[], String))
+        pubkeys = Nostr.PubKeyId[]
+        groups = []
+        for group in d
+            members = []
+            for user in group["people"]
+                pubkey = user["pubkey"]
+                if startswith(pubkey, "npub")
+                    pubkey = Nostr.hex(Nostr.bech32_decode(pubkey))
+                end
+                push!(pubkeys, Nostr.PubKeyId(pubkey))
+                push!(members, merge(user, Dict("pubkey" => pubkey)))
+            end
+            push!(groups, merge(group, Dict("people" => members)))
+        end
+        res = (;
+               metadata=collect_metadata(pubkeys),
+               suggestions=groups)
         HTTP.Response(200, api_headers, JSON.json(res))
     end
 end
