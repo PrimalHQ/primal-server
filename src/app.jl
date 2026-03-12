@@ -951,7 +951,12 @@ function feed_2(
     #     Main.stuffd[:eids] = eids
     # end
 
-    tdur3 = @elapsed (res = response_messages_for_posts(est, eids; user_pubkey, time_exceeded))
+    if usepgfuncs
+        pg_posts = Tuple{Nostr.EventId, Int}[(Nostr.EventId(eid), created_at) for (eid, created_at) in posts]
+        tdur3 = @elapsed (res = enrich_feed_events_pg(est; posts=pg_posts, user_pubkey, apply_humaness_check))
+    else
+        tdur3 = @elapsed (res = response_messages_for_posts(est, eids; user_pubkey, time_exceeded))
+    end
 
     # @show (tdur1, tdur2, tdur3)
 
