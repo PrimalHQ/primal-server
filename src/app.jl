@@ -1159,8 +1159,8 @@ end
 function primal_verified_names(est::DB.CacheStorage, pubkeys::Vector)
     pks = '{'*join([Nostr.hex(pk) for pk in pubkeys], ',')*'}'
     res = []
-    append!(res, [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from primal_verified_names(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])])
-    append!(res, [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from  user_blossom_servers(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])])
+    append!(res, filter(!isnothing, [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from primal_verified_names(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])]))
+    append!(res, filter(!isnothing, [castnamedtuple(e) for (e,) in Postgres.pex(DAG_OUTPUTS_DB[], "select * from  user_blossom_servers(array(select decode(unnest(\$1::text[]), 'hex')))", [pks])]))
     return res
 
     # res_primal_names = Dict()
@@ -2988,11 +2988,6 @@ function multi_kind_mega_feed_directive(
     if haskey(kwargs, :user_pubkey) && est.auto_fetch_missing_events
         user_pubkey = cast(kwargs[:user_pubkey], Nostr.PubKeyId)
         DB.fetch_user_metadata(est, user_pubkey)
-    end
-
-    # support kinds from spec for backward compatibility
-    if isempty(kinds) && haskey(s, "kinds")
-        kinds = s["kinds"]
     end
 
     id = get(s, "id", "")
