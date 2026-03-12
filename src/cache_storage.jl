@@ -1143,7 +1143,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     # end
 
     catch_exception(est, e.id) do
-        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.LONG_FORM_CONTENT)
+        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.LONG_FORM_CONTENT) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL)
             for (tbl, q, key_vals) in [(est.event_stats,           event_stats_insert_q,           (e.id,     e.pubkey)),
                                        # (est.event_stats_by_pubkey, event_stats_by_pubkey_insert_q, (e.pubkey,     e.id)),
                                       ]
