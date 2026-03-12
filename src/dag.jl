@@ -247,10 +247,10 @@ function default_pipeline(targetserver, xn, o)
     o.human_override   = ServerTable(:postgres, targetserver, "human_override")
 
     xn(basic_tags_node, o.events)
-    xn(poll_stats_node, o.basic_tags)
     # xn(events_simplified_node, o.events)
     # xn(event_stats_node, o.events, o.events_simplified)
     xn(zap_receipts_node, o.events)
+    xn(poll_stats_node, o.basic_tags)
     xn(a_tags_node, o.events)
     # xn(sqlite2pg_node; skipprocessing=true)
     xn(override_runtag(sqlite2pg_node, :dev27); skipprocessing=true)
@@ -1136,27 +1136,7 @@ function zap_receipts_node(
 
     process_segments(zap_receipts; runctx, step=24*3600, sequential=false) do t1, t2
         transaction_with_execution_stats(events.server; runctx.stats) do session1
-            pgt = PGTable(zap_receipts, session1)
-            for r in Postgres.execute(session1, "
-                                      select 
-                                          id, pubkey, created_at, kind, tags, '', sig, imported_at
-                                      from $(events.table)
-                                      where 
-                                          imported_at >= ?1 and imported_at <= ?2 and 
-                                          kind = $(Int(Nostr.ZAP_RECEIPT))
-                                      order by imported_at
-                                      " |> rep,
-                                      [t1, t2])[2]
-                e = event_from_row(r)
-                try
-                    p = parse_zap_receipt(r[5])
-                    if !isnothing(p.eid) && !isnothing(p.receiver) && !isnothing(p.sender) && p.amount_sats > 0
-                        push!(pgt, (e.id, e.created_at, p.eid, p.sender, p.receiver, p.amount_sats, r[end]))
-                    end
-                catch ex
-                    println(ex)
-                end
-            end
+            import_zap_receipts(session1, events, zap_receipts, t1, t2)
         end
     end
 
@@ -1835,6 +1815,31 @@ function pubkey_content_zap_cnt_node(
     (; pubkey_content_zap_cnt)
 end
 
+function import_zap_receipts(connsel, events::ServerTable, zap_receipts::ServerTable, since, until)
+    for r in Postgres.execute(connsel, "
+                              select
+                                  id, pubkey, created_at, kind, tags, '', sig, imported_at
+                              from $(events.table)
+                              where
+                                  imported_at >= \$1 and imported_at <= \$2 and
+                                  kind = $(Int(Nostr.ZAP_RECEIPT))
+                              order by imported_at
+                              " |> rep,
+                              [since, until])[2]
+        e = event_from_row(r)
+        try
+            p = parse_zap_receipt(r[5])
+            if !isnothing(p.eid) && !isnothing(p.receiver) && !isnothing(p.sender) && p.amount_sats > 0
+                Postgres.execute(connsel,
+                    "insert into $(zap_receipts.table) (eid, created_at, target_eid, sender, receiver, satszapped, imported_at) values (\$1, \$2, \$3, \$4, \$5, \$6, \$7) on conflict do nothing" |> rep,
+                    [e.id, e.created_at, p.eid, p.sender, p.receiver, p.amount_sats, r[end]])
+            end
+        catch ex
+            println(ex)
+        end
+    end
+end
+
 function parse_zap_receipt(tags::Vector)
     eid = nothing
     receiver = sender = nothing
@@ -2119,6 +2124,13 @@ function update_single_poll_stats(poll_id, poll_stats::ServerTable, poll_user_vo
                             end
                         end
                     catch _ end
+                end
+            end
+            # Fall back to zap_receipts table if amount not in description tags
+            if amount_msats == 0
+                sats_rows = Postgres.pex(MAIN_SERVER[], "select satszapped from zap_receipts where eid = ?1", (zap_eid,))
+                if !isempty(sats_rows)
+                    amount_msats = sats_rows[1][1] * 1000
                 end
             end
             if !isnothing(option_id) && haskey(opts, option_id) && !isnothing(zap_sender)

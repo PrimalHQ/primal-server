@@ -1913,6 +1913,7 @@ function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false
                                                                try
                                                                    o = Main.App.DAG_OUTPUTS[][2]
                                                                    Main.DAG.import_basic_tags(Main.App.DAG_OUTPUTS_DB[], o.events, o.basic_tags, e.created_at, e.created_at)
+                                                                   Main.DAG.import_zap_receipts(Main.App.DAG_OUTPUTS_DB[], o.events, o.zap_receipts, e.created_at, e.created_at)
                                                                    Main.DAG.import_poll_votes(Main.App.DAG_OUTPUTS_DB[], o.basic_tags, o.poll_stats, o.poll_user_votes, e.created_at, e.created_at)
                                                                    Main.DAG.import_event_mentions(est, o.event_mentions, e)
                                                                catch ex
@@ -3008,6 +3009,8 @@ function multi_kind_mega_feed_directive(
             return explore_global_mostzapped(est, s["hours"]; kinds, kwargs...)
         elseif id == "feed"
             return feed(est; skwa..., kinds, kwargs..., usepgfuncs, apply_humaness_check)
+        elseif id == "advsearch"
+            return advanced_search(est; skwa..., kinds, kwargs...)
         end
     else
         return mega_feed_directive(est; spec, usepgfuncs, apply_humaness_check, kwargs...)
