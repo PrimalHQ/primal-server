@@ -3011,6 +3011,16 @@ function multi_kind_mega_feed_directive(
             return feed(est; skwa..., kinds, kwargs..., usepgfuncs, apply_humaness_check)
         elseif id == "advsearch"
             return advanced_search(est; skwa..., kinds, kwargs...)
+        elseif id == "nostr-reads-feed"
+            return advanced_search(est; query="kind:30023 scope:myfollowsinteractions minwords:100 features:summary", kwargs...)
+        else
+            for f in try JSON.parse(read(ADVANCED_FEEDS_FILE[], String)) catch _; [] end
+                f["id"] == id && return mega_feed_directive(est; spec=f["specification"], kwargs...)
+            end
+            if 30023 in kinds
+                return long_form_content_feed(est; skwa..., kwargs..., usepgfuncs, apply_humaness_check)
+            end
+            return mega_feed_directive(est; spec, usepgfuncs, apply_humaness_check, kwargs...)
         end
     else
         return mega_feed_directive(est; spec, usepgfuncs, apply_humaness_check, kwargs...)
