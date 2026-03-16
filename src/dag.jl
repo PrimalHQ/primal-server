@@ -4030,18 +4030,18 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             ))")
     end
 
-    kind = Nostr.TEXT_NOTE
+    kind = Int(Nostr.TEXT_NOTE)
     has_explicit_kind = false
     for op in expr.ops
         if op isa O.Kind
             cond("$(T(o.advsearch)).kind = $(P(op.kind))")
-            kind = Nostr.Kind(op.kind)
+            kind = op.kind
             has_explicit_kind = true
             break
         end
     end
 
-    if kind == Nostr.TEXT_NOTE
+    if kind == Int(Nostr.TEXT_NOTE)
         if !has_explicit_kind
             cond("$(T(o.advsearch)).kind IN ($(P(Int(Nostr.TEXT_NOTE))), $(P(Int(Nostr.POLL))), $(P(Int(Nostr.ZAP_POLL))))")
         end
@@ -4051,7 +4051,7 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         cond("$(T(o.advsearch)).created_at <= $(P(until))")
         orderby = "$(T(o.advsearch)).created_at"
 
-    elseif kind == Nostr.LONG_FORM_CONTENT
+    elseif kind == Int(Nostr.LONG_FORM_CONTENT)
         select("$(T(o.advsearch)).id")
         orderkey = "$(T(o.reads)).published_at"
         cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid")
@@ -4060,7 +4060,11 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         orderby = "$(T(o.reads)).published_at"
 
     else
-        error("unsupported kind")
+        select("$(T(o.advsearch)).id")
+        orderkey = "$(T(o.advsearch)).created_at"
+        cond("$(T(o.advsearch)).created_at >= $(P(since))")
+        cond("$(T(o.advsearch)).created_at <= $(P(until))")
+        orderby = "$(T(o.advsearch)).created_at"
     end
 
     if !isempty(kinds)
