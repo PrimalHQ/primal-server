@@ -448,6 +448,12 @@ impl ReqHandlers {
 
                     if id == "latest" {
                         let mut kwa = kwargs.clone();
+                        // merge spec kwargs (excluding id, kind)
+                        for (k, v) in s.iter() {
+                            if k != "id" && k != "kind" {
+                                kwa.insert(k.clone(), v.clone());
+                            }
+                        }
                         kwa.insert("pubkey".to_string(), kwa.get("user_pubkey").expect("user_pubkey argument required").clone());
                         kwa.insert("kinds".to_string(), kinds.clone());
 

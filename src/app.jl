@@ -2999,7 +2999,7 @@ function multi_kind_mega_feed_directive(
 
     if !isempty(kinds)
         if     id == "latest"
-            return feed(est; pubkey=kwa[:user_pubkey], kinds, kwargs...)
+            return feed(est; skwa..., pubkey=kwa[:user_pubkey], kinds, kwargs...)
         elseif id == "global-trending"
             return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kinds, kwargs...)
         elseif id == "all-notes"
