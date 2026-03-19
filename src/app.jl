@@ -3078,7 +3078,7 @@ function poll_votes(est::DB.CacheStorage;
         until::Union{Nothing,Int}=nothing,
         limit::Int=20, offset::Int=0,
         user_pubkey=nothing,
-        apply_humaness_check=false,
+        apply_humaness_check=true,
         option=nothing,
         kwargs...)
     event_id = cast(event_id, Nostr.EventId)

@@ -2098,12 +2098,28 @@ function update_single_poll_stats(poll_id, poll_stats::ServerTable, poll_user_vo
     end
 
     if poll_kind == Nostr.ZAP_POLL
+        # Extract value_minimum and value_maximum from poll tags
+        value_minimum = nothing
+        value_maximum = nothing
+        for tag in poll_tags
+            if length(tag) >= 2 && tag[1] == "value_minimum"
+                try value_minimum = parse(Int, tag[2]) catch _ end
+            elseif length(tag) >= 2 && tag[1] == "value_maximum"
+                try value_maximum = parse(Int, tag[2]) catch _ end
+            end
+        end
+        # NIP-69: if value_minimum == value_maximum, only count 1 zap per option per participant
+        one_zap_per_option = !isnothing(value_minimum) && !isnothing(value_maximum) && value_minimum == value_maximum
+
         zaps = Postgres.pex(MAIN_SERVER[],
             "select e.id, e.created_at, e.tags from basic_tags bt join event e on e.id = bt.id
              where bt.arg1 = ?1 and bt.tag = 'e' and bt.kind = 9735",
             (poll_id,))
-        # Deduplicate: keep latest zap per sender pubkey
-        user_zaps = Dict{Nostr.PubKeyId, @NamedTuple{zap_eid::Nostr.EventId, created_at::Int, option_id::String, amount_msats::Int}}()
+
+        # Track per-user latest zap (for poll_user_votes upsert) and per-option dedup when needed
+        user_latest_zap = Dict{Nostr.PubKeyId, @NamedTuple{zap_eid::Nostr.EventId, created_at::Int, option_id::String}}()
+        seen_user_option = Set{Tuple{Nostr.PubKeyId, String}}()
+
         for (zap_eid_raw, zap_created_at, zap_tags) in zaps
             zap_eid = Nostr.EventId(zap_eid_raw)
             option_id = nothing
@@ -2126,9 +2142,9 @@ function update_single_poll_stats(poll_id, poll_stats::ServerTable, poll_user_vo
                     catch _ end
                 end
             end
-            # Fall back to zap_receipts table if amount not in description tags
+            # Fall back to og_zap_receipts if amount not in description tags
             if amount_msats == 0
-                sats_rows = Postgres.pex(MAIN_SERVER[], "select satszapped from zap_receipts where eid = ?1", (zap_eid,))
+                sats_rows = Postgres.pex(MAIN_SERVER[], "select amount_sats from og_zap_receipts where zap_receipt_id = ?1 limit 1", (zap_eid,))
                 if !isempty(sats_rows)
                     amount_msats = sats_rows[1][1] * 1000
                 end
@@ -2137,17 +2153,32 @@ function update_single_poll_stats(poll_id, poll_stats::ServerTable, poll_user_vo
                 try
                     sender_pk = Nostr.PubKeyId(zap_sender)
                     DB.ext_is_human(Main.cache_storage, sender_pk) || continue
-                    prev = get(user_zaps, sender_pk, nothing)
+                    amount_sats = amount_msats ÷ 1000
+                    # NIP-69: check value bounds
+                    if !isnothing(value_minimum) && amount_sats < value_minimum
+                        continue
+                    end
+                    if !isnothing(value_maximum) && amount_sats > value_maximum
+                        continue
+                    end
+                    # NIP-69: if one_zap_per_option, skip duplicate zaps for same user+option
+                    if one_zap_per_option && (sender_pk, option_id) in seen_user_option
+                        continue
+                    end
+                    push!(seen_user_option, (sender_pk, option_id))
+                    # Count every eligible zap as a vote with its sats
+                    opts[option_id]["votes"] += 1
+                    opts[option_id]["satszapped"] += amount_sats
+                    # Track latest zap per user for poll_user_votes
+                    prev = get(user_latest_zap, sender_pk, nothing)
                     if isnothing(prev) || zap_created_at > prev.created_at
-                        user_zaps[sender_pk] = (; zap_eid, created_at=zap_created_at, option_id, amount_msats)
+                        user_latest_zap[sender_pk] = (; zap_eid, created_at=zap_created_at, option_id)
                     end
                 catch _ end
             end
         end
-        # Count from deduplicated zaps and upsert
-        for (pubkey, v) in user_zaps
-            opts[v.option_id]["votes"] += 1
-            opts[v.option_id]["satszapped"] += v.amount_msats ÷ 1000
+        # Upsert poll_user_votes with latest zap per user
+        for (pubkey, v) in user_latest_zap
             Postgres.pex(MAIN_SERVER[],
                 "insert into $(poll_user_votes.table) (poll_id, pubkey, option_id, created_at, vote_eid)
                  values (?1, ?2, ?3, ?4, ?5)

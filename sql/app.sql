@@ -1734,15 +1734,20 @@ LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 DECLARE
     allowed_eids bytea[];
+    vote_eids bytea[];
+    sender_pubkeys bytea[];
 BEGIN
     IF a_option IS NULL THEN
+        vote_eids := ARRAY (SELECT event_id FROM poll_votes_posts(
+            a_event_id, a_since, a_until, a_limit, a_offset, a_option));
         RETURN QUERY SELECT * FROM enrich_feed_events(
             ARRAY (SELECT r FROM poll_votes_posts(
                 a_event_id, a_since, a_until, a_limit, a_offset, a_option) r),
             a_user_pubkey, a_apply_humaness_check);
     ELSE
-        allowed_eids := ARRAY (SELECT event_id FROM poll_votes_posts(
+        vote_eids := ARRAY (SELECT event_id FROM poll_votes_posts(
             a_event_id, a_since, a_until, a_limit, a_offset, a_option));
+        allowed_eids := vote_eids;
         RETURN QUERY SELECT e FROM enrich_feed_events(
             ARRAY (SELECT (event_id, created_at)::post FROM poll_votes_posts(
                 a_event_id, a_since, a_until, a_limit, a_offset, a_option)),
@@ -1750,6 +1755,15 @@ BEGIN
         WHERE e IS NOT NULL
           AND NOT ((e->>'kind')::int8 = 9735 AND NOT (DECODE(e->>'id', 'hex') = ANY(allowed_eids)));
     END IF;
+
+    -- return metadata for zap vote senders
+    sender_pubkeys := ARRAY (
+        SELECT DISTINCT oz.sender FROM og_zap_receipts oz
+        WHERE oz.zap_receipt_id = ANY(vote_eids)
+    );
+    RETURN QUERY SELECT get_event_jsonb(md.value) FROM meta_data md
+        WHERE md.key = ANY(sender_pubkeys);
+    RETURN QUERY SELECT * FROM primal_verified_names(sender_pubkeys);
 END;
 $BODY$;
 
