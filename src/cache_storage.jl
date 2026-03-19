@@ -1055,6 +1055,10 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     EVENT_RELAY_TRACKING_ENABLED[] && (isnothing(relay_url) || Postgres.execute(:p0, "insert into event_relays values (\$1, \$2, \$3) on conflict do nothing", [e.id, relay_url, Utils.current_time()]))
     isnothing(relay_url) || update_known_relays(est, relay_url)
 
+    accepted_kind = (!(e.kind in [30382, 30383])) && (e.kind in kindints || (10000 <= e.kind < 20000) || (30000 <= e.kind < 40000))
+    accepted_kind || return false
+    # @show (accepted_kind, e.kind)
+
     should_import = lock(already_imported_check_lock) do
         if e.kind in BLOCKED_KINDS || e.id in est.events || !ext_preimport_check(est, e)
             false
@@ -1064,8 +1068,6 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             true
         end
     end
-
-    e.kind in kindints || (10000 <= e.kind < 20000) || (30000 <= e.kind < 40000) || return false
 
     (force || should_import) || return false
 
