@@ -543,12 +543,13 @@ BEGIN
         RETURN QUERY SELECT * FROM response_messages_for_post(eid, a_user_pubkey, true, a_depth-1);
     END LOOP;
 
-    FOR pk IN 
+    FOR pk IN
         (
             SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag in ('p', 'P')
         ) UNION (
             SELECT argpubkey FROM event_mentions em WHERE em.eid = a_event_id AND tag in ('p', 'P')
         )
+        LIMIT 50
     LOOP
         RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE pk = meta_data.key;
     END LOOP;
