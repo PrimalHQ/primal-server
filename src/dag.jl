@@ -35,6 +35,8 @@ PROTECTED_TABLES = ["event"]
 
 MAIN_SERVER = Ref(:p0)
 
+POLL_VOTE_IMPORT_ENABLED = Ref(false)
+
 const logs = Ref{Any}(nothing)
 const node_outputs = Ref{Any}(nothing)
 const coverages = Ref{Any}(nothing)
@@ -2210,6 +2212,7 @@ function update_poll_stats(poll_stats::ServerTable, poll_user_votes::ServerTable
 end
 
 function import_poll_votes(connsel, basic_tags::ServerTable, poll_stats::ServerTable, poll_user_votes::ServerTable, since, until)
+    POLL_VOTE_IMPORT_ENABLED[] || return 
     poll_ids = Set{Nostr.EventId}()
     for (arg1,) in Postgres.execute(connsel,
             "select distinct bt.arg1 from $(basic_tags.table) bt
@@ -4254,17 +4257,17 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         elseif op isa O.Word;      cond("$(T(o.advsearch)).content_tsv @@ plainto_tsquery('simple', $(P(op.word)))")
         elseif op isa O.Phrase;    cond("$(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase)))")
         elseif op isa O.HashTag
-            if kind == Nostr.TEXT_NOTE
+            if kind == Int(Nostr.TEXT_NOTE)
                 cond("$(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag)))")
-            elseif kind == Nostr.LONG_FORM_CONTENT
+            elseif kind == Int(Nostr.LONG_FORM_CONTENT)
                 cond("$(T(o.reads)).topics @@ plainto_tsquery('simple', $(P(op.hashtag)))")
             end
         elseif op isa O.NotWord;   cond("$(T(o.advsearch)).content_tsv @@ to_tsquery('simple', $(P("! "*op.word)))")
         elseif op isa O.NotPhrase; cond("not ($(T(o.advsearch)).content_tsv @@ phraseto_tsquery('simple', $(P(op.phrase))))")
         elseif op isa O.NotHashTag
-            if kind == Nostr.TEXT_NOTE
+            if kind == Int(Nostr.TEXT_NOTE)
                 cond("not ($(T(o.advsearch)).hashtag_tsv @@ plainto_tsquery('simple', $(P(op.hashtag))))")
-            elseif kind == Nostr.LONG_FORM_CONTENT
+            elseif kind == Int(Nostr.LONG_FORM_CONTENT)
                 cond("not ($(T(o.reads)).topics @@ plainto_tsquery('simple', $(P(op.hashtag))))")
             end
         elseif op isa O.Since;     cond("$(T(o.advsearch)).created_at >= $(P(op.ts))")
@@ -4339,9 +4342,9 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
         elseif op isa O.MinTrustRank
             cond("$(T(o.advsearch)).pubkey = $(T(o.pubkey_trustrank)).pubkey and $(T(o.pubkey_trustrank)).rank >= $(P(10.0^op.trustrank))")
         elseif op isa O.Lang
-            if     kind == Nostr.TEXT_NOTE
+            if     kind == Int(Nostr.TEXT_NOTE)
                 cond("$(T("text_metadata")).event_id = $(T(o.advsearch)).id and $(T("text_metadata")).md->>'lang' = $(P(op.lang))")
-            elseif kind == Nostr.LONG_FORM_CONTENT
+            elseif kind == Int(Nostr.LONG_FORM_CONTENT)
                 cond("$(T(o.advsearch)).id = $(T(o.reads)).latest_eid and $(T(o.reads)).lang = $(P(op.lang)) and $(T(o.reads)).lang_prob = 1.0")
             end
         elseif op isa O.ZappedBy

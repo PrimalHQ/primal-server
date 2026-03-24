@@ -3072,6 +3072,7 @@ function enrich_feed_events_pg(
     [[pes[eid] for eid in elements if haskey(pes, eid)]; res2]
 end
 
+POLL_VOTES_REDIRECTED = Ref{Any}(nothing)
 function poll_votes(est::DB.CacheStorage;
         event_id=nothing,
         since::Union{Nothing,Int}=nothing,
@@ -3081,6 +3082,23 @@ function poll_votes(est::DB.CacheStorage;
         apply_humaness_check=true,
         option=nothing,
         kwargs...)
+    if !isnothing(POLL_VOTES_REDIRECTED[])
+        try
+            return Main.rex(POLL_VOTES_REDIRECTED[]..., 
+                            :(Main.App.poll_votes(Main.cache_storage; 
+                                                  event_id=$event_id, 
+                                                  since=$since,
+                                                  until=$until,
+                                                  limit=$limit,
+                                                  offset=$offset,
+                                                  user_pubkey=$user_pubkey,
+                                                  apply_humaness_check=$apply_humaness_check,
+                                                  option=$option,
+                                                  $kwargs...)))
+        catch ex
+            println("poll_votes redirection failed: $ex")
+        end
+    end
     event_id = cast(event_id, Nostr.EventId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
     since = isnothing(since) ? 0 : since
