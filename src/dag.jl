@@ -759,7 +759,7 @@ function advsearch_node(
                         $(events.table) es
                     where 
                         es.imported_at >= \$1 and es.imported_at <= \$2 and
-                        (es.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.POLL)), $(Int(Nostr.ZAP_POLL)), $(Int(Nostr.LONG_FORM_CONTENT))))
+                        (es.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.POLL)), $(Int(Nostr.ZAP_POLL)), $(Int(Nostr.LONG_FORM_CONTENT)), $(Nostr.PICTURE), $(Nostr.VIDEO_LONG_FORM), $(Nostr.VIDEO_SHORT_FORM), $(Nostr.COMMENT)))
                     order by es.id
                 "
 
@@ -4147,7 +4147,7 @@ function to_sql(est::DB.CacheStorage, user_pubkey, outputs::NamedTuple, expr, ki
             #     error("unsupported repliestokind operator argument")
             # end
         elseif op isa O.PostType && op.type == "root"
-            cond("not exists (select 1 from basic_tags btpt where btpt.id = $(T(o.advsearch)).id and btpt.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.POLL)), $(Int(Nostr.ZAP_POLL))) and btpt.tag = 'e' and btpt.arg3 = 'root' limit 1)")
+            cond("not exists (select 1 from basic_tags btpt where btpt.id = $(T(o.advsearch)).id and btpt.kind in ($(Int(Nostr.TEXT_NOTE)), $(Int(Nostr.POLL)), $(Int(Nostr.ZAP_POLL)), $(Nostr.PICTURE), $(Nostr.VIDEO_LONG_FORM), $(Nostr.VIDEO_SHORT_FORM), $(Nostr.COMMENT)) and btpt.tag = 'e' and btpt.arg3 = 'root' limit 1)")
         elseif op isa O.Scope
             if op.scope in ["myfollows", "mynetwork"]
                 if     op.scope == "myfollows"

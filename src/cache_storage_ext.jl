@@ -408,6 +408,16 @@ function ext_live_event(est::CacheStorage, e::Nostr.Event)
     end
 end
 
+function ext_video_note(est::CacheStorage, e::Nostr.Event)
+    import_note_urls(est, e)
+    for t in e.tags
+        if length(t.fields) >= 2 && t.fields[1] in ("url", "thumb", "image")
+            url = t.fields[2]
+            DOWNLOAD_MEDIA[] && @pnd import_media_pn(est, e.id, url, Main.Media.all_variants)
+        end
+    end
+end
+
 function ext_reply(est::CacheStorage, e::Nostr.Event, parent_eid)
     event_hook(est, parent_eid, (:score_event_cb, e.pubkey, e.created_at, :reply, 10))
 
@@ -928,7 +938,7 @@ function for_urls(body::Function, est::CacheStorage, e::Nostr.Event)
     for m in eachmatch(re_url, e.content)
         body(String(m.match))
     end
-    if e.kind == Nostr.PICTURE
+    if e.kind in (Nostr.PICTURE, Nostr.VIDEO_LONG_FORM, Nostr.VIDEO_SHORT_FORM)
         for t in e.tags
             if length(t.fields) >= 1 && t.fields[1] == "imeta"
                 for it in t.fields[2:end]

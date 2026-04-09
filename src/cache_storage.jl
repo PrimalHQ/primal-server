@@ -29,7 +29,7 @@ hashfunc(::Type{Nostr.PubKeyId}) = pk->pk.pk[32]
 hashfunc(::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) = p->p[1].pk[32]
 
 MAX_MESSAGE_SIZE = Ref(500_000) |> ThreadSafe
-kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT, Nostr.REPORTING, Nostr.POLL, Nostr.POLL_VOTE, Nostr.ZAP_POLL, Nostr.LIVE_CHAT_MESSAGE]]
+kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS, Nostr.HIGHLIGHT, Nostr.REPORTING, Nostr.POLL, Nostr.POLL_VOTE, Nostr.ZAP_POLL, Nostr.LIVE_CHAT_MESSAGE, Nostr.PICTURE, Nostr.COMMENT]]
 
 term_lines = try parse(Int, strip(read(`tput lines`, String))) catch _ 15 end
 threadprogress = Dict{Int, Any}() |> ThreadSafe
@@ -1102,7 +1102,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     begin
         local is_pubkey_event = false
         local is_reply = false
-        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL)
+        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL) || e.kind == Nostr.PICTURE || e.kind == Nostr.VIDEO_LONG_FORM || e.kind == Nostr.VIDEO_SHORT_FORM
             is_pubkey_event = true
             for tag in e.tags
                 if length(tag.fields) >= 2 && (tag.fields[1] == "e" || tag.fields[1] == "a")
@@ -1145,7 +1145,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
     # end
 
     catch_exception(est, e.id) do
-        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.LONG_FORM_CONTENT) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL)
+        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.LONG_FORM_CONTENT) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL) || e.kind == Nostr.PICTURE || e.kind == Nostr.VIDEO_LONG_FORM || e.kind == Nostr.VIDEO_SHORT_FORM || e.kind == Nostr.COMMENT
             for (tbl, q, key_vals) in [(est.event_stats,           event_stats_insert_q,           (e.id,     e.pubkey)),
                                        # (est.event_stats_by_pubkey, event_stats_by_pubkey_insert_q, (e.pubkey,     e.id)),
                                       ]
@@ -1197,7 +1197,7 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
 
             fetch_missing_events(est, e)
 
-        elseif e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL)
+        elseif e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.POLL) || e.kind == Int(Nostr.ZAP_POLL) || e.kind == Nostr.PICTURE
             incr(est, :pubnotes)
 
             ext_text_note(est, e)
@@ -1377,6 +1377,21 @@ function import_event(est::CacheStorage, e::Nostr.Event; force=false, disable_da
             init_event_pubkey_action(est, e.id, e)
         elseif e.kind == Nostr.LIVE_EVENT
             ext_live_event(est, e)
+        elseif e.kind == Nostr.VIDEO_LONG_FORM || e.kind == Nostr.VIDEO_SHORT_FORM
+            ext_video_note(est, e)
+        elseif e.kind == Nostr.COMMENT
+            ext_text_note(est, e)
+            if !isnothing(local parent_eid = parse_parent_eid(est, e))
+                incr(est, :replies)
+                ext_is_hidden(est, e.id) || !is_trusted_user(est, e.pubkey) || event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
+                exe(est.event_replies, @sql("insert into event_replies (event_id, reply_event_id, reply_created_at) values (?1, ?2, ?3)"),
+                    parent_eid, e.id, e.created_at)
+                event_pubkey_action(est, parent_eid, e, :replied)
+                est.event_thread_parents[e.id] = parent_eid
+                ext_reply(est, e, parent_eid)
+            end
+            import_reply_notifications(est, e)
+            fetch_missing_events(est, e)
         end
     end
 

@@ -247,6 +247,10 @@ pub const BOOKMARKS: i64 = 10003;
 pub const FOLLOW_LIST: i64 = 39089;
 pub const LIVE_EVENT: i64 = 30311;
 
+pub const PICTURE: i64 = 20;
+pub const COMMENT: i64 = 1111;
+pub const VIDEO_LONG_FORM: i64 = 34235;
+pub const VIDEO_SHORT_FORM: i64 = 34236;
 pub const LIVE_EVENT_MUTELIST: i64 = 10555;
 
 impl Tag {

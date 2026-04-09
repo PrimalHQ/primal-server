@@ -2996,9 +2996,16 @@ function multi_kind_mega_feed_directive(
     end
 
     id = get(s, "id", "")
+    kind = get(s, "kind", "")
 
     if !isempty(kinds)
-        if     id == "latest"
+        if     id == "latest" && kind == "photos"
+            return advanced_search(est; query="kind:20", kwargs...)
+        elseif id == "latest" && kind == "short_videos"
+            return advanced_search(est; query="kind:34236", kwargs...)
+        elseif id == "latest" && kind == "media"
+            return advanced_search(est; query="kind:20 OR kind:34236", kwargs...)
+        elseif id == "latest"
             return feed(est; skwa..., pubkey=kwa[:user_pubkey], kinds, kwargs...)
         elseif id == "global-trending"
             return explore(est; timeframe="trending", scope="global", created_after=Utils.current_time()-s["hours"]*3600, kinds, kwargs...)
@@ -4367,39 +4374,48 @@ end
 
 function follow_lists(
         est::DB.CacheStorage;
-        since=0, until=Utils.current_time(), 
+        since=0, until=Utils.current_time(),
         limit=5, offset=0,
     )
     limit = min(20, limit)
 
+    whitelist = try JSON.parse(read(content_moderation_repo_file("explore-follow-packs.json"), String)) catch _; nothing end
+
+    events = if !isnothing(whitelist)
+        eids = Nostr.EventId[]
+        for entry in whitelist
+            try
+                d = Dict(Bech32.nip19_decode(entry["follow_pack"]))
+                push!(eids, d[Bech32.Special])
+            catch _ end
+        end
+        page_eids = eids[min(offset+1, length(eids)+1):min(offset+limit, length(eids))]
+        filter(!isnothing, map(page_eids) do eid
+            rs = p0"select es.* from events es where es.id = $(eid)"
+            isempty(rs) ? nothing : event_from_row(collect(rs[1]))
+        end)
+    else
+        evs = Nostr.Event[]
+        for r in p0"
+            select es.* from parametrized_replaceable_events pre, events es
+            where pre.kind = 39089 and pre.created_at >= $since and pre.created_at <= $until and pre.event_id = es.id
+              and not exists (select 1 from filterlist fl where fl.target = pre.pubkey and fl.target_type = 'pubkey' and fl.grp = 'spam' and fl.blocked)
+            order by pre.created_at desc limit $limit offset $offset"
+            e = event_from_row(collect(r))
+            any(t -> length(t.fields) >= 2 && t.fields[1] == "image", e.tags) && push!(evs, e)
+        end
+        evs
+    end
+
     es = []
     res = []
-
     pks = Set{Nostr.PubKeyId}()
-    for r in p0"
-        select es.* from parametrized_replaceable_events pre, events es 
-        where pre.kind = 39089 and pre.created_at >= $since and pre.created_at <= $until and pre.event_id = es.id
-          and not exists (select 1 from filterlist fl where fl.target = pre.pubkey and fl.target_type = 'pubkey' and fl.grp = 'spam' and fl.blocked)
-        order by pre.created_at desc limit $limit offset $offset"
-        e = event_from_row(collect(r))
 
-        has_image = false
-        for t in e.tags
-            if length(t.fields) >= 2 && t.fields[1] == "image"
-                has_image = true
-                break
-            end
-        end
-        has_image || continue
-
+    for e in events
         push!(res, e)
-
         append!(res, map(castnamedtuple, p0"select * from event_media_response($(e.id))"))
-
         push!(es, (e.id, e.created_at))
-
         push!(pks, e.pubkey)
-
         pks_param = "{$(join(["\\\\x$(Nostr.hex(pk))" for pk in parse_follow_list(e)], ','))}"
         rs = p0"select key as pubkey, value as cnt from pubkey_followers_cnt where key = any ($(pks_param)::bytea[]) order by cnt desc limit 5"
         union!(pks, [r.pubkey for r in rs])

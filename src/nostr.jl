@@ -50,6 +50,9 @@ POLL_VOTE=1018
 ZAP_POLL=6969
 LIVE_EVENT=30311
 LIVE_CHAT_MESSAGE=1311
+VIDEO_LONG_FORM=34235
+VIDEO_SHORT_FORM=34236
+COMMENT=1111
 
 struct Event
     id::EventId # <32-bytes lowercase hex-encoded sha256 of the the serialized event data>
