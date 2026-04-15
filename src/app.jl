@@ -121,6 +121,8 @@ exposed_functions = Set([:feed,
 
                          :poll_votes,
                          :import_poll_vote_event,
+
+                         :parse_advanced_search_query,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -192,6 +194,8 @@ INVOICES_TO_ZAP_RECEIPTS=10_000_177
 MEDIA_HLS_URLS=10_000_178
 
 POLL_STATS=10_000_179
+
+PARSED_SEARCH_QUERY=10_000_180
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -4389,11 +4393,12 @@ function follow_lists(
                 push!(eids, d[Bech32.Special])
             catch _ end
         end
-        page_eids = eids[min(offset+1, length(eids)+1):min(offset+limit, length(eids))]
-        filter(!isnothing, map(page_eids) do eid
+        all_events = filter(!isnothing, map(eids) do eid
             rs = p0"select es.* from events es where es.id = $(eid)"
             isempty(rs) ? nothing : event_from_row(collect(rs[1]))
         end)
+        filtered = filter(e -> e.created_at >= since && e.created_at <= until, all_events)
+        filtered[min(offset+1, length(filtered)+1):min(offset+limit, length(filtered))]
     else
         evs = Nostr.Event[]
         for r in p0"
