@@ -380,21 +380,35 @@ function scored_content(
                 else
                     push!(params, user_pubkey)
                     user_pubkey_idx = length(params)
-                    push!(where_exprs, "not is_event_hidden(\$$user_pubkey_idx, 'trending', event_id)")
-                    push!(where_exprs, "not exists (select 1 from filterlist where target = event_id and target_type = 'event' and grp = 'trending' and blocked)")
-                    push!(where_exprs, "not exists (
+                    candidates_limit = (n + offset) * 10
+                    push!(params, candidates_limit)
+                    candidates_limit_idx = length(params)
+                    kinds_filter = if !isnothing(kinds)
+                        "and exists (select 1 from events e where e.id = es.event_id and e.kind = any(\$$kinds_param_idx::bigint[]))"
+                    else
+                        ""
+                    end
+                    since_until_filter = join([e for e in where_exprs if occursin(string(field), e)], " and ")
+                    since_until_clause = isempty(since_until_filter) ? "" : "and $since_until_filter"
+                    q = "
+                    WITH top_candidates AS MATERIALIZED (
+                        select es.author_pubkey, es.event_id, es.$field
+                        from event_stats es
+                        where es.$field > 0 and $created_after <= es.created_at
+                          $since_until_clause
+                          $kinds_filter
+                        order by es.$field desc limit \$$candidates_limit_idx
+                    )
+                    select author_pubkey, event_id, $field
+                    from top_candidates es
+                    where not is_event_hidden(\$$user_pubkey_idx, 'trending', event_id)
+                      and not exists (select 1 from filterlist where target = event_id and target_type = 'event' and grp = 'trending' and blocked)
+                      and not exists (
                             select 1 from cmr_pubkeys_scopes cmr, basic_tags bt
                             where bt.id = event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey
                               and cmr.user_pubkey = \$$user_pubkey_idx and cmr.scope = 'trending'
                             limit 1
-                          )")
-                    if !isnothing(kinds)
-                        push!(where_exprs, "exists (select 1 from events e where e.id = event_id and e.kind = any(\$$kinds_param_idx::bigint[]))")
-                    end
-                    q_wheres = wheres()
-                    q = "
-                    select author_pubkey, event_id, $field
-                    from event_stats es $q_wheres
+                          )
                     order by $field desc limit \$1 offset \$2"
                 end
             end
@@ -1203,6 +1217,206 @@ function advanced_search(
     else
         [] 
     end
+end
+
+function collect_search_ops(ast)
+    O = Main.DAG.O
+    ops = []
+    if ast isa O.And || ast isa O.Or
+        for op in ast.ops
+            append!(ops, collect_search_ops(op))
+        end
+    elseif !isnothing(ast)
+        push!(ops, ast)
+    end
+    ops
+end
+
+function parse_advanced_search_query(
+        est::DB.CacheStorage;
+        query::String,
+        kwargs...,
+    )
+    O = Main.DAG.O
+
+    scope_map = Dict(
+        "myfollows" => "My Follows",
+        "mynetwork" => "My Network",
+        "myfollowsinteractions" => "My Follows Interactions",
+        "mynetworkinteractions" => "My Network Interactions",
+        "mynotifications" => "My Notifications",
+        "notmyfollows" => "Not My Follows",
+    )
+
+    orderby_map = Dict(
+        "score" => "Content Score",
+        "replies" => "Number of Replies",
+        "satszapped" => "Sats Zapped",
+        "likes" => "Number of Interactions",
+    )
+
+    words_per_minute = 238
+
+    function since_to_timeframe(ts::Int)
+        now = Utils.current_time()
+        diff = now - ts
+        if abs(diff - 86400) < 3600
+            return "Today", nothing
+        elseif abs(diff - 7*86400) < 86400
+            return "This Week", nothing
+        elseif abs(diff - 30*86400) < 2*86400
+            return "This Month", nothing
+        elseif abs(diff - 365*86400) < 15*86400
+            return "This Year", nothing
+        else
+            return "Custom", Dates.format(Dates.unix2datetime(ts), "yyyy-mm-dd")
+        end
+    end
+
+    ast = Main.DAG.parse_search_query(query)
+    ops = collect_search_ops(ast)
+
+    includes = String[]
+    excludes = String[]
+    hashtags = String[]
+    posted_by = String[]
+    replying_to = String[]
+    zapped_by = String[]
+    user_mentions = String[]
+    following_list = String[]
+
+    result = Dict{String,Any}(
+        "timeframe" => "Anytime",
+        "customTimeframe" => Dict("since" => "", "until" => ""),
+        "sentiment" => "Neutral",
+        "scope" => "Global",
+        "sortBy" => "Time",
+        "kind" => "Notes",
+        "orientation" => "Any",
+        "minDuration" => 0,
+        "maxDuration" => 0,
+        "minWords" => 0,
+        "maxWords" => 0,
+        "minScore" => 0,
+        "minInteractions" => 0,
+        "minLikes" => 0,
+        "minZaps" => 0,
+        "minReplies" => 0,
+        "minReposts" => 0,
+    )
+
+    raw_kind = nothing
+    replies_to_kind = nothing
+
+    for op in ops
+        if op isa O.Word && startswith(op.word, "following:")
+            npub_str = op.word[length("following:")+1:end]
+            !isempty(npub_str) && push!(following_list, npub_str)
+        elseif op isa O.Word
+            push!(includes, op.word)
+        elseif op isa O.Phrase
+            push!(includes, "\"$(op.phrase)\"")
+        elseif op isa O.NotWord
+            push!(excludes, op.word)
+        elseif op isa O.NotPhrase
+            push!(excludes, "\"$(op.phrase)\"")
+        elseif op isa O.HashTag
+            push!(hashtags, op.hashtag)
+        elseif op isa O.From && op.from isa Nostr.PubKeyId
+            push!(posted_by, Nostr.bech32_encode(op.from))
+        elseif op isa O.To
+            push!(replying_to, Nostr.bech32_encode(op.pubkey))
+        elseif op isa O.ZappedBy
+            push!(zapped_by, Nostr.bech32_encode(op.pubkey))
+        elseif op isa O.Mention
+            push!(user_mentions, Nostr.bech32_encode(op.pubkey))
+        elseif op isa O.Kind
+            raw_kind = op.kind
+        elseif op isa O.RepliesToKind
+            replies_to_kind = op.kind
+        elseif op isa O.Filter
+            f = lowercase(op.filter)
+            if f == "image"
+                result["kind"] = "Images"
+            elseif f == "video"
+                result["kind"] = "Video"
+            elseif f == "audio"
+                result["kind"] = "Audio"
+            end
+        elseif op isa O.Since
+            tf, date = since_to_timeframe(op.ts)
+            result["timeframe"] = tf
+            if tf == "Custom" && !isnothing(date)
+                result["customTimeframe"]["since"] = date
+            end
+        elseif op isa O.Until
+            result["timeframe"] = "Custom"
+            result["customTimeframe"]["until"] = Dates.format(Dates.unix2datetime(op.ts), "yyyy-mm-dd")
+        elseif op isa O.Scope
+            result["scope"] = get(scope_map, op.scope, "Global")
+        elseif op isa O.Emoticon
+            if op.emo == ":)"
+                result["sentiment"] = "Positive"
+            elseif op.emo == ":("
+                result["sentiment"] = "Negative"
+            end
+        elseif op isa O.Question
+            result["sentiment"] = "Question"
+        elseif op isa O.Orientation
+            result["orientation"] = uppercasefirst(op.orientation)
+        elseif op isa O.MinDuration
+            result["minDuration"] = round(Int, op.duration)
+        elseif op isa O.MaxDuration
+            result["maxDuration"] = round(Int, op.duration)
+        elseif op isa O.MinWords
+            result["minWords"] = round(Int, op.words / words_per_minute)
+        elseif op isa O.MaxWords
+            result["maxWords"] = round(Int, op.words / words_per_minute)
+        elseif op isa O.MinScore
+            result["minScore"] = op.score
+        elseif op isa O.MinInteractions
+            result["minInteractions"] = op.interactions
+        elseif op isa O.OrderBy
+            result["sortBy"] = get(orderby_map, op.field, "Time")
+        elseif op isa O.EventStatsField && op.operation == :(>=)
+            field = op.field
+            if field == :score
+                result["minScore"] = op.argument
+            elseif field == :likes
+                result["minLikes"] = op.argument
+            elseif field == :zaps
+                result["minZaps"] = op.argument
+            elseif field == :replies
+                result["minReplies"] = op.argument
+            elseif field == :reposts
+                result["minReposts"] = op.argument
+            end
+        end
+    end
+
+    # Determine kind from raw_kind + replies_to_kind
+    if !isnothing(raw_kind)
+        if raw_kind == 1 && replies_to_kind == 1
+            result["kind"] = "Note Replies"
+        elseif raw_kind == 1 && replies_to_kind == 30023
+            result["kind"] = "Reads Comments"
+        elseif raw_kind == 1
+            result["kind"] = "Notes"
+        elseif raw_kind == 30023
+            result["kind"] = "Reads"
+        end
+    end
+
+    result["includes"] = join(includes, " ")
+    result["excludes"] = join(excludes, " ")
+    result["hashtags"] = join(hashtags, " ")
+    result["postedBy"] = posted_by
+    result["replingTo"] = replying_to
+    result["zappedBy"] = zapped_by
+    result["userMentions"] = user_mentions
+    result["following"] = following_list
+
+    [(; kind=Int(PARSED_SEARCH_QUERY), content=JSON.json(result))]
 end
 
 ADVANCED_FEED_PROVIDER_HOST = Ref{Any}(nothing)
