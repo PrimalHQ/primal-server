@@ -132,6 +132,8 @@ pub struct MediaConfig {
     pub blossom_host: String,
     #[serde(default = "MediaConfig::default_binary_data_cache_dir")]
     pub binary_data_cache_dir: String,
+    #[serde(default)]
+    pub ffmpeg_remote_host: Option<String>,
 }
 
 impl Default for MediaConfig {
@@ -157,6 +159,7 @@ impl Default for MediaConfig {
             ai_timeout_secs: Self::default_ai_timeout_secs(),
             blossom_host: Self::default_blossom_host(),
             binary_data_cache_dir: Self::default_binary_data_cache_dir(),
+            ffmpeg_remote_host: None,
         }
     }
 }

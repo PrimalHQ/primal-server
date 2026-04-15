@@ -727,7 +727,7 @@ async fn main() -> anyhow::Result<()> {
           db_cfg.statement_timeout_secs, db_cfg.acquire_timeout_secs);
 
     let pool = PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(50)
         .acquire_timeout(Duration::from_secs(db_cfg.acquire_timeout_secs))
         .connect_with(connect_options)
         .await

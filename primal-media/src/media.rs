@@ -20,7 +20,7 @@ use reqwest::Url;
 
 use log::info;
 
-const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.113 Safari/537.36";
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone)]
 pub enum Size {
@@ -775,43 +775,104 @@ pub fn subdir_from_h(h: &str) -> (String, String) { let subdir = format!("{}/{}/
 async fn ensure_dir(path: &str) -> anyhow::Result<()> { tokio::fs::create_dir_all(path).await?; Ok(()) }
 fn default_variant_specs() -> Vec<(String, bool)> { let sizes=["original","small","medium","large"]; let mut v=Vec::new(); for s in sizes { for a in [true,false] { v.push((s.to_string(),a)); } } v }
 fn size_resolution(size: &str) -> (i32,i32) { match size { "small"=>(200,200),"medium"=>(400,400),"large"=>(1000,1000), _=>(0,0) } }
-fn build_scale_filter(size:&str)->Option<String>{ let (w,h)=size_resolution(size); if w==0 {return None;} if size=="small"||size=="medium" {Some(format!("scale=-1:'min({},ih)'",h))} else if size=="large" {Some(format!("scale='min({},iw)':-1",w))} else {None}}
-async fn ffmpeg_resize_to_file(input:&[u8],filters:&[String],single_frame:bool,outfn:&str)->anyhow::Result<()> {
+fn build_scale_filter(size:&str)->Option<String>{ let (w,h)=size_resolution(size); if w==0 {return None;} if size=="small"||size=="medium" {Some(format!("scale=trunc(oh*a/2)*2:min({}\\,ih)",h))} else if size=="large" {Some(format!("scale=min({}\\,iw):trunc(ow/a/2)*2",w))} else {None}}
+/// Returns stderr output from ffmpeg on success (for logging/diagnostics)
+async fn ffmpeg_resize_to_file(input:&[u8],filters:&[String],single_frame:bool,outfn:&str,ffmpeg_remote_host:Option<&str>)->anyhow::Result<String> {
     use tokio::process::Command;
     use tokio::io::AsyncWriteExt;
+    use tokio::time::Duration;
     use std::process::Stdio;
 
-    let mut cmd=Command::new("ffmpeg");
-    cmd.arg("-v").arg("error").arg("-y").arg("-i").arg("-").arg("-map_metadata").arg("-1");
-    if single_frame {cmd.arg("-frames:v").arg("1").arg("-update").arg("1");}
-    if !filters.is_empty(){let vf=filters.join(","); cmd.arg("-vf").arg(vf);}
-    cmd.arg(outfn).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let output_to_stdout = ffmpeg_remote_host.is_some();
+
+    // Build ffmpeg args
+    let mut ffmpeg_args = vec![
+        "-v".to_string(), "error".to_string(), "-y".to_string(),
+        "-i".to_string(), "-".to_string(), "-map_metadata".to_string(), "-1".to_string(),
+    ];
+    if single_frame {
+        ffmpeg_args.extend_from_slice(&["-frames:v".into(), "1".into(), "-update".into(), "1".into()]);
+    }
+    if !filters.is_empty() {
+        ffmpeg_args.push("-vf".into());
+        ffmpeg_args.push(filters.join(","));
+    }
+    if output_to_stdout {
+        let ext = std::path::Path::new(outfn).extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+        let fmt = match ext {
+            "jpg" | "jpeg" => "mjpeg",
+            "png" => "image2",
+            "webp" => "webp",
+            "gif" => "gif",
+            "mp4" => "mp4",
+            _ => "mjpeg",
+        };
+        if fmt == "mp4" {
+            ffmpeg_args.extend_from_slice(&["-movflags".into(), "frag_keyframe+empty_moov".into()]);
+        }
+        ffmpeg_args.extend_from_slice(&["-f".into(), fmt.into()]);
+        ffmpeg_args.push("pipe:1".into());
+    } else {
+        ffmpeg_args.push(outfn.into());
+    }
+
+    // Build command: local ffmpeg or ssh to remote host
+    let mut cmd = if let Some(host) = ffmpeg_remote_host {
+        let remote_cmd = std::iter::once("nice".to_string())
+            .chain(std::iter::once("ffmpeg".to_string()))
+            .chain(ffmpeg_args)
+            .map(|a| shell_escape::escape(a.into()).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        log::debug!("Running remote ffmpeg on {}: {}", host, remote_cmd);
+        let mut c = Command::new("ssh");
+        c.arg(host)
+         .arg(&remote_cmd);
+        c
+    } else {
+        let mut c = Command::new("ffmpeg");
+        for arg in &ffmpeg_args { c.arg(arg); }
+        c
+    };
+
+    cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    if output_to_stdout { cmd.stdout(Stdio::piped()); } else { cmd.stdout(Stdio::null()); }
 
     log::debug!("Running ffmpeg command: {:?}", cmd);
-    let mut child=cmd.spawn()?;
+    let mut child = cmd.spawn()?;
 
-    // Write to stdin and explicitly drop it to signal EOF
     {
-        let mut stdin=child.stdin.take().ok_or_else(||anyhow::anyhow!("failed to open ffmpeg stdin"))?;
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("failed to open ffmpeg stdin"))?;
         if let Err(e) = stdin.write_all(input).await {
-            // Collect output to see the actual error
             let output = child.wait_with_output().await?;
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log::error!("Failed to write to ffmpeg stdin: {}, stderr: {}", e, stderr);
-            anyhow::bail!("ffmpeg write failed: {}, stderr: {}", e, stderr);
+            log::error!("Failed to write to ffmpeg stdin (remote={}): {}, stderr: {}", ffmpeg_remote_host.unwrap_or("local"), e, stderr);
+            anyhow::bail!("ffmpeg write failed (remote={}): {}, stderr: {}", ffmpeg_remote_host.unwrap_or("local"), e, stderr);
         }
-        // Explicitly shutdown stdin to signal EOF
         let _ = stdin.shutdown().await;
-        // stdin is dropped here, closing the pipe
     }
 
-    let output = child.wait_with_output().await?;
-    if !output.status.success(){
+    let output = tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await
+        .map_err(|_| anyhow::anyhow!("ffmpeg timed out after 600s"))??;
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log::error!("ffmpeg failed with stderr: {}", stderr);
-        anyhow::bail!("ffmpeg resize failed: {}", stderr);
+        log::error!("ffmpeg failed (remote={}): stderr: {}", ffmpeg_remote_host.unwrap_or("local"), stderr);
+        anyhow::bail!("ffmpeg resize failed (remote={}): {}", ffmpeg_remote_host.unwrap_or("local"), stderr);
     }
-    Ok(())
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    if output_to_stdout {
+        if output.stdout.is_empty() {
+            anyhow::bail!("remote ffmpeg produced no output, stderr: {}", stderr);
+        }
+        if let Some(parent) = std::path::Path::new(outfn).parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        tokio::fs::write(outfn, &output.stdout).await?;
+    }
+
+    Ok(stderr)
 }
 
 // Handler for PrimalServer.Media.media_variants_pn(est, url; variant_specs, key)
@@ -902,6 +963,11 @@ pub async fn media_variants_pn(
             out_variants.push(json!({"size": size, "animated": animated, "media_url": orig_media_url}));
             continue;
         }
+        // For videos: only extract single frames, never re-encode whole video
+        if mimetype.starts_with("video/") && animated {
+            log::debug!("Skipping animated variant for video: {}", size);
+            continue;
+        }
         let mut conv_single_frame=false;
         if !mimetype.starts_with("image/gif") && (!animated || mimetype.starts_with("image/")) {
             conv_single_frame=true;
@@ -936,10 +1002,11 @@ pub async fn media_variants_pn(
             "v": {"animated": animated, "size": size, "url": url}
         })).await;
 
-        match ffmpeg_resize_to_file(&orig_data, &filters, conv_single_frame, &outfn).await {
-            Ok(_) => {
+        match ffmpeg_resize_to_file(&orig_data, &filters, conv_single_frame, &outfn, state.config.media.ffmpeg_remote_host.as_deref()).await {
+            Ok(ffmpeg_stderr) => {
                 let _ = crate::processing_graph::extralog(state, id, json!({
                     "status": true,
+                    "ffmpeg_stderr": if ffmpeg_stderr.is_empty() { None } else { Some(&ffmpeg_stderr) },
                     "v": {"animated": animated, "size": size, "url": url}
                 })).await;
             }
@@ -961,7 +1028,8 @@ pub async fn media_variants_pn(
         k_resized.push(("type".into(), Value::String("resized".into())));
         k_resized.push(("size".into(), Value::String(size.clone())));
         k_resized.push(("animated".into(), Value::Bool(animated)));
-        let data = tokio::fs::read(&outfn).await?;
+        let data = tokio::fs::read(&outfn).await
+            .map_err(|e| anyhow::anyhow!("failed to read ffmpeg output {}: {}", outfn, e))?;
         log::debug!("Resized file read - {} bytes, calling media_import", data.len());
         let data_clone = data.clone();
         let media_url2 = media_import(state, &k_resized, |_| Ok(data_clone.clone())).await?;
@@ -1017,7 +1085,7 @@ pub async fn media_variant_fast_pn(state: &AppState, id: &crate::processing_grap
     let (subdir2,_)=subdir_from_h(&h_res); let dirpath2 = format!("{}/{}", state.config.media.media_path, subdir2); ensure_dir(&dirpath2).await?; let ext = mimetype_ext(&mimetype).to_string();
     let outfn = format!("{}/{}{}", state.config.media.tmp_dir, h_res, ext);
     let mut filters=Vec::new(); if let Some(f)=build_scale_filter(size){ filters.push(f); }
-    if let Err(e)=ffmpeg_resize_to_file(&data_start, &filters, true, &outfn).await { log::warn!("fast_pn ffmpeg resize failed: {}", e); return Ok(Value::Null); }
+    if let Err(e)=ffmpeg_resize_to_file(&data_start, &filters, true, &outfn, state.config.media.ffmpeg_remote_host.as_deref()).await { log::warn!("fast_pn ffmpeg resize failed: {}", e); return Ok(Value::Null); }
     let out_data = tokio::fs::read(&outfn).await?;
     let out_clone = out_data.clone();
     let media_url2 = media_import(state, &k_resized, |_| Ok(out_clone.clone())).await?;

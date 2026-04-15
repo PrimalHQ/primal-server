@@ -659,7 +659,7 @@ pub async fn import_media_fast_pn(state: &AppState, eid_hex: &String, url: &Stri
     let category = "";
     let category_prob: f64 = 1.0;
     let size = "original";
-    let animated: i64 = 0;
+    let animated: i64 = if mimetype.starts_with("video/") { 1 } else { 0 };
 
     let _ = processing_graph::extralog(state, nid, json!({"op":"insert","table":"media","url":url,"media_url":url,"size":size,"animated":animated,"dldur":dldur,"width":width,"height":height,"mimetype":mimetype,"duration":duration})).await;
 
