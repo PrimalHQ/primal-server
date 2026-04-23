@@ -718,6 +718,12 @@ function nostr_json_handler(req::HTTP.Request)
             if !isempty(local pks = nostr_json_query_by_name(name))
                 nj = Dict([name=>pks[1]])
             end
+        else
+            lock(nostr_json_query_lock) do
+                for (name, pk) in DB.exec(verified_users[], DB.@sql("select name, pubkey from verified_users"))
+                    nj[name] = Nostr.PubKeyId(pk)
+                end
+            end
         end
         HTTP.Response(200, HTTP.Headers(["Content-Type"=>"application/json"]), JSON.json((; names=nj), 2))
     end
