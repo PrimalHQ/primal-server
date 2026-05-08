@@ -229,30 +229,36 @@ pub async fn download(
 }
 
 pub async fn parse_mimetype(data: &[u8]) -> String {
-    use std::io::Write;
+    use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
+    use std::process::Stdio;
 
-    let mut tmp = match tempfile::NamedTempFile::new() {
-        Ok(t) => t,
+    if data.is_empty() {
+        return "inode/x-empty".into();
+    }
+
+    let mut child = match Command::new("file")
+        .arg("-b")
+        .arg("--mime-type")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(_) => return "application/octet-stream".into(),
     };
 
-    if tmp.write_all(data).is_err() {
-        return "application/octet-stream".into();
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(data).await.is_err() {
+            let _ = child.kill().await;
+            return "application/octet-stream".into();
+        }
+        drop(stdin);
     }
 
-    let path = match tmp.path().to_str() {
-        Some(p) => p,
-        None => return "application/octet-stream".into(),
-    };
-
-    match Command::new("file")
-        .arg("-b")
-        .arg("--mime-type")
-        .arg(path)
-        .output()
-        .await
-    {
+    match child.wait_with_output().await {
         Ok(out) if out.status.success() => {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }

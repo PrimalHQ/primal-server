@@ -618,11 +618,8 @@ function parse_video_dimensions(data::Vector{UInt8})
 end
 
 function parse_mimetype(data::Vector{UInt8})
-    mktemp() do fn, io
-        write(io, data)
-        close(io)
-        String(chomp(read(pipeline(`file -b --mime-type $fn`; stdin=devnull), String)))
-    end
+    isempty(data) && return "inode/x-empty"
+    String(chomp(read(pipeline(`file -b --mime-type -`; stdin=IOBuffer(data)), String)))
 end
 
 function extract_video_frames(data::Vector{UInt8}; nframes=5, image_format="mjpeg")
