@@ -1068,7 +1068,7 @@ function bunny_purge()
     @assert HTTP.request("POST", "https://api.bunny.net/pullzone/1425721/purgeCache", ["AccessKey"=>BUNNY_API_KEY[]]).status == 204
 end
 
-function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reason=nothing, extra=(;), verbose=false, block_all_uploads=false, clear_cache=false)
+function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reason=nothing, extra=(;), verbose=false, block_all_uploads=false, clear_cache=false, s3_backup=true)
     verbose && @show (:purge_media, pubkey, surl, reason)
 
     media_block_id = string(UUIDs.uuid4())
@@ -1117,9 +1117,11 @@ function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reaso
                 try 
                     if Media.s3_check(s3_provider, p[2:end])
                         push!(mb.files, (; mp, p))
-                        Media.s3_copy(s3_provider, 
-                                      Main.S3_CONFIGS[s3_provider].bucket,  p[2:end],
-                                      Main.S3_CONFIGS[s3_provider].bucket2, p[2:end])
+                        if s3_backup
+                            Media.s3_copy(s3_provider, 
+                                          Main.S3_CONFIGS[s3_provider].bucket,  p[2:end],
+                                          Main.S3_CONFIGS[s3_provider].bucket2, p[2:end])
+                        end
                         Media.s3_delete(s3_provider, p[2:end])
                     end
                     if s3_provider == :bunny
