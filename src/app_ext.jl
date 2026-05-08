@@ -1323,13 +1323,13 @@ function parse_advanced_search_query(
         elseif op isa O.HashTag
             push!(hashtags, op.hashtag)
         elseif op isa O.From && op.from isa Nostr.PubKeyId
-            push!(posted_by, Nostr.bech32_encode(op.from))
+            push!(posted_by, Nostr.hex(op.from))
         elseif op isa O.To
-            push!(replying_to, Nostr.bech32_encode(op.pubkey))
+            push!(replying_to, Nostr.hex(op.pubkey))
         elseif op isa O.ZappedBy
-            push!(zapped_by, Nostr.bech32_encode(op.pubkey))
+            push!(zapped_by, Nostr.hex(op.pubkey))
         elseif op isa O.Mention
-            push!(user_mentions, Nostr.bech32_encode(op.pubkey))
+            push!(user_mentions, Nostr.hex(op.pubkey))
         elseif op isa O.Kind
             raw_kind = op.kind
         elseif op isa O.RepliesToKind

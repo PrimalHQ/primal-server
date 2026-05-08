@@ -3929,6 +3929,7 @@ function parse_search_query(query)
             elseif sm[2] == "lastweek";   O.Since(Utils.current_time() -  7*24*3600)
             elseif sm[2] == "last2weeks"; O.Since(Utils.current_time() - 14*24*3600)
             elseif sm[2] == "lastmonth";  O.Since(Utils.current_time() - 30*24*3600)
+            elseif sm[2] == "lastyear";   O.Since(Utils.current_time() - 365*24*3600)
             else;                         O.Since(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
             end
         elseif m.rule == :until_expr; O.Until(datetime2unix(DateTime(replace(sm[2], '_'=>'T'))))
