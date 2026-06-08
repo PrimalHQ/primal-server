@@ -58,6 +58,7 @@ function event_ids_by_created_at(
     eids = Main.rex(from..., :([Nostr.EventId(eid) for (eid,) in DB.exec(Main.cache_storage.event_created_at, 
                                                                          "select event_id from event_created_at where created_at >= ?1 and created_at <= ?2 limit ?3", 
                                                                          ($since, $until, $limit))]))
+    @show (:event_ids_by_created_at, (length(eids), limit))
     @assert length(eids) < limit
     eids
 end
