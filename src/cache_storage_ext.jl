@@ -170,6 +170,14 @@ function ext_init(est::CacheStorage)
                                             )",
                                             ])
 ##
+    est.dyn[:spam_note_content_hash] = est.params.DBSet(Vector{UInt8}, "spam_note_content_hash"; est.dbargs...,
+                              init_queries=["create table if not exists spam_note_content_hash (
+                                                content_sha256 bytea not null,
+                                                added_at int8 not null,
+                                                primary key (content_sha256)
+                                            )",
+                                            ])
+##
     est.dyn[:cache] = est.params.DBDict(String, Any, "cache"; est.dbargs...,
                                         valuefuncs=DB.DBConversionFuncs(JSON.json, identity),
                                         init_queries=["create unlogged table if not exists cache (
@@ -327,11 +335,46 @@ function import_note_urls(est::CacheStorage, e::Nostr.Event)
     end
 end
 
+function spam_content_sha256(content::AbstractString)
+    SHA.sha256(transcode(UInt8, content))
+end
+
+# Record the content hash of a confirmed-spam note so that future notes reusing the exact same
+# content can be flagged immediately (see check_spam_content_hash). Called from the spam detector's
+# spamevent processor.
+function store_spam_content_hash(est::CacheStorage, e::Nostr.Event)
+    e.kind == Int(Nostr.TEXT_NOTE) || return
+    exe(est.dyn[:spam_note_content_hash],
+        @sql("insert into spam_note_content_hash (content_sha256, added_at) values (?1, ?2) on conflict do nothing"),
+        spam_content_sha256(e.content), trunc(Int, time()))
+end
+
+# If a new note's content exactly matches the content of a previously-confirmed spam note, flag its
+# author as a spammer right away (on note #1) instead of waiting for the clustering detector to see
+# ~10 notes. Guarded to low-follower, non-allowlisted accounts to keep false positives near zero.
+function check_spam_content_hash(est::CacheStorage, e::Nostr.Event)
+    e.kind == Int(Nostr.TEXT_NOTE) || return
+    (e.pubkey in Filterlist.access_pubkey_unblocked) && return
+    get(est.pubkey_followers_cnt, e.pubkey, 0) < 50 || return
+    h = spam_content_sha256(e.content)
+    isempty(exec(est.dyn[:spam_note_content_hash],
+                 @sql("select 1 from spam_note_content_hash where content_sha256 = ?1 limit 1"), (h,))) && return
+    # flag author as spam via a direct filterlist insert (source of truth on :membership, read live
+    # at query time); comment explains the automated reason and names the triggering note
+    Postgres.execute(:membership,
+        "insert into filterlist values (\$1, \$2, \$3, \$4, \$5, \$6) on conflict do nothing",
+        [e.pubkey, "pubkey", true, "spam", trunc(Int, time()),
+         "spam-content-hash: sha256 of note $(Nostr.hex(e.id)) matches known spam content"])
+    nothing
+end
+
 function ext_text_note(est::CacheStorage, e::Nostr.Event)
     # if !isnothing(est.event_contents)
-    #     exe(est.event_contents, @sql("insert into kv_fts (event_id, content) values (?1, ?2)"), 
+    #     exe(est.event_contents, @sql("insert into kv_fts (event_id, content) values (?1, ?2)"),
     #         e.id, e.content)
     # end
+
+    check_spam_content_hash(est, e)
 
     for_mentiones(est, e; pubkeys_in_content=true) do tag
         if tag.fields[1] == "p" 

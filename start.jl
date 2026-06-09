@@ -114,6 +114,9 @@ spamdetector.spamevent_processors[:mark_event_as_spam] = function(e)
     push!(s, e.id)
     while length(s) >= 100000; popfirst!(s); end
 end
+spamdetector.spamevent_processors[:store_spam_content_hash] = function(e)
+    DB.store_spam_content_hash(cache_storage, e)
+end
 
 # disable humaness checks if we don't have trustrank initialized
 DB.ext_is_human(est::DB.CacheStorage, pubkey::Nostr.PubKeyId) = true
