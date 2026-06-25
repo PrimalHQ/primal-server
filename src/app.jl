@@ -549,18 +549,18 @@ end
 is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId) = false
 is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId) = false
 
-function is_hidden_(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+function is_hidden_(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId; author_exempt=nothing)
     pubkey in cmr.pubkeys_allowed && return false
     if haskey(cmr.pubkeys, pubkey)
         scopes = cmr.pubkeys[pubkey].scopes
         isempty(scopes) ? true : scope in scopes
     else
-        ext_is_hidden_by_group(est, cmr, user_pubkey, scope, pubkey)
+        ext_is_hidden_by_group(est, cmr, user_pubkey, scope, pubkey; author_exempt)
     end
 end
-function is_hidden_(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, eid::Nostr.EventId)
+function is_hidden_(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, eid::Nostr.EventId; author_exempt=nothing)
     eid in est.events && is_hidden(est, user_pubkey, scope, est.events[eid].pubkey) && return true
-    ext_is_hidden_by_group(est, cmr, user_pubkey, scope, eid)
+    ext_is_hidden_by_group(est, cmr, user_pubkey, scope, eid; author_exempt)
 end
 
 RELAY_URL_MAP = Dict{String, String}()
@@ -1901,6 +1901,10 @@ end
 
 IMPORT_EVENTS_SERVER = Ref{Any}(nothing)
 
+# Referenced by primalnode_config.jl (append!(App.FOLLOW_LIST_EVENTS, [])); kept as an empty
+# appendable global so a cold start can load the config. No src logic reads it.
+FOLLOW_LIST_EVENTS = []
+
 function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false)
     replicated || replicate_request(:import_events; events)
     est.readonly[] && return []
@@ -2720,6 +2724,11 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
     kwargs = Dict(kwargs)
     user_pubkey = castmaybe(get(kwargs, :user_pubkey, nothing), Nostr.PubKeyId)
 
+    # profile feed: the owner being viewed is exempt from spam-softban hiding so non-followers
+    # still see their authored posts (csam/mutes/nsfw still apply via is_hidden_)
+    authored_owner = (string(get(kwargs, :notes, "")) == "authored" && haskey(kwargs, :pubkey)) ?
+                     castmaybe(kwargs[:pubkey], Nostr.PubKeyId) : nothing
+
     if funcall == :get_featured_dvm_feeds || funcall == :advanced_search || funcall == :advanced_feed
         return res
     elseif get(kwargs, :usepgfuncs, false) && funcall in Main.CacheServerHandlers.app_funcalls_with_pgfuncs
@@ -2766,7 +2775,7 @@ function content_moderation_filtering_2(est::DB.CacheStorage, res::Vector, funca
                 nothing
             end
             if !isnothing(scope)
-                ok &= !is_hidden_(est, cmr, user_pubkey, scope, pubkey)
+                ok &= !is_hidden_(est, cmr, user_pubkey, scope, pubkey; author_exempt=authored_owner)
                 # !ok && @show (funcall, user_pubkey, scope, pubkey)
             end
         elseif !isnothing(kind)

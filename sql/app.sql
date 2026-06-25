@@ -61,7 +61,7 @@ SELECT
             NOT EXISTS (SELECT 1 FROM filterlist fl2 WHERE fl2.target = a_pubkey AND fl2.target_type = 'pubkey' AND NOT fl2.blocked))
 $BODY$;
 
-CREATE OR REPLACE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_pubkey bytea) RETURNS bool
+CREATE OR REPLACE FUNCTION public.is_pubkey_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_pubkey bytea, a_followed_override bytea DEFAULT null) RETURNS bool
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
 BEGIN
@@ -83,6 +83,17 @@ BEGIN
         RETURN true;
     END IF;
 
+    -- spam softban: the viewer follows the author / is the author / the author is the profile
+    -- owner being viewed (a_followed_override, threaded down from feed_user_authored) -> the
+    -- author is exempt from spam hiding; csam/impersonation and the viewer's explicit mutes
+    -- above still apply, and NSFW is still enforced below.
+    IF a_pubkey = a_user_pubkey
+       OR a_pubkey = a_followed_override
+       OR EXISTS (SELECT 1 FROM pubkey_followers WHERE pubkey = a_pubkey AND follower_pubkey = a_user_pubkey)
+    THEN
+        RETURN is_pubkey_hidden_by_group(a_user_pubkey, a_scope, a_pubkey, 'primal_nsfw', 'nsfw');
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM lists
         WHERE pubkey = a_pubkey AND list = 'spam_block'
@@ -90,20 +101,20 @@ BEGIN
         RETURN true;
     END IF;
 
-    RETURN 
+    RETURN
         is_pubkey_hidden_by_group(a_user_pubkey, a_scope, a_pubkey, 'primal_spam', 'spam') OR
         is_pubkey_hidden_by_group(a_user_pubkey, a_scope, a_pubkey, 'primal_nsfw', 'nsfw');
 END
 $BODY$;
 
-CREATE OR REPLACE FUNCTION public.is_event_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_event_id bytea) RETURNS bool
+CREATE OR REPLACE FUNCTION public.is_event_hidden(a_user_pubkey bytea, a_scope cmr_scope, a_event_id bytea, a_author_exempt bytea DEFAULT null) RETURNS bool
     LANGUAGE 'sql' STABLE PARALLEL UNSAFE
 AS $BODY$
 SELECT a_user_pubkey IS NOT NULL AND EXISTS (
     SELECT 1
     FROM public.event e
     WHERE e.id = a_event_id AND (
-        public.is_pubkey_hidden(a_user_pubkey, a_scope, e.pubkey)
+        public.is_pubkey_hidden(a_user_pubkey, a_scope, e.pubkey, a_author_exempt)
 
         OR EXISTS (SELECT 1 FROM zap_receipts zr WHERE zr.eid = a_event_id AND public.is_pubkey_hidden(a_user_pubkey, a_scope, zr.sender))
 
@@ -494,7 +505,8 @@ CREATE OR REPLACE FUNCTION public.response_messages_for_post(
         a_event_id bytea,
         a_user_pubkey bytea,
         a_is_referenced_event bool,
-        a_depth int8) 
+        a_depth int8,
+        a_author_exempt bytea DEFAULT null)
     RETURNS SETOF response_messages_for_post_res
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
 AS $BODY$
@@ -511,9 +523,9 @@ BEGIN
 
     IF event_is_deleted(e.id) THEN
         RETURN;
-    ELSIF is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey) THEN
+    ELSIF is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey, a_author_exempt) THEN
         RETURN;
-    ELSIF is_event_hidden(a_user_pubkey, 'content', a_event_id) THEN
+    ELSIF is_event_hidden(a_user_pubkey, 'content', a_event_id, a_author_exempt) THEN
         RETURN;
     ELSIF EXISTS (
         SELECT 1 FROM pubkey_followers pf
@@ -540,7 +552,7 @@ BEGIN
             SELECT argeid FROM event_mentions em WHERE em.eid = a_event_id AND tag = 'e'
         )
     LOOP
-        RETURN QUERY SELECT * FROM response_messages_for_post(eid, a_user_pubkey, true, a_depth-1);
+        RETURN QUERY SELECT * FROM response_messages_for_post(eid, a_user_pubkey, true, a_depth-1, a_author_exempt);
     END LOOP;
 
     FOR pk IN
@@ -565,7 +577,7 @@ BEGIN
             WHERE em.eid = a_event_id AND em.tag = 'a' AND em.argkind = pre.kind AND em.argpubkey = pre.pubkey AND em.argid = pre.identifier
         )
     LOOP
-        RETURN QUERY SELECT * FROM response_messages_for_post(eid, a_user_pubkey, true, a_depth-1);
+        RETURN QUERY SELECT * FROM response_messages_for_post(eid, a_user_pubkey, true, a_depth-1, a_author_exempt);
     END LOOP;
 END;
 $BODY$;
@@ -696,11 +708,12 @@ END;
 $BODY$;
 
 CREATE OR REPLACE FUNCTION public.enrich_feed_events(
-    a_posts post[], 
-    a_user_pubkey bytea, 
-    a_apply_humaness_check bool, 
+    a_posts post[],
+    a_user_pubkey bytea,
+    a_apply_humaness_check bool,
     a_order_by varchar DEFAULT 'created_at',
-    presort bool DEFAULT true
+    presort bool DEFAULT true,
+    a_author_exempt bytea DEFAULT null
 )
 	RETURNS SETOF jsonb
     LANGUAGE 'plpgsql' STABLE PARALLEL UNSAFE
@@ -734,7 +747,7 @@ BEGIN
 	FOREACH p IN ARRAY a_posts_sorted LOOP
 		max_created_at := GREATEST(max_created_at, p.created_at);
 		min_created_at := LEAST(min_created_at, p.created_at);
-        FOR t IN SELECT * FROM response_messages_for_post(p.event_id, a_user_pubkey, false, 3) LOOP
+        FOR t IN SELECT * FROM response_messages_for_post(p.event_id, a_user_pubkey, false, 3, a_author_exempt) LOOP
             DECLARE
                 e jsonb := t.e;
                 e_id bytea := DECODE(e->>'id', 'hex');
@@ -923,6 +936,8 @@ BEGIN
         RETURN;
     END IF;
 
+    -- profile feed: exempt the profile owner from spam-softban hiding (threaded explicitly via
+    -- a_author_exempt) so non-followers still see their authored posts.
     RETURN QUERY SELECT * FROM enrich_feed_events(
         ARRAY (
             select (e.id, pe.created_at)::post
@@ -935,7 +950,7 @@ BEGIN
                 e.kind = ANY(a_kinds)
             order by pe.created_at desc limit a_limit offset a_offset
         ),
-        a_user_pubkey, a_apply_humaness_check);
+        a_user_pubkey, a_apply_humaness_check, a_author_exempt => a_pubkey);
 END
 $BODY$;
 

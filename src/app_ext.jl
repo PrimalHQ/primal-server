@@ -1970,10 +1970,22 @@ function is_hidden_on_primal_nsfw(est::DB.CacheStorage, user_pubkey, scope::Symb
     false
 end
 
-function __ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+# spam softban: a spam-flagged author is NOT hidden by the spam group when the viewer follows
+# them, is them, or (profile feed) the author is the profile owner being viewed. csam/impersonation,
+# the viewer's explicit mutes, and NSFW filtering are handled separately and still apply.
+function spam_softban_exempt(user_pubkey, pubkey::Nostr.PubKeyId, author_exempt)
+    pubkey == author_exempt && return true
+    isnothing(user_pubkey) && return false
+    pubkey == user_pubkey && return true
+    !isempty(Postgres.execute(:p0, "select 1 from pubkey_followers where pubkey = \$1 and follower_pubkey = \$2 limit 1", [pubkey, user_pubkey])[2])
+end
+
+function __ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId; author_exempt=nothing)
     if haskey(cmr.groups, :primal_spam) && pubkey in Filterlist.access_pubkey_blocked_spam && !(pubkey in Filterlist.access_pubkey_unblocked_spam)
-        scopes = cmr.groups[:primal_spam].scopes
-        return (isempty(scopes) ? true : scope in scopes)
+        if !spam_softban_exempt(user_pubkey, pubkey, author_exempt)
+            scopes = cmr.groups[:primal_spam].scopes
+            return (isempty(scopes) ? true : scope in scopes)
+        end
     end
     # if haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
     if haskey(cmr.groups, :primal_nsfw) && pubkey in Filterlist.access_pubkey_blocked_nsfw && !(pubkey in Filterlist.access_pubkey_unblocked_nsfw)
@@ -1982,12 +1994,14 @@ function __ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pu
     end
     false
 end
-function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId; author_exempt=nothing)
     # @show (user_pubkey, scope, pubkey)
     if haskey(cmr.groups, :primal_spam) && ((pubkey in Filterlist.access_pubkey_blocked_spam && !(pubkey in Filterlist.access_pubkey_unblocked_spam)) ||
                                             !isempty(Postgres.execute(:p0, "select 1 from filterlist where grp = 'spam' and target_type = 'pubkey' and target = \$1 and blocked limit 1", [pubkey])[2]))
-        scopes = cmr.groups[:primal_spam].scopes
-        return (isempty(scopes) ? true : scope in scopes)
+        if !spam_softban_exempt(user_pubkey, pubkey, author_exempt)
+            scopes = cmr.groups[:primal_spam].scopes
+            return (isempty(scopes) ? true : scope in scopes)
+        end
     end
     # if haskey(cmr.groups, :primal_nsfw) && is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey)
     if haskey(cmr.groups, :primal_nsfw) && ((pubkey in Filterlist.access_pubkey_blocked_nsfw && !(pubkey in Filterlist.access_pubkey_unblocked_nsfw)) ||
@@ -1998,8 +2012,8 @@ function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubk
     false
 end
 
-function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, eid::Nostr.EventId)
-    eid in est.events && ext_is_hidden_by_group(est, cmr, user_pubkey, scope, est.events[eid].pubkey) && return true
+function ext_is_hidden_by_group(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, eid::Nostr.EventId; author_exempt=nothing)
+    eid in est.events && ext_is_hidden_by_group(est, cmr, user_pubkey, scope, est.events[eid].pubkey; author_exempt) && return true
     # cmr = compile_content_moderation_rules(est, user_pubkey)
     # if haskey(cmr.groups, :primal_nsfw)
     #     scopes = cmr.groups[:primal_nsfw].scopes
