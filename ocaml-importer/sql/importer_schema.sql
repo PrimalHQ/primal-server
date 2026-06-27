@@ -225,6 +225,46 @@ create table if not exists pubkey_ln_address (
   ln_address text  not null
 );
 
+-- relay_list_metadata / bookmarks dyn dicts (pubkey -> event_id) + the bookmark entries
+create table if not exists relay_list_metadata (
+  pubkey   bytea not null primary key,
+  event_id bytea not null
+);
+
+create table if not exists bookmarks (
+  pubkey   bytea not null primary key,
+  event_id bytea not null
+);
+
+create table if not exists pubkey_bookmarks (
+  pubkey         bytea not null,
+  ref_event_id   bytea,
+  ref_kind       bytea,
+  ref_pubkey     bytea,
+  ref_identifier bytea
+);
+
+-- reads / reads_versions are serving-layer (DAG-maintained) long-form tables; the importer
+-- only cleans them up on a long-form deletion. Minimal columns for those queries.
+create table if not exists reads (
+  pubkey     bytea not null,
+  identifier text  not null
+);
+
+create table if not exists reads_versions (
+  pubkey     bytea not null,
+  identifier text  not null,
+  eid        bytea not null
+);
+
+-- fetcher_relays: which relays the (separate) fetcher process should pull from; the importer
+-- maintains it from users' relay lists. relay_url is unique (ON CONFLICT target).
+create table if not exists fetcher_relays (
+  relay_url       varchar   not null primary key,
+  updated_at      timestamp not null,
+  source_event_id bytea
+);
+
 -- pubkey_trustrank is populated by the separate Julia TrustRankMaker; the importer only
 -- reads it (is_trusted_user). Columns per cache_storage_ext.jl: pubkey + rank.
 create table if not exists pubkey_trustrank (

@@ -61,10 +61,21 @@ let test_bech32_lnurl () =
   Alcotest.(check (option string)) "lud06 decode (lowercase)" (Some expected)
     (Importer.Bech32.lnurl_decode (String.lowercase_ascii lnurl))
 
+(* Canonical NIP-19 npub vector. *)
+let test_nip19_npub () =
+  let npub = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6" in
+  let expected = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d" in
+  match Importer.Bech32.nip19_decode npub with
+  | Some (Importer.Bech32.Npub pk) ->
+      Alcotest.(check string) "npub pubkey" expected (Importer.Hex_util.encode pk)
+  | _ -> Alcotest.fail "npub did not decode to Npub"
+
 let () =
   Alcotest.run "importer"
     [ ("hex_util", [ Alcotest.test_case "roundtrip" `Quick test_hex ]);
       ("secp256k1", [ Alcotest.test_case "schnorr verify" `Quick test_schnorr_verify ]);
-      ("bech32", [ Alcotest.test_case "lnurl lud06" `Quick test_bech32_lnurl ]);
+      ("bech32",
+       [ Alcotest.test_case "lnurl lud06" `Quick test_bech32_lnurl;
+         Alcotest.test_case "nip19 npub" `Quick test_nip19_npub ]);
       ("nostr", [ Alcotest.test_case "real events" `Quick test_real_events ])
     ]

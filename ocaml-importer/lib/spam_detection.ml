@@ -35,7 +35,7 @@ type t = {
   mutable tlatest : float;
   mutable last_realtime_flush : float;
   mutable spamevent_processors : (CS.est -> Nostr.t -> unit) list;
-  mutable spamlist_processors : (SS.t -> unit) list;
+  mutable spamlist_processors : (CS.est -> SS.t -> unit) list;
 }
 
 let create ?(cluster_size_threshold = 10) ?(min_note_size = 3) ?(follower_cnt_threshold = 50)
@@ -85,11 +85,11 @@ let split_words (content : string) : SS.t =
   |> List.filter (fun s -> s <> "")
   |> SS.of_list
 
-let process_spamlist (sd : t) (spamlist : SS.t) : unit =
-  List.iter (fun p -> try p spamlist with _ -> ()) sd.spamlist_processors
+let process_spamlist (sd : t) (est : CS.est) (spamlist : SS.t) : unit =
+  List.iter (fun p -> try p est spamlist with _ -> ()) sd.spamlist_processors
 
 (* Julia produce_spamlist: authors of every note in a large-enough latest cluster. *)
-let produce_spamlist (sd : t) : unit =
+let produce_spamlist (sd : t) (est : CS.est) : unit =
   let spam = ref SS.empty in
   List.iter
     (fun c ->
@@ -102,7 +102,7 @@ let produce_spamlist (sd : t) : unit =
           c.eids)
     sd.latest_clusters;
   sd.latest_spamlist <- !spam;
-  process_spamlist sd !spam
+  process_spamlist sd est !spam
 
 let copy_table (src : ('a, 'b) Hashtbl.t) (dst : ('a, 'b) Hashtbl.t) : unit =
   Hashtbl.reset dst;
@@ -134,7 +134,7 @@ let on_event (sd : t) ~(est : CS.est) (e : Nostr.t) (now : float) : bool =
                      sd.realtime_spamlist_diff <- SS.add e.pubkey sd.realtime_spamlist_diff;
                      if now -. sd.last_realtime_flush >= sd.realtime_flush_period then begin
                        sd.last_realtime_flush <- now;
-                       process_spamlist sd sd.realtime_spamlist_diff;
+                       process_spamlist sd est sd.realtime_spamlist_diff;
                        sd.realtime_spamlist_diff <- SS.empty
                      end;
                      List.iter (fun p -> try p est e with _ -> ()) sd.spamevent_processors;
@@ -162,7 +162,7 @@ let on_event (sd : t) ~(est : CS.est) (e : Nostr.t) (now : float) : bool =
             Hashtbl.reset sd.events;
             sd.clusters <- [];
             sd.realtime_spamlist <- SS.empty;
-            produce_spamlist sd
+            produce_spamlist sd est
           end
         end
       end);

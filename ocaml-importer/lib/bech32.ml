@@ -107,3 +107,62 @@ let decode ~hrp (addr : string) : string option =
 
 (* LNURL (lud06): an "lnurl"-HRP bech32 string whose payload is the ASCII URL. *)
 let lnurl_decode (lnurl : string) : string option = decode ~hrp:"lnurl" lnurl
+
+(* {1 NIP-19} (mirrors Julia Bech32.nip19_decode) — enough for for_mentiones content mentions. *)
+
+type nip19 =
+  | Npub of string (* 32-byte pubkey *)
+  | Note of string (* 32-byte event id *)
+  | Nprofile of string (* pubkey (Special TLV) *)
+  | Nevent of string (* event id (Special TLV) *)
+  | Naddr of { kind : int; author : string; identifier : string }
+
+(* decode the bech32 payload to raw 8-bit bytes *)
+let to_bytes (data5 : int list) : string option =
+  match convertbits data5 ~frombits:5 ~tobits:8 ~pad:false with
+  | None -> None
+  | Some bs ->
+      let b = Bytes.create (List.length bs) in
+      List.iteri (fun i v -> Bytes.set b i (Char.chr v)) bs;
+      Some (Bytes.unsafe_to_string b)
+
+(* TLV: (type, length, value)*. Returns the first value for each type. *)
+let parse_tlv (data : string) : (int * string) list =
+  let n = String.length data in
+  let rec loop i acc =
+    if i + 2 > n then List.rev acc
+    else
+      let t = Char.code data.[i] and l = Char.code data.[i + 1] in
+      if i + 2 + l > n then List.rev acc else loop (i + 2 + l) ((t, String.sub data (i + 2) l) :: acc)
+  in
+  loop 0 []
+
+let nip19_decode (s : string) : nip19 option =
+  match bech32_decode s with
+  | None -> None
+  | Some (hrp, data5) -> (
+      match to_bytes data5 with
+      | None -> None
+      | Some raw -> (
+          let tlv () = parse_tlv raw in
+          let u32be v =
+            (Char.code v.[0] lsl 24) lor (Char.code v.[1] lsl 16) lor (Char.code v.[2] lsl 8) lor Char.code v.[3]
+          in
+          match hrp with
+          | "npub" when String.length raw = 32 -> Some (Npub raw)
+          | "note" when String.length raw = 32 -> Some (Note raw)
+          | "nprofile" -> (
+              match List.assoc_opt 0 (tlv ()) with
+              | Some v when String.length v = 32 -> Some (Nprofile v)
+              | _ -> None)
+          | "nevent" -> (
+              match List.assoc_opt 0 (tlv ()) with
+              | Some v when String.length v = 32 -> Some (Nevent v)
+              | _ -> None)
+          | "naddr" -> (
+              let t = tlv () in
+              match (List.assoc_opt 0 t, List.assoc_opt 2 t, List.assoc_opt 3 t) with
+              | Some ident, Some author, Some k when String.length author = 32 && String.length k = 4 ->
+                  Some (Naddr { kind = u32be k; author; identifier = ident })
+              | _ -> None)
+          | _ -> None))

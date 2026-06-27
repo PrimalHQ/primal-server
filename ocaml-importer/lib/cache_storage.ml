@@ -16,10 +16,19 @@ type config = {
   disable_trustrank : bool;
       (* Julia est.disable_trustrank: when set, seed pubkey_trustrank=1.0 for every new
          pubkey so ext_is_human is true for everyone (used when no TrustRankMaker runs). *)
+  import_reporting : bool; (* Julia IMPORT_REPORTING_EVENTS: process kind-1984 reports *)
+  reporting_whitelist : string list; (* raw 32-byte pubkeys allowed to report (REPORTING_WHITELIST) *)
 }
 
 let default_config =
-  { verification_enabled = true; verify_zappers = true; trusted_zappers = []; disable_trustrank = false }
+  {
+    verification_enabled = true;
+    verify_zappers = true;
+    trusted_zappers = [];
+    disable_trustrank = false;
+    import_reporting = false;
+    reporting_whitelist = [];
+  }
 
 (* [dbh] is the cache DB (Julia :p0); [mem_dbh] is the membership DB (Julia :membership),
    where the filterlist / human_override tables live. At compile time both type-check against
@@ -47,8 +56,11 @@ type ext_hooks = {
   ext_video_note : est -> Nostr.t -> unit;
   ext_live_event : est -> Nostr.t -> unit;
   ext_is_hidden_event : est -> string -> bool;           (* eid *)
+  ext_is_hidden_pubkey : est -> string -> bool;          (* pubkey *)
+  import_reporting : est -> Nostr.t -> unit;             (* kind-1984 reporting events *)
   score_event_cb : est -> Nostr.t -> string -> int -> string -> int -> unit;
       (* parent event, initiator pubkey, scored_at, action, increment *)
+  expire_hashtag_score_cb : est -> string -> int -> unit; (* hashtag, delta (scheduled hook) *)
 }
 
 let no_ext =
@@ -66,7 +78,10 @@ let no_ext =
     ext_video_note = (fun _ _ -> ());
     ext_live_event = (fun _ _ -> ());
     ext_is_hidden_event = (fun _ _ -> false);
+    ext_is_hidden_pubkey = (fun _ _ -> false);
+    import_reporting = (fun _ _ -> ());
     score_event_cb = (fun _ _ _ _ _ _ -> ());
+    expire_hashtag_score_cb = (fun _ _ _ -> ());
   }
 
 let ext = ref no_ext
@@ -80,8 +95,9 @@ let zapper_verifier : (est -> zapped_pk:string -> zap_receipt:Nostr.t -> bool) r
 
 let set_zapper_verifier f = zapper_verifier := f
 
-(* Julia ext_is_hidden(est, e.id); routed through the registry. *)
+(* Julia ext_is_hidden(est, e.id) / ext_is_hidden(est, pubkey); routed through the registry. *)
 let ext_is_hidden_event (est : est) (id : string) : bool = (!ext).ext_is_hidden_event est id
+let ext_is_hidden_pubkey (est : est) (pubkey : string) : bool = (!ext).ext_is_hidden_pubkey est pubkey
 
 let max_message_size = 2_000_000
 let max_satszapped = 1_100_000
@@ -274,6 +290,23 @@ let schedule_hook (est : est) ~(execute_at : int) (funcall : Yojson.Safe.t) : un
     let execute_at = i64 execute_at and funcall = Yojson.Safe.to_string funcall in
     ignore [%pgsql dbh "insert into scheduled_hooks (execute_at, funcall) values ($execute_at, $funcall)"]
   end
+
+(* scheduled_hook_execute / run_scheduled_hooks (Julia cache_storage.jl:690,1810): fire all
+   due scheduled hooks and delete them. Currently the only scheduled hook is
+   expire_hashtag_score_cb (routed through the ext registry). Driven by a periodic fiber in
+   bin/main.ml. *)
+let scheduled_hook_execute (est : est) (j : Yojson.Safe.t) : unit =
+  match j with
+  | `List (`String "expire_hashtag_score_cb" :: `String hashtag :: `Int d :: _) ->
+      (!ext).expire_hashtag_score_cb est hashtag d
+  | _ -> ()
+
+let run_scheduled_hooks (est : est) : unit =
+  let dbh = est.dbh in
+  let now = i64 (Utils.current_time ()) in
+  let due = [%pgsql dbh "select funcall from scheduled_hooks where execute_at <= $now"] in
+  List.iter (fun funcall -> scheduled_hook_execute est (Yojson.Safe.from_string funcall)) due;
+  ignore [%pgsql dbh "delete from scheduled_hooks where execute_at <= $now"]
 
 (* {1 event_pubkey_actions} (Julia init_event_pubkey_action / event_pubkey_action) *)
 
@@ -597,9 +630,11 @@ let import_directmsg (est : est) (e : Nostr.t) : unit =
       (fun tg -> match (Nostr.tag_name tg, Nostr.tag_field tg 1) with Some "p", Some h -> decode32 h | _ -> None)
       e.tags
   with
+  | Some _ when ext_is_hidden_pubkey est e.pubkey -> () (* Julia: ext_is_hidden(sender) -> skip *)
   | None -> ()
   | Some receiver ->
-      (* TODO Phase 3/4: hidden check via filterlist / App.is_hidden; assume visible *)
+      (* App.is_hidden(receiver, :content, sender) is an App-layer per-user check — out of scope;
+         the ext_is_hidden(sender) part above is honoured via the filterlist. *)
       let dbh = est.dbh in
       let sender = e.pubkey and created_at = i64 e.created_at and event_id = e.id in
       let exists =
@@ -678,8 +713,14 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
               (match [%pgsql dbh "select event_id from parametrized_replaceable_events where pubkey = $pk and kind = $k and identifier = $identifier limit 1"] with
                | eid :: _ -> delete_event eid
                | [] -> ());
-              ignore [%pgsql dbh "delete from parametrized_replaceable_events where pubkey = $pk and kind = $k and identifier = $identifier"]
-          (* TODO Phase 3: reads/reads_versions cleanup for long-form *))
+              ignore [%pgsql dbh "delete from parametrized_replaceable_events where pubkey = $pk and kind = $k and identifier = $identifier"];
+              (* long-form: also drop the serving-layer reads / reads_versions rows *)
+              if kind = Nostr.kind_long_form_content then begin
+                List.iter (fun reid -> delete_event reid)
+                  [%pgsql dbh "select eid from reads_versions where pubkey = $pk and identifier = $identifier"];
+                ignore [%pgsql dbh "delete from reads where pubkey = $pk and identifier = $identifier"];
+                ignore [%pgsql dbh "delete from reads_versions where pubkey = $pk and identifier = $identifier"]
+              end)
       | _ -> ())
     e.tags
 
@@ -723,7 +764,8 @@ let handle_reaction (est : est) (e : Nostr.t) : unit =
               (* TODO: YOUR_POST_WAS_LIKED notification (notifications subsystem) *))
       | _ -> ())
     e.tags
-  (* TODO Phase 5: fetch_missing_events *)
+  (* fetch_missing_events: gated by auto_fetch_missing_events (default off in Julia) and needs a
+     relay fetcher (out of importer scope) — faithful no-op. *)
 
 let handle_repost (est : est) (e : Nostr.t) : unit =
   let rec first_e = function
@@ -741,7 +783,8 @@ let handle_repost (est : est) (e : Nostr.t) : unit =
         | _ -> first_e rest)
   in
   first_e e.tags
-  (* TODO Phase 5: fetch_missing_events *)
+  (* fetch_missing_events: gated by auto_fetch_missing_events (default off in Julia) and needs a
+     relay fetcher (out of importer scope) — faithful no-op. *)
 
 let zapper_ok (est : est) (e : Nostr.t) ~(zapped_pk : string) : bool =
   if (not est.cfg.verify_zappers) || List.mem e.pubkey est.cfg.trusted_zappers then true
@@ -785,7 +828,10 @@ let handle_categorized_people (est : est) (e : Nostr.t) : unit =
     | tg :: rest -> (
         if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "d" then
           match Nostr.tag_field tg 1 with
-          | Some "mute" -> upsert_pubkey_event_id est ~table:`Mute_list_2 ~key:e.pubkey ~value:e.id (* TODO update_content_moderation_rules *)
+          | Some "mute" -> upsert_pubkey_event_id est ~table:`Mute_list_2 ~key:e.pubkey ~value:e.id
+              (* Julia also update_content_moderation_rules: app_settings-gated, recomputes the
+                 cmr_* tables via App.import_content_moderation_rules — a serving/App-layer job
+                 (the importer doesn't own app_settings), so it is a no-op in the import path. *)
           | Some "mutelists" -> upsert_pubkey_event_id est ~table:`Mute_lists ~key:e.pubkey ~value:e.id
           | Some "allowlist" -> upsert_pubkey_event_id est ~table:`Allow_list ~key:e.pubkey ~value:e.id
           | Some identifier ->
@@ -798,6 +844,102 @@ let handle_categorized_people (est : est) (e : Nostr.t) : unit =
   in
   go e.tags
 
+(* {1 Relay list metadata / bookmarks} (Julia 1338-1353) *)
+
+let store_relay_list_metadata (est : est) (e : Nostr.t) : unit =
+  let dbh = est.dbh in
+  let pubkey = e.pubkey and event_id = e.id in
+  let newer =
+    match
+      [%pgsql dbh "select ev.created_at from relay_list_metadata r, events ev where r.pubkey = $pubkey and ev.id = r.event_id"]
+    with
+    | [] -> true
+    | old :: _ -> i64 e.created_at > old
+  in
+  if newer then
+    ignore
+      [%pgsql dbh "insert into relay_list_metadata (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"]
+
+(* Julia App.get_user_relays: a user's relay URLs — from their kind-10002 relay list ('r' tags)
+   or, failing that, the legacy relay map in their kind-3 contact-list content. *)
+let user_relay_urls (est : est) (pubkey : string) : string list =
+  let dbh = est.dbh in
+  let from_relay_list =
+    match
+      (match [%pgsql dbh "select event_id from relay_list_metadata where pubkey = $pubkey"] with
+       | eid :: _ -> get_event est eid
+       | [] -> None)
+    with
+    | Some e ->
+        List.filter_map
+          (fun tg ->
+            match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+            | Some "r", Some url when url <> "" -> Some url
+            | _ -> None)
+          e.tags
+    | None -> []
+  in
+  if from_relay_list <> [] then from_relay_list
+  else
+    match get_contact_list_event est pubkey with
+    | None -> []
+    | Some e -> (
+        match Yojson.Safe.from_string e.content with
+        | `Assoc kv ->
+            List.filter_map
+              (fun (url, v) ->
+                if url = "" then None
+                else
+                  match v with
+                  | `Assoc markers when List.exists (fun (_, b) -> b = `Bool true) markers -> Some url
+                  | _ -> None)
+              kv
+        | _ -> []
+        | exception _ -> [])
+
+(* Julia update_fetcher_relays: publish the user's relays to fetcher_relays for the (separate)
+   fetcher process. Called from the contact-list and relay-list-metadata branches. *)
+let update_fetcher_relays (est : est) ~(pubkey : string) ~(source_event_id : string option) : unit =
+  let dbh = est.dbh in
+  List.iter
+    (fun relay_url ->
+      ignore
+        [%pgsql dbh "insert into fetcher_relays (relay_url, updated_at, source_event_id) values ($relay_url, now(), $?source_event_id) on conflict (relay_url) do update set updated_at = excluded.updated_at"])
+    (user_relay_urls est pubkey)
+
+let import_pubkey_bookmarks (est : est) (e : Nostr.t) : unit =
+  let dbh = est.dbh in
+  let pubkey = e.pubkey in
+  ignore [%pgsql dbh "delete from pubkey_bookmarks where pubkey = $pubkey"];
+  List.iter
+    (fun tg ->
+      match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+      | Some "e", Some h -> (
+          match decode32 h with
+          | Some ref_event_id ->
+              ignore
+                [%pgsql dbh "insert into pubkey_bookmarks (pubkey, ref_event_id, ref_kind, ref_pubkey, ref_identifier) values ($pubkey, $ref_event_id, null, null, null)"]
+          | None -> ())
+      | _ -> ())
+    e.tags
+
+let store_bookmarks (est : est) (e : Nostr.t) : unit =
+  let dbh = est.dbh in
+  let pubkey = e.pubkey and event_id = e.id in
+  let newer =
+    match
+      [%pgsql dbh "select ev.created_at from bookmarks b, events ev where b.pubkey = $pubkey and ev.id = b.event_id"]
+    with
+    | [] -> true
+    | old :: _ -> i64 e.created_at > old
+  in
+  if newer then begin
+    ignore
+      [%pgsql dbh "insert into bookmarks (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"];
+    import_pubkey_bookmarks est e
+    (* Julia also fires YOUR_POST_WAS_BOOKMARKED notifications — notifications subsystem TODO. *)
+  end
+
 let dispatch_kind (est : est) (e : Nostr.t) : unit =
   let k = e.kind in
   if k = Nostr.kind_set_metadata then begin
@@ -809,8 +951,8 @@ let dispatch_kind (est : est) (e : Nostr.t) : unit =
   end
   else if k = Nostr.kind_contact_list then begin
     if contact_list_should_update est ~pubkey:e.pubkey ~created_at:e.created_at then
-      import_contact_list est e
-    (* TODO Phase 5: update_fetcher_relays *)
+      import_contact_list est e;
+    update_fetcher_relays est ~pubkey:e.pubkey ~source_event_id:(Some e.id)
   end
   else if k = Nostr.kind_reaction then handle_reaction est e
   else if is_text_note_branch k then handle_note_reply est e
@@ -820,15 +962,22 @@ let dispatch_kind (est : est) (e : Nostr.t) : unit =
   else if k = Nostr.kind_zap_receipt then handle_zap_receipt est e
   else if k = Nostr.kind_mute_list then
     upsert_pubkey_event_id est ~table:`Mute_list ~key:e.pubkey ~value:e.id
-    (* TODO Phase 3: update_content_moderation_rules *)
+    (* update_content_moderation_rules: app_settings-gated serving-layer recompute — no-op here *)
   else if k = Nostr.kind_categorized_people then handle_categorized_people est e
   else if k = Nostr.kind_comment then handle_note_reply est e
   else if k = Nostr.kind_long_form_content then (!ext).ext_long_form_note est e
   else if k = Nostr.kind_live_event then (!ext).ext_live_event est e
   else if k = Nostr.kind_video_long_form || k = Nostr.kind_video_short_form then
     (!ext).ext_video_note est e
-  (* relay_list_metadata / bookmarks / highlight / follow_pack / reporting: dyn-table /
-     notification handling -> TODO (notifications subsystem, media import) *)
+  else if k = Nostr.kind_relay_list_metadata then begin
+    store_relay_list_metadata est e;
+    update_fetcher_relays est ~pubkey:e.pubkey ~source_event_id:(Some e.id)
+  end
+  else if k = Nostr.kind_bookmarks then store_bookmarks est e
+  else if k = Nostr.kind_reporting then begin
+    if est.cfg.import_reporting then (!ext).import_reporting est e
+  end
+  (* highlight -> notifications only (TODO); follow_pack -> media (out of scope). *)
 
 (* {1 import_event} (Julia 1046-1434) *)
 

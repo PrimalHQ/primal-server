@@ -19,6 +19,16 @@ let bool_env name default =
   | Some ("0" | "false" | "no" | "off") -> false
   | _ -> default
 
+(* Comma-separated hex pubkeys -> raw 32-byte strings. *)
+let pubkey_list_env name =
+  match getenv name with
+  | None | Some "" -> []
+  | Some s ->
+      String.split_on_char ',' s
+      |> List.filter_map (fun h ->
+             let h = String.trim h in
+             if String.length h = 64 then Hex_util.decode_opt h else None)
+
 (* Strip a leading socks5h:// or socks5:// scheme; keep host:port. *)
 let normalize_proxy s =
   let strip_prefix p s =
@@ -52,5 +62,7 @@ let from_env () : t =
         verify_zappers = bool_env "VERIFY_ZAPPERS" true;
         trusted_zappers = [];
         disable_trustrank = bool_env "IMPORTER_DISABLE_TRUSTRANK" false;
+        import_reporting = bool_env "IMPORTER_IMPORT_REPORTING" false;
+        reporting_whitelist = pubkey_list_env "IMPORTER_REPORTING_WHITELIST";
       };
   }

@@ -32,12 +32,18 @@ let () =
   CS.set_zapper_verifier (fun est ~zapped_pk ~zap_receipt ->
       Importer.Lnurl.verify ~net ~clock ?proxy est ~zapped_pk ~zapper_pubkey:zap_receipt.N.pubkey);
 
-  (* Spam detector shared across worker domains; processors mirror start_media_importer.jl. *)
+  (* Spam detector shared across worker domains; processors mirror start_media_importer.jl, but
+     write to the membership filterlist (no in-process Filterlist state). *)
   let sd = SD.create () in
-  SD.add_spamlist_processor sd (fun spamlist ->
-      SD.SS.iter (fun pk -> Importer.Filterlist.add_access_pubkey_blocked_spam pk) spamlist);
-  SD.add_spamevent_processor sd (fun _est e ->
-      Importer.Filterlist.add_access_event_blocked_spam e.N.id);
+  SD.add_spamlist_processor sd (fun est spamlist ->
+      SD.SS.iter
+        (fun pk ->
+          Importer.Filterlist.block_pubkey_spam ~mem_dbh:est.CS.mem_dbh pk
+            ~comment:"spam-detector: clustered spam pubkey")
+        spamlist);
+  SD.add_spamevent_processor sd (fun est e ->
+      Importer.Filterlist.block_event_spam ~mem_dbh:est.CS.mem_dbh e.N.id
+        ~comment:"spam-detector: clustered spam event");
   SD.add_spamevent_processor sd (fun est e -> Importer.Cache_storage_ext.store_spam_content_hash est e);
 
   let pool = WP.create ~capacity:cfg.queue_capacity in
@@ -57,8 +63,24 @@ let () =
     cfg.firehose_port cfg.num_workers
     (match cfg.proxy with Some p -> ", proxy " ^ p | None -> "");
 
-  Fiber.both
-    (fun () -> WP.run ~domain_mgr ~net ~n:cfg.num_workers ~make_est ~process pool)
-    (fun () ->
-      FC.run ~net ~clock ~host:cfg.firehose_host ~port:cfg.firehose_port
-        ~on_message:(WP.submit pool) ())
+  (* Main-domain env + a connection for the periodic scheduled-hooks runner. *)
+  Switch.run @@ fun sw ->
+  Pg.set_env ~net ~sw;
+  let hooks_est = make_est () in
+  let run_scheduled_hooks_loop () =
+    while true do
+      (try CS.run_scheduled_hooks hooks_est with
+      | Eio.Cancel.Cancelled _ as e -> raise e
+      | exn -> Printf.eprintf "scheduled_hooks: %s\n%!" (Printexc.to_string exn));
+      Eio.Time.sleep clock 60.
+    done
+  in
+
+  Fiber.all
+    [
+      (fun () -> WP.run ~domain_mgr ~net ~n:cfg.num_workers ~make_est ~process pool);
+      (fun () ->
+        FC.run ~net ~clock ~host:cfg.firehose_host ~port:cfg.firehose_port
+          ~on_message:(WP.submit pool) ());
+      run_scheduled_hooks_loop;
+    ]

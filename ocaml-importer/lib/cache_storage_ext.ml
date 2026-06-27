@@ -16,17 +16,26 @@
 
 module CS = Cache_storage
 module PGOCaml = Postgres.PGOCaml
-open Pg_types
+open Pg_types (* filterlist enum constructors (Spam / Impersonation / Pubkey / Event) *)
 
 let i64 = Int64.of_int
 let current_time = Utils.current_time
 
 (* {1 trust / hidden predicates} (Julia ext_is_human / ext_is_hidden) *)
 
+(* Julia ext_is_human's default threshold is TrustRank.humaness_threshold[], which itself
+   defaults to 0.0 and is recomputed at runtime by the (separate) TrustRank process — that live
+   value lives only in that process, so the importer uses 0.0 (any positive trustrank ⇒ human),
+   overridable with IMPORTER_HUMANESS_THRESHOLD. *)
+let humaness_threshold =
+  match Sys.getenv_opt "IMPORTER_HUMANESS_THRESHOLD" with
+  | Some v -> ( try float_of_string v with _ -> 0.0)
+  | None -> 0.0
+
 (* Julia ext_is_human: a human_override (membership) wins; otherwise pubkey_trustrank.rank >
-   threshold. The default threshold is TrustRank.humaness_threshold[]; we approximate with 0.0
-   (any positive trustrank ⇒ human) for staging — TODO thread the real threshold through. *)
-let ext_is_human ?(threshold = 0.0) (est : CS.est) (pubkey : string) : bool =
+   threshold. *)
+let ext_is_human ?threshold (est : CS.est) (pubkey : string) : bool =
+  let threshold = match threshold with Some t -> t | None -> humaness_threshold in
   let mdbh = est.CS.mem_dbh in
   match [%pgsql mdbh "select is_human from human_override where pubkey = $pubkey"] with
   | h :: _ -> h
@@ -38,9 +47,12 @@ let ext_is_human ?(threshold = 0.0) (est : CS.est) (pubkey : string) : bool =
       | [] -> false
       | _ -> true)
 
-(* Julia ext_is_hidden(eid) = eid in Filterlist.access_event_blocked_spam (in-memory set). *)
-let ext_is_hidden_event (_est : CS.est) (id : string) : bool =
-  Filterlist.is_access_event_blocked_spam id
+(* Julia ext_is_hidden(eid/pubkey): read the filterlist (local cache DB). *)
+let ext_is_hidden_event (est : CS.est) (id : string) : bool =
+  Filterlist.is_event_blocked_spam est.CS.dbh id
+
+let ext_is_hidden_pubkey (est : CS.est) (pk : string) : bool =
+  Filterlist.is_pubkey_blocked_spam est.CS.dbh pk
 
 (* {1 spam content hash} (Julia spam_content_sha256 / store_/check_spam_content_hash) *)
 
@@ -63,7 +75,7 @@ let store_spam_content_hash (est : CS.est) (e : Nostr.t) : unit =
 let check_spam_content_hash (est : CS.est) (e : Nostr.t) : unit =
   if
     e.kind = Nostr.kind_text_note
-    && (not (Filterlist.is_access_pubkey_unblocked e.pubkey))
+    && (not (Filterlist.is_pubkey_unblocked est.CS.dbh e.pubkey))
     && CS.pubkey_followers_cnt est e.pubkey < 50
   then begin
     let dbh = est.CS.dbh in
@@ -71,17 +83,11 @@ let check_spam_content_hash (est : CS.est) (e : Nostr.t) : unit =
     match [%pgsql dbh "select 1 from spam_note_content_hash where content_sha256 = $h limit 1"] with
     | [] -> ()
     | _ ->
-        let mdbh = est.CS.mem_dbh in
-        let target = e.pubkey and target_type = Pubkey and blocked = true and grp = Spam in
-        let added_at = i64 (current_time ()) in
         let comment =
           Printf.sprintf "spam-content-hash: sha256 of note %s matches known spam content"
             (Hex_util.encode e.id)
         in
-        ignore
-          [%pgsql mdbh
-            "insert into filterlist (target, target_type, blocked, grp, added_at, comment) \
-             values ($target, $target_type, $blocked, $grp, $added_at, $comment) on conflict do nothing"]
+        Filterlist.block_pubkey_spam ~mem_dbh:est.CS.mem_dbh e.pubkey ~comment
   end
 
 (* {1 content scanning helpers} (Julia for_hashtags / for_mentiones) *)
@@ -167,7 +173,32 @@ let for_mentiones (est : CS.est) (e : Nostr.t) (body : Nostr.tag -> unit) : unit
               | None -> ())
           | _ -> ())
       e.tags;
-    (* TODO: nostr:/bech32 (nevent / note / naddr / nprofile) content mentions — pending bech32.ml *)
+    (* bech32 nip19 content mentions (Julia re_mention): npub/nprofile -> p, note/nevent -> e,
+       naddr -> resolve the parametrized-replaceable event -> e. *)
+    let is_b32 c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') in
+    let prefixes = [ "npub1"; "note1"; "naddr1"; "nevent1"; "nprofile1" ] in
+    let starts_with s p =
+      String.length s >= String.length p && String.sub s 0 (String.length p) = p
+    in
+    let p = ref 0 in
+    while !p < n0 do
+      if is_b32 content.[!p] then begin
+        let q = ref !p in
+        while !q < n0 && is_b32 content.[!q] do incr q done;
+        let tok = String.sub content !p (!q - !p) in
+        (if List.exists (starts_with tok) prefixes then
+           match Bech32.nip19_decode tok with
+           | Some (Bech32.Npub pk) | Some (Bech32.Nprofile pk) -> push "p" (Hex_util.encode pk)
+           | Some (Bech32.Note eid) | Some (Bech32.Nevent eid) -> push "e" (Hex_util.encode eid)
+           | Some (Bech32.Naddr { kind; author; identifier }) -> (
+               match CS.lookup_parametrized_replaceable_event est ~kind ~pubkey:author ~identifier with
+               | Some eid -> push "e" (Hex_util.encode eid)
+               | None -> ())
+           | None -> ());
+        p := !q
+      end
+      else incr p
+    done;
     (* Julia unique() over the 2-field tags, preserving first occurrence. *)
     let seen = Hashtbl.create 16 in
     List.iter
@@ -287,9 +318,50 @@ let ext_long_form_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls es
 let ext_video_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls est e
 let ext_live_event (_est : CS.est) (_e : Nostr.t) : unit = ()
 
-(* Julia ext_preimport_check: !(pubkey in Filterlist.import_pubkey_blocked). *)
-let ext_preimport_check (_est : CS.est) (e : Nostr.t) : bool =
-  not (Filterlist.is_import_pubkey_blocked e.pubkey)
+(* Julia ext_preimport_check: !(pubkey in Filterlist.import_pubkey_blocked) — read the local
+   filterlist. *)
+let ext_preimport_check (est : CS.est) (e : Nostr.t) : bool =
+  not (Filterlist.is_import_pubkey_blocked est.CS.dbh e.pubkey)
+
+(* Scheduled-hook callback: decrement a hashtag's score after the expiry window (Julia
+   expire_hashtag_score_cb). *)
+let expire_hashtag_score_cb (est : CS.est) (hashtag : string) (d : int) : unit =
+  let dbh = est.CS.dbh in
+  let delta = i64 d in
+  ignore [%pgsql dbh "update hashtags set score = score - $delta where hashtag = $hashtag"]
+
+(* Julia import_reporting (NIP-56): a whitelisted reporter's kind-1984 report blocks the
+   reported pubkeys/events on the membership filterlist. The report type lives in the tag's 3rd
+   field; only spam / impersonation are acted on. Gated by est.cfg.import_reporting at the call
+   site and by the reporting whitelist here. *)
+let import_reporting (est : CS.est) (e : Nostr.t) : unit =
+  if List.mem e.pubkey est.CS.cfg.CS.reporting_whitelist then begin
+    let added_at = i64 e.created_at in
+    let comment = Printf.sprintf "1984/%s: %s" (Hex_util.encode e.id) e.content in
+    let insert_rule target target_type grp =
+      Filterlist.block ~mem_dbh:est.CS.mem_dbh ~added_at ~target ~target_type ~grp ~comment ()
+    in
+    List.iter
+      (fun tg ->
+        if Nostr.tag_len tg >= 3 then
+          match Nostr.tag_field tg 2 with
+          | Some "impersonation" | Some "spam" -> (
+              let grp = match Nostr.tag_field tg 2 with Some "impersonation" -> Impersonation | _ -> Spam in
+              match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+              | Some "p", Some h -> (
+                  match CS.decode32 h with Some pk -> insert_rule pk Pubkey grp | None -> ())
+              | Some "e", Some h -> (
+                  match CS.decode32 h with
+                  | Some eid ->
+                      insert_rule eid Event grp;
+                      (match CS.get_event est eid with
+                      | Some ev -> insert_rule ev.pubkey Pubkey grp
+                      | None -> ())
+                  | None -> ())
+              | _ -> ())
+          | _ -> ())
+      e.tags
+  end
 
 (* {1 event scoring} (Julia score_event_cb)
 
@@ -357,7 +429,10 @@ let ext_hooks : CS.ext_hooks =
     ext_video_note = ext_video_note;
     ext_live_event = ext_live_event;
     ext_is_hidden_event = ext_is_hidden_event;
+    ext_is_hidden_pubkey = ext_is_hidden_pubkey;
+    import_reporting = import_reporting;
     score_event_cb = score_event_cb;
+    expire_hashtag_score_cb = expire_hashtag_score_cb;
   }
 
 let register () = CS.set_ext ext_hooks
