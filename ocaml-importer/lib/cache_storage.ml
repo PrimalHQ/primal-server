@@ -434,21 +434,30 @@ let parse_parent_eid (est : est) (e : Nostr.t) : string option =
 
 (* {1 Core storage operations} *)
 
-let store_event (est : est) (e : Nostr.t) : unit =
+(* Atomically claim and store the event. Returns true iff THIS call inserted the row, i.e. we own
+   the event and must run its side effects; false if it already existed (another worker domain or
+   an earlier delivery owns it), in which case the caller must NOT dispatch.
+
+   This is the OCaml stand-in for Julia's already_imported_check_lock (cache_storage.jl:1062): the
+   existence check and the claim are a single atomic DB op, so two concurrent worker domains
+   processing the same event cannot both dispatch it — which would double-count likes/reposts/zaps
+   and duplicate event_pubkey_action_refs. The id is the event's content hash, so a conflicting row
+   is byte-identical and needs no update (do nothing). *)
+let store_event (est : est) (e : Nostr.t) : bool =
   let dbh = est.dbh in
   let id = e.id and pubkey = e.pubkey and sig_ = e.sig_ and content = e.content in
   let created_at = i64 e.created_at and kind = i64 e.kind in
   let imported_at = i64 (Utils.current_time ()) in
   let tags = Yojson.Safe.to_string (`List (List.map (fun (t : Nostr.tag) -> `List t) e.tags)) in
-  ignore
+  match
     [%pgsql
       dbh
         "insert into events (id, pubkey, created_at, kind, tags, content, sig, \
          imported_at) values ($id, $pubkey, $created_at, $kind, $tags, $content, $sig_, \
-         $imported_at) on conflict (id) do update set pubkey = excluded.pubkey, \
-         created_at = excluded.created_at, kind = excluded.kind, tags = excluded.tags, \
-         content = excluded.content, sig = excluded.sig, imported_at = \
-         excluded.imported_at"]
+         $imported_at) on conflict (id) do nothing returning id"]
+  with
+  | [] -> false
+  | _ -> true
 
 let set_event_created_at (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
@@ -992,10 +1001,12 @@ let import_event (est : est) (e : Nostr.t) : bool =
   else if event_deleted est e.id then false
   else if not (accepted_kind e.kind) then false
   else if List.mem e.kind blocked_kinds then false
-  else if already_imported est e then false
   else if not ((!ext).ext_preimport_check est e) then false
+  (* store_event is the atomic claim (Julia's already_imported_check_lock): it both inserts the
+     event and reports whether we won the race. A losing concurrent delivery returns false here and
+     skips dispatch, so side effects (likes/reposts/zaps, action refs) run exactly once. *)
+  else if not (store_event est e) then false
   else begin
-    store_event est e;
     set_event_created_at est e;
     track_pubkey est e.pubkey;
     if is_pubkey_event_kind e.kind then

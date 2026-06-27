@@ -127,12 +127,18 @@ let membership_conninfo () =
     database = Option.value (getenv_opt "PGMEMBERSHIPDATABASE") ~default:c.database;
   }
 
-(* Remote DB for verification (bin/compare.ml): the Julia importer's Postgres, which has the
-   SAME port/credentials/dbname as local — only the host differs (default 192.168.44.7, override
-   with COMPARE_HOST). *)
+(* Remote DB for verification (bin/compare.ml): the Julia importer's Postgres. Defaults to the
+   local port/credentials with only the host differing (default 192.168.44.7), but each field can
+   be overridden independently with COMPARE_* since the Julia box often uses a different database
+   name (e.g. primal1) than the local reference DB. *)
 let remote_conninfo () =
   let c = cache_conninfo () in
-  { c with host = Option.value (getenv_opt "COMPARE_HOST") ~default:"192.168.44.7" }
+  {
+    host = Option.value (getenv_opt "COMPARE_HOST") ~default:"192.168.44.7";
+    port = (match getenv_opt "COMPARE_PORT" with Some p -> int_of_string p | None -> c.port);
+    user = Option.value (getenv_opt "COMPARE_USER") ~default:c.user;
+    database = Option.value (getenv_opt "COMPARE_DATABASE") ~default:c.database;
+  }
 
 let connect (ci : conninfo) : dbh =
   PGOCaml.connect ~host:ci.host ~port:ci.port ~user:ci.user ~database:ci.database ()
