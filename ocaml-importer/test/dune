@@ -1,0 +1,4 @@
+(test
+ (name test_importer)
+ (libraries importer alcotest yojson)
+ (deps events.jsonl))

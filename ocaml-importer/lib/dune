@@ -1,0 +1,30 @@
+(library
+ (name importer)
+ ; warnings 33/26/27 are triggered by pgocaml_ppx-generated code for inline [%pgsql].
+ (flags
+  (:standard -w -33-26-27))
+ (libraries
+  unix
+  eio
+  eio.unix
+  eio_main
+  yojson
+  ppx_yojson_conv_lib
+  hex
+  uuidm
+  digestif.c
+  pgocaml
+  saturn
+  tls
+  tls-eio
+  ca-certs
+  domain-name
+  mirage-crypto-rng
+  mirage-crypto-rng.unix)
+ (foreign_stubs
+  (language c)
+  (names secp256k1_stubs))
+ (c_library_flags
+  (-lsecp256k1))
+ (preprocess
+  (pps pgocaml_ppx ppx_yojson_conv)))

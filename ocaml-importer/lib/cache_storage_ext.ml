@@ -1,0 +1,363 @@
+(* ext_* hooks, mirroring Julia src/cache_storage_ext.jl.
+
+   These are the "extension" callbacks the core import path (cache_storage.ml) invokes through
+   its [ext] registry: pubkey_zapped seeding, zap receipts, event scoring, hashtag indexing,
+   and the content-hash spam guard. They are registered with [Cache_storage.set_ext] by
+   [register ()] (called once at startup, from bin/main.ml).
+
+   Out of scope for the staging importer (matching the Julia importer's effective behaviour):
+   - media import (Julia gates every download on DOWNLOAD_MEDIA, off in the importer) — the
+     import_note_urls / image-tag paths are no-ops here;
+   - notifications (notifications_cb / pubkey_notifications / NotificationType) — a large
+     separate subsystem (notifications.jl); the score_event_cb and event_stats_cb hooks that
+     also feed event_stats ARE implemented;
+   - user_search FTS indexing (update_user_search) — a separate tsvector subsystem.
+   Each is marked with a TODO where it would otherwise sit. *)
+
+module CS = Cache_storage
+module PGOCaml = Postgres.PGOCaml
+open Pg_types
+
+let i64 = Int64.of_int
+let current_time = Utils.current_time
+
+(* {1 trust / hidden predicates} (Julia ext_is_human / ext_is_hidden) *)
+
+(* Julia ext_is_human: a human_override (membership) wins; otherwise pubkey_trustrank.rank >
+   threshold. The default threshold is TrustRank.humaness_threshold[]; we approximate with 0.0
+   (any positive trustrank ⇒ human) for staging — TODO thread the real threshold through. *)
+let ext_is_human ?(threshold = 0.0) (est : CS.est) (pubkey : string) : bool =
+  let mdbh = est.CS.mem_dbh in
+  match [%pgsql mdbh "select is_human from human_override where pubkey = $pubkey"] with
+  | h :: _ -> h
+  | [] -> (
+      let dbh = est.CS.dbh in
+      match
+        [%pgsql dbh "select 1 from pubkey_trustrank where pubkey = $pubkey and rank > $threshold limit 1"]
+      with
+      | [] -> false
+      | _ -> true)
+
+(* Julia ext_is_hidden(eid) = eid in Filterlist.access_event_blocked_spam (in-memory set). *)
+let ext_is_hidden_event (_est : CS.est) (id : string) : bool =
+  Filterlist.is_access_event_blocked_spam id
+
+(* {1 spam content hash} (Julia spam_content_sha256 / store_/check_spam_content_hash) *)
+
+let spam_content_sha256 (content : string) : string =
+  Digestif.SHA256.(to_raw_string (digest_string content))
+
+(* Record the content hash of a confirmed-spam note (called from the spam detector's spamevent
+   processor) so future identical notes can be flagged on note #1. *)
+let store_spam_content_hash (est : CS.est) (e : Nostr.t) : unit =
+  if e.kind = Nostr.kind_text_note then begin
+    let dbh = est.CS.dbh in
+    let content_sha256 = spam_content_sha256 e.content and added_at = i64 (current_time ()) in
+    ignore
+      [%pgsql dbh "insert into spam_note_content_hash (content_sha256, added_at) values ($content_sha256, $added_at) on conflict do nothing"]
+  end
+
+(* If a new note's content exactly matches a previously-confirmed spam note, flag its author as
+   spam immediately. Guarded to low-follower, non-allowlisted accounts. Writes the filterlist
+   row to the membership DB (source of truth). *)
+let check_spam_content_hash (est : CS.est) (e : Nostr.t) : unit =
+  if
+    e.kind = Nostr.kind_text_note
+    && (not (Filterlist.is_access_pubkey_unblocked e.pubkey))
+    && CS.pubkey_followers_cnt est e.pubkey < 50
+  then begin
+    let dbh = est.CS.dbh in
+    let h = spam_content_sha256 e.content in
+    match [%pgsql dbh "select 1 from spam_note_content_hash where content_sha256 = $h limit 1"] with
+    | [] -> ()
+    | _ ->
+        let mdbh = est.CS.mem_dbh in
+        let target = e.pubkey and target_type = Pubkey and blocked = true and grp = Spam in
+        let added_at = i64 (current_time ()) in
+        let comment =
+          Printf.sprintf "spam-content-hash: sha256 of note %s matches known spam content"
+            (Hex_util.encode e.id)
+        in
+        ignore
+          [%pgsql mdbh
+            "insert into filterlist (target, target_type, blocked, grp, added_at, comment) \
+             values ($target, $target_type, $blocked, $grp, $added_at, $comment) on conflict do nothing"]
+  end
+
+(* {1 content scanning helpers} (Julia for_hashtags / for_mentiones) *)
+
+let is_hashtag_char c =
+  (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_' || c = '-'
+
+(* Julia re_hashtag = (^|[^0-9a-zA-Z_-])#([0-9a-zA-Z_-]+), TEXT_NOTE only. *)
+let for_hashtags (e : Nostr.t) (body : string -> unit) : unit =
+  if e.kind = Nostr.kind_text_note then begin
+    let s = e.content in
+    let n = String.length s in
+    let i = ref 0 in
+    while !i < n do
+      if s.[!i] = '#' && (!i = 0 || not (is_hashtag_char s.[!i - 1])) then begin
+        let j = ref (!i + 1) in
+        while !j < n && is_hashtag_char s.[!j] do
+          incr j
+        done;
+        if !j > !i + 1 then body (String.sub s (!i + 1) (!j - !i - 1));
+        i := !j
+      end
+      else incr i
+    done
+  end
+
+(* Julia for_mentiones: collect the events/pubkeys a note mentions, yielding 2-field tags.
+   We implement the tag-derived mentions — #[N] content refs into the tag list, and a/e tags
+   carrying a 4th "mention" marker (a-tags resolved to their current event id). The bech32
+   "nostr:" content mentions (re_mention / nip19_decode) are a TODO pending bech32.ml. *)
+let for_mentiones (est : CS.est) (e : Nostr.t) (body : Nostr.tag -> unit) : unit =
+  if
+    e.kind = Nostr.kind_text_note
+    || e.kind = Nostr.kind_long_form_content
+    || e.kind = Nostr.kind_repost
+  then begin
+    let tags = Array.of_list e.tags in
+    let acc = ref [] in
+    let push name value = acc := [ `String name; `String value ] :: !acc in
+    let push_tag (tg : Nostr.tag) =
+      match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+      | Some name, Some value -> push name value
+      | _ -> ()
+    in
+    (* hashref content references into the tag list, of the form hash-bracket-N-bracket;
+       Julia indexes 1-based, we index 0-based. *)
+    let content = e.content in
+    let n0 = String.length content in
+    let i = ref 0 in
+    while !i < n0 do
+      if !i + 1 < n0 && content.[!i] = '#' && content.[!i + 1] = '[' then begin
+        let j = ref (!i + 2) in
+        while !j < n0 && content.[!j] >= '0' && content.[!j] <= '9' do
+          incr j
+        done;
+        if !j < n0 && content.[!j] = ']' && !j > !i + 2 then begin
+          (match int_of_string_opt (String.sub content (!i + 2) (!j - !i - 2)) with
+          | Some ref_idx when ref_idx >= 0 && ref_idx < Array.length tags ->
+              let tg = tags.(ref_idx) in
+              if Nostr.tag_len tg >= 2 then push_tag tg
+          | _ -> ());
+          i := !j + 1
+        end
+        else i := !j
+      end
+      else incr i
+    done;
+    (* a/e tags carrying a 4th "mention" marker *)
+    List.iter
+      (fun tg ->
+        if Nostr.tag_len tg >= 4 && Nostr.tag_field tg 3 = Some "mention" then
+          match Nostr.tag_name tg with
+          | Some "e" -> push_tag tg
+          | Some "a" -> (
+              match Nostr.tag_field tg 1 with
+              | Some s -> (
+                  match CS.parse_a_tag s with
+                  | Some (kind, pubkey, identifier) -> (
+                      match CS.lookup_parametrized_replaceable_event est ~kind ~pubkey ~identifier with
+                      | Some eid -> push "e" (Hex_util.encode eid)
+                      | None -> ())
+                  | None -> ())
+              | None -> ())
+          | _ -> ())
+      e.tags;
+    (* TODO: nostr:/bech32 (nevent / note / naddr / nprofile) content mentions — pending bech32.ml *)
+    (* Julia unique() over the 2-field tags, preserving first occurrence. *)
+    let seen = Hashtbl.create 16 in
+    List.iter
+      (fun tg ->
+        let k = match tg with `String a :: `String b :: _ -> a ^ "\x00" ^ b | _ -> "" in
+        if not (Hashtbl.mem seen k) then begin
+          Hashtbl.add seen k ();
+          body tg
+        end)
+      (List.rev !acc)
+  end
+
+(* Julia import_note_urls: media-URL extraction + download. Every branch is gated on
+   DOWNLOAD_MEDIA, off in the importer, so this is a no-op. TODO: media import subsystem. *)
+let import_note_urls (_est : CS.est) (_e : Nostr.t) : unit = ()
+
+(* {1 zaps} (Julia import_zap_receipt / zap_receiver) *)
+
+let zap_receiver (e : Nostr.t) : string option =
+  List.find_map
+    (fun tg ->
+      match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+      | Some "p", Some h -> CS.decode32 h
+      | _ -> None)
+    e.tags
+
+let import_zap_receipt (est : CS.est) (e : Nostr.t) (parent_eid : string) (amount_sats : int) : unit =
+  let dbh = est.CS.dbh in
+  let zap_receipt_id = e.id and created_at = i64 e.created_at in
+  let sender = CS.zap_sender e and receiver = zap_receiver e in
+  let amount = i64 amount_sats and event_id = Some parent_eid in
+  ignore
+    [%pgsql dbh
+      "insert into og_zap_receipts (zap_receipt_id, created_at, sender, receiver, amount_sats, event_id) \
+       values ($zap_receipt_id, $created_at, $?sender, $?receiver, $amount, $?event_id)"]
+
+(* {1 ext_* entry points} *)
+
+(* Seed pubkey_zapped for a newly-tracked pubkey (Julia ext_pubkey). *)
+let ext_pubkey (est : CS.est) (pubkey : string) : unit =
+  let dbh = est.CS.dbh in
+  ignore
+    [%pgsql dbh "insert into pubkey_zapped (pubkey, zaps, satszapped) values ($pubkey, 0, 0) on conflict do nothing"]
+
+(* update_user_search (FTS) + metadata media import; both deferred. *)
+let ext_metadata_changed (_est : CS.est) (_e : Nostr.t) : unit = ()
+
+let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
+  check_spam_content_hash est e;
+  for_mentiones est e (fun tg ->
+      match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+      | Some "p", Some _ -> () (* YOU_WERE_MENTIONED_IN_POST notification — TODO *)
+      | Some "e", Some h -> (
+          (* YOUR_POST_WAS_MENTIONED_IN_POST notification — TODO. The repost-via-mention
+             scoring below DOES land in event_stats. *)
+          match CS.decode32 h with
+          | None -> ()
+          | Some eid ->
+              if not (ext_is_hidden_event est e.id) then begin
+                CS.event_hook est eid (CS.Event_stats_cb ("reposts", 1));
+                CS.event_hook est eid
+                  (CS.Score_event_cb
+                     { initiator = e.pubkey; scored_at = e.created_at; action = "repost"; increment = 7 })
+              end)
+      | _ -> ());
+  import_note_urls est e;
+  if ext_is_human est e.pubkey then
+    for_hashtags e (fun hashtag ->
+        let hashtag = String.lowercase_ascii hashtag in
+        let dbh = est.CS.dbh in
+        let event_id = e.id and created_at = i64 e.created_at in
+        ignore
+          [%pgsql dbh "insert into event_hashtags (event_id, hashtag, created_at) values ($event_id, $hashtag, $created_at)"];
+        (match [%pgsql dbh "select 1 from hashtags where hashtag = $hashtag limit 1"] with
+        | [] -> ignore [%pgsql dbh "insert into hashtags (hashtag, score) values ($hashtag, 0)"]
+        | _ -> ());
+        ignore [%pgsql dbh "update hashtags set score = score + 1 where hashtag = $hashtag"];
+        CS.schedule_hook est
+          ~execute_at:(current_time () + (4 * 3600))
+          (`List [ `String "expire_hashtag_score_cb"; `String hashtag; `Int 1 ]))
+
+let ext_reaction (est : CS.est) (e : Nostr.t) (eid : string) : unit =
+  CS.event_hook est eid
+    (CS.Score_event_cb { initiator = e.pubkey; scored_at = e.created_at; action = "like"; increment = 1 })
+
+let ext_reply (est : CS.est) (e : Nostr.t) (parent_eid : string) : unit =
+  CS.event_hook est parent_eid
+    (CS.Score_event_cb { initiator = e.pubkey; scored_at = e.created_at; action = "reply"; increment = 10 })
+
+let ext_repost (est : CS.est) (e : Nostr.t) (eid : string) : unit =
+  CS.event_hook est eid
+    (CS.Score_event_cb { initiator = e.pubkey; scored_at = e.created_at; action = "repost"; increment = 7 })
+
+let ext_zap (est : CS.est) (e : Nostr.t) (parent_eid : string) (amount_sats : int) : unit =
+  match CS.zap_sender e with
+  | None -> ()
+  | Some sender ->
+      CS.event_hook est parent_eid
+        (CS.Score_event_cb { initiator = sender; scored_at = e.created_at; action = "zap"; increment = 5 });
+      if ext_is_human est sender then begin
+        CS.event_hook est parent_eid (CS.Event_stats_cb ("satszapped", amount_sats));
+        (* YOUR_POST_WAS_ZAPPED & friends notifications — TODO *)
+        import_zap_receipt est e parent_eid amount_sats
+      end
+
+let ext_pubkey_zap (est : CS.est) (e : Nostr.t) (zapped_pk : string) (amount_sats : int) : unit =
+  match CS.zap_sender e with
+  | Some sender when ext_is_human est sender ->
+      let dbh = est.CS.dbh in
+      let amount = i64 amount_sats in
+      ignore
+        [%pgsql dbh "update pubkey_zapped set zaps = zaps + 1, satszapped = satszapped + $amount where pubkey = $zapped_pk"]
+  | _ -> ()
+
+(* long-form / video / live: only media imports, all gated on DOWNLOAD_MEDIA — no-ops here. *)
+let ext_long_form_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls est e
+let ext_video_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls est e
+let ext_live_event (_est : CS.est) (_e : Nostr.t) : unit = ()
+
+(* Julia ext_preimport_check: !(pubkey in Filterlist.import_pubkey_blocked). *)
+let ext_preimport_check (_est : CS.est) (e : Nostr.t) : bool =
+  not (Filterlist.is_import_pubkey_blocked e.pubkey)
+
+(* {1 event scoring} (Julia score_event_cb)
+
+   Time-decayed engagement score: a reply's weight depends on its length; the increment is
+   scaled by humanness and zeroed for non-human initiators or duplicate (pubkey, ref_kind)
+   actions; recent activity (<24h) also bumps score24h and schedules a score_expiry row. *)
+let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at : int)
+    (action : string) (increment : int) : unit =
+  let increment =
+    if action = "reply" then
+      let len = String.length e.content in
+      if len <= 20 then 1 else if len <= 100 then 5 else 10
+    else increment
+  in
+  let increment =
+    if ext_is_human est initiator then int_of_float (1e10 *. float_of_int increment /. 91.) else 0
+  in
+  let ref_kind =
+    match action with
+    | "like" -> Some Nostr.kind_reaction
+    | "reply" -> Some Nostr.kind_text_note
+    | "repost" -> Some Nostr.kind_repost
+    | "zap" -> Some Nostr.kind_zap_receipt
+    | _ -> None
+  in
+  match ref_kind with
+  | None -> ()
+  | Some ref_kind ->
+      let dbh = est.CS.dbh in
+      let event_id = e.id and rk = i64 ref_kind in
+      let dup =
+        match
+          [%pgsql dbh "select count(1) from event_pubkey_action_refs where event_id = $event_id and ref_pubkey = $initiator and ref_kind = $rk"]
+        with
+        | Some n :: _ -> n > 1L
+        | _ -> false
+      in
+      let increment = if dup then 0 else increment in
+      if increment > 0 then begin
+        let inc = i64 increment in
+        ignore [%pgsql dbh "update event_stats set score = score + $inc where event_id = $event_id"];
+        let expire_at = scored_at + (24 * 3600) in
+        if expire_at > current_time () then begin
+          ignore [%pgsql dbh "update event_stats set score24h = score24h + $inc where event_id = $event_id"];
+          let author_pubkey = e.pubkey and change = inc and expire_at = i64 expire_at in
+          ignore
+            [%pgsql dbh "insert into score_expiry (event_id, author_pubkey, change, expire_at) values ($event_id, $author_pubkey, $change, $expire_at)"]
+        end
+      end
+
+(* {1 registration} *)
+
+let ext_hooks : CS.ext_hooks =
+  {
+    CS.ext_preimport_check = ext_preimport_check;
+    ext_pubkey = ext_pubkey;
+    ext_metadata_changed = ext_metadata_changed;
+    ext_text_note = ext_text_note;
+    ext_reaction = ext_reaction;
+    ext_reply = ext_reply;
+    ext_repost = ext_repost;
+    ext_zap = ext_zap;
+    ext_pubkey_zap = ext_pubkey_zap;
+    ext_long_form_note = ext_long_form_note;
+    ext_video_note = ext_video_note;
+    ext_live_event = ext_live_event;
+    ext_is_hidden_event = ext_is_hidden_event;
+    score_event_cb = score_event_cb;
+  }
+
+let register () = CS.set_ext ext_hooks
