@@ -14,6 +14,18 @@ PORT="${PGPORT:-54017}"
 USER="${PGUSER:-pr}"
 DB="${PGDATABASE:-primal_importer_ref}"
 
+# Safety guard: never truncate a known live/production database, even if PG* happen to point at
+# one (e.g. while pointing bin/zapcheck/bin/compare at the Julia box). The production DB names are
+# refused outright by name; extend the list with REFDB_PROTECTED_EXTRA="name1 name2" if needed.
+PROTECTED_DBS="primal1 primal ${REFDB_PROTECTED_EXTRA:-}"
+for prot in $PROTECTED_DBS; do
+  if [ "$DB" = "$prot" ]; then
+    echo "ERROR: refusing to truncate '$DB' on $HOST:$PORT — it is a protected production database." >&2
+    echo "       This script only resets the reference DB (default: primal_importer_ref)." >&2
+    exit 1
+  fi
+done
+
 echo "truncating all tables in $DB on $HOST:$PORT (schema preserved)"
 psql -h "$HOST" -p "$PORT" -U "$USER" -d "$DB" -v ON_ERROR_STOP=1 <<'SQL'
 do $$

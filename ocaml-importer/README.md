@@ -58,7 +58,9 @@ nix develop "path:$P" -c sql/refdb-truncate.sh
 ```
 
 It targets the `PG*` database and never drops or alters the schema. Run it after any live
-import session.
+import session. As a safety guard it **refuses by name** to truncate a known production
+database (`primal1`, `primal`) even if `PG*` are pointed there — extend that list with
+`REFDB_PROTECTED_EXTRA="name1 name2"` if needed.
 
 ---
 
