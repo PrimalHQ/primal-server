@@ -46,6 +46,20 @@ This creates `primal_importer_ref` (if missing) on `127.0.0.1:54017` and loads
 `sql/importer_schema.sql`. The build, and several of the dev binaries below, only need the
 schema — not data.
 
+### Resetting the reference DB to schema-only
+
+Binaries that import real data (`bin/main` against the live firehose, `bin/importcheck`, …)
+write into the cache DB — which defaults to this reference DB. To clear that data back to
+schema-only (every table truncated, schema preserved so `dune build` still type-checks),
+run the explicit counterpart of the setup script:
+
+```sh
+nix develop "path:$P" -c sql/refdb-truncate.sh
+```
+
+It targets the `PG*` database and never drops or alters the schema. Run it after any live
+import session.
+
 ---
 
 ## Configuration (environment variables)
@@ -210,8 +224,9 @@ nix develop "path:$P" -c dune exec bin/phase8check.exe
 ## Notes
 
 - `main`, `importcheck`, `scorecheck`, and `phase8check` **write** to the cache DB, which
-  by default is the compile-time reference DB (`primal_importer_ref`). Truncate it back to
-  schema-only after runs that import real data.
+  by default is the compile-time reference DB (`primal_importer_ref`). After runs that
+  import real data, reset it with `sql/refdb-truncate.sh` (see *Resetting the reference DB
+  to schema-only* above).
 - The unit tests (`dune test`) cover pure logic only (NIP-01 event id, BIP340 schnorr,
   bech32 lud06 / NIP-19, real-event vectors) and need no database beyond the compile-time
   schema check.
