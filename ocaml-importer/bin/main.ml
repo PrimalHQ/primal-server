@@ -67,6 +67,13 @@ let () =
   Switch.run @@ fun sw ->
   Pg.set_env ~net ~sw;
   let hooks_est = make_est () in
+
+  (* Initialise the humaness threshold from pubkey_trustrank (rank of the 50,000th-ranked
+     pubkey), mirroring TrustRank.load. Done on the main domain before the worker domains spawn,
+     so they all observe the final value. *)
+  let humaness = Importer.Cache_storage_ext.load_humaness_threshold hooks_est in
+  Printf.printf "primal-importer: humaness_threshold = %g\n%!" humaness;
+
   let run_scheduled_hooks_loop () =
     while true do
       (try CS.run_scheduled_hooks hooks_est with

@@ -29,38 +29,43 @@ nix develop "path:$P" -c dune test          # run the unit tests (alcotest)
 nix develop "path:$P" -c dune exec bin/main.exe   # run a binary
 ```
 
-The dev shell exports the `PG*` variables (see below) that point the `[%pgsql]` ppx at a
-**reference database** used purely for compile-time schema checking. `dune build` *fails*
-if any inline SQL does not match that schema.
+The dev shell exports the `PG*` variables (see below). By default they point the `[%pgsql]`
+ppx — and the binaries at runtime — at the **live `primal1` database** (compile-time schema
+checking and runtime now both use the live DB). `dune build` *fails* if any inline SQL does
+not match that live schema.
 
-### One-time reference DB setup
+### Reference DB (occasional, for tests)
 
-The reference DB must exist before the first build. Create/load it from the importer
-schema:
+A standalone reference DB (`primal_importer_ref`) is no longer required for the build — it
+is only used occasionally for tests. There is no bundled schema file; instead, create it as
+a **schema-only clone of an existing DB** (e.g. the live `primal1`). The connection is taken
+entirely from required command-line flags (no env, no defaults):
 
 ```sh
-nix develop "path:$P" -c sql/refdb-setup.sh
+nix develop "path:$P" -c sql/refdb-setup.sh \
+  --from-host 127.0.0.1 --from-port 54017 --from-user pr --from-db primal1 \
+  --to-host   127.0.0.1 --to-port   54017 --to-user   pr --to-db   primal_importer_ref
 ```
 
-This creates `primal_importer_ref` (if missing) on `127.0.0.1:54017` and loads
-`sql/importer_schema.sql`. The build, and several of the dev binaries below, only need the
-schema — not data.
+This `pg_dump --schema-only` of the `--from-*` source DB into the `--to-*` target DB
+(created if missing). No data is copied.
 
 ### Resetting the reference DB to schema-only
 
-Binaries that import real data (`bin/main` against the live firehose, `bin/importcheck`, …)
-write into the cache DB — which defaults to this reference DB. To clear that data back to
-schema-only (every table truncated, schema preserved so `dune build` still type-checks),
-run the explicit counterpart of the setup script:
+Binaries that import real data (`bin/importcheck`, …) can be pointed at the reference DB to
+keep test data out of the live DB. To clear it back to schema-only (every table truncated,
+schema preserved so `dune build` still type-checks), run the explicit counterpart of the
+setup script:
 
 ```sh
-nix develop "path:$P" -c sql/refdb-truncate.sh
+nix develop "path:$P" -c sql/refdb-truncate.sh -h 127.0.0.1 -p 54017 -U pr -d primal_importer_ref
 ```
 
-It targets the `PG*` database and never drops or alters the schema. Run it after any live
-import session. As a safety guard it **only accepts the database named exactly
-`primal_importer_ref`**. Any other name (every production DB, such as `primal1` or
-`primal`) is refused even if `PG*` are pointed there.
+Like `refdb-setup.sh`, the connection is taken **entirely from command-line arguments**
+(not the `PG*` environment) and there are **no defaults** — all of `-h`/`-p`/`-U`/`-d` are
+required. It never drops or alters the schema. As a safety guard it **only accepts the
+database named exactly `primal_importer_ref`**. Any other name (every production DB, such as
+`primal1` or `primal`) is refused.
 
 ---
 
@@ -80,7 +85,7 @@ cache connection**, so only the `PG*` set is required.
 | `PGHOST` | `127.0.0.1` | Cache / local DB host (Julia `:p0`). The DB the importer writes to. |
 | `PGPORT` | `54017` | Cache DB port. |
 | `PGUSER` | `pr` | Cache DB user. |
-| `PGDATABASE` | `primal_importer_ref` | Cache DB name. Also the compile-time reference DB. |
+| `PGDATABASE` | `primal1` | Cache DB name; the **live** DB used for both compile-time `[%pgsql]` checks and runtime (dev shell sets this). The code fallback when unset is `primal_importer_ref`. |
 | `PGMEMBERSHIPHOST` | = `PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`. |
 | `PGMEMBERSHIPPORT` | = `PGPORT` | Membership DB port. |
 | `PGMEMBERSHIPUSER` | = `PGUSER` | Membership DB user. |
@@ -103,7 +108,7 @@ cache connection**, so only the `PG*` set is required.
 | `VERIFY_ZAPPERS` | `true` | Verify zap receipts via LNURL (see proxy below). When `false`, all zappers pass. |
 | `PRIMALSERVER_PROXY` | *(none)* | SOCKS5 proxy for LNURL egress, e.g. `socks5h://192.168.41.2:1080` (a bare `host:port` also works). `socks5h://` resolves DNS at the proxy. |
 | `IMPORTER_DISABLE_TRUSTRANK` | `false` | When `true`, seed `pubkey_trustrank = 1.0` for every new pubkey so `ext_is_human` is true for everyone (use when no TrustRankMaker feeds this DB). |
-| `IMPORTER_HUMANESS_THRESHOLD` | `0.0` | `ext_is_human` passes when `pubkey_trustrank.rank >` this threshold. |
+| `IMPORTER_HUMANESS_THRESHOLD` | *(computed)* | `ext_is_human` passes when `pubkey_trustrank.rank >` this threshold. Unset, it is computed once at startup as the rank of the 50,000th-highest-ranked pubkey in `pubkey_trustrank` (mirroring Julia `TrustRank.load`; `0.0` if the table is empty). Set it to pin an explicit override. |
 | `IMPORTER_IMPORT_REPORTING` | `false` | Process NIP-56 kind-1984 reports into the membership `filterlist`. |
 | `IMPORTER_REPORTING_WHITELIST` | *(empty)* | Comma-separated **hex** pubkeys allowed to file reports (only honored when `IMPORTER_IMPORT_REPORTING=true`). |
 
@@ -225,10 +230,10 @@ nix develop "path:$P" -c dune exec bin/phase8check.exe
 
 ## Notes
 
-- `main`, `importcheck`, `scorecheck`, and `phase8check` **write** to the cache DB, which
-  by default is the compile-time reference DB (`primal_importer_ref`). After runs that
-  import real data, reset it with `sql/refdb-truncate.sh` (see *Resetting the reference DB
-  to schema-only* above).
+- `main`, `importcheck`, `scorecheck`, and `phase8check` **write** to the cache DB, which by
+  default (`PGDATABASE`) is now the **live `primal1` DB**. Point `PG*` at the reference DB
+  (`primal_importer_ref`) for test runs you don't want landing in the live DB, then reset it
+  with `sql/refdb-truncate.sh` (see *Resetting the reference DB to schema-only* above).
 - The unit tests (`dune test`) cover pure logic only (NIP-01 event id, BIP340 schnorr,
   bech32 lud06 / NIP-19, real-event vectors) and need no database beyond the compile-time
   schema check.

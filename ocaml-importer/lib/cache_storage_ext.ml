@@ -23,19 +23,44 @@ let current_time = Utils.current_time
 
 (* {1 trust / hidden predicates} (Julia ext_is_human / ext_is_hidden) *)
 
-(* Julia ext_is_human's default threshold is TrustRank.humaness_threshold[], which itself
-   defaults to 0.0 and is recomputed at runtime by the (separate) TrustRank process — that live
-   value lives only in that process, so the importer uses 0.0 (any positive trustrank ⇒ human),
-   overridable with IMPORTER_HUMANESS_THRESHOLD. *)
-let humaness_threshold =
+(* Julia ext_is_human's default threshold is TrustRank.humaness_threshold[], a global Ref that is
+   initialised to 0.0 (trust_rank.jl:10) and recomputed by TrustRank.load as the rank of the
+   50,000th-highest-ranked pubkey in pubkey_trustrank (trust_rank.jl:20:
+   first(sorted, 50000)[end][2]). load runs only in the separate TrustRankMaker process, but the
+   value it derives comes from the same shared pubkey_trustrank table — so we reproduce that
+   cutoff here directly from the table at startup (load_humaness_threshold) rather than leave it
+   pinned at 0.0. IMPORTER_HUMANESS_THRESHOLD, when set, is an explicit override that wins over
+   the computed value. *)
+let env_threshold =
   match Sys.getenv_opt "IMPORTER_HUMANESS_THRESHOLD" with
-  | Some v -> ( try float_of_string v with _ -> 0.0)
-  | None -> 0.0
+  | Some v -> ( try Some (float_of_string v) with _ -> None)
+  | None -> None
+
+let humaness_threshold = ref (Option.value env_threshold ~default:0.0)
+
+(* Mirror TrustRank.load: humaness_threshold = rank of the 50,000th-highest-ranked pubkey (or the
+   lowest rank present, if fewer than 50,000 rows). min over the top-50000-by-rank window is
+   exactly Julia's first(sorted, 50000)[end][2]. Skipped when IMPORTER_HUMANESS_THRESHOLD pins an
+   explicit override; an empty table keeps 0.0. Call once at startup, before the worker domains
+   read the value; returns the threshold now in force. *)
+let load_humaness_threshold (est : CS.est) : float =
+  (match env_threshold with
+  | Some _ -> () (* explicit override already in the ref *)
+  | None -> (
+      let dbh = est.CS.dbh in
+      match
+        [%pgsql dbh
+          "select min(rank) from (select rank from pubkey_trustrank order by rank desc limit \
+           50000) t"]
+      with
+      | Some r :: _ -> humaness_threshold := r
+      | _ -> () (* empty table: keep 0.0 *)));
+  !humaness_threshold
 
 (* Julia ext_is_human: a human_override (membership) wins; otherwise pubkey_trustrank.rank >
    threshold. *)
 let ext_is_human ?threshold (est : CS.est) (pubkey : string) : bool =
-  let threshold = match threshold with Some t -> t | None -> humaness_threshold in
+  let threshold = match threshold with Some t -> t | None -> !humaness_threshold in
   let mdbh = est.CS.mem_dbh in
   match [%pgsql mdbh "select is_human from human_override where pubkey = $pubkey"] with
   | h :: _ -> h

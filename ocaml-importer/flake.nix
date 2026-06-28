@@ -50,11 +50,12 @@
             pkgs.postgresql_16
           ] ++ importerLibs ++ cLibs;
 
-          # Reference database for compile-time [%pgsql] schema checking.
-          # Created once with sql/refdb-setup.sh (loads sql/importer_schema.sql).
+          # Live database (primal1) used directly for compile-time [%pgsql] schema checking
+          # and at runtime. The standalone reference DB (primal_importer_ref), created from the
+          # live schema with sql/refdb-setup.sh, is only used occasionally for tests.
           PGHOST = "127.0.0.1";
           PGPORT = "54017";
-          PGDATABASE = "primal_importer_ref";
+          PGDATABASE = "primal1";
           PGUSER = "pr";
         };
 
@@ -63,8 +64,9 @@
           version = "0.1.0";
           src = ./.;
           buildInputs = importerLibs ++ cLibs;
-          # NOTE: the package build also needs PG* pointing at a reachable reference DB
-          # with the importer schema, because [%pgsql] type-checks at compile time.
+          # NOTE: the package build also needs PG* pointing at a reachable DB carrying the
+          # importer schema (the live primal1 DB by default), because [%pgsql] type-checks at
+          # compile time.
         };
       });
 }
