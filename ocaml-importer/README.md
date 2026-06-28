@@ -37,18 +37,18 @@ not match that live schema.
 ### Reference DB (occasional, for tests)
 
 A standalone reference DB (`primal_importer_ref`) is no longer required for the build — it
-is only used occasionally for tests. There is no bundled schema file; instead, create it as
-a **schema-only clone of an existing DB** (e.g. the live `primal1`). The connection is taken
-entirely from required command-line flags (no env, no defaults):
+is only used occasionally for tests. There is no bundled schema file; instead it is created
+as a **schema-only clone of the live `primal1`** (the importer's inline SQL targets primal1's
+base tables by name, so the reference DB must mirror that schema). It takes **no arguments**;
+the connection is **hardcoded** (`pg_dump` from `primal1` into `primal_importer_ref`, both on
+`127.0.0.1:54017`, user `pr`) and cannot be overridden:
 
 ```sh
-nix develop "path:$P" -c sql/refdb-setup.sh \
-  --from-host 127.0.0.1 --from-port 54017 --from-user pr --from-db primal1 \
-  --to-host   127.0.0.1 --to-port   54017 --to-user   pr --to-db   primal_importer_ref
+nix develop "path:$P" -c sql/refdb-setup.sh
 ```
 
-This `pg_dump --schema-only` of the `--from-*` source DB into the `--to-*` target DB
-(created if missing). No data is copied.
+This `pg_dump --schema-only` of `primal1` into `primal_importer_ref` (created if missing); the
+target is always the reference DB, so it can never clobber the live source. No data is copied.
 
 ### Resetting the reference DB to schema-only
 
@@ -58,14 +58,14 @@ schema preserved so `dune build` still type-checks), run the explicit counterpar
 setup script:
 
 ```sh
-nix develop "path:$P" -c sql/refdb-truncate.sh -h 127.0.0.1 -p 54017 -U pr -d primal_importer_ref
+nix develop "path:$P" -c sql/refdb-truncate.sh
 ```
 
-Like `refdb-setup.sh`, the connection is taken **entirely from command-line arguments**
-(not the `PG*` environment) and there are **no defaults** — all of `-h`/`-p`/`-U`/`-d` are
-required. It never drops or alters the schema. As a safety guard it **only accepts the
-database named exactly `primal_importer_ref`**. Any other name (every production DB, such as
-`primal1` or `primal`) is refused.
+It takes **no arguments**. The connection is **hardcoded** to `primal_importer_ref` on
+`127.0.0.1:54017` (user `pr`) and cannot be overridden — not even via `PG*` env vars (the
+dev shell points those at the live DB; the script passes its connection to `psql` explicitly).
+It can therefore *only* ever truncate the reference DB and can never touch a live/production DB
+(e.g. `primal1`, `primal`). It never drops or alters the schema.
 
 ---
 

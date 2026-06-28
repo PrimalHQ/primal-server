@@ -1,82 +1,21 @@
 #!/usr/bin/env bash
-# Create the standalone reference database (used occasionally for tests) by cloning the schema of
-# an existing database. The live primal1 DB is what the build and runtime use directly now (see
-# flake.nix); this reference DB is a schema-only copy of an existing DB.
+# Create the standalone reference database (primal_importer_ref, used occasionally for tests) by
+# cloning the schema of the live primal1 database. Because the importer's inline SQL targets
+# primal1's base tables by name, the reference DB must be a schema clone of primal1.
 #
-# There is no bundled schema file: the schema is taken from the --from-* source database via
-# `pg_dump --schema-only` and loaded into the --to-* target database (created if missing).
+# The connection parameters are HARDCODED below and cannot be overridden: there are no arguments
+# and no environment variables are consulted. It always clones the schema of primal1 into
+# primal_importer_ref on 127.0.0.1:54017. The target is always the reference DB, so it can never
+# clobber the live source (which is only read, via pg_dump).
 #
-# The connection is taken entirely from command-line arguments (NOT environment variables, NOT
-# defaults). All of --from-{host,port,user,db} and --to-{host,port,user,db} are required. This is
-# the explicit counterpart to sql/refdb-truncate.sh.
+# There is no bundled schema file: the schema is taken from the source database via
+# `pg_dump --schema-only` and loaded into the target database (created if missing). It copies no
+# data. This is the explicit counterpart to sql/refdb-truncate.sh.
 set -euo pipefail
 
-FROM_HOST= FROM_PORT= FROM_USER= FROM_DB=
-TO_HOST=   TO_PORT=   TO_USER=   TO_DB=
-
-usage() {
-  cat >&2 <<EOF
-Usage: $(basename "$0") \\
-         --from-host H --from-port P --from-user U --from-db D \\
-         --to-host   H --to-port   P --to-user   U --to-db   D
-
-Clone the schema of the --from-* (source) database into the --to-* (target) database
-via 'pg_dump --schema-only'. The target database is created if it does not exist.
-
-All options are required (there are no defaults):
-  --from-host / --from-port / --from-user / --from-db   source DB to copy the schema from
-  --to-host   / --to-port   / --to-user   / --to-db     target reference DB to create/load
-  --help                                                show this help and exit
-EOF
-}
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --from-host|--from-port|--from-user|--from-db|--to-host|--to-port|--to-user|--to-db)
-      if [ $# -lt 2 ]; then
-        echo "ERROR: option $1 requires an argument" >&2
-        usage
-        exit 2
-      fi
-      case "$1" in
-        --from-host) FROM_HOST="$2" ;;
-        --from-port) FROM_PORT="$2" ;;
-        --from-user) FROM_USER="$2" ;;
-        --from-db)   FROM_DB="$2" ;;
-        --to-host)   TO_HOST="$2" ;;
-        --to-port)   TO_PORT="$2" ;;
-        --to-user)   TO_USER="$2" ;;
-        --to-db)     TO_DB="$2" ;;
-      esac
-      shift 2
-      ;;
-    --help|-\?)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "ERROR: unknown argument '$1'" >&2
-      usage
-      exit 2
-      ;;
-  esac
-done
-
-# All connection arguments are mandatory — no defaults.
-missing=
-[ -n "$FROM_HOST" ] || missing="$missing --from-host"
-[ -n "$FROM_PORT" ] || missing="$missing --from-port"
-[ -n "$FROM_USER" ] || missing="$missing --from-user"
-[ -n "$FROM_DB" ]   || missing="$missing --from-db"
-[ -n "$TO_HOST" ]   || missing="$missing --to-host"
-[ -n "$TO_PORT" ]   || missing="$missing --to-port"
-[ -n "$TO_USER" ]   || missing="$missing --to-user"
-[ -n "$TO_DB" ]     || missing="$missing --to-db"
-if [ -n "$missing" ]; then
-  echo "ERROR: missing required argument(s):$missing" >&2
-  usage
-  exit 2
-fi
+# Hardcoded source (schema cloned FROM here, read-only) and target (reference DB created/loaded).
+FROM_HOST=127.0.0.1  FROM_PORT=54017  FROM_USER=pr  FROM_DB=primal1
+TO_HOST=127.0.0.1    TO_PORT=54017    TO_USER=pr    TO_DB=primal_importer_ref
 
 # Create the target database if it does not already exist.
 exists=$(psql -h "$TO_HOST" -p "$TO_PORT" -U "$TO_USER" -d postgres -tAc \
