@@ -89,10 +89,10 @@ cache connection**, so only the `PG*` set is required.
 | `PGPORT` | `54017` | Cache DB port. |
 | `PGUSER` | `pr` | Cache DB user. |
 | `PGDATABASE` | `primal1` | Cache DB name; the **live** DB used for both compile-time `[%pgsql]` checks and runtime (dev shell sets this). The code fallback when unset is `primal_importer_ref`. |
-| `PGMEMBERSHIPHOST` | = `PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`, and the notification-gate tables `app_settings` / `notification_settings` (see [Notifications](#notifications)). Point this at a real membership DB to activate the serving-layer notification gates. |
-| `PGMEMBERSHIPPORT` | = `PGPORT` | Membership DB port. |
-| `PGMEMBERSHIPUSER` | = `PGUSER` | Membership DB user. |
-| `PGMEMBERSHIPDATABASE` | = `PGDATABASE` | Membership DB name. |
+| `PGMEMBERSHIPHOST` | `192.168.11.7` (dev shell); code fallback `= PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`, and the notification-gate tables `app_settings` / `notification_settings` (see [Notifications](#notifications)). The dev shell sets this to the real membership DB so the serving-layer notification gates are active; the code fallback when unset is the cache connection. |
+| `PGMEMBERSHIPPORT` | `5432` (dev shell); fallback `= PGPORT` | Membership DB port. |
+| `PGMEMBERSHIPUSER` | `primal` (dev shell); fallback `= PGUSER` | Membership DB user. |
+| `PGMEMBERSHIPDATABASE` | `primal` (dev shell); fallback `= PGDATABASE` | Membership DB name. |
 | `COMPARE_HOST` | `192.168.44.7` | Remote DB host for `bin/compare` (the Julia importer's Postgres). |
 | `COMPARE_PORT` | = `PGPORT` | Remote DB port. |
 | `COMPARE_USER` | = `PGUSER` | Remote DB user. |
@@ -293,11 +293,15 @@ Imports produce in-DB notifications, mirroring Julia `notification` / `notificat
   `pubkey_followers`) — read tables that live only in the membership DB. They are queried **raw**
   (`Postgres.query`, not `[%pgsql]`, since `app_settings` is absent from primal1) and the whole set
   is **gated on `app_settings` being present** in the membership connection, detected once at
-  startup (`init_notification_gating`; the banner logs `gates ON/OFF`). With `mem_dbh` pointed at
-  primal1 (no `app_settings`) the gates are inert and the importer over-generates (notifications for
-  every recipient, not just app users); point `mem_dbh` at a real membership DB via the
-  `PGMEMBERSHIP*` env vars to activate them and reach parity with the Julia importer (e.g. the
-  recipient gate alone collapses repost notifications from ~12× the Julia rate down to ~1×).
+  startup (`init_notification_gating`; the banner logs `gates ON/OFF`). The dev shell points
+  `mem_dbh` at the real membership DB (`PGMEMBERSHIP*` in `flake.nix`), so the gates are **ON** by
+  default and notifications track the Julia importer (the recipient gate alone collapses repost
+  notifications from ~12× the Julia rate down to ~1×). Pointed at primal1 instead (no
+  `app_settings`), the gates go inert and the importer over-generates (notifications for every
+  recipient, not just app users).
+- **Side effect:** with `mem_dbh` on the real membership DB, the spam detector writes its
+  `filterlist` blocks (comment-tagged `spam-detector: …`) and `import_reporting` writes there too —
+  i.e. the importer contributes to the production membership filterlist, as the Julia importer does.
 - **Push notifications** (`lib/push_notifications.ml`) mirror the Julia stub and are **disabled**
   at runtime (`enabled = false`, matching `PUSH_NOTIFICATIONS_ENABLED`); there is no APNS/FCM/
   web-push backend to port. The token-registration helpers parse and verify input but do not

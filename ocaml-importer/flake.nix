@@ -57,6 +57,15 @@
           PGPORT = "54017";
           PGDATABASE = "primal1";
           PGUSER = "pr";
+
+          # Membership DB (Julia :membership) — filterlist, human_override, and the notification-gate
+          # tables app_settings / notification_settings. Runtime only (mem_dbh); [%pgsql] still checks
+          # against primal1 via PG* above. Pointing mem_dbh here activates the serving-layer
+          # notification gates (app_settings present) so notifications match the Julia importer.
+          PGMEMBERSHIPHOST = "192.168.11.7";
+          PGMEMBERSHIPPORT = "5432";
+          PGMEMBERSHIPDATABASE = "primal";
+          PGMEMBERSHIPUSER = "primal";
         };
 
         packages.default = ocamlPkgs.buildDunePackage {
