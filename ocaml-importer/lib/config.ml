@@ -7,11 +7,16 @@ type t = {
   num_workers : int;
   queue_capacity : int;
   proxy : string option; (* SOCKS5 "host:port" (or "socks5h://host:port") for LNURL *)
+  event_sync_enabled : bool; (* pull recent events from peer nodes (Event_syncer) *)
+  event_sync_remotes : string list; (* peer Postgres hosts (same port/credentials as local) *)
+  event_sync_interval : float; (* seconds between sync cycles *)
+  event_sync_overlap : int; (* seconds of lookback behind local max created_at *)
   cs : Cache_storage.config;
 }
 
 let getenv = Sys.getenv_opt
 let int_env name default = match getenv name with Some v -> int_of_string v | None -> default
+let float_env name default = match getenv name with Some v -> float_of_string v | None -> default
 
 let bool_env name default =
   match getenv name with
@@ -56,6 +61,14 @@ let from_env () : t =
     num_workers = int_env "IMPORTER_WORKERS" 4;
     queue_capacity = int_env "IMPORTER_QUEUE_CAPACITY" 10_000;
     proxy = Option.bind (getenv "PRIMALSERVER_PROXY") normalize_proxy;
+    event_sync_enabled = bool_env "IMPORTER_EVENT_SYNC" true;
+    event_sync_remotes =
+      (match getenv "IMPORTER_EVENT_SYNC_REMOTES" with
+      | Some s when String.trim s <> "" ->
+          String.split_on_char ',' s |> List.map String.trim |> List.filter (fun h -> h <> "")
+      | _ -> [ "192.168.40.7"; "192.168.42.7"; "192.168.43.7"; "192.168.44.7" ]);
+    event_sync_interval = float_env "IMPORTER_EVENT_SYNC_INTERVAL" 60.0;
+    event_sync_overlap = int_env "IMPORTER_EVENT_SYNC_OVERLAP" 600;
     cs =
       {
         Cache_storage.verification_enabled = bool_env "IMPORTER_VERIFY" true;

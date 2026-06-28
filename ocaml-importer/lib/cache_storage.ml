@@ -8,6 +8,7 @@
    (each marked with a TODO). *)
 
 module PGOCaml = Postgres.PGOCaml
+module Notif = Notifications
 
 type config = {
   verification_enabled : bool;
@@ -35,6 +36,14 @@ let default_config =
    the same reference DB. *)
 type est = { cfg : config; dbh : Postgres.dbh; mem_dbh : Postgres.dbh }
 
+(* A single notification argument, as it is stored in pubkey_notifications. The first two
+   positional args of every NotificationType are an EventId / PubKeyId (written to the bytea
+   arg1/arg2 columns); the remaining args are scalars (Int satszapped, Str reaction/message) or
+   an EventId/PubKeyId, all written JSON-encoded to the jsonb arg3/arg4 columns. This mirrors the
+   Julia notification() insert (cache_storage_ext.jl:744), which writes notif[4:5] natively and
+   JSON.json's notif[6:7]. *)
+type notif_arg = Aeid of string | Apk of string | Aint of int | Astr of string
+
 (* {1 ext hook registry} (mirrors Julia's separately-defined cache_storage_ext.jl functions)
 
    Julia dispatches ext_* by name at runtime, so cache_storage.jl can call functions defined
@@ -61,6 +70,11 @@ type ext_hooks = {
   score_event_cb : est -> Nostr.t -> string -> int -> string -> int -> unit;
       (* parent event, initiator pubkey, scored_at, action, increment *)
   expire_hashtag_score_cb : est -> string -> int -> unit; (* hashtag, delta (scheduled hook) *)
+  notification : est -> string -> int -> int -> notif_arg list -> unit;
+      (* recipient pubkey, notif_created_at, NotificationType code, args *)
+  notifications_cb : est -> Nostr.t -> int -> Yojson.Safe.t list -> unit;
+      (* the event whose deferred hooks fired, NotificationType code, raw hook args *)
+  import_reply_notifications : est -> Nostr.t -> unit;   (* reply/comment notification fan-out *)
 }
 
 let no_ext =
@@ -82,6 +96,9 @@ let no_ext =
     import_reporting = (fun _ _ -> ());
     score_event_cb = (fun _ _ _ _ _ _ -> ());
     expire_hashtag_score_cb = (fun _ _ _ -> ());
+    notification = (fun _ _ _ _ _ -> ());
+    notifications_cb = (fun _ _ _ _ -> ());
+    import_reply_notifications = (fun _ _ -> ());
   }
 
 let ext = ref no_ext
@@ -231,6 +248,9 @@ let incr_event_stat (est : est) (event_id : string) (prop : string) (increment :
 type hook_call =
   | Event_stats_cb of string * int
   | Score_event_cb of { initiator : string; scored_at : int; action : string; increment : int }
+  | Notifications_cb of int * Yojson.Safe.t list
+      (* NotificationType code + the hook args (Julia (:notifications_cb, type, args...)); the
+         first arg, when present, is the hex id of the acting event (looked up as e0). *)
   | Other of Yojson.Safe.t list
 
 let hook_to_json = function
@@ -240,6 +260,7 @@ let hook_to_json = function
          the pubkey JSON-lowers to hex, the symbol to a string. *)
       `List [ `String "score_event_cb"; `String (Hex_util.encode initiator);
               `Int scored_at; `String action; `Int increment ]
+  | Notifications_cb (ntype, args) -> `List (`String "notifications_cb" :: `Int ntype :: args)
   | Other args -> `List args
 
 let hook_of_json (j : Yojson.Safe.t) : hook_call =
@@ -250,6 +271,7 @@ let hook_of_json (j : Yojson.Safe.t) : hook_call =
       match Hex_util.decode_opt init_hex with
       | Some initiator -> Score_event_cb { initiator; scored_at; action; increment }
       | None -> Other [])
+  | `List (`String "notifications_cb" :: `Int ntype :: args) -> Notifications_cb (ntype, args)
   | `List args -> Other args
   | _ -> Other []
 
@@ -259,7 +281,8 @@ let apply_hook (est : est) (e : Nostr.t) = function
   | Event_stats_cb (prop, inc) -> incr_event_stat est e.id prop inc
   | Score_event_cb { initiator; scored_at; action; increment } ->
       (!ext).score_event_cb est e initiator scored_at action increment
-  | Other _ -> () (* notifications_cb etc. — the notifications subsystem is a TODO *)
+  | Notifications_cb (ntype, args) -> (!ext).notifications_cb est e ntype args
+  | Other _ -> () (* unknown deferred funcall: ignore (Julia would error; we drop it) *)
 
 let event_hook (est : est) (eid : string) (call : hook_call) : unit =
   if already_imported_id est eid then
@@ -621,9 +644,10 @@ let import_contact_list (est : est) (e : Nostr.t) : unit =
       if not (SS.mem follow_pubkey olds) then begin
         let follower_pubkey = e.pubkey and follower_contact_list_event_id = e.id in
         ignore [%pgsql dbh "insert into pubkey_followers_1_d52305fb47 (pubkey, follower_pubkey, follower_contact_list_event_id) values ($follow_pubkey, $follower_pubkey, $follower_contact_list_event_id)"];
-        if trusted then
-          ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = value + 1 where key = $follow_pubkey"]
-        (* TODO Phase 3: NEW_USER_FOLLOWED_YOU notification *)
+        if trusted then begin
+          ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = value + 1 where key = $follow_pubkey"];
+          (!ext).notification est follow_pubkey e.created_at Notif.new_user_followed_you [ Apk e.pubkey ]
+        end
       end)
     news;
   SS.iter
@@ -631,9 +655,11 @@ let import_contact_list (est : est) (e : Nostr.t) : unit =
       if not (SS.mem follow_pubkey news) then begin
         let follower_pubkey = e.pubkey in
         ignore [%pgsql dbh "delete from pubkey_followers_1_d52305fb47 where pubkey = $follow_pubkey and follower_pubkey = $follower_pubkey"];
-        if trusted then
-          ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = greatest(0, value - 1) where key = $follow_pubkey"]
-        (* TODO Phase 3: USER_UNFOLLOWED_YOU notification *)
+        if trusted then begin
+          ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = greatest(0, value - 1) where key = $follow_pubkey"];
+          (* notification() drops USER_UNFOLLOWED_YOU (cache_storage_ext.jl:630); kept for fidelity. *)
+          (!ext).notification est follow_pubkey e.created_at Notif.user_unfollowed_you [ Apk e.pubkey ]
+        end
       end)
     olds
 
@@ -759,8 +785,8 @@ let handle_note_reply (est : est) (e : Nostr.t) : unit =
       set_event_thread_parent est ~event_id:e.id ~parent;
       (!ext).ext_reply est e parent
   | None -> ());
-  (* TODO: import_reply_notifications (notifications subsystem); Phase 5: fetch_missing_events *)
-  ()
+  (!ext).import_reply_notifications est e
+  (* Phase 5: fetch_missing_events (relay fetcher, out of importer scope) *)
 
 let handle_reaction (est : est) (e : Nostr.t) : unit =
   List.iter
@@ -775,8 +801,13 @@ let handle_reaction (est : est) (e : Nostr.t) : unit =
                   event_hook est eid (Event_stats_cb ("likes", 1));
                 event_pubkey_action est ~eid ~re:e ~action:"liked";
                 (!ext).ext_reaction est e eid
-              end
-              (* TODO: YOUR_POST_WAS_LIKED notification (notifications subsystem) *))
+              end;
+              (* Julia fires the YOUR_POST_WAS_LIKED hook for every reacted-to event, regardless
+                 of like_content (cache_storage.jl:1193); args: (reaction event id, content). *)
+              event_hook est eid
+                (Notifications_cb
+                   (Notif.your_post_was_liked,
+                    [ `String (Hex_util.encode e.id); `String e.content ])))
       | _ -> ())
     e.tags
   (* fetch_missing_events: gated by auto_fetch_missing_events (default off in Julia) and needs a
@@ -938,22 +969,56 @@ let import_pubkey_bookmarks (est : est) (e : Nostr.t) : unit =
       | _ -> ())
     e.tags
 
+let bookmark_eids (e : Nostr.t) : string list =
+  List.filter_map
+    (fun tg -> match (Nostr.tag_name tg, Nostr.tag_field tg 1) with Some "e", Some h -> decode32 h | _ -> None)
+    e.tags
+
 let store_bookmarks (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
   let pubkey = e.pubkey and event_id = e.id in
-  let newer =
-    match
-      [%pgsql dbh "select ev.created_at from bookmarks_1_43f5248b56 b, event ev where b.pubkey = $pubkey and ev.id = b.event_id"]
-    with
-    | [] -> true
-    | old :: _ -> i64 e.created_at > old
+  (* Julia compares against the previous bookmark event and only notifies newly-added eids
+     (cache_storage.jl:1343-1353). *)
+  let old_be =
+    match [%pgsql dbh "select event_id from bookmarks_1_43f5248b56 where pubkey = $pubkey"] with
+    | beid :: _ -> get_event est beid
+    | [] -> None
   in
+  let newer = match old_be with None -> true | Some be -> e.created_at > be.created_at in
   if newer then begin
     ignore
       [%pgsql dbh "insert into bookmarks_1_43f5248b56 (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"];
-    import_pubkey_bookmarks est e
-    (* Julia also fires YOUR_POST_WAS_BOOKMARKED notifications — notifications subsystem TODO. *)
+    import_pubkey_bookmarks est e;
+    let olds = SS.of_list (match old_be with Some be -> bookmark_eids be | None -> []) in
+    List.iter
+      (fun eid ->
+        if not (SS.mem eid olds) then
+          event_hook est eid
+            (Notifications_cb (Notif.your_post_was_bookmarked, [ `String (Hex_util.encode e.id) ])))
+      (bookmark_eids e)
   end
+
+(* Julia HIGHLIGHT branch (cache_storage.jl:1354-1367): each e/a tag highlights a target event;
+   fire YOUR_POST_WAS_HIGHLIGHTED on the highlighted event. *)
+let handle_highlight (est : est) (e : Nostr.t) : unit =
+  let notify eid =
+    event_hook est eid
+      (Notifications_cb (Notif.your_post_was_highlighted, [ `String (Hex_util.encode e.id) ]))
+  in
+  List.iter
+    (fun tg ->
+      if Nostr.tag_len tg >= 2 then
+        match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+        | Some "e", Some h -> ( match decode32 h with Some eid -> notify eid | None -> ())
+        | Some "a", Some s -> (
+            match parse_a_tag s with
+            | Some (kind, pubkey, identifier) -> (
+                match lookup_parametrized_replaceable_event est ~kind ~pubkey ~identifier with
+                | Some eid -> notify eid
+                | None -> ())
+            | None -> ())
+        | _ -> ())
+    e.tags
 
 let dispatch_kind (est : est) (e : Nostr.t) : unit =
   let k = e.kind in
@@ -971,7 +1036,12 @@ let dispatch_kind (est : est) (e : Nostr.t) : unit =
   end
   else if k = Nostr.kind_reaction then handle_reaction est e
   else if is_text_note_branch k then handle_note_reply est e
-  else if k = Nostr.kind_direct_message then import_directmsg est e
+  else if k = Nostr.kind_direct_message then begin
+    import_directmsg est e;
+    (* NEW_DIRECT_MESSAGE: hook on the DM event itself; notifications_cb reads its 'p' tag for the
+       receiver (cache_storage.jl:1221). *)
+    event_hook est e.id (Notifications_cb (Notif.new_direct_message, []))
+  end
   else if k = Nostr.kind_event_deletion then import_delete_event est e
   else if k = Nostr.kind_repost then handle_repost est e
   else if k = Nostr.kind_zap_receipt then handle_zap_receipt est e
@@ -989,10 +1059,11 @@ let dispatch_kind (est : est) (e : Nostr.t) : unit =
     update_fetcher_relays est ~pubkey:e.pubkey ~source_event_id:(Some e.id)
   end
   else if k = Nostr.kind_bookmarks then store_bookmarks est e
+  else if k = Nostr.kind_highlight then handle_highlight est e
   else if k = Nostr.kind_reporting then begin
     if est.cfg.import_reporting then (!ext).import_reporting est e
   end
-  (* highlight -> notifications only (TODO); follow_pack -> media (out of scope). *)
+  (* follow_pack -> media (out of scope). *)
 
 (* {1 import_event} (Julia 1046-1434) *)
 

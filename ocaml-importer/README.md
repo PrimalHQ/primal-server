@@ -114,6 +114,10 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_HUMANESS_THRESHOLD` | *(computed)* | `ext_is_human` passes when `pubkey_trustrank.rank >` this threshold. Unset, it is computed once at startup as the rank of the 50,000th-highest-ranked pubkey in `pubkey_trustrank` (mirroring Julia `TrustRank.load`; `0.0` if the table is empty). Set it to pin an explicit override. |
 | `IMPORTER_IMPORT_REPORTING` | `false` | Process NIP-56 kind-1984 reports into the membership `filterlist`. |
 | `IMPORTER_REPORTING_WHITELIST` | *(empty)* | Comma-separated **hex** pubkeys allowed to file reports (only honored when `IMPORTER_IMPORT_REPORTING=true`). |
+| `IMPORTER_EVENT_SYNC` | `true` | Enable the event syncer (pull recent events from peer nodes into the import queue — see [Event syncer](#event-syncer)). |
+| `IMPORTER_EVENT_SYNC_REMOTES` | `192.168.40.7,192.168.42.7,192.168.43.7,192.168.44.7` | Comma-separated peer Postgres hosts to pull from (same port/credentials as the local cache DB). |
+| `IMPORTER_EVENT_SYNC_INTERVAL` | `60` | Seconds between sync cycles. |
+| `IMPORTER_EVENT_SYNC_OVERLAP` | `600` | Seconds of lookback behind the local max `created_at` each cycle (the 10-minute self-healing window). |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`.
 
@@ -135,8 +139,14 @@ from the environment variables above.
 ### `main` — the importer
 
 The production entry point. No CLI arguments. Wires the firehose client, the spam
-detector, the LNURL zapper verifier, the worker-domain pool, and a periodic
-scheduled-hooks runner, then imports forever (reconnecting to the firehose on drop).
+detector, the LNURL zapper verifier, the worker-domain pool, the [event syncer](#event-syncer),
+and a periodic scheduled-hooks runner, then imports forever (reconnecting to the firehose on
+drop). Imports also produce in-DB [notifications](#notifications). It prints a one-line
+per-second stats summary (receive/import/dup/reject rates, queue depth, busy workers).
+
+During development, don't run this by hand — use `rebuild-restart-importer.sh` (see
+[Development loop](#development-loop)) so a fresh build is always the one running and you can
+watch the live DB.
 
 ```sh
 # default: firehose 127.0.0.1:9017, 4 workers, writes to PG* DB
@@ -228,6 +238,61 @@ after itself.
 ```sh
 nix develop "path:$P" -c dune exec bin/phase8check.exe
 ```
+
+---
+
+## Development loop
+
+`rebuild-restart-importer.sh` (repo: `ocaml-importer/`) is the standard way to run `main`
+while developing: it rebuilds everything with dune and, **only if the build succeeds**,
+(re)starts `main.exe` as a detached background process, replacing any importer already running
+from this project's binary. stdout+stderr (including the per-second stats line and
+`event_syncer:` lines) go to `/home/pr/var/primalserver/ocaml-importer.log` (truncated each run);
+the pid and log path are printed to stderr.
+
+```sh
+./rebuild-restart-importer.sh
+# tail -f /home/pr/var/primalserver/ocaml-importer.log
+```
+
+**Use it after any change to importer code or SQL.** Because `main` writes to the live `primal1`
+DB, keeping a freshly-built `main` always running lets you verify in real time that a change
+produces the right rows — edit, `./rebuild-restart-importer.sh`, then watch the log and query the
+DB (e.g. `event`, `event_stats_1_1b380f4869`, `pubkey_notifications_1_e5459ab9dd`). Runtime env
+overrides propagate, e.g. `PRIMALSERVER_PROXY=socks5h://… ./rebuild-restart-importer.sh`.
+
+## Event syncer
+
+On a timer (`IMPORTER_EVENT_SYNC_INTERVAL`, default 60 s) `main` pulls the most recent events
+from each peer node's `event` table (`IMPORTER_EVENT_SYNC_REMOTES`) and feeds them into the same
+import queue as the firehose, so events any single node missed still land locally. Each cycle the
+lower bound is `min(now, local max created_at) − IMPORTER_EVENT_SYNC_OVERLAP` (default 10 min): a
+fixed lookback behind the newest event already held. Re-importing already-seen events is cheap and
+safe (`store_event` is an atomic `ON CONFLICT` claim, so they count as duplicates), which makes
+the sync self-healing across restarts and firehose gaps. The window query is index-backed
+(`event(created_at)`), and queue backpressure throttles the pull to the workers' import rate.
+Mirrors Julia's `EventSyncer`. Disable with `IMPORTER_EVENT_SYNC=false`.
+
+## Notifications
+
+Imports produce in-DB notifications, mirroring Julia `notification` / `notifications_cb` /
+`import_reply_notifications` (`src/cache_storage_ext.jl`, `src/notifications.jl`):
+
+- Rows land in `pubkey_notifications_1_e5459ab9dd` (per-type counters in
+  `pubkey_notification_cnts_1_d78f6fcade`, bumped only for trusted users).
+- Types wired: follow (`NEW_USER_FOLLOWED_YOU`), reactions (`YOUR_POST_WAS_LIKED`), reposts,
+  zaps, replies + reply-to-reply + mentions (via `import_reply_notifications`, including thread
+  chains from `thread_view_parent_posts`), post-mentioned-in-post, highlights, bookmarks, and
+  DMs. Deferred types fire through the `Notifications_cb` event hook once the referenced post is
+  present.
+- Gating reproduces the parts that don't depend on serving-layer tables absent from the importer
+  DB: skip self-notifications and references to hidden events, drop `USER_UNFOLLOWED_YOU`. The
+  `app_settings`/`notification_settings`/mute-list/hellthread/only-from-followers gates are
+  serving-layer and intentionally **not** reproduced here (like `update_content_moderation_rules`).
+- **Push notifications** (`lib/push_notifications.ml`) mirror the Julia stub and are **disabled**
+  at runtime (`enabled = false`, matching `PUSH_NOTIFICATIONS_ENABLED`); there is no APNS/FCM/
+  web-push backend to port. The token-registration helpers parse and verify input but do not
+  persist.
 
 ---
 

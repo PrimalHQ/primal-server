@@ -55,14 +55,28 @@ let () =
     { CS.cfg = cfg.cs; dbh; mem_dbh }
   in
   (* Runs in a worker domain. Counts started/completed (for queue depth & busy-workers) and the
-     import outcome; completed is bumped via Fun.protect so it covers errors and cancellation. *)
-  let process (est : CS.est) (msg : string) =
+     import outcome; completed is bumped via Fun.protect so it covers errors and cancellation.
+     [Msg] = a raw firehose line (parse + spam-check + import); [Event] = an already-parsed event
+     from Event_syncer (import directly, no firehose framing or spam detector). *)
+  let process (est : CS.est) (job : WP.job) =
     Importer.Stats.started stats;
     Fun.protect ~finally:(fun () -> Importer.Stats.completed stats) (fun () ->
         try
-          let now = float_of_int (Importer.Utils.current_time ()) in
-          ignore (SD.on_message sd ~est msg now);
-          match CS.import_msg_into_storage est msg with
+          let result =
+            match job with
+            | WP.Msg msg ->
+                let now = float_of_int (Importer.Utils.current_time ()) in
+                ignore (SD.on_message sd ~est msg now);
+                CS.import_msg_into_storage est msg
+            | WP.Event e ->
+                (* Synced events come from our own trusted peer nodes (already signature-verified
+                   when imported there); re-running BIP340 on every one — most of them duplicates
+                   we already hold — would saturate the workers and throttle the firehose. Import
+                   with verification off; all other gates (kind/deleted/preimport) still apply. *)
+                let est = { est with CS.cfg = { est.CS.cfg with CS.verification_enabled = false } } in
+                CS.import_event est e
+          in
+          match result with
           | CS.Imported -> Importer.Stats.imported stats
           | CS.Duplicate -> Importer.Stats.duplicate stats
           | CS.Rejected -> Importer.Stats.rejected stats
@@ -101,8 +115,26 @@ let () =
      blocks under backpressure); count submitted once it is actually on the queue. *)
   let on_message msg =
     Importer.Stats.recv stats;
-    WP.submit pool msg;
+    WP.submit_msg pool msg;
     Importer.Stats.submitted stats
+  in
+
+  (* Event syncer: build a remote conninfo per peer host (same port/credentials as local, only the
+     host differs), then run a fiber that periodically pulls recent events into the queue. *)
+  let sync_remotes =
+    List.map
+      (fun host -> { (Pg.cache_conninfo ()) with Pg.host })
+      cfg.event_sync_remotes
+  in
+  let run_event_syncer () =
+    (* The syncer owns its connections (a dedicated local conninfo + the remotes); it must not
+       reuse hooks_est.dbh, which the scheduled-hooks fiber drives concurrently. *)
+    if cfg.event_sync_enabled && sync_remotes <> [] then
+      Importer.Event_syncer.run ~clock ~local:(Pg.cache_conninfo ()) ~remotes:sync_remotes
+        ~submit:(fun e ->
+          WP.submit_event pool e;
+          Importer.Stats.submitted stats)
+        ~interval:cfg.event_sync_interval ~overlap:cfg.event_sync_overlap ()
   in
 
   Fiber.all
@@ -113,6 +145,7 @@ let () =
           ~on_reconnect:(fun () -> Importer.Stats.reconnects stats)
           ());
       run_scheduled_hooks_loop;
+      run_event_syncer;
       (fun () ->
         Importer.Stats.report_loop ~clock ~capacity:cfg.queue_capacity ~workers:cfg.num_workers
           stats);
