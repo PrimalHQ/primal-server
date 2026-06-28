@@ -35,7 +35,7 @@ let () =
   assert (CS.import_event est parent);
   assert (CS.import_event est reaction);
   let row =
-    [%pgsql dbh "select likes, score, score24h from event_stats where event_id = $parent_id"]
+    [%pgsql dbh "select likes, score, score24h from event_stats_1_1b380f4869 where event_id = $parent_id"]
   in
   let se = [%pgsql dbh "select count(*) from score_expiry where event_id = $parent_id"] in
   (match row with
@@ -47,8 +47,8 @@ let () =
   List.iter
     (fun q -> ignore (q ()))
     [
-      (fun () -> [%pgsql dbh "delete from events where id = $parent_id"]);
-      (fun () -> [%pgsql dbh "delete from event_stats where event_id = $parent_id"]);
+      (fun () -> [%pgsql dbh "delete from event where id = $parent_id"]);
+      (fun () -> [%pgsql dbh "delete from event_stats_1_1b380f4869 where event_id = $parent_id"]);
       (fun () -> [%pgsql dbh "delete from score_expiry where event_id = $parent_id"]);
       (fun () -> [%pgsql dbh "delete from pubkey_trustrank where pubkey = $liker_pk"]);
     ]

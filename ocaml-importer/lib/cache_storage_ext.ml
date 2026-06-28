@@ -63,8 +63,9 @@ let ext_is_human ?threshold (est : CS.est) (pubkey : string) : bool =
   let threshold = match threshold with Some t -> t | None -> !humaness_threshold in
   let mdbh = est.CS.mem_dbh in
   match [%pgsql mdbh "select is_human from human_override where pubkey = $pubkey"] with
-  | h :: _ -> h
-  | [] -> (
+  | Some h :: _ -> h
+  | _ -> (
+      (* no override row, or is_human NULL (nullable in live) -> fall through to trustrank *)
       let dbh = est.CS.dbh in
       match
         [%pgsql dbh "select 1 from pubkey_trustrank where pubkey = $pubkey and rank > $threshold limit 1"]
@@ -257,7 +258,7 @@ let import_zap_receipt (est : CS.est) (e : Nostr.t) (parent_eid : string) (amoun
   let amount = i64 amount_sats and event_id = Some parent_eid in
   ignore
     [%pgsql dbh
-      "insert into og_zap_receipts (zap_receipt_id, created_at, sender, receiver, amount_sats, event_id) \
+      "insert into og_zap_receipts_1_dc85307383 (zap_receipt_id, created_at, sender, receiver, amount_sats, event_id) \
        values ($zap_receipt_id, $created_at, $?sender, $?receiver, $amount, $?event_id)"]
 
 (* {1 ext_* entry points} *)
@@ -266,7 +267,7 @@ let import_zap_receipt (est : CS.est) (e : Nostr.t) (parent_eid : string) (amoun
 let ext_pubkey (est : CS.est) (pubkey : string) : unit =
   let dbh = est.CS.dbh in
   ignore
-    [%pgsql dbh "insert into pubkey_zapped (pubkey, zaps, satszapped) values ($pubkey, 0, 0) on conflict do nothing"]
+    [%pgsql dbh "insert into pubkey_zapped_1_17f1f622a9 (pubkey, zaps, satszapped) values ($pubkey, 0, 0) on conflict do nothing"]
 
 (* update_user_search (FTS) + metadata media import; both deferred. *)
 let ext_metadata_changed (_est : CS.est) (_e : Nostr.t) : unit = ()
@@ -296,11 +297,11 @@ let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
         let dbh = est.CS.dbh in
         let event_id = e.id and created_at = i64 e.created_at in
         ignore
-          [%pgsql dbh "insert into event_hashtags (event_id, hashtag, created_at) values ($event_id, $hashtag, $created_at)"];
-        (match [%pgsql dbh "select 1 from hashtags where hashtag = $hashtag limit 1"] with
-        | [] -> ignore [%pgsql dbh "insert into hashtags (hashtag, score) values ($hashtag, 0)"]
+          [%pgsql dbh "insert into event_hashtags_1_295f217c0e (event_id, hashtag, created_at) values ($event_id, $hashtag, $created_at)"];
+        (match [%pgsql dbh "select 1 from hashtags_1_1e5c72161a where hashtag = $hashtag limit 1"] with
+        | [] -> ignore [%pgsql dbh "insert into hashtags_1_1e5c72161a (hashtag, score) values ($hashtag, 0)"]
         | _ -> ());
-        ignore [%pgsql dbh "update hashtags set score = score + 1 where hashtag = $hashtag"];
+        ignore [%pgsql dbh "update hashtags_1_1e5c72161a set score = score + 1 where hashtag = $hashtag"];
         CS.schedule_hook est
           ~execute_at:(current_time () + (4 * 3600))
           (`List [ `String "expire_hashtag_score_cb"; `String hashtag; `Int 1 ]))
@@ -335,7 +336,7 @@ let ext_pubkey_zap (est : CS.est) (e : Nostr.t) (zapped_pk : string) (amount_sat
       let dbh = est.CS.dbh in
       let amount = i64 amount_sats in
       ignore
-        [%pgsql dbh "update pubkey_zapped set zaps = zaps + 1, satszapped = satszapped + $amount where pubkey = $zapped_pk"]
+        [%pgsql dbh "update pubkey_zapped_1_17f1f622a9 set zaps = zaps + 1, satszapped = satszapped + $amount where pubkey = $zapped_pk"]
   | _ -> ()
 
 (* long-form / video / live: only media imports, all gated on DOWNLOAD_MEDIA — no-ops here. *)
@@ -353,7 +354,7 @@ let ext_preimport_check (est : CS.est) (e : Nostr.t) : bool =
 let expire_hashtag_score_cb (est : CS.est) (hashtag : string) (d : int) : unit =
   let dbh = est.CS.dbh in
   let delta = i64 d in
-  ignore [%pgsql dbh "update hashtags set score = score - $delta where hashtag = $hashtag"]
+  ignore [%pgsql dbh "update hashtags_1_1e5c72161a set score = score - $delta where hashtag = $hashtag"]
 
 (* Julia import_reporting (NIP-56): a whitelisted reporter's kind-1984 report blocks the
    reported pubkeys/events on the membership filterlist. The report type lives in the tag's 3rd
@@ -419,7 +420,7 @@ let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at 
       let event_id = e.id and rk = i64 ref_kind in
       let dup =
         match
-          [%pgsql dbh "select count(1) from event_pubkey_action_refs where event_id = $event_id and ref_pubkey = $initiator and ref_kind = $rk"]
+          [%pgsql dbh "select count(1) from event_pubkey_action_refs_1_f32e1ff589 where event_id = $event_id and ref_pubkey = $initiator and ref_kind = $rk"]
         with
         | Some n :: _ -> n > 1L
         | _ -> false
@@ -427,10 +428,10 @@ let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at 
       let increment = if dup then 0 else increment in
       if increment > 0 then begin
         let inc = i64 increment in
-        ignore [%pgsql dbh "update event_stats set score = score + $inc where event_id = $event_id"];
+        ignore [%pgsql dbh "update event_stats_1_1b380f4869 set score = score + $inc where event_id = $event_id"];
         let expire_at = scored_at + (24 * 3600) in
         if expire_at > current_time () then begin
-          ignore [%pgsql dbh "update event_stats set score24h = score24h + $inc where event_id = $event_id"];
+          ignore [%pgsql dbh "update event_stats_1_1b380f4869 set score24h = score24h + $inc where event_id = $event_id"];
           let author_pubkey = e.pubkey and change = inc and expire_at = i64 expire_at in
           ignore
             [%pgsql dbh "insert into score_expiry (event_id, author_pubkey, change, expire_at) values ($event_id, $author_pubkey, $change, $expire_at)"]

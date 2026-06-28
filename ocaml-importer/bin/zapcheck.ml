@@ -30,7 +30,7 @@ let () =
   let est = { CS.cfg = cfg.cs; dbh; mem_dbh = dbh } in
   (* most recent zap receipts: (author pubkey, tags json) *)
   let rows =
-    [%pgsql dbh "select pubkey, tags from events where kind = 9735 order by imported_at desc limit 50"]
+    [%pgsql dbh "select pubkey, tags from event where kind = 9735 order by imported_at desc limit 50"]
   in
   let zapped_of_tags tags_json =
     match Yojson.Safe.from_string tags_json with

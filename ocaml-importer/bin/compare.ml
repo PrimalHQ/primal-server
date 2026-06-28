@@ -52,59 +52,59 @@ let report (label : string) (lp : (string * string) list) (rp : (string * string
 
 let events dbh ~since ~until =
   List.map (fun id -> (hx id, ""))
-    [%pgsql dbh "select id from events where created_at > $since and created_at < $until"]
+    [%pgsql dbh "select id from event where created_at > $since and created_at < $until"]
 
 let event_stats dbh ~since ~until =
   List.map
     (fun (eid, likes, replies, mentions, reposts, zaps, satszapped) ->
       (hx eid, Printf.sprintf "%Ld/%Ld/%Ld/%Ld/%Ld/%Ld" likes replies mentions reposts zaps satszapped))
     [%pgsql dbh
-      "select event_id, likes, replies, mentions, reposts, zaps, satszapped from event_stats \
+      "select event_id, likes, replies, mentions, reposts, zaps, satszapped from event_stats_1_1b380f4869 \
        where created_at > $since and created_at < $until"]
 
 let pubkey_events dbh ~since ~until =
   List.map
     (fun (pk, eid, is_reply) -> (hx pk ^ "|" ^ hx eid, Int64.to_string is_reply))
     [%pgsql dbh
-      "select pubkey, event_id, is_reply from pubkey_events where created_at > $since and created_at < $until"]
+      "select pubkey, event_id, is_reply from pubkey_events_1_1dcbfe1466 where created_at > $since and created_at < $until"]
 
 let event_replies dbh ~since ~until =
   List.map
     (fun (eid, reid) -> (hx eid ^ "|" ^ hx reid, ""))
     [%pgsql dbh
-      "select event_id, reply_event_id from event_replies where reply_created_at > $since and reply_created_at < $until"]
+      "select event_id, reply_event_id from event_replies_1_9d033b5bb3 where reply_created_at > $since and reply_created_at < $until"]
 
 let event_pubkey_actions dbh ~since ~until =
   List.map
     (fun (eid, pk, replied, liked, reposted, zapped) ->
       (hx eid ^ "|" ^ hx pk, Printf.sprintf "%Ld%Ld%Ld%Ld" replied liked reposted zapped))
     [%pgsql dbh
-      "select event_id, pubkey, replied, liked, reposted, zapped from event_pubkey_actions \
+      "select event_id, pubkey, replied, liked, reposted, zapped from event_pubkey_actions_1_d62afee35d \
        where created_at > $since and created_at < $until"]
 
 let meta_data dbh ~since ~until =
   List.map
     (fun (k, v) -> (hx k, hx v))
     [%pgsql dbh
-      "select m.key, m.value from meta_data m, events e where e.id = m.value and e.created_at > $since and e.created_at < $until"]
+      "select m.key, m.value from meta_data_1_323bc43167 m, event e where e.id = m.value and e.created_at > $since and e.created_at < $until"]
 
 let contact_lists dbh ~since ~until =
   List.map
     (fun (k, v) -> (hx k, hx v))
     [%pgsql dbh
-      "select c.key, c.value from contact_lists c, events e where e.id = c.value and e.created_at > $since and e.created_at < $until"]
+      "select c.key, c.value from contact_lists_1_1abdf474bd c, event e where e.id = c.value and e.created_at > $since and e.created_at < $until"]
 
 let og_zap_receipts dbh ~since ~until =
   List.map
-    (fun (zid, amount, eid) -> (hx zid, Printf.sprintf "%Ld|%s" amount (match eid with Some e -> hx e | None -> "")))
+    (fun (zid, amount, eid) -> (hx zid, Printf.sprintf "%Ld|%s" amount (hx eid)))
     [%pgsql dbh
-      "select zap_receipt_id, amount_sats, event_id from og_zap_receipts where created_at > $since and created_at < $until"]
+      "select zap_receipt_id, amount_sats, event_id from og_zap_receipts_1_dc85307383 where created_at > $since and created_at < $until"]
 
 let parametrized_replaceable_events dbh ~since ~until =
   List.map
     (fun (pk, kind, ident, eid) -> (hx pk ^ "|" ^ Int64.to_string kind ^ "|" ^ ident, hx eid))
     [%pgsql dbh
-      "select pubkey, kind, identifier, event_id from parametrized_replaceable_events \
+      "select pubkey, kind, identifier, event_id from parametrized_replaceable_events_1_cbe75c8d53 \
        where created_at > $since and created_at < $until"]
 
 let () =

@@ -165,7 +165,7 @@ let parse_a_tag (s : string) : (int * string * string) option =
 
 let already_imported_id (est : est) (id : string) : bool =
   let dbh = est.dbh in
-  match [%pgsql dbh "select 1 from events where id = $id limit 1"] with
+  match [%pgsql dbh "select 1 from event where id = $id limit 1"] with
   | [] -> false
   | _ -> true
 
@@ -173,7 +173,7 @@ let already_imported (est : est) (e : Nostr.t) = already_imported_id est e.id
 
 let event_deleted (est : est) (id : string) : bool =
   let dbh = est.dbh in
-  match [%pgsql dbh "select 1 from deleted_events where event_id = $id limit 1"] with
+  match [%pgsql dbh "select 1 from deleted_events_1_0249f47b16 where event_id = $id limit 1"] with
   | [] -> false
   | _ -> true
 
@@ -186,7 +186,7 @@ let parse_tags_json (s : string) : Nostr.tag list =
 let get_event (est : est) (id : string) : Nostr.t option =
   let dbh = est.dbh in
   match
-    [%pgsql dbh "select pubkey, created_at, kind, tags, content, sig from events where id = $id"]
+    [%pgsql dbh "select pubkey, created_at, kind, tags, content, sig from event where id = $id"]
   with
   | (pubkey, created_at, kind, tags, content, sig_) :: _ ->
       Some
@@ -214,14 +214,14 @@ let incr_event_stat (est : est) (event_id : string) (prop : string) (increment :
   let dbh = est.dbh in
   let d = i64 increment in
   match prop with
-  | "likes" -> ignore [%pgsql dbh "update event_stats set likes = likes + $d where event_id = $event_id"]
-  | "replies" -> ignore [%pgsql dbh "update event_stats set replies = replies + $d where event_id = $event_id"]
-  | "mentions" -> ignore [%pgsql dbh "update event_stats set mentions = mentions + $d where event_id = $event_id"]
-  | "reposts" -> ignore [%pgsql dbh "update event_stats set reposts = reposts + $d where event_id = $event_id"]
-  | "zaps" -> ignore [%pgsql dbh "update event_stats set zaps = zaps + $d where event_id = $event_id"]
-  | "satszapped" -> ignore [%pgsql dbh "update event_stats set satszapped = satszapped + $d where event_id = $event_id"]
-  | "score" -> ignore [%pgsql dbh "update event_stats set score = score + $d where event_id = $event_id"]
-  | "score24h" -> ignore [%pgsql dbh "update event_stats set score24h = score24h + $d where event_id = $event_id"]
+  | "likes" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set likes = likes + $d where event_id = $event_id"]
+  | "replies" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set replies = replies + $d where event_id = $event_id"]
+  | "mentions" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set mentions = mentions + $d where event_id = $event_id"]
+  | "reposts" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set reposts = reposts + $d where event_id = $event_id"]
+  | "zaps" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set zaps = zaps + $d where event_id = $event_id"]
+  | "satszapped" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set satszapped = satszapped + $d where event_id = $event_id"]
+  | "score" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set score = score + $d where event_id = $event_id"]
+  | "score24h" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set score24h = score24h + $d where event_id = $event_id"]
   | _ -> ()
 
 (* {1 event_hooks} (Julia event_hook / event_hook_execute; funcall stored as JSON)
@@ -316,7 +316,7 @@ let init_event_pubkey_action (est : est) ~(eid : string) ~(re : Nostr.t) : unit 
   ignore
     [%pgsql
       dbh
-        "insert into event_pubkey_actions (event_id, pubkey, created_at, updated_at, \
+        "insert into event_pubkey_actions_1_d62afee35d (event_id, pubkey, created_at, updated_at, \
          replied, liked, reposted, zapped) values ($event_id, $pubkey, $created_at, 0, 0, \
          0, 0, 0) on conflict (event_id, pubkey) do nothing"]
 
@@ -325,17 +325,17 @@ let event_pubkey_action (est : est) ~(eid : string) ~(re : Nostr.t) ~(action : s
   let dbh = est.dbh in
   let event_id = eid and pubkey = re.pubkey and updated_at = i64 re.created_at in
   (match action with
-  | "replied" -> ignore [%pgsql dbh "update event_pubkey_actions set replied = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
-  | "liked" -> ignore [%pgsql dbh "update event_pubkey_actions set liked = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
-  | "reposted" -> ignore [%pgsql dbh "update event_pubkey_actions set reposted = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
-  | "zapped" -> ignore [%pgsql dbh "update event_pubkey_actions set zapped = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
+  | "replied" -> ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set replied = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
+  | "liked" -> ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set liked = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
+  | "reposted" -> ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set reposted = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
+  | "zapped" -> ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set zapped = 1, updated_at = $updated_at where event_id = $event_id and pubkey = $pubkey"]
   | _ -> ());
   let event_id = eid and ref_event_id = re.id and ref_pubkey = re.pubkey in
   let ref_created_at = i64 re.created_at and ref_kind = i64 re.kind in
   ignore
     [%pgsql
       dbh
-        "insert into event_pubkey_action_refs (event_id, ref_event_id, ref_pubkey, \
+        "insert into event_pubkey_action_refs_1_f32e1ff589 (event_id, ref_event_id, ref_pubkey, \
          ref_created_at, ref_kind) values ($event_id, $ref_event_id, $ref_pubkey, \
          $ref_created_at, $ref_kind)"]
 
@@ -385,7 +385,7 @@ let lookup_parametrized_replaceable_event (est : est) ~kind ~pubkey ~identifier 
   let dbh = est.dbh in
   let k = i64 kind in
   match
-    [%pgsql dbh "select event_id from parametrized_replaceable_events where pubkey = $pubkey and kind = $k and identifier = $identifier limit 1"]
+    [%pgsql dbh "select event_id from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pubkey and kind = $k and identifier = $identifier limit 1"]
   with
   | x :: _ -> Some x
   | [] -> None
@@ -452,7 +452,7 @@ let store_event (est : est) (e : Nostr.t) : bool =
   match
     [%pgsql
       dbh
-        "insert into events (id, pubkey, created_at, kind, tags, content, sig, \
+        "insert into event (id, pubkey, created_at, kind, tags, content, sig, \
          imported_at) values ($id, $pubkey, $created_at, $kind, $tags, $content, $sig_, \
          $imported_at) on conflict (id) do nothing returning id"]
   with
@@ -463,26 +463,29 @@ let set_event_created_at (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
   let event_id = e.id and created_at = i64 e.created_at in
   ignore
-    [%pgsql dbh "insert into event_created_at (event_id, created_at) values ($event_id, $created_at) on conflict (event_id) do update set created_at = excluded.created_at"]
+    [%pgsql dbh "insert into event_created_at_1_7a51e16c5c (event_id, created_at) values ($event_id, $created_at) on conflict (event_id) do update set created_at = excluded.created_at"]
 
 let pubkey_known (est : est) (pubkey : string) : bool =
   let dbh = est.dbh in
-  match [%pgsql dbh "select 1 from pubkey_ids where key = $pubkey limit 1"] with
+  match [%pgsql dbh "select 1 from pubkey_ids_1_54b55dd09c where key = $pubkey limit 1"] with
   | [] -> false
   | _ -> true
 
 (* Julia get(est.pubkey_followers_cnt, pubkey, 0). *)
 let pubkey_followers_cnt (est : est) (pubkey : string) : int =
   let dbh = est.dbh in
-  match [%pgsql dbh "select value from pubkey_followers_cnt where key = $pubkey"] with
+  match [%pgsql dbh "select value from pubkey_followers_cnt_1_a6f7e200e7 where key = $pubkey"] with
   | v :: _ -> Int64.to_int v
   | [] -> 0
 
 let track_pubkey (est : est) (pubkey : string) : unit =
   if not (pubkey_known est pubkey) then begin
     let dbh = est.dbh in
-    ignore [%pgsql dbh "insert into pubkey_ids (key, value) values ($pubkey, true) on conflict (key) do nothing"];
-    ignore [%pgsql dbh "insert into pubkey_followers_cnt (key, value) values ($pubkey, 0) on conflict (key) do nothing"];
+    (* pubkey_ids is a DBSet in Julia (PGDict{_,Bool}); push! stores value = Int(true) = 1 into
+       the bigint value column (db.jl push!/setindex!, psql2.jl:114). The reference schema had
+       value boolean; live primal1 has value bigint, so write the integer, not a boolean. *)
+    ignore [%pgsql dbh "insert into pubkey_ids_1_54b55dd09c (key, value) values ($pubkey, 1) on conflict (key) do nothing"];
+    ignore [%pgsql dbh "insert into pubkey_followers_cnt_1_a6f7e200e7 (key, value) values ($pubkey, 0) on conflict (key) do nothing"];
     if est.cfg.disable_trustrank then begin
       let rank = 1.0 in
       ignore [%pgsql dbh "insert into pubkey_trustrank (pubkey, rank) values ($pubkey, $rank) on conflict (pubkey) do nothing"]
@@ -493,28 +496,31 @@ let track_pubkey (est : est) (pubkey : string) : unit =
 let insert_pubkey_event (est : est) ~pubkey ~event_id ~created_at ~is_reply : unit =
   let dbh = est.dbh in
   ignore
-    [%pgsql dbh "insert into pubkey_events (pubkey, event_id, created_at, is_reply) values ($pubkey, $event_id, $created_at, $is_reply)"]
+    [%pgsql dbh "insert into pubkey_events_1_1dcbfe1466 (pubkey, event_id, created_at, is_reply) values ($pubkey, $event_id, $created_at, $is_reply)"]
 
 let event_stats_init (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
   let event_id = e.id and author_pubkey = e.pubkey and created_at = i64 e.created_at in
+  (* Plain insert, matching Julia's event_stats_insert_q (cache_storage.jl:1018) which has no ON
+     CONFLICT: this runs exactly once per new event because import_event gates it behind the
+     atomic store_event claim. Live primal1's event_stats is a view whose base table has no unique
+     constraint on event_id, so an ON CONFLICT (event_id) arbiter has nothing to match (42P10). *)
   ignore
     [%pgsql
       dbh
-        "insert into event_stats (event_id, author_pubkey, created_at, likes, replies, \
+        "insert into event_stats_1_1b380f4869 (event_id, author_pubkey, created_at, likes, replies, \
          mentions, reposts, zaps, satszapped, score, score24h) values ($event_id, \
-         $author_pubkey, $created_at, 0, 0, 0, 0, 0, 0, 0, 0) on conflict (event_id) do \
-         nothing"]
+         $author_pubkey, $created_at, 0, 0, 0, 0, 0, 0, 0, 0)"]
 
 let insert_event_reply (est : est) ~parent ~reply ~reply_created_at : unit =
   let dbh = est.dbh in
   ignore
-    [%pgsql dbh "insert into event_replies (event_id, reply_event_id, reply_created_at) values ($parent, $reply, $reply_created_at)"]
+    [%pgsql dbh "insert into event_replies_1_9d033b5bb3 (event_id, reply_event_id, reply_created_at) values ($parent, $reply, $reply_created_at)"]
 
 let set_event_thread_parent (est : est) ~event_id ~parent : unit =
   let dbh = est.dbh in
   ignore
-    [%pgsql dbh "insert into event_thread_parents (key, value) values ($event_id, $parent) on conflict (key) do update set value = excluded.value"]
+    [%pgsql dbh "insert into event_thread_parents_1_e17bf16c98 (key, value) values ($event_id, $parent) on conflict (key) do update set value = excluded.value"]
 
 (* {1 Replaceable / parametrized replaceable} (Julia 1399-1422) *)
 
@@ -535,40 +541,40 @@ let store_parametrized_replaceable_event (est : est) (e : Nostr.t) : unit =
   | Some identifier ->
       let dbh = est.dbh in
       let pubkey = e.pubkey and kind = i64 e.kind and event_id = e.id and created_at = i64 e.created_at in
-      ignore [%pgsql dbh "delete from parametrized_replaceable_events where pubkey = $pubkey and kind = $kind and identifier = $identifier"];
+      ignore [%pgsql dbh "delete from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pubkey and kind = $kind and identifier = $identifier"];
       ignore
-        [%pgsql dbh "insert into parametrized_replaceable_events (pubkey, kind, identifier, event_id, created_at) values ($pubkey, $kind, $identifier, $event_id, $created_at)"]
+        [%pgsql dbh "insert into parametrized_replaceable_events_1_cbe75c8d53 (pubkey, kind, identifier, event_id, created_at) values ($pubkey, $kind, $identifier, $event_id, $created_at)"]
 
 (* {1 Replaceable single-event dict writes (meta_data, mute lists, contact_lists)} *)
 
 let upsert_pubkey_event_id (est : est) ~(table : [ `Meta_data | `Contact_lists | `Mute_list | `Mute_list_2 | `Mute_lists | `Allow_list ]) ~key ~value : unit =
   let dbh = est.dbh in
   match table with
-  | `Meta_data -> ignore [%pgsql dbh "insert into meta_data (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
-  | `Contact_lists -> ignore [%pgsql dbh "insert into contact_lists (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
-  | `Mute_list -> ignore [%pgsql dbh "insert into mute_list (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
-  | `Mute_list_2 -> ignore [%pgsql dbh "insert into mute_list_2 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
-  | `Mute_lists -> ignore [%pgsql dbh "insert into mute_lists (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
-  | `Allow_list -> ignore [%pgsql dbh "insert into allow_list (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
+  | `Meta_data -> ignore [%pgsql dbh "insert into meta_data_1_323bc43167 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
+  | `Contact_lists -> ignore [%pgsql dbh "insert into contact_lists_1_1abdf474bd (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
+  | `Mute_list -> ignore [%pgsql dbh "insert into mute_list_1_f693a878b9 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
+  | `Mute_list_2 -> ignore [%pgsql dbh "insert into mute_list_2_1_949b3d746b (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
+  | `Mute_lists -> ignore [%pgsql dbh "insert into mute_lists_1_d90e559628 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
+  | `Allow_list -> ignore [%pgsql dbh "insert into allow_list_1_f1da08e9c8 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
 
 let meta_data_should_update (est : est) ~pubkey ~created_at : bool =
   let dbh = est.dbh in
   let key = pubkey in
-  match [%pgsql dbh "select e.created_at from meta_data m, events e where m.key = $key and e.id = m.value"] with
+  match [%pgsql dbh "select e.created_at from meta_data_1_323bc43167 m, event e where m.key = $key and e.id = m.value"] with
   | [] -> true
   | old :: _ -> i64 created_at > old
 
 let contact_list_should_update (est : est) ~pubkey ~created_at : bool =
   let dbh = est.dbh in
   let key = pubkey in
-  match [%pgsql dbh "select e.created_at from contact_lists c, events e where c.key = $key and e.id = c.value"] with
+  match [%pgsql dbh "select e.created_at from contact_lists_1_1abdf474bd c, event e where c.key = $key and e.id = c.value"] with
   | [] -> true
   | old :: _ -> i64 created_at > old
 
 (* Julia update_pubkey_ln_address: parse lud16 out of the pubkey's current metadata event. *)
 let get_meta_data_event (est : est) (pubkey : string) : Nostr.t option =
   let dbh = est.dbh in
-  match [%pgsql dbh "select value from meta_data where key = $pubkey"] with
+  match [%pgsql dbh "select value from meta_data_1_323bc43167 where key = $pubkey"] with
   | mid :: _ -> get_event est mid
   | [] -> None
 
@@ -582,7 +588,7 @@ let update_pubkey_ln_address (est : est) (pubkey : string) : unit =
           | Some (`String lud16) when lud16 <> "" ->
               let dbh = est.dbh in
               ignore
-                [%pgsql dbh "insert into pubkey_ln_address (pubkey, ln_address) values ($pubkey, $lud16) on conflict (pubkey) do update set ln_address = excluded.ln_address"]
+                [%pgsql dbh "insert into pubkey_ln_address_1_d3649b2898 (pubkey, ln_address) values ($pubkey, $lud16) on conflict (pubkey) do update set ln_address = excluded.ln_address"]
           | _ -> ())
       | _ -> ()
       | exception _ -> ())
@@ -596,7 +602,7 @@ let contact_list_follows (e : Nostr.t) : string list =
 
 let get_contact_list_event (est : est) (pubkey : string) : Nostr.t option =
   let dbh = est.dbh in
-  match [%pgsql dbh "select value from contact_lists where key = $pubkey"] with
+  match [%pgsql dbh "select value from contact_lists_1_1abdf474bd where key = $pubkey"] with
   | clid :: _ -> get_event est clid
   | [] -> None
 
@@ -614,9 +620,9 @@ let import_contact_list (est : est) (e : Nostr.t) : unit =
     (fun follow_pubkey ->
       if not (SS.mem follow_pubkey olds) then begin
         let follower_pubkey = e.pubkey and follower_contact_list_event_id = e.id in
-        ignore [%pgsql dbh "insert into pubkey_followers (pubkey, follower_pubkey, follower_contact_list_event_id) values ($follow_pubkey, $follower_pubkey, $follower_contact_list_event_id)"];
+        ignore [%pgsql dbh "insert into pubkey_followers_1_d52305fb47 (pubkey, follower_pubkey, follower_contact_list_event_id) values ($follow_pubkey, $follower_pubkey, $follower_contact_list_event_id)"];
         if trusted then
-          ignore [%pgsql dbh "update pubkey_followers_cnt set value = value + 1 where key = $follow_pubkey"]
+          ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = value + 1 where key = $follow_pubkey"]
         (* TODO Phase 3: NEW_USER_FOLLOWED_YOU notification *)
       end)
     news;
@@ -624,9 +630,9 @@ let import_contact_list (est : est) (e : Nostr.t) : unit =
     (fun follow_pubkey ->
       if not (SS.mem follow_pubkey news) then begin
         let follower_pubkey = e.pubkey in
-        ignore [%pgsql dbh "delete from pubkey_followers where pubkey = $follow_pubkey and follower_pubkey = $follower_pubkey"];
+        ignore [%pgsql dbh "delete from pubkey_followers_1_d52305fb47 where pubkey = $follow_pubkey and follower_pubkey = $follower_pubkey"];
         if trusted then
-          ignore [%pgsql dbh "update pubkey_followers_cnt set value = greatest(0, value - 1) where key = $follow_pubkey"]
+          ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = greatest(0, value - 1) where key = $follow_pubkey"]
         (* TODO Phase 3: USER_UNFOLLOWED_YOU notification *)
       end)
     olds
@@ -647,32 +653,32 @@ let import_directmsg (est : est) (e : Nostr.t) : unit =
       let dbh = est.dbh in
       let sender = e.pubkey and created_at = i64 e.created_at and event_id = e.id in
       let exists =
-        match [%pgsql dbh "select 1 from pubkey_directmsgs where receiver = $receiver and event_id = $event_id limit 1"] with
+        match [%pgsql dbh "select 1 from pubkey_directmsgs_1_c794110a2c where receiver = $receiver and event_id = $event_id limit 1"] with
         | [] -> false
         | _ -> true
       in
       if not exists then
-        ignore [%pgsql dbh "insert into pubkey_directmsgs (receiver, sender, created_at, event_id) values ($receiver, $sender, $created_at, $event_id)"];
+        ignore [%pgsql dbh "insert into pubkey_directmsgs_1_c794110a2c (receiver, sender, created_at, event_id) values ($receiver, $sender, $created_at, $event_id)"];
       (* pubkey_directmsgs_cnt: maintain per (receiver, null) and (receiver, sender) *)
       let bump ~with_sender =
         if with_sender then begin
-          (match [%pgsql dbh "select 1 from pubkey_directmsgs_cnt where receiver = $receiver and sender = $sender limit 1"] with
-           | [] -> ignore [%pgsql dbh "insert into pubkey_directmsgs_cnt (receiver, sender, cnt, latest_at, latest_event_id) values ($receiver, $sender, 0, $created_at, $event_id)"]
+          (match [%pgsql dbh "select 1 from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender = $sender limit 1"] with
+           | [] -> ignore [%pgsql dbh "insert into pubkey_directmsgs_cnt_1_efdf9742a6 (receiver, sender, cnt, latest_at, latest_event_id) values ($receiver, $sender, 0, $created_at, $event_id)"]
            | _ -> ());
-          ignore [%pgsql dbh "update pubkey_directmsgs_cnt set cnt = cnt + 1 where receiver = $receiver and sender = $sender"];
-          (match [%pgsql dbh "select latest_at from pubkey_directmsgs_cnt where receiver = $receiver and sender = $sender limit 1"] with
+          ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set cnt = cnt + 1 where receiver = $receiver and sender = $sender"];
+          (match [%pgsql dbh "select latest_at from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender = $sender limit 1"] with
            | prev :: _ when created_at >= prev ->
-               ignore [%pgsql dbh "update pubkey_directmsgs_cnt set latest_at = $created_at, latest_event_id = $event_id where receiver = $receiver and sender = $sender"]
+               ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set latest_at = $created_at, latest_event_id = $event_id where receiver = $receiver and sender = $sender"]
            | _ -> ())
         end
         else begin
-          (match [%pgsql dbh "select 1 from pubkey_directmsgs_cnt where receiver = $receiver and sender is null limit 1"] with
-           | [] -> ignore [%pgsql dbh "insert into pubkey_directmsgs_cnt (receiver, sender, cnt, latest_at, latest_event_id) values ($receiver, null, 0, $created_at, $event_id)"]
+          (match [%pgsql dbh "select 1 from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender is null limit 1"] with
+           | [] -> ignore [%pgsql dbh "insert into pubkey_directmsgs_cnt_1_efdf9742a6 (receiver, sender, cnt, latest_at, latest_event_id) values ($receiver, null, 0, $created_at, $event_id)"]
            | _ -> ());
-          ignore [%pgsql dbh "update pubkey_directmsgs_cnt set cnt = cnt + 1 where receiver = $receiver and sender is null"];
-          (match [%pgsql dbh "select latest_at from pubkey_directmsgs_cnt where receiver = $receiver and sender is null limit 1"] with
+          ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set cnt = cnt + 1 where receiver = $receiver and sender is null"];
+          (match [%pgsql dbh "select latest_at from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender is null limit 1"] with
            | prev :: _ when created_at >= prev ->
-               ignore [%pgsql dbh "update pubkey_directmsgs_cnt set latest_at = $created_at, latest_event_id = $event_id where receiver = $receiver and sender is null"]
+               ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set latest_at = $created_at, latest_event_id = $event_id where receiver = $receiver and sender is null"]
            | _ -> ())
         end
       in
@@ -685,8 +691,8 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
   let delete_event eid =
     let deletion_event_id = e.id in
-    ignore [%pgsql dbh "insert into deleted_events (event_id, deletion_event_id) values ($eid, $deletion_event_id) on conflict (event_id) do update set deletion_event_id = excluded.deletion_event_id"];
-    ignore [%pgsql dbh "delete from events where id = $eid"]
+    ignore [%pgsql dbh "insert into deleted_events_1_0249f47b16 (event_id, deletion_event_id) values ($eid, $deletion_event_id) on conflict (event_id) do update set deletion_event_id = excluded.deletion_event_id"];
+    ignore [%pgsql dbh "delete from event where id = $eid"]
   in
   List.iter
     (fun tg ->
@@ -708,9 +714,9 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
                             | None -> ()
                             | Some reid ->
                                 let depk = de.pubkey and deid = de.id in
-                                ignore [%pgsql dbh "update event_pubkey_actions set reposted = 0 where event_id = $reid and pubkey = $depk"];
-                                ignore [%pgsql dbh "delete from event_pubkey_action_refs where ref_event_id = $deid and ref_pubkey = $depk"];
-                                ignore [%pgsql dbh "update event_stats set reposts = reposts - 1 where event_id = $reid"])
+                                ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set reposted = 0 where event_id = $reid and pubkey = $depk"];
+                                ignore [%pgsql dbh "delete from event_pubkey_action_refs_1_f32e1ff589 where ref_event_id = $deid and ref_pubkey = $depk"];
+                                ignore [%pgsql dbh "update event_stats_1_1b380f4869 set reposts = reposts - 1 where event_id = $reid"])
                         | _ -> ())
                       de.tags
               | _ -> ()))
@@ -719,16 +725,16 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
           | None -> ()
           | Some (kind, pk, identifier) ->
               let k = i64 kind in
-              (match [%pgsql dbh "select event_id from parametrized_replaceable_events where pubkey = $pk and kind = $k and identifier = $identifier limit 1"] with
+              (match [%pgsql dbh "select event_id from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pk and kind = $k and identifier = $identifier limit 1"] with
                | eid :: _ -> delete_event eid
                | [] -> ());
-              ignore [%pgsql dbh "delete from parametrized_replaceable_events where pubkey = $pk and kind = $k and identifier = $identifier"];
+              ignore [%pgsql dbh "delete from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pk and kind = $k and identifier = $identifier"];
               (* long-form: also drop the serving-layer reads / reads_versions rows *)
               if kind = Nostr.kind_long_form_content then begin
                 List.iter (fun reid -> delete_event reid)
-                  [%pgsql dbh "select eid from reads_versions where pubkey = $pk and identifier = $identifier"];
-                ignore [%pgsql dbh "delete from reads where pubkey = $pk and identifier = $identifier"];
-                ignore [%pgsql dbh "delete from reads_versions where pubkey = $pk and identifier = $identifier"]
+                  [%pgsql dbh "select eid from reads_versions_12_b537d4df66 where pubkey = $pk and identifier = $identifier"];
+                ignore [%pgsql dbh "delete from reads_12_68c6bbfccd where pubkey = $pk and identifier = $identifier"];
+                ignore [%pgsql dbh "delete from reads_versions_12_b537d4df66 where pubkey = $pk and identifier = $identifier"]
               end)
       | _ -> ())
     e.tags
@@ -846,8 +852,8 @@ let handle_categorized_people (est : est) (e : Nostr.t) : unit =
           | Some identifier ->
               let dbh = est.dbh in
               let pubkey = e.pubkey and created_at = i64 e.created_at and event_id = e.id in
-              ignore [%pgsql dbh "delete from parameterized_replaceable_list where pubkey = $pubkey and identifier = $identifier"];
-              ignore [%pgsql dbh "insert into parameterized_replaceable_list (pubkey, identifier, created_at, event_id) values ($pubkey, $identifier, $created_at, $event_id)"]
+              ignore [%pgsql dbh "delete from parameterized_replaceable_list_1_d02d7ecc62 where pubkey = $pubkey and identifier = $identifier"];
+              ignore [%pgsql dbh "insert into parameterized_replaceable_list_1_d02d7ecc62 (pubkey, identifier, created_at, event_id) values ($pubkey, $identifier, $created_at, $event_id)"]
           | None -> go rest
         else go rest)
   in
@@ -860,14 +866,14 @@ let store_relay_list_metadata (est : est) (e : Nostr.t) : unit =
   let pubkey = e.pubkey and event_id = e.id in
   let newer =
     match
-      [%pgsql dbh "select ev.created_at from relay_list_metadata r, events ev where r.pubkey = $pubkey and ev.id = r.event_id"]
+      [%pgsql dbh "select ev.created_at from relay_list_metadata_1_801a17fc93 r, event ev where r.pubkey = $pubkey and ev.id = r.event_id"]
     with
     | [] -> true
     | old :: _ -> i64 e.created_at > old
   in
   if newer then
     ignore
-      [%pgsql dbh "insert into relay_list_metadata (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"]
+      [%pgsql dbh "insert into relay_list_metadata_1_801a17fc93 (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"]
 
 (* Julia App.get_user_relays: a user's relay URLs — from their kind-10002 relay list ('r' tags)
    or, failing that, the legacy relay map in their kind-3 contact-list content. *)
@@ -875,7 +881,7 @@ let user_relay_urls (est : est) (pubkey : string) : string list =
   let dbh = est.dbh in
   let from_relay_list =
     match
-      (match [%pgsql dbh "select event_id from relay_list_metadata where pubkey = $pubkey"] with
+      (match [%pgsql dbh "select event_id from relay_list_metadata_1_801a17fc93 where pubkey = $pubkey"] with
        | eid :: _ -> get_event est eid
        | [] -> None)
     with
@@ -937,14 +943,14 @@ let store_bookmarks (est : est) (e : Nostr.t) : unit =
   let pubkey = e.pubkey and event_id = e.id in
   let newer =
     match
-      [%pgsql dbh "select ev.created_at from bookmarks b, events ev where b.pubkey = $pubkey and ev.id = b.event_id"]
+      [%pgsql dbh "select ev.created_at from bookmarks_1_43f5248b56 b, event ev where b.pubkey = $pubkey and ev.id = b.event_id"]
     with
     | [] -> true
     | old :: _ -> i64 e.created_at > old
   in
   if newer then begin
     ignore
-      [%pgsql dbh "insert into bookmarks (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"];
+      [%pgsql dbh "insert into bookmarks_1_43f5248b56 (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"];
     import_pubkey_bookmarks est e
     (* Julia also fires YOUR_POST_WAS_BOOKMARKED notifications — notifications subsystem TODO. *)
   end
@@ -1024,7 +1030,7 @@ let import_event (est : est) (e : Nostr.t) : bool =
 
 let count_events (est : est) : int64 =
   let dbh = est.dbh in
-  match [%pgsql dbh "select count(*) from events"] with Some n :: _ -> n | _ -> 0L
+  match [%pgsql dbh "select count(*) from event"] with Some n :: _ -> n | _ -> 0L
 
 (* Julia: DB.import_msg_into_storage(msg, est) *)
 let import_msg_into_storage (est : est) (msg : string) : bool =

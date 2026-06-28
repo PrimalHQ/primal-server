@@ -28,13 +28,13 @@ let () =
 
   (* scheduled hook: a due expire_hashtag_score_cb decrements the hashtag score *)
   let ht = "phase8tag" in
-  ignore [%pgsql dbh "delete from hashtags where hashtag = $ht"];
-  ignore [%pgsql dbh "insert into hashtags (hashtag, score) values ($ht, 5)"];
+  ignore [%pgsql dbh "delete from hashtags_1_1e5c72161a where hashtag = $ht"];
+  ignore [%pgsql dbh "insert into hashtags_1_1e5c72161a (hashtag, score) values ($ht, 5)"];
   let past = Int64.of_int (Importer.Utils.current_time () - 10) in
   let funcall = {|["expire_hashtag_score_cb","phase8tag",2]|} in
   ignore [%pgsql dbh "insert into scheduled_hooks (execute_at, funcall) values ($past, $funcall)"];
   CS.run_scheduled_hooks est;
-  let score = match [%pgsql dbh "select score from hashtags where hashtag = $ht"] with s :: _ -> s | [] -> -1L in
+  let score = match [%pgsql dbh "select score from hashtags_1_1e5c72161a where hashtag = $ht"] with s :: _ -> s | [] -> -1L in
   let remaining = match [%pgsql dbh "select count(*) from scheduled_hooks where funcall = $funcall"] with Some n :: _ -> n | _ -> -1L in
   Printf.printf "hashtag score after expiry=%Ld (expect 3), due hooks remaining=%Ld (expect 0)\n" score remaining;
 
@@ -62,8 +62,8 @@ let () =
 
   (* cleanup *)
   ignore [%pgsql dbh "delete from filterlist where target = $pk or target = $eid or target = $tpk or target = $teid"];
-  ignore [%pgsql dbh "delete from hashtags where hashtag = $ht"];
+  ignore [%pgsql dbh "delete from hashtags_1_1e5c72161a where hashtag = $ht"];
   ignore [%pgsql dbh "delete from scheduled_hooks where funcall = $funcall"];
-  ignore [%pgsql dbh "delete from events where id = $rid"];
-  ignore [%pgsql dbh "delete from pubkey_ids where key = $reporter"];
-  ignore [%pgsql dbh "delete from pubkey_zapped where pubkey = $reporter"]
+  ignore [%pgsql dbh "delete from event where id = $rid"];
+  ignore [%pgsql dbh "delete from pubkey_ids_1_54b55dd09c where key = $reporter"];
+  ignore [%pgsql dbh "delete from pubkey_zapped_1_17f1f622a9 where pubkey = $reporter"]
