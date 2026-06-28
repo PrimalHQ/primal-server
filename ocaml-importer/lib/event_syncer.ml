@@ -14,9 +14,11 @@
    sync self-healing across restarts and gaps. The window query is backed by event(imported_at)
    (event_imported_at), so it is an index range scan, not a table scan.
 
-   Runs as a fiber on the main domain (where the Postgres Eio env is set); pushed events go onto the
-   shared cross-domain worker queue via [submit]. The syncer owns all its connections and never
-   shares a handle with another fiber (a PGOCaml connection is single-threaded). *)
+   Each cycle's events from all remotes are merged and submitted to the worker queue ordered by
+   created_at asc, so parents land before their replies. Runs as a fiber on the main domain (where
+   the Postgres Eio env is set); pushed events go onto the shared cross-domain worker queue via
+   [submit]. The syncer owns all its connections and never shares a handle with another fiber (a
+   PGOCaml connection is single-threaded). *)
 
 open Eio.Std
 module CS = Cache_storage
@@ -46,11 +48,11 @@ let event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_ : Nostr.t =
     sig_;
   }
 
-(* One pull from one remote: events with imported_at >= since, oldest-imported first, streamed to
-   [submit] (which blocks under queue backpressure, throttling the pull to the workers' rate).
-   Returns (count, high_water) where high_water is the largest imported_at yielded (>= since), so
-   the caller continues strictly forward next cycle. *)
-let pull_remote (dbh : Pg.dbh) ~(since : int) ~(submit : Nostr.t -> unit) : int * int =
+(* One pull from one remote: events with imported_at >= since. Returns (events, high_water) where
+   high_water is the largest imported_at seen (>= since), so the caller continues strictly forward
+   next cycle. Events are returned (not submitted) so the caller can merge all remotes and submit in
+   created_at order. *)
+let pull_remote (dbh : Pg.dbh) ~(since : int) : Nostr.t list * int =
   let since64 = Int64.of_int since in
   let rows =
     [%pgsql dbh
@@ -58,13 +60,15 @@ let pull_remote (dbh : Pg.dbh) ~(since : int) ~(submit : Nostr.t -> unit) : int 
        where imported_at >= $since64 order by imported_at"]
   in
   let hw = ref since in
-  List.iter
-    (fun (id, pubkey, created_at, kind, tags, content, sig_, imported_at) ->
-      submit (event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_);
-      let ia = Int64.to_int imported_at in
-      if ia > !hw then hw := ia)
-    rows;
-  (List.length rows, !hw)
+  let evs =
+    List.map
+      (fun (id, pubkey, created_at, kind, tags, content, sig_, imported_at) ->
+        let ia = Int64.to_int imported_at in
+        if ia > !hw then hw := ia;
+        event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_)
+      rows
+  in
+  (evs, !hw)
 
 (* Loop forever (intended as a fiber). Per-remote state = a lazily-(re)connected handle plus a
    high-water imported_at; both are kept across cycles, and the high-water survives a reconnect
@@ -99,19 +103,33 @@ let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.connin
   Printf.printf "event_syncer: %d remotes, interval %.0fs, overlap %ds, start imported_at >= %d\n%!"
     (List.length remotes) interval overlap floor;
   while true do
+    (* Pull each remote's new events (advancing its per-remote high-water), accumulate the whole
+       cycle's batch, then submit ordered by created_at asc — so a parent is enqueued before its
+       replies (created_at(reply) >= created_at(parent)), which lets reply/mention notifications and
+       the deferred event_stats hooks resolve on first import instead of waiting for a later event. *)
+    let batch = ref [] and total = ref 0 in
     List.iter
       (fun (ci, slot, last) ->
         try
           let dbh = get_conn ci slot in
           let since = !last in
-          let n, hw = pull_remote dbh ~since ~submit in
+          let evs, hw = pull_remote dbh ~since in
           if hw > !last then last := hw;
-          if n > 0 then Printf.printf "event_syncer: %s +%d events (imported_at %d..%d)\n%!" ci.Pg.host n since hw
+          let n = List.length evs in
+          if n > 0 then begin
+            batch := List.rev_append evs !batch;
+            total := !total + n;
+            Printf.printf "event_syncer: %s +%d events (imported_at %d..%d)\n%!" ci.Pg.host n since hw
+          end
         with
         | Eio.Cancel.Cancelled _ as e -> raise e
         | exn ->
             Printf.eprintf "event_syncer: %s: %s\n%!" ci.Pg.host (Printexc.to_string exn);
             drop slot)
       conns;
+    if !total > 0 then
+      !batch
+      |> List.sort (fun (a : Nostr.t) (b : Nostr.t) -> Int.compare a.created_at b.created_at)
+      |> List.iter submit;
     Eio.Time.sleep clock interval
   done
