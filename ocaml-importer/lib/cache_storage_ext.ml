@@ -342,16 +342,20 @@ let is_app_user (est : CS.est) (pubkey : string) : bool =
   | _ -> true
 
 (* a boolean notificationsAdditional setting; true iff a row matches Julia's
-   "... and coalesce((value->'content'->'notificationsAdditional'->KEY)::bool, DEFAULT)". [key] is a
-   fixed literal from our code (not user input), so the interpolation is safe. *)
+   "... and coalesce((value->'content'->'notificationsAdditional'->KEY)::bool, DEFAULT)". Both the
+   JSON key and the default are bound parameters ($2::text disambiguates jsonb->text from the array
+   jsonb->int overload, $3::bool the coalesce default), so the SQL is a fixed literal — no
+   interpolation. *)
 let app_setting_flag (est : CS.est) (pubkey : string) ~(key : string) ~(default : bool) : bool =
-  let sql =
-    Printf.sprintf
+  match
+    Postgres.query est.CS.mem_dbh
       "select 1 from app_settings where key = decode($1,'hex') and \
-       coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->'%s')::bool, %b) limit 1"
-      key default
-  in
-  match Postgres.query est.CS.mem_dbh sql [ hexp pubkey ] with [] -> false | _ -> true
+       coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->$2::text)::bool, \
+       $3::bool) limit 1"
+      [ hexp pubkey; Some key; Some (string_of_bool default) ]
+  with
+  | [] -> false
+  | _ -> true
 
 (* recipient follows initiator (Julia pubkey_followers: follower_pubkey = recipient, pubkey =
    initiator). Cache base table, [%pgsql]-checkable. *)
