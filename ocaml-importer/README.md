@@ -37,18 +37,21 @@ not match that live schema.
 ### Reference DB (occasional, for tests)
 
 A standalone reference DB (`primal_importer_ref`) is no longer required for the build — it
-is only used occasionally for tests. There is no bundled schema file; instead it is created
-as a **schema-only clone of the live `primal1`** (the importer's inline SQL targets primal1's
-base tables by name, so the reference DB must mirror that schema). It takes **no arguments**;
-the connection is **hardcoded** (`pg_dump` from `primal1` into `primal_importer_ref`, both on
-`127.0.0.1:54017`, user `pr`) and cannot be overridden:
+is only used occasionally for tests. There is no bundled schema file; instead it is rebuilt
+as a **schema-only clone of the live `primal1` public schema** (the importer's inline SQL
+targets primal1's base tables by name, so the reference DB must mirror that schema). It takes
+**no arguments**; the connection is **hardcoded** (`pg_dump` from `primal1` into
+`primal_importer_ref`, both on `127.0.0.1:54017`, user `pr`) and cannot be overridden:
 
 ```sh
 nix develop "path:$P" -c sql/refdb-setup.sh
 ```
 
-This `pg_dump --schema-only` of `primal1` into `primal_importer_ref` (created if missing); the
-target is always the reference DB, so it can never clobber the live source. No data is copied.
+Each run **drops and recreates** the reference DB, then clones only primal1's `public` schema
+with `--no-subscriptions --no-publications` — so it pulls in none of primal1's replication
+config, extensions, or other schemas (`pg_cron`/`age`/`plv8`/…), just the tables/types the
+importer needs. The target is always the reference DB, so it can never clobber the live source
+(read-only via `pg_dump`). No data is copied.
 
 ### Resetting the reference DB to schema-only
 
