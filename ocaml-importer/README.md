@@ -89,7 +89,7 @@ cache connection**, so only the `PG*` set is required.
 | `PGPORT` | `54017` | Cache DB port. |
 | `PGUSER` | `pr` | Cache DB user. |
 | `PGDATABASE` | `primal1` | Cache DB name; the **live** DB used for both compile-time `[%pgsql]` checks and runtime (dev shell sets this). The code fallback when unset is `primal_importer_ref`. |
-| `PGMEMBERSHIPHOST` | = `PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`. |
+| `PGMEMBERSHIPHOST` | = `PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`, and the notification-gate tables `app_settings` / `notification_settings` (see [Notifications](#notifications)). Point this at a real membership DB to activate the serving-layer notification gates. |
 | `PGMEMBERSHIPPORT` | = `PGPORT` | Membership DB port. |
 | `PGMEMBERSHIPUSER` | = `PGUSER` | Membership DB user. |
 | `PGMEMBERSHIPDATABASE` | = `PGDATABASE` | Membership DB name. |
@@ -285,10 +285,19 @@ Imports produce in-DB notifications, mirroring Julia `notification` / `notificat
   chains from `thread_view_parent_posts`), post-mentioned-in-post, highlights, bookmarks, and
   DMs. Deferred types fire through the `Notifications_cb` event hook once the referenced post is
   present.
-- Gating reproduces the parts that don't depend on serving-layer tables absent from the importer
-  DB: skip self-notifications and references to hidden events, drop `USER_UNFOLLOWED_YOU`. The
-  `app_settings`/`notification_settings`/mute-list/hellthread/only-from-followers gates are
-  serving-layer and intentionally **not** reproduced here (like `update_content_moderation_rules`).
+- Gating reproduces the full Julia `notification()` filter set. Always-on: skip self-notifications
+  and references to hidden events, drop `USER_UNFOLLOWED_YOU`. The **serving-layer gates** —
+  recipient must be a Primal app user (`app_settings`), `notification_settings` per-type enable,
+  mute-list (event/pubkey/hashtag/word), hellthread mention cap, and the
+  `only_show_*_from_users_i_follow` / `include_deep_replies` settings (via `app_settings` +
+  `pubkey_followers`) — read tables that live only in the membership DB. They are queried **raw**
+  (`Postgres.query`, not `[%pgsql]`, since `app_settings` is absent from primal1) and the whole set
+  is **gated on `app_settings` being present** in the membership connection, detected once at
+  startup (`init_notification_gating`; the banner logs `gates ON/OFF`). With `mem_dbh` pointed at
+  primal1 (no `app_settings`) the gates are inert and the importer over-generates (notifications for
+  every recipient, not just app users); point `mem_dbh` at a real membership DB via the
+  `PGMEMBERSHIP*` env vars to activate them and reach parity with the Julia importer (e.g. the
+  recipient gate alone collapses repost notifications from ~12× the Julia rate down to ~1×).
 - **Push notifications** (`lib/push_notifications.ml`) mirror the Julia stub and are **disabled**
   at runtime (`enabled = false`, matching `PUSH_NOTIFICATIONS_ENABLED`); there is no APNS/FCM/
   web-push backend to port. The token-registration helpers parse and verify input but do not

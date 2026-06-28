@@ -102,6 +102,14 @@ let () =
   let humaness = Importer.Cache_storage_ext.load_humaness_threshold hooks_est in
   Printf.printf "primal-importer: humaness_threshold = %g\n%!" humaness;
 
+  (* Serving-layer notification gates (app_settings / notification_settings / mute-list / follows)
+     activate only when the membership connection actually has app_settings; detect once here,
+     before the worker domains spawn. *)
+  let gating = Importer.Cache_storage_ext.init_notification_gating hooks_est in
+  Printf.printf "primal-importer: notification serving-layer gates %s (app_settings %s in membership DB)\n%!"
+    (if gating then "ON" else "OFF")
+    (if gating then "present" else "absent");
+
   let run_scheduled_hooks_loop () =
     while true do
       (try CS.run_scheduled_hooks hooks_est with

@@ -51,4 +51,8 @@ importers writing to the same DB. The script's stop step prevents that.
   fiber/worker needs its own connection (see `Event_syncer`, which owns its connections).
 - `primal1` also receives production data via logical replication, so a table's row count mixes
   this importer's writes with replicated rows — don't assume every recent row came from here.
+- Tables that live only in the **membership DB** (e.g. `app_settings`, `notification_settings`) are
+  absent from primal1, so `[%pgsql]` can't check them. Query them with `Postgres.query` (raw, no
+  compile-time check) against `mem_dbh`, use `decode($n,'hex')` for bytea params, and gate the
+  feature on the table actually being present (see `Cache_storage_ext.init_notification_gating`).
 - `sql/refdb-truncate.sh` may only ever touch `primal_importer_ref`; never truncate `primal1`.

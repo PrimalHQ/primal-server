@@ -169,3 +169,14 @@ let ping (dbh : dbh) : string option list list =
   let rows = PGOCaml.execute dbh ~params:[] () in
   PGOCaml.close_statement dbh ();
   rows
+
+(* Run an arbitrary SQL statement WITHOUT the compile-time [%pgsql] schema check, returning rows as
+   text [string option] cells. For tables that live only in the membership DB (e.g. app_settings,
+   notification_settings) and so are absent from the primal1 schema the ppx checks against. Params
+   are text — for bytea columns use [decode($n,'hex')] in the SQL and pass the hex string. The
+   connection must be used by only one fiber at a time (as with [%pgsql]). *)
+let query (dbh : dbh) (sql : string) (params : string option list) : string option list list =
+  PGOCaml.prepare dbh ~query:sql ();
+  let rows = PGOCaml.execute dbh ~params () in
+  PGOCaml.close_statement dbh ();
+  rows
