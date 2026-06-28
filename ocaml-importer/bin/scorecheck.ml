@@ -32,8 +32,8 @@ let () =
       tags = [ [ `String "e"; `String (Importer.Hex_util.encode parent_id) ] ];
       content = "+"; sig_ = b32 '\x00' }
   in
-  assert (CS.import_event est parent);
-  assert (CS.import_event est reaction);
+  assert (CS.import_event est parent = CS.Imported);
+  assert (CS.import_event est reaction = CS.Imported);
   let row =
     [%pgsql dbh "select likes, score, score24h from event_stats_1_1b380f4869 where event_id = $parent_id"]
   in

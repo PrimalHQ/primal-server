@@ -31,7 +31,7 @@ let () =
       if String.trim line <> "" then begin
         incr n;
         let e = N.of_json (Yojson.Safe.from_string line) in
-        if CS.import_event est e then incr ok
+        if CS.import_event est e = CS.Imported then incr ok
       end)
     (read_lines path);
   Printf.printf "imported %d/%d events; events table now has %Ld rows\n%!" !ok !n

@@ -47,16 +47,30 @@ let () =
   SD.add_spamevent_processor sd (fun est e -> Importer.Cache_storage_ext.store_spam_content_hash est e);
 
   let pool = WP.create ~capacity:cfg.queue_capacity in
+  let stats = Importer.Stats.create () in
   let make_est () : CS.est =
     Mirage_crypto_rng_unix.use_default (); (* RNG for TLS in this worker domain *)
     let dbh = Pg.connect (Pg.cache_conninfo ()) in
     let mem_dbh = Pg.connect (Pg.membership_conninfo ()) in
     { CS.cfg = cfg.cs; dbh; mem_dbh }
   in
+  (* Runs in a worker domain. Counts started/completed (for queue depth & busy-workers) and the
+     import outcome; completed is bumped via Fun.protect so it covers errors and cancellation. *)
   let process (est : CS.est) (msg : string) =
-    let now = float_of_int (Importer.Utils.current_time ()) in
-    ignore (SD.on_message sd ~est msg now);
-    ignore (CS.import_msg_into_storage est msg)
+    Importer.Stats.started stats;
+    Fun.protect ~finally:(fun () -> Importer.Stats.completed stats) (fun () ->
+        try
+          let now = float_of_int (Importer.Utils.current_time ()) in
+          ignore (SD.on_message sd ~est msg now);
+          match CS.import_msg_into_storage est msg with
+          | CS.Imported -> Importer.Stats.imported stats
+          | CS.Duplicate -> Importer.Stats.duplicate stats
+          | CS.Rejected -> Importer.Stats.rejected stats
+        with
+        | Eio.Cancel.Cancelled _ as e -> raise e
+        | exn ->
+            Importer.Stats.errors stats;
+            Printf.eprintf "worker: %s\n%!" (Printexc.to_string exn))
   in
 
   Printf.printf "primal-importer: firehose %s:%d, %d workers%s\n%!" cfg.firehose_host
@@ -83,11 +97,23 @@ let () =
     done
   in
 
+  (* Firehose callback (runs in the reader fiber): count the received line, then enqueue (which
+     blocks under backpressure); count submitted once it is actually on the queue. *)
+  let on_message msg =
+    Importer.Stats.recv stats;
+    WP.submit pool msg;
+    Importer.Stats.submitted stats
+  in
+
   Fiber.all
     [
       (fun () -> WP.run ~domain_mgr ~net ~n:cfg.num_workers ~make_est ~process pool);
       (fun () ->
-        FC.run ~net ~clock ~host:cfg.firehose_host ~port:cfg.firehose_port
-          ~on_message:(WP.submit pool) ());
+        FC.run ~net ~clock ~host:cfg.firehose_host ~port:cfg.firehose_port ~on_message
+          ~on_reconnect:(fun () -> Importer.Stats.reconnects stats)
+          ());
       run_scheduled_hooks_loop;
+      (fun () ->
+        Importer.Stats.report_loop ~clock ~capacity:cfg.queue_capacity ~workers:cfg.num_workers
+          stats);
     ]

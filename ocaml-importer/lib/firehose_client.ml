@@ -30,11 +30,15 @@ let session ~net ~host ~port ~on_message =
   in
   loop ()
 
-let run ?(reconnect_delay = 1.0) ?(running = fun () -> true) ~net ~clock ~host ~port
-    ~(on_message : string -> unit) () =
+let run ?(reconnect_delay = 1.0) ?(running = fun () -> true) ?(on_reconnect = fun () -> ())
+    ~net ~clock ~host ~port ~(on_message : string -> unit) () =
   while running () do
     (try session ~net ~host ~port ~on_message with
     | Eio.Cancel.Cancelled _ as e -> raise e
     | exn -> Printf.eprintf "firehose: %s\n%!" (Printexc.to_string exn));
-    if running () then Eio.Time.sleep clock reconnect_delay
+    (* the session ended (EOF / empty line / error): count the reconnect about to happen *)
+    if running () then begin
+      on_reconnect ();
+      Eio.Time.sleep clock reconnect_delay
+    end
   done

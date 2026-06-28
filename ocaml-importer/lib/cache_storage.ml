@@ -1002,16 +1002,22 @@ let verify_event (e : Nostr.t) : bool =
 
 let blocked_kinds = [ 29333 ]
 
-let import_event (est : est) (e : Nostr.t) : bool =
-  if est.cfg.verification_enabled && not (verify_event e) then false
-  else if event_deleted est e.id then false
-  else if not (accepted_kind e.kind) then false
-  else if List.mem e.kind blocked_kinds then false
-  else if not ((!ext).ext_preimport_check est e) then false
+(* Outcome of importing one event/message, for stats. [Rejected] = refused before storage
+   (failed verification, blocked/unaccepted kind, already-deleted, ext_preimport_check, or an
+   unparseable message); [Duplicate] = lost the atomic store_event claim (already imported);
+   [Imported] = newly stored and dispatched. *)
+type import_result = Imported | Duplicate | Rejected
+
+let import_event (est : est) (e : Nostr.t) : import_result =
+  if est.cfg.verification_enabled && not (verify_event e) then Rejected
+  else if event_deleted est e.id then Rejected
+  else if not (accepted_kind e.kind) then Rejected
+  else if List.mem e.kind blocked_kinds then Rejected
+  else if not ((!ext).ext_preimport_check est e) then Rejected
   (* store_event is the atomic claim (Julia's already_imported_check_lock): it both inserts the
      event and reports whether we won the race. A losing concurrent delivery returns false here and
      skips dispatch, so side effects (likes/reposts/zaps, action refs) run exactly once. *)
-  else if not (store_event est e) then false
+  else if not (store_event est e) then Duplicate
   else begin
     set_event_created_at est e;
     track_pubkey est e.pubkey;
@@ -1025,7 +1031,7 @@ let import_event (est : est) (e : Nostr.t) : bool =
       guard "parametrized_replaceable" (fun () -> store_parametrized_replaceable_event est e);
     guard "event_hooks" (fun () -> fire_event_hooks est e);
     (* TODO Phase 3: ext_event *)
-    true
+    Imported
   end
 
 let count_events (est : est) : int64 =
@@ -1033,10 +1039,10 @@ let count_events (est : est) : int64 =
   match [%pgsql dbh "select count(*) from event"] with Some n :: _ -> n | _ -> 0L
 
 (* Julia: DB.import_msg_into_storage(msg, est) *)
-let import_msg_into_storage (est : est) (msg : string) : bool =
-  if String.length msg > max_message_size then false
+let import_msg_into_storage (est : est) (msg : string) : import_result =
+  if String.length msg > max_message_size then Rejected
   else
     match Nostr.event_from_msg (Yojson.Safe.from_string msg) with
     | Some (_relay, e) -> import_event est e
-    | None -> false
-    | exception _ -> false
+    | None -> Rejected
+    | exception _ -> Rejected
