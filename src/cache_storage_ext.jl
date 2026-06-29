@@ -675,6 +675,23 @@ function notification(
     end
     block[] && return
 
+    # REPLY_TO_REPLY notifications for hellthreads are hidden at read time by
+    # notification_is_visible -> event_has_excessive_mentions(arg1) (>50 p tags).
+    # Apply the same check here so the push notification and the stored row stay
+    # consistent with what get_notifications returns.
+    catch_exception(est, :block_reply_to_reply_for_hellthreads, callargs) do
+        if notif_type == REPLY_TO_REPLY
+            eid = args[1] # your_post
+            if eid in est.events
+                ptags = count(t -> length(t.fields) >= 1 && t.fields[1] == "p", est.events[eid].tags)
+                if ptags > 50
+                    block[] = true
+                end
+            end
+        end
+    end
+    block[] && return
+
     block[] |= catch_exception(est, :notification_blocked_by_mutelist, callargs) do
         notification_blocked_by_mutelist(est, pubkey, args)
     end
