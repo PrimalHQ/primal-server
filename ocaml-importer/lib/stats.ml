@@ -42,6 +42,10 @@ let rejected t = Atomic.incr t.rejected
 let errors t = Atomic.incr t.errors
 let reconnects t = Atomic.incr t.reconnects
 
+(* Cumulative imported-event count (the [tot] field of the per-second log line). Read by the
+   pushgateway exporter fiber, which publishes it as a Prometheus counter. *)
+let imported_total t = Atomic.get t.imported
+
 let fmt_hms s = Printf.sprintf "%02d:%02d:%02d" (s / 3600) (s / 60 mod 60) (s mod 60)
 
 (* Loop forever (run as a fiber on the main domain): once per second, print per-second deltas of

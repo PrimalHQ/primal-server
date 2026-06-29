@@ -11,6 +11,11 @@ type t = {
   event_sync_remotes : string list; (* peer Postgres hosts (same port/credentials as local) *)
   event_sync_interval : float; (* seconds between sync cycles *)
   event_sync_overlap : int; (* seconds of lookback behind local max created_at *)
+  pushgateway_enabled : bool; (* publish the imported count to a Prometheus pushgateway *)
+  pushgateway_host : string;
+  pushgateway_port : int;
+  pushgateway_job : string; (* job label (Julia uses "primalnode<idx>"); here "cache_any" *)
+  pushgateway_interval : float; (* seconds between pushes *)
   cs : Cache_storage.config;
 }
 
@@ -69,6 +74,11 @@ let from_env () : t =
       | _ -> [ "192.168.40.7"; "192.168.42.7"; "192.168.43.7"; "192.168.44.7" ]);
     event_sync_interval = float_env "IMPORTER_EVENT_SYNC_INTERVAL" 60.0;
     event_sync_overlap = int_env "IMPORTER_EVENT_SYNC_OVERLAP" 600;
+    pushgateway_enabled = bool_env "IMPORTER_PUSHGATEWAY" true;
+    pushgateway_host = Option.value (getenv "IMPORTER_PUSHGATEWAY_HOST") ~default:"127.0.0.1";
+    pushgateway_port = int_env "IMPORTER_PUSHGATEWAY_PORT" 9091;
+    pushgateway_job = Option.value (getenv "IMPORTER_PUSHGATEWAY_JOB") ~default:"cache_any";
+    pushgateway_interval = float_env "IMPORTER_PUSHGATEWAY_INTERVAL" 15.0;
     cs =
       {
         Cache_storage.verification_enabled = bool_env "IMPORTER_VERIFY" true;

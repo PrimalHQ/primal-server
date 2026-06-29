@@ -118,6 +118,11 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_EVENT_SYNC_REMOTES` | `192.168.40.7,192.168.42.7,192.168.43.7,192.168.44.7` | Comma-separated peer Postgres hosts to pull from (same port/credentials as the local cache DB). |
 | `IMPORTER_EVENT_SYNC_INTERVAL` | `60` | Seconds between sync cycles. |
 | `IMPORTER_EVENT_SYNC_OVERLAP` | `600` | Seconds of lookback behind the local max `created_at` each cycle (the 10-minute self-healing window). |
+| `IMPORTER_PUSHGATEWAY` | `true` | Publish the cumulative imported-event count to a Prometheus pushgateway (see [Pushgateway](#pushgateway)). |
+| `IMPORTER_PUSHGATEWAY_HOST` | `127.0.0.1` | Pushgateway host. |
+| `IMPORTER_PUSHGATEWAY_PORT` | `9091` | Pushgateway port. |
+| `IMPORTER_PUSHGATEWAY_JOB` | `cache_any` | Pushgateway `job` label (Julia uses `primalnode<idx>`). |
+| `IMPORTER_PUSHGATEWAY_INTERVAL` | `15` | Seconds between pushes. |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`.
 
@@ -272,6 +277,17 @@ safe (`store_event` is an atomic `ON CONFLICT` claim, so they count as duplicate
 the sync self-healing across restarts and firehose gaps. The window query is index-backed
 (`event(created_at)`), and queue backpressure throttles the pull to the workers' import rate.
 Mirrors Julia's `EventSyncer`. Disable with `IMPORTER_EVENT_SYNC=false`.
+
+## Pushgateway
+
+On a timer (`IMPORTER_PUSHGATEWAY_INTERVAL`, default 15 s) `main` POSTs the cumulative
+imported-event count (the `tot` field of the per-second log line) to a Prometheus pushgateway as a
+counter `cache_imported`, under `job=cache_any`
+(`http://IMPORTER_PUSHGATEWAY_HOST:IMPORTER_PUSHGATEWAY_PORT/metrics/job/cache_any`, default
+`127.0.0.1:9091`). Because it is a monotonic counter, Prometheus derives the import rate via
+`rate()`. Pushes are best-effort — a failure (gateway down/timeout) is logged and skipped, never
+fatal. Mirrors Julia's `PushGatewayExporter.set!` (`src/pushgateway_exporter.jl`); Julia uses
+`job=primalnode<idx>` and `cache_*`-prefixed metric names. Disable with `IMPORTER_PUSHGATEWAY=false`.
 
 ## Notifications
 
