@@ -157,8 +157,8 @@ let () =
       (fun () ->
         if cfg.pushgateway_enabled then
           Importer.Pushgateway.run ~net ~clock ~stats ~host:cfg.pushgateway_host
-            ~port:cfg.pushgateway_port ~job:cfg.pushgateway_job ~interval:cfg.pushgateway_interval
-            ());
+            ~port:cfg.pushgateway_port ~job:cfg.pushgateway_job
+            ~stats_file:cfg.pushgateway_stats_file ~interval:cfg.pushgateway_interval ());
       (fun () ->
         Importer.Stats.report_loop ~clock ~capacity:cfg.queue_capacity ~workers:cfg.num_workers
           stats);

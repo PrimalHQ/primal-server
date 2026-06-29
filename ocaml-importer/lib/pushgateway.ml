@@ -1,19 +1,25 @@
-(* Pushgateway exporter, mirroring Julia src/pushgateway_exporter.jl (module PushGatewayExporter).
+(* Pushgateway exporter, mirroring Julia src/pushgateway_exporter.jl (module PushGatewayExporter)
+   and the persisted "any" counter from src/cache_storage.jl (load_stats / save_stats).
 
    Julia's PushGatewayExporter.set!(k, v; job, type) POSTs the Prometheus text-exposition body
    "# TYPE k type\nk v\n" to http://HOST:PORT/metrics/job/<job> (HOSTPORT default 127.0.0.1:9091,
-   TIMEOUT 10, type usually :counter). A fiber here does the same on a timer: every [interval]
-   seconds it pushes the importer's cumulative imported-event count (Stats.imported_total — the
-   [tot] in the per-second log line) as a counter named "cache_imported", under job [job]
-   (default "cache_any"). Pushgateway keeps the last value pushed per (job, metric); since the
-   value is a monotonic counter, Prometheus derives the import rate via rate().
+   TIMEOUT 10, type usually :counter). The cache server publishes metric "cache_any" from
+   App.network_stats's "any" field — est.commons.stats[:any], the cumulative count of every event
+   imported, which Julia persists across restarts in <rootdirectory>/stats.json (the whole stats
+   dict; written atomically via tmp + rename, throttled). Grafana graphs the import rate with
+   rate(cache_any{exported_job="primalnode<idx>"}[...]), so the value must be a monotonic counter.
 
-   This is plain HTTP to an internal host (no TLS, no SOCKS proxy), so it does not go through Http
-   (HTTPS/LNURL-over-SOCKS5 only) — a tiny POST is hand-rolled over Eio.Net here, using the same
-   socket idiom as Firehose_client.
+   A fiber here reproduces that: it loads the persisted "any" baseline from the same stats.json,
+   then every [interval]s publishes baseline + (events imported this session) under metric
+   "cache_any" and job [job], and writes the updated total back to the file (preserving the other
+   stats keys verbatim). Reloading our own last write as the next baseline keeps the counter
+   monotonic across restarts — no double counting, no reset.
 
-   Best-effort: a push failure (pushgateway down, timeout, refused) is logged and skipped, never
-   fatal — matching Julia's retry=false under errormonitor. *)
+   Plain HTTP to an internal host (no TLS, no SOCKS proxy), so it does not go through Http
+   (HTTPS/LNURL-over-SOCKS5 only); a tiny POST is hand-rolled over Eio.Net here, using the same
+   socket idiom as Firehose_client. Best-effort throughout: a push or save failure (gateway down,
+   timeout, unwritable file) is logged and skipped, never fatal — matching Julia's retry=false
+   under errormonitor. *)
 
 open Eio.Std
 
@@ -45,16 +51,56 @@ let set ~net ~clock ?(timeout = 10.0) ?(typ = "counter") ~host ~port ~job (k : s
   let body = Printf.sprintf "# TYPE %s %s\n%s %d\n" k typ k v in
   post ~net ~clock ~timeout ~host ~port ~path:("/metrics/job/" ^ job) body
 
-let metric_name = "cache_imported"
+(* Load the full stats.json object (kept verbatim so the other keys survive a write) and the
+   current "any" total. Missing file / parse error -> ([], 0). Mirrors Julia load_stats. *)
+let load_stats (path : string) : (string * Yojson.Safe.t) list * int =
+  try
+    match Yojson.Safe.from_file path with
+    | `Assoc fields ->
+        let any =
+          match List.assoc_opt "any" fields with
+          | Some (`Int n) -> n
+          | Some (`Intlit s) -> ( try int_of_string s with _ -> 0)
+          | Some (`Float f) -> int_of_float f
+          | _ -> 0
+        in
+        (fields, any)
+    | _ -> ([], 0)
+  with _ -> ([], 0)
+
+(* Atomically write [fields] with "any" set to [any] (tmp file + rename), mirroring Julia
+   save_stats. Best-effort: failure is logged, never fatal. *)
+let save_stats (path : string) (fields : (string * Yojson.Safe.t) list) (any : int) : unit =
+  try
+    let replaced = ref false in
+    let fields =
+      List.map
+        (fun (k, v) -> if k = "any" then ( replaced := true; (k, `Int any)) else (k, v))
+        fields
+    in
+    let fields = if !replaced then fields else fields @ [ ("any", `Int any) ] in
+    let tmp = path ^ ".tmp" in
+    let oc = open_out tmp in
+    Fun.protect
+      ~finally:(fun () -> close_out_noerr oc)
+      (fun () -> output_string oc (Yojson.Safe.to_string (`Assoc fields)));
+    Sys.rename tmp path
+  with exn -> Printf.eprintf "pushgateway: save_stats %s: %s\n%!" path (Printexc.to_string exn)
+
+let metric_name = "cache_any"
 
 (* Loop forever (intended as a fiber on the main domain, where the Eio net/clock live): every
-   [interval]s push the cumulative imported count under [job]. *)
-let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~(interval : float) () : unit =
-  Printf.printf "pushgateway: http://%s:%d job=%s metric=%s every %.0fs\n%!" host port job
-    metric_name interval;
+   [interval]s, recompute the monotonic "any" total (persisted baseline + this session's imported
+   count), persist it back to [stats_file], and push it under [job]. *)
+let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval : float) () : unit =
+  let base_fields, base_any = load_stats stats_file in
+  Printf.printf
+    "pushgateway: http://%s:%d job=%s metric=%s every %.0fs (stats file %s, baseline any=%d)\n%!"
+    host port job metric_name interval stats_file base_any;
   while true do
-    let imported = Stats.imported_total stats in
-    (try set ~net ~clock ~host ~port ~job metric_name imported with
+    let any = base_any + Stats.imported_total stats in
+    save_stats stats_file base_fields any;
+    (try set ~net ~clock ~host ~port ~job metric_name any with
     | Eio.Cancel.Cancelled _ as e -> raise e
     | exn -> Printf.eprintf "pushgateway: %s\n%!" (Printexc.to_string exn));
     Eio.Time.sleep clock interval

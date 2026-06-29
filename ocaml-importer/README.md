@@ -118,11 +118,14 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_EVENT_SYNC_REMOTES` | `192.168.40.7,192.168.42.7,192.168.43.7,192.168.44.7` | Comma-separated peer Postgres hosts to pull from (same port/credentials as the local cache DB). |
 | `IMPORTER_EVENT_SYNC_INTERVAL` | `60` | Seconds between sync cycles. |
 | `IMPORTER_EVENT_SYNC_OVERLAP` | `600` | Seconds of lookback behind the local max `created_at` each cycle (the 10-minute self-healing window). |
-| `IMPORTER_PUSHGATEWAY` | `true` | Publish the cumulative imported-event count to a Prometheus pushgateway (see [Pushgateway](#pushgateway)). |
+| `IMPORTER_PUSHGATEWAY` | `true` | Publish the cumulative imported-event count (`cache_any`) to a Prometheus pushgateway (see [Pushgateway](#pushgateway)). |
 | `IMPORTER_PUSHGATEWAY_HOST` | `127.0.0.1` | Pushgateway host. |
 | `IMPORTER_PUSHGATEWAY_PORT` | `9091` | Pushgateway port. |
-| `IMPORTER_PUSHGATEWAY_JOB` | `cache_any` | Pushgateway `job` label (Julia uses `primalnode<idx>`). |
+| `IMPORTER_PUSHGATEWAY_JOB` | `primalnode<report-node>` | Pushgateway `job` label (Prometheus exposes it as `exported_job`). |
+| `IMPORTER_STATS_FILE` | `<storage>/primalnode<report-node>/cache/db/stats.json` | Julia stats file the `cache_any` total is loaded from and persisted to. |
 | `IMPORTER_PUSHGATEWAY_INTERVAL` | `15` | Seconds between pushes. |
+| `PRIMALSERVER_REPORT_NODE_IDX` | `18` | Reporting node identity for the two defaults above (distinct from the firehose node `NODE_IDX`). |
+| `PRIMALSERVER_STORAGE_PATH` | `/home/pr/var/primalserver` | Storage root for the default `IMPORTER_STATS_FILE`. |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`.
 
@@ -280,14 +283,29 @@ Mirrors Julia's `EventSyncer`. Disable with `IMPORTER_EVENT_SYNC=false`.
 
 ## Pushgateway
 
-On a timer (`IMPORTER_PUSHGATEWAY_INTERVAL`, default 15 s) `main` POSTs the cumulative
-imported-event count (the `tot` field of the per-second log line) to a Prometheus pushgateway as a
-counter `cache_imported`, under `job=cache_any`
-(`http://IMPORTER_PUSHGATEWAY_HOST:IMPORTER_PUSHGATEWAY_PORT/metrics/job/cache_any`, default
-`127.0.0.1:9091`). Because it is a monotonic counter, Prometheus derives the import rate via
-`rate()`. Pushes are best-effort — a failure (gateway down/timeout) is logged and skipped, never
-fatal. Mirrors Julia's `PushGatewayExporter.set!` (`src/pushgateway_exporter.jl`); Julia uses
-`job=primalnode<idx>` and `cache_*`-prefixed metric names. Disable with `IMPORTER_PUSHGATEWAY=false`.
+On a timer (`IMPORTER_PUSHGATEWAY_INTERVAL`, default 15 s) `main` POSTs the counter `cache_any` to a
+Prometheus pushgateway under `job=primalnode<report-node>`
+(`http://IMPORTER_PUSHGATEWAY_HOST:IMPORTER_PUSHGATEWAY_PORT/metrics/job/<job>`, default
+`127.0.0.1:9091`), matching the Grafana panel
+`rate(cache_any{exported_job="primalnode18"}[$__rate_interval])`.
+
+`cache_any` is the always-increasing total of imported events. To stay monotonic across the Julia →
+OCaml cutover and across restarts, it is **persisted in the same `stats.json` Julia uses**
+(`src/cache_storage.jl` `load_stats`/`save_stats`; `est.commons.stats[:any]`, surfaced as
+`cache_any` by `App.network_stats`). On startup `main` reads the `"any"` baseline from
+`IMPORTER_STATS_FILE`; each cycle it publishes `baseline + (events imported this session)` and
+writes that total back to the file (atomic tmp + rename, other keys preserved verbatim). Reloading
+our own last write as the next baseline means restarts neither reset nor double-count. Because it is
+a monotonic counter, Prometheus derives the import rate via `rate()`.
+
+The **reporting node** (`PRIMALSERVER_REPORT_NODE_IDX`, default 18) is intentionally separate from
+the **firehose node** (`NODE_IDX`, default 17): on this box only the node-17 firehose (port 9017)
+exists, but the importer replaces the production node-18 Julia importer, so its metrics/stats are
+published as node 18.
+
+Pushes and file writes are best-effort — a failure (gateway down/timeout, unwritable file) is
+logged and skipped, never fatal (Julia uses `retry=false` under `errormonitor`). Mirrors Julia's
+`PushGatewayExporter.set!` (`src/pushgateway_exporter.jl`). Disable with `IMPORTER_PUSHGATEWAY=false`.
 
 ## Notifications
 

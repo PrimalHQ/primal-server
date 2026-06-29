@@ -14,7 +14,8 @@ type t = {
   pushgateway_enabled : bool; (* publish the imported count to a Prometheus pushgateway *)
   pushgateway_host : string;
   pushgateway_port : int;
-  pushgateway_job : string; (* job label (Julia uses "primalnode<idx>"); here "cache_any" *)
+  pushgateway_job : string; (* job label, Julia "primalnode<idx>" (the reporting node, see below) *)
+  pushgateway_stats_file : string; (* Julia stats.json: persists the always-increasing "any" total *)
   pushgateway_interval : float; (* seconds between pushes *)
   cs : Cache_storage.config;
 }
@@ -60,6 +61,14 @@ let proxy_endpoint (t : t) : (string * int) option =
 
 let from_env () : t =
   let node_idx = int_env "NODE_IDX" (int_env "PRIMALSERVER_NODE_IDX" 17) in
+  (* Reporting node identity for pushgateway/stats, distinct from the firehose node (node_idx).
+     On this box only the node-17 firehose (port 9017) exists, but the importer replaces the
+     production node-18 Julia importer, so its metrics/stats are published as node 18 (the Grafana
+     panel queries cache_any{exported_job="primalnode18"}). Override with PRIMALSERVER_REPORT_NODE_IDX. *)
+  let report_node = int_env "PRIMALSERVER_REPORT_NODE_IDX" 18 in
+  let storage_path =
+    Option.value (getenv "PRIMALSERVER_STORAGE_PATH") ~default:"/home/pr/var/primalserver"
+  in
   {
     firehose_host = Option.value (getenv "PRIMALSERVER_FIREHOSE_HOST") ~default:"127.0.0.1";
     firehose_port = int_env "PRIMALSERVER_FIREHOSE_PORT" (9000 + node_idx);
@@ -77,7 +86,12 @@ let from_env () : t =
     pushgateway_enabled = bool_env "IMPORTER_PUSHGATEWAY" true;
     pushgateway_host = Option.value (getenv "IMPORTER_PUSHGATEWAY_HOST") ~default:"127.0.0.1";
     pushgateway_port = int_env "IMPORTER_PUSHGATEWAY_PORT" 9091;
-    pushgateway_job = Option.value (getenv "IMPORTER_PUSHGATEWAY_JOB") ~default:"cache_any";
+    pushgateway_job =
+      Option.value (getenv "IMPORTER_PUSHGATEWAY_JOB")
+        ~default:(Printf.sprintf "primalnode%d" report_node);
+    pushgateway_stats_file =
+      Option.value (getenv "IMPORTER_STATS_FILE")
+        ~default:(Printf.sprintf "%s/primalnode%d/cache/db/stats.json" storage_path report_node);
     pushgateway_interval = float_env "IMPORTER_PUSHGATEWAY_INTERVAL" 15.0;
     cs =
       {
