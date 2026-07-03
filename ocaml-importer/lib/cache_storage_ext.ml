@@ -483,9 +483,27 @@ let gate_mutelist (est : CS.est) (recipient : string) (arr : CS.notif_arg array)
             | _ -> false)
         mv.tags
 
+(* Julia notification spam guard (cache_storage_ext.jl): drop notifications for a receiver who has
+   no followers and is not verified on primal (verified_users, in the cache DB) — keeps the table
+   free of noise aimed at brand-new/throwaway accounts. Follower count is a single indexed lookup;
+   verified_users is only queried when the receiver has zero followers. Fails open: a DB error
+   leaves the notification in place (Julia wraps this in catch_exception). Unconditional, unlike the
+   app_settings-gated serving-layer gates. *)
+let blocked_unfollowed_unverified (est : CS.est) (recipient : string) : bool =
+  try
+    CS.pubkey_followers_cnt est recipient = 0
+    && (match
+          [%pgsql est.CS.dbh "select 1 from verified_users where pubkey = $recipient limit 1"]
+        with
+       | [] -> true
+       | _ :: _ -> false)
+  with
+  | Eio.Cancel.Cancelled _ as e -> raise e
+  | _ -> false
+
 (* Julia notification (cache_storage_ext.jl:611). Membership-table gates run only when app_settings
-   is present (init_notification_gating); the self-notification, hidden-event and USER_UNFOLLOWED_YOU
-   gates always apply. *)
+   is present (init_notification_gating); the self-notification, hidden-event, USER_UNFOLLOWED_YOU
+   and no-followers-and-unverified gates always apply. *)
 let notification (est : CS.est) (recipient : string) (notif_created_at : int) (ntype : int)
     (args : CS.notif_arg list) : unit =
   let arr = Array.of_list args in
@@ -494,6 +512,7 @@ let notification (est : CS.est) (recipient : string) (notif_created_at : int) (n
     || List.exists
          (function CS.Apk pk -> pk = recipient | CS.Aeid eid -> ext_is_hidden_event est eid | _ -> false)
          args
+    || blocked_unfollowed_unverified est recipient
     || (!app_settings_present
        && ((not (is_app_user est recipient))
           || gate_hellthread est recipient ntype arr
