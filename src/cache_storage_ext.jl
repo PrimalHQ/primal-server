@@ -618,6 +618,16 @@ function notification(
     callargs = (; pubkey, notif_created_at, notif_type, args)
     # @show callargs
 
+    let skip = Ref(false)
+        catch_exception(est, :notification_blocked_unfollowed_unverified, callargs) do
+            if get(est.pubkey_followers_cnt, pubkey, 0) == 0 &&
+               isempty(Postgres.execute(:p0, "select 1 from verified_users where pubkey = \$1 limit 1", [pubkey])[2])
+                skip[] = true
+            end
+        end
+        skip[] && return
+    end
+
     for a in args
         a isa Nostr.PubKeyId && a == pubkey && return
         if a isa Nostr.EventId && (ext_is_hidden(est, a) ||
