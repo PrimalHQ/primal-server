@@ -7,7 +7,8 @@
      imports the event into Postgres;
    - run the firehose client, feeding messages into the worker queue.
 
-   Configuration comes from the environment (see lib/config.ml). *)
+   Configuration comes from a JSON file passed as the sole command-line argument (all settings
+   are read from there; the environment is not consulted at runtime). See lib/config.ml. *)
 
 open Eio.Std
 module CS = Importer.Cache_storage
@@ -18,10 +19,29 @@ module SD = Importer.Spam_detection
 module FC = Importer.Firehose_client
 module WP = Importer.Worker_pool
 
+let usage () =
+  Printf.eprintf "usage: %s <config.json>   run the importer with settings from the JSON config file\n%!"
+    Sys.argv.(0)
+
 let () =
+  (* Config is read entirely from the JSON file named on the command line (required). Parsing runs
+     before Eio_main.run — it does not need the Eio env. *)
+  let cfg =
+    match Sys.argv with
+    | [| _; path |] when String.length path > 0 && path.[0] <> '-' -> (
+        try Cfg.of_json_file path with
+        | Cfg.Config_error msg ->
+            Printf.eprintf "primal-importer: config error: %s\n%!" msg;
+            exit 2
+        | Sys_error msg ->
+            Printf.eprintf "primal-importer: %s\n%!" msg;
+            exit 2)
+    | _ ->
+        usage ();
+        exit 2
+  in
   Eio_main.run @@ fun env ->
   Mirage_crypto_rng_unix.use_default ();
-  let cfg = Cfg.from_env () in
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
   let domain_mgr = Eio.Stdenv.domain_mgr env in
@@ -50,8 +70,8 @@ let () =
   let stats = Importer.Stats.create () in
   let make_est () : CS.est =
     Mirage_crypto_rng_unix.use_default (); (* RNG for TLS in this worker domain *)
-    let dbh = Pg.connect (Pg.cache_conninfo ()) in
-    let mem_dbh = Pg.connect (Pg.membership_conninfo ()) in
+    let dbh = Pg.connect cfg.cache_db in
+    let mem_dbh = Pg.connect cfg.membership_db in
     { CS.cfg = cfg.cs; dbh; mem_dbh }
   in
   (* Runs in a worker domain. Counts started/completed (for queue depth & busy-workers) and the
@@ -99,6 +119,7 @@ let () =
   (* Initialise the humaness threshold from pubkey_trustrank (rank of the 50,000th-ranked
      pubkey), mirroring TrustRank.load. Done on the main domain before the worker domains spawn,
      so they all observe the final value. *)
+  Importer.Cache_storage_ext.set_humaness_override cfg.humaness_threshold;
   let humaness = Importer.Cache_storage_ext.load_humaness_threshold hooks_est in
   Printf.printf "primal-importer: humaness_threshold = %g\n%!" humaness;
 
@@ -129,16 +150,12 @@ let () =
 
   (* Event syncer: build a remote conninfo per peer host (same port/credentials as local, only the
      host differs), then run a fiber that periodically pulls recent events into the queue. *)
-  let sync_remotes =
-    List.map
-      (fun host -> { (Pg.cache_conninfo ()) with Pg.host })
-      cfg.event_sync_remotes
-  in
+  let sync_remotes = List.map (fun host -> { cfg.cache_db with Pg.host }) cfg.event_sync_remotes in
   let run_event_syncer () =
     (* The syncer owns its connections (a dedicated local conninfo + the remotes); it must not
        reuse hooks_est.dbh, which the scheduled-hooks fiber drives concurrently. *)
     if cfg.event_sync_enabled && sync_remotes <> [] then
-      Importer.Event_syncer.run ~clock ~local:(Pg.cache_conninfo ()) ~remotes:sync_remotes
+      Importer.Event_syncer.run ~clock ~local:cfg.cache_db ~remotes:sync_remotes
         ~submit:(fun e ->
           WP.submit_event pool e;
           Importer.Stats.submitted stats)

@@ -30,22 +30,24 @@ let current_time = Utils.current_time
    first(sorted, 50000)[end][2]). load runs only in the separate TrustRankMaker process, but the
    value it derives comes from the same shared pubkey_trustrank table — so we reproduce that
    cutoff here directly from the table at startup (load_humaness_threshold) rather than leave it
-   pinned at 0.0. IMPORTER_HUMANESS_THRESHOLD, when set, is an explicit override that wins over
-   the computed value. *)
-let env_threshold =
-  match Sys.getenv_opt "IMPORTER_HUMANESS_THRESHOLD" with
-  | Some v -> ( try Some (float_of_string v) with _ -> None)
-  | None -> None
+   pinned at 0.0. The config file's [humaness_threshold], when set, is an explicit override that
+   wins over the computed value. *)
+(* The explicit override (from the config file's [humaness_threshold], set by main via
+   [set_humaness_override]); [Some _] pins the value, [None] means compute it at startup. *)
+let humaness_override = ref None
+let humaness_threshold = ref 0.0
 
-let humaness_threshold = ref (Option.value env_threshold ~default:0.0)
+let set_humaness_override (t : float option) =
+  humaness_override := t;
+  match t with Some v -> humaness_threshold := v | None -> ()
 
 (* Mirror TrustRank.load: humaness_threshold = rank of the 50,000th-highest-ranked pubkey (or the
    lowest rank present, if fewer than 50,000 rows). min over the top-50000-by-rank window is
-   exactly Julia's first(sorted, 50000)[end][2]. Skipped when IMPORTER_HUMANESS_THRESHOLD pins an
-   explicit override; an empty table keeps 0.0. Call once at startup, before the worker domains
+   exactly Julia's first(sorted, 50000)[end][2]. Skipped when the config file pins an explicit
+   humaness_threshold override; an empty table keeps 0.0. Call once at startup, before the worker domains
    read the value; returns the threshold now in force. *)
 let load_humaness_threshold (est : CS.est) : float =
-  (match env_threshold with
+  (match !humaness_override with
   | Some _ -> () (* explicit override already in the ref *)
   | None -> (
       let dbh = est.CS.dbh in

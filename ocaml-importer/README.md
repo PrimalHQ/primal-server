@@ -72,10 +72,29 @@ It can therefore *only* ever truncate the reference DB and can never touch a liv
 
 ---
 
-## Configuration (environment variables)
+## Configuration (JSON file)
 
-All configuration is read from the environment; there are no config files. Binaries that
-take positional CLI arguments are noted in the per-binary section.
+`bin/main` (the importer) reads **all** of its settings from a single JSON config file passed
+as its sole command-line argument; the environment is **not** consulted at runtime. The file
+lives at `/home/pr/work/itk/primal/primal-importer-config.json` (outside the repo — it is a
+deployment artifact); `rebuild-restart-importer.sh` passes that path automatically (override with
+`IMPORTER_CONFIG`). Edit the file directly to change a setting, then restart.
+
+The JSON keys mirror the variables below with the `IMPORTER_`/`PRIMALSERVER_` prefixes dropped
+(e.g. `IMPORTER_WORKERS` → `num_workers`, `PRIMALSERVER_FIREHOSE_HOST` → `firehose_host`,
+`IMPORTER_VERIFY` → `verification_enabled`); the DB connections become the nested `cache_db` /
+`membership_db` objects (`{host, port, user, database}`); and the derive-only inputs (`NODE_IDX`,
+`PRIMALSERVER_REPORT_NODE_IDX`, `PRIMALSERVER_STORAGE_PATH`) are not stored — their resolved
+outputs (`firehose_port`, `pushgateway_job`, `pushgateway_stats_file`) appear directly. `proxy`
+and `humaness_threshold` are `null` when unset; pubkey lists are lowercase-hex string arrays.
+Every key is **required** — the file is authoritative, so a missing key is an error rather than a
+silent fallback. The defaults below are the values `bin/main` shipped with (also encoded in
+`Config.from_env`, which the dev tools read); use them to author or repair the file by hand.
+
+The **dev tools** (`bin/compare`, etc.) still read the environment (`PG*` / `COMPARE_*`); only
+`bin/main` is config-file driven. The tables below give each option's env name (as read by the
+dev tools) and default. Binaries that take positional CLI arguments are noted in the per-binary
+section.
 
 ### Database connections
 
@@ -141,12 +160,14 @@ Booleans accept `1/true/yes/on` and `0/false/no/off`.
 
 Build any of them with `dune build bin/<name>.exe` and run with
 `nix develop "path:$P" -c dune exec bin/<name>.exe [args]` (or run the built artifact
-directly: `_build/default/bin/<name>.exe [args]`). All read their DB connection and config
-from the environment variables above.
+directly: `_build/default/bin/<name>.exe [args]`). `bin/main` takes a required JSON config
+path (see [Configuration](#configuration-json-file)); the dev tools read their DB connection
+and config from the environment variables above.
 
 ### `main` — the importer
 
-The production entry point. No CLI arguments. Wires the firehose client, the spam
+The production entry point. Takes the JSON config file as its sole argument (see
+[Configuration](#configuration-json-file)). Wires the firehose client, the spam
 detector, the LNURL zapper verifier, the worker-domain pool, the [event syncer](#event-syncer),
 and a periodic scheduled-hooks runner, then imports forever (reconnecting to the firehose on
 drop). Imports also produce in-DB [notifications](#notifications). It prints a one-line
@@ -157,14 +178,12 @@ During development, don't run this by hand — use `rebuild-restart-importer.sh`
 watch the live DB.
 
 ```sh
-# default: firehose 127.0.0.1:9017, 4 workers, writes to PG* DB
-nix develop "path:$P" -c dune exec bin/main.exe
+# run the importer with all settings from the JSON file (firehose, workers, DBs, proxy, …)
+nix develop "path:$P" -c dune exec bin/main.exe -- /home/pr/work/itk/primal/primal-importer-config.json
 
-# example: explicit firehose + LNURL proxy + trustrank seeding
-PRIMALSERVER_FIREHOSE_PORT=9017 \
-PRIMALSERVER_PROXY=socks5h://192.168.41.2:1080 \
-IMPORTER_DISABLE_TRUSTRANK=true \
-nix develop "path:$P" -c dune exec bin/main.exe
+# to change a setting (e.g. explicit firehose port, LNURL proxy, trustrank seeding), edit the JSON
+# file — proxy: "socks5h://192.168.41.2:1080", disable_trustrank: true, firehose_port: 9017 — and
+# restart.
 ```
 
 > Writes to the cache DB (`PG*`), which defaults to the reference DB. After live runs

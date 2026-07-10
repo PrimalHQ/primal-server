@@ -19,6 +19,17 @@ nix develop "path:$P" -c dune build @check  # type-check only
 `PGDATABASE=primal1` (live DB) is used for BOTH compile-time SQL checking and runtime. The
 reference DB `primal_importer_ref` is only for occasional tests.
 
+## Runtime config is a JSON file, not the environment
+
+`main.exe` reads **all** of its settings from a single JSON file given as its sole argument
+(`main.exe <config.json>`); the environment is **not** consulted at runtime. The file lives at
+`/home/pr/work/itk/primal/primal-importer-config.json` and `rebuild-restart-importer.sh` passes it
+automatically (override with `IMPORTER_CONFIG`). Every key is required. To change a runtime
+setting, edit that JSON file and restart. The defaults are documented in `README.md` →
+Configuration and encoded in `Config.from_env` (`lib/config.ml`), which the dev tools
+(`bin/compare`, etc. — these still read the environment) use; `Config.of_json_file` loads the
+file.
+
 ## Always use `rebuild-restart-importer.sh` after code/SQL changes
 
 `./rebuild-restart-importer.sh` rebuilds with dune and, only if the build succeeds, (re)starts
