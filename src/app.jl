@@ -546,7 +546,42 @@ function import_content_moderation_rules(est::DB.CacheStorage, user_pubkey)
     end
 end
 
-is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId) = false
+TRENDING_BLOCKED_DOMAINS = Set()
+
+trending_author_domain_cache = Dict{Nostr.PubKeyId, Union{Nothing, String}}() |> ThreadSafe
+trending_author_domain_cache_periodic = Throttle(; period=300.0)
+
+function author_nip05_domain(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    pubkey in est.meta_data || return nothing
+    eid = est.meta_data[pubkey]
+    eid in est.events || return nothing
+    d = try JSON.parse(est.events[eid].content) catch _; nothing end
+    d isa AbstractDict || return nothing
+    nip05 = get(d, "nip05", nothing)
+    nip05 isa AbstractString || return nothing
+    parts = split(nip05, '@')
+    length(parts) == 2 || return nothing
+    lowercase(strip(parts[2]))
+end
+
+function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+    scope == :trending || return false
+    isempty(TRENDING_BLOCKED_DOMAINS) && return false
+    trending_author_domain_cache_periodic() do
+        lock(trending_author_domain_cache) do c; empty!(c); end
+    end
+    cached = lock(trending_author_domain_cache) do c
+        haskey(c, pubkey) ? Some(c[pubkey]) : nothing
+    end
+    domain = if cached === nothing
+        d = author_nip05_domain(est, pubkey)
+        lock(trending_author_domain_cache) do c; c[pubkey] = d; end
+        d
+    else
+        something(cached)
+    end
+    domain !== nothing && domain in TRENDING_BLOCKED_DOMAINS
+end
 is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId) = false
 
 function is_hidden_(est::DB.CacheStorage, cmr::NamedTuple, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId; author_exempt=nothing)
