@@ -21,7 +21,7 @@ git**, refer to the flake with the `path:` scheme (the plain `.#` form will not 
 files):
 
 ```sh
-P=/home/pr/work/itk/primal/primal-net-server/primal-server/ocaml-importer
+P=$HOME/work/itk/primal/primal-net-server/primal-server/ocaml-importer
 
 nix develop "path:$P"                       # interactive dev shell
 nix develop "path:$P" -c dune build @all    # build everything
@@ -76,7 +76,7 @@ It can therefore *only* ever truncate the reference DB and can never touch a liv
 
 `bin/main` (the importer) reads **all** of its settings from a single JSON config file passed
 as its sole command-line argument; the environment is **not** consulted at runtime. The file
-lives at `/home/pr/work/itk/primal/primal-importer-config.json` (outside the repo — it is a
+lives at `$HOME/work/itk/primal/primal-importer-config.json` (outside the repo — it is a
 deployment artifact); `rebuild-restart-importer.sh` passes that path automatically (override with
 `IMPORTER_CONFIG`). Edit the file directly to change a setting, then restart.
 
@@ -144,7 +144,7 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_STATS_FILE` | `<storage>/primalnode<report-node>/cache/db/stats.json` | Julia stats file the `cache_any` total is loaded from and persisted to. |
 | `IMPORTER_PUSHGATEWAY_INTERVAL` | `15` | Seconds between pushes. |
 | `PRIMALSERVER_REPORT_NODE_IDX` | `18` | Reporting node identity for the two defaults above (distinct from the firehose node `NODE_IDX`). |
-| `PRIMALSERVER_STORAGE_PATH` | `/home/pr/var/primalserver` | Storage root for the default `IMPORTER_STATS_FILE`. |
+| `PRIMALSERVER_STORAGE_PATH` | `$HOME/var/primalserver` | Storage root for the default `IMPORTER_STATS_FILE`. |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`.
 
@@ -179,7 +179,7 @@ watch the live DB.
 
 ```sh
 # run the importer with all settings from the JSON file (firehose, workers, DBs, proxy, …)
-nix develop "path:$P" -c dune exec bin/main.exe -- /home/pr/work/itk/primal/primal-importer-config.json
+nix develop "path:$P" -c dune exec bin/main.exe -- $HOME/work/itk/primal/primal-importer-config.json
 
 # to change a setting (e.g. explicit firehose port, LNURL proxy, trustrank seeding), edit the JSON
 # file — proxy: "socks5h://192.168.41.2:1080", disable_trustrank: true, firehose_port: 9017 — and
@@ -274,12 +274,12 @@ nix develop "path:$P" -c dune exec bin/phase8check.exe
 while developing: it rebuilds everything with dune and, **only if the build succeeds**,
 (re)starts `main.exe` as a detached background process, replacing any importer already running
 from this project's binary. stdout+stderr (including the per-second stats line and
-`event_syncer:` lines) go to `/home/pr/var/primalserver/ocaml-importer.log` (truncated each run);
+`event_syncer:` lines) go to `$HOME/var/primalserver/ocaml-importer.log` (truncated each run);
 the pid and log path are printed to stderr.
 
 ```sh
 ./rebuild-restart-importer.sh
-# tail -f /home/pr/var/primalserver/ocaml-importer.log
+# tail -f $HOME/var/primalserver/ocaml-importer.log
 ```
 
 **Use it after any change to importer code or SQL.** Because `main` writes to the live `primal1`

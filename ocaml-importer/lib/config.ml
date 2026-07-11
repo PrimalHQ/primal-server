@@ -70,7 +70,9 @@ let from_env () : t =
      panel queries cache_any{exported_job="primalnode18"}). Override with PRIMALSERVER_REPORT_NODE_IDX. *)
   let report_node = int_env "PRIMALSERVER_REPORT_NODE_IDX" 18 in
   let storage_path =
-    Option.value (getenv "PRIMALSERVER_STORAGE_PATH") ~default:"/home/pr/var/primalserver"
+    match getenv "PRIMALSERVER_STORAGE_PATH" with
+    | Some p -> p
+    | None -> Filename.concat (Option.value (getenv "HOME") ~default:".") "var/primalserver"
   in
   {
     firehose_host = Option.value (getenv "PRIMALSERVER_FIREHOSE_HOST") ~default:"127.0.0.1";

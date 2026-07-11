@@ -10,7 +10,7 @@ full layout, binaries, and environment variables.
 All dune commands run inside the project's flake dev shell. Set `P` to this directory:
 
 ```sh
-P=/home/pr/work/itk/primal/primal-net-server/primal-server/ocaml-importer
+P=$HOME/work/itk/primal/primal-net-server/primal-server/ocaml-importer
 cd "$P"
 nix develop "path:$P" -c dune build @all   # build (fails if any inline [%pgsql] mismatches primal1)
 nix develop "path:$P" -c dune build @check  # type-check only
@@ -23,7 +23,7 @@ reference DB `primal_importer_ref` is only for occasional tests.
 
 `main.exe` reads **all** of its settings from a single JSON file given as its sole argument
 (`main.exe <config.json>`); the environment is **not** consulted at runtime. The file lives at
-`/home/pr/work/itk/primal/primal-importer-config.json` and `rebuild-restart-importer.sh` passes it
+`$HOME/work/itk/primal/primal-importer-config.json` and `rebuild-restart-importer.sh` passes it
 automatically (override with `IMPORTER_CONFIG`). Every key is required. To change a runtime
 setting, edit that JSON file and restart. The defaults are documented in `README.md` →
 Configuration and encoded in `Config.from_env` (`lib/config.ml`), which the dev tools
@@ -35,7 +35,7 @@ file.
 `./rebuild-restart-importer.sh` rebuilds with dune and, only if the build succeeds, (re)starts
 `main.exe` as a detached background process (stopping any importer already running from this
 project's binary — matched by full exe path, never by bare name). Its stdout+stderr go to
-`/home/pr/var/primalserver/ocaml-importer.log` (truncated each run); the pid and log path print to
+`$HOME/var/primalserver/ocaml-importer.log` (truncated each run); the pid and log path print to
 stderr.
 
 **Run it after any relevant change** so a freshly-built `main` is always the one running. Because
@@ -44,7 +44,7 @@ the correct rows:
 
 1. Edit code/SQL.
 2. `./rebuild-restart-importer.sh` (a broken build leaves the running importer untouched).
-3. Watch `tail -f /home/pr/var/primalserver/ocaml-importer.log` (per-second stats, `event_syncer:`
+3. Watch `tail -f $HOME/var/primalserver/ocaml-importer.log` (per-second stats, `event_syncer:`
    lines, any `worker:`/exception output) and query the DB to confirm the data is correct, e.g.
    `event`, `event_stats_1_1b380f4869`, `pubkey_notifications_1_e5459ab9dd`,
    `pubkey_notification_cnts_1_d78f6fcade`.
