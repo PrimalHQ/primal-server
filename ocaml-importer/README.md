@@ -272,10 +272,13 @@ nix develop "path:$P" -c dune exec bin/phase8check.exe
 
 `rebuild-restart-importer.sh` (repo: `ocaml-importer/`) is the standard way to run `main`
 while developing: it rebuilds everything with dune and, **only if the build succeeds**,
-(re)starts `main.exe` as a detached background process, replacing any importer already running
-from this project's binary. stdout+stderr (including the per-second stats line and
-`event_syncer:` lines) go to `$HOME/var/primalserver/ocaml-importer.log` (truncated each run);
-the pid and log path are printed to stderr.
+(re)starts `main.exe` as a transient systemd `--user` service (`primal-ocaml-importer.service`) in
+its own cgroup, replacing any importer already running from this project's binary. The service has
+a 10G `MemoryMax` and auto-restarts on any exit, including an OOM `SIGKILL`. stdout+stderr
+(including the per-second stats line and `event_syncer:` lines) are appended to
+`$HOME/var/primalserver/ocaml-importer.log` (truncated once at the manual restart, then appended
+across auto-restarts); the pid and the log/status/stop commands are printed to stderr. Inspect or
+stop it with `systemctl --user status|stop primal-ocaml-importer`.
 
 ```sh
 ./rebuild-restart-importer.sh

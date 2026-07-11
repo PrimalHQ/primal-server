@@ -33,10 +33,13 @@ file.
 ## Always use `rebuild-restart-importer.sh` after code/SQL changes
 
 `./rebuild-restart-importer.sh` rebuilds with dune and, only if the build succeeds, (re)starts
-`main.exe` as a detached background process (stopping any importer already running from this
-project's binary — matched by full exe path, never by bare name). Its stdout+stderr go to
-`$HOME/var/primalserver/ocaml-importer.log` (truncated each run); the pid and log path print to
-stderr.
+`main.exe` as a transient **systemd `--user` service** (`primal-ocaml-importer.service`), stopping
+any importer already running from this project's binary — matched by full exe path, never by bare
+name. The service runs in its own cgroup with a 10G `MemoryMax` and **auto-restarts** on any exit,
+including an OOM `SIGKILL` (`Restart=always`, `OOMPolicy=kill`). Its stdout+stderr are appended to
+`$HOME/var/primalserver/ocaml-importer.log` (the script truncates it once at the manual restart,
+then the service appends across auto-restarts); the pid and the log/status/stop commands print to
+stderr. Inspect or stop it with `systemctl --user status|stop primal-ocaml-importer`.
 
 **Run it after any relevant change** so a freshly-built `main` is always the one running. Because
 `main` writes to the live `primal1` DB, this lets you verify in real time that a change produces
