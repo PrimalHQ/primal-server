@@ -48,6 +48,29 @@ let imported_total t = Atomic.get t.imported
 
 let fmt_hms s = Printf.sprintf "%02d:%02d:%02d" (s / 3600) (s / 60 mod 60) (s mod 60)
 
+(* Whole-process resident set size (bytes), read from /proc/self/statm (field 2 = resident pages).
+   This is process-wide — it covers every worker domain and all C/malloc allocations (libpq buffers,
+   TLS, etc.), not just the OCaml heap — so it is the number the OOM killer actually acts on. Linux
+   x86_64 pages are 4 KiB. Best-effort: any read failure yields 0. *)
+let page_size = 4096
+
+let read_rss_bytes () =
+  try
+    let ic = open_in "/proc/self/statm" in
+    Fun.protect
+      ~finally:(fun () -> close_in_noerr ic)
+      (fun () ->
+        match String.split_on_char ' ' (input_line ic) with
+        | _size :: resident :: _ -> int_of_string resident * page_size
+        | _ -> 0)
+  with _ -> 0
+
+let fmt_bytes b =
+  let b = float_of_int b in
+  if b >= 1073741824. then Printf.sprintf "%.2fG" (b /. 1073741824.)
+  else if b >= 1048576. then Printf.sprintf "%.0fM" (b /. 1048576.)
+  else Printf.sprintf "%.0fK" (b /. 1024.)
+
 (* Loop forever (run as a fiber on the main domain): once per second, print per-second deltas of
    the rate counters plus instantaneous queue depth / busy-workers / cumulative totals. Pure
    in-memory; never touches the DB. *)
@@ -66,7 +89,14 @@ let report_loop ~clock ~capacity ~workers (t : t) : unit =
     let depth = max 0 (sub - sta) and busy = max 0 (sta - comp) in
     let pct = if capacity > 0 then 100. *. float_of_int depth /. float_of_int capacity else 0. in
     let uptime = int_of_float (Eio.Time.now clock -. start) in
+    (* rss = whole-process resident memory (what OOM acts on); heap = OCaml major heap (shared
+       across domains). The gap between them is C/malloc memory (libpq, TLS) — so a growing rss with
+       a flat heap points at a native leak rather than an OCaml one. quick_stat does not walk the
+       heap, so it is cheap to sample every second. *)
+    let rss = read_rss_bytes () in
+    let heap = (Gc.quick_stat ()).Gc.heap_words * (Sys.word_size / 8) in
     Printf.printf
-      "[importer %s] recv %d/s  imp %d/s  dup %d/s  rej %d/s  err %d/s | q %d/%d %.1f%% | busy %d/%d | tot %d | r=%d\n%!"
-      (fmt_hms uptime) d_recv d_imp d_dup d_rej d_err depth capacity pct busy workers imp rc
+      "[importer %s] recv %d/s  imp %d/s  dup %d/s  rej %d/s  err %d/s | q %d/%d %.1f%% | busy %d/%d | tot %d | rss %s heap %s | r=%d\n%!"
+      (fmt_hms uptime) d_recv d_imp d_dup d_rej d_err depth capacity pct busy workers imp
+      (fmt_bytes rss) (fmt_bytes heap) rc
   done
