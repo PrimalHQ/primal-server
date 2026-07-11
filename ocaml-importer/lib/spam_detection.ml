@@ -108,65 +108,92 @@ let copy_table (src : ('a, 'b) Hashtbl.t) (dst : ('a, 'b) Hashtbl.t) : unit =
   Hashtbl.reset dst;
   Hashtbl.iter (fun k v -> Hashtbl.replace dst k v) src
 
-let on_event (sd : t) ~(est : CS.est) (e : Nostr.t) (now : float) : bool =
+(* The clustering + periodic-snapshot mutations of [sd]'s shared state (called with the mutex held).
+   [ewords] is precomputed by the caller outside the lock. Returns false iff the event matched an
+   already-large latest cluster (i.e. is realtime spam). *)
+let cluster_locked (sd : t) (est : CS.est) (e : Nostr.t) (ewords : SS.t) (now : float) : bool =
   let notspam = ref true in
-  Mutex.lock sd.mutex;
-  Fun.protect
-    ~finally:(fun () -> Mutex.unlock sd.mutex)
-    (fun () ->
-      if
-        float_of_int e.created_at < now +. 300.
-        && e.kind = Nostr.kind_text_note
-        && (not (Hashtbl.mem sd.events e.id))
-      then begin
-        Hashtbl.replace sd.events e.id e;
-        if Nostr.verify e && Cache_storage.pubkey_followers_cnt est e.pubkey < sd.follower_cnt_threshold
-        then begin
-          let ewords = split_words e.content in
-          if SS.cardinal ewords >= sd.min_note_size then begin
-            (* realtime: does this match an already-large latest cluster? *)
-            (try
-               List.iter
-                 (fun c ->
-                   if List.length c.eids >= sd.cluster_size_threshold && is_spam ewords c.words then begin
-                     notspam := false;
-                     sd.realtime_spamlist <- SS.add e.pubkey sd.realtime_spamlist;
-                     sd.realtime_spamlist_diff <- SS.add e.pubkey sd.realtime_spamlist_diff;
-                     if now -. sd.last_realtime_flush >= sd.realtime_flush_period then begin
-                       sd.last_realtime_flush <- now;
-                       process_spamlist sd est sd.realtime_spamlist_diff;
-                       sd.realtime_spamlist_diff <- SS.empty
-                     end;
-                     List.iter (fun p -> try p est e with _ -> ()) sd.spamevent_processors;
-                     raise Exit
-                   end)
-                 sd.latest_clusters
-             with Exit -> ());
-            (* add to (or open) a cluster *)
-            try
-              List.iter
-                (fun c ->
-                  if is_spam ewords c.words then begin
-                    c.eids <- e.id :: c.eids;
-                    raise Exit
-                  end)
-                sd.clusters;
-              sd.clusters <- { words = ewords; eids = [ e.id ] } :: sd.clusters
-            with Exit -> ()
-          end;
-          (* periodic snapshot + spamlist production *)
-          if now -. sd.tlatest >= sd.spamlist_period then begin
-            sd.tlatest <- now;
-            copy_table sd.events sd.latest_events;
-            sd.latest_clusters <- sd.clusters;
-            Hashtbl.reset sd.events;
-            sd.clusters <- [];
-            sd.realtime_spamlist <- SS.empty;
-            produce_spamlist sd est
-          end
-        end
-      end);
+  if SS.cardinal ewords >= sd.min_note_size then begin
+    (* realtime: does this match an already-large latest cluster? *)
+    (try
+       List.iter
+         (fun c ->
+           if List.length c.eids >= sd.cluster_size_threshold && is_spam ewords c.words then begin
+             notspam := false;
+             sd.realtime_spamlist <- SS.add e.pubkey sd.realtime_spamlist;
+             sd.realtime_spamlist_diff <- SS.add e.pubkey sd.realtime_spamlist_diff;
+             if now -. sd.last_realtime_flush >= sd.realtime_flush_period then begin
+               sd.last_realtime_flush <- now;
+               process_spamlist sd est sd.realtime_spamlist_diff;
+               sd.realtime_spamlist_diff <- SS.empty
+             end;
+             List.iter (fun p -> try p est e with _ -> ()) sd.spamevent_processors;
+             raise Exit
+           end)
+         sd.latest_clusters
+     with Exit -> ());
+    (* add to (or open) a cluster *)
+    try
+      List.iter
+        (fun c ->
+          if is_spam ewords c.words then begin
+            c.eids <- e.id :: c.eids;
+            raise Exit
+          end)
+        sd.clusters;
+      sd.clusters <- { words = ewords; eids = [ e.id ] } :: sd.clusters
+    with Exit -> ()
+  end;
+  (* periodic snapshot + spamlist production *)
+  if now -. sd.tlatest >= sd.spamlist_period then begin
+    sd.tlatest <- now;
+    copy_table sd.events sd.latest_events;
+    sd.latest_clusters <- sd.clusters;
+    Hashtbl.reset sd.events;
+    sd.clusters <- [];
+    sd.realtime_spamlist <- SS.empty;
+    produce_spamlist sd est
+  end;
   !notspam
+
+let on_event (sd : t) ~(est : CS.est) (e : Nostr.t) (now : float) : bool =
+  (* Cheap gate first, no lock: only recent kind-1 text notes are clustered. *)
+  if not (float_of_int e.created_at < now +. 300. && e.kind = Nostr.kind_text_note) then true
+  else begin
+    (* Claim the event id in the corpus under a SHORT lock (dedup + insert). Bail if another worker
+       already handled this id, so the expensive verify/DB below runs at most once per event. *)
+    let fresh =
+      begin
+        Mutex.lock sd.mutex;
+        Fun.protect
+          ~finally:(fun () -> Mutex.unlock sd.mutex)
+          (fun () ->
+            if Hashtbl.mem sd.events e.id then false
+            else begin
+              Hashtbl.replace sd.events e.id e;
+              true
+            end)
+      end
+    in
+    if not fresh then true
+    else if
+      (* Signature verification (CPU) and the follower-count lookup (DB I/O) are the two costly
+         per-event steps. Run them WITHOUT the mutex so all worker domains do them in parallel on
+         their own connections, instead of serialising every event through the single global lock
+         (which also stalled the workers behind each other's DB round-trip). *)
+      not
+        (Nostr.verify e
+        && Cache_storage.pubkey_followers_cnt est e.pubkey < sd.follower_cnt_threshold)
+    then true
+    else begin
+      let ewords = split_words e.content in
+      (* Only the shared-state clustering + periodic snapshot need the lock. *)
+      Mutex.lock sd.mutex;
+      Fun.protect
+        ~finally:(fun () -> Mutex.unlock sd.mutex)
+        (fun () -> cluster_locked sd est e ewords now)
+    end
+  end
 
 let on_message (sd : t) ~(est : CS.est) (msg : string) (now : float) : bool =
   match try Nostr.event_from_msg (Yojson.Safe.from_string msg) with _ -> None with
