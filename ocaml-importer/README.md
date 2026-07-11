@@ -288,8 +288,11 @@ stop it with `systemctl --user status|stop primal-ocaml-importer`.
 **Use it after any change to importer code or SQL.** Because `main` writes to the live `primal1`
 DB, keeping a freshly-built `main` always running lets you verify in real time that a change
 produces the right rows — edit, `./rebuild-restart-importer.sh`, then watch the log and query the
-DB (e.g. `event`, `event_stats_1_1b380f4869`, `pubkey_notifications_1_e5459ab9dd`). Runtime env
-overrides propagate, e.g. `PRIMALSERVER_PROXY=socks5h://… ./rebuild-restart-importer.sh`.
+DB (e.g. `event`, `event_stats_1_1b380f4869`, `pubkey_notifications_1_e5459ab9dd`). To change a
+runtime setting (proxy, worker count, sync remotes, …), edit the JSON config file
+(`$HOME/work/itk/primal/primal-importer-config.json`, or the path in `$IMPORTER_CONFIG`) and re-run
+the script — `main.exe` reads every setting from that file and does not consult the environment at
+runtime.
 
 ## Event syncer
 
