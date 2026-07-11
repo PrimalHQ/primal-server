@@ -34,7 +34,10 @@ let default_config =
 (* [dbh] is the cache DB (Julia :p0); [mem_dbh] is the membership DB (Julia :membership),
    where the filterlist / human_override tables live. At compile time both type-check against
    the same reference DB. *)
-type est = { cfg : config; dbh : Postgres.dbh; mem_dbh : Postgres.dbh }
+(* [dbh]/[mem_dbh] are mutable so a worker can swap in fresh connections after Postgres drops them
+   (restart / network reset) without rebuilding the whole est — see [reconnect_est] in main.ml. Each
+   per-event query reads [est.dbh] afresh, so the swap takes effect on the next event. *)
+type est = { cfg : config; mutable dbh : Postgres.dbh; mutable mem_dbh : Postgres.dbh }
 
 (* A single notification argument, as it is stored in pubkey_notifications. The first two
    positional args of every NotificationType are an EventId / PubKeyId (written to the bytea

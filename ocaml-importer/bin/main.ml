@@ -74,6 +74,43 @@ let () =
     let mem_dbh = Pg.connect cfg.membership_db in
     { CS.cfg = cfg.cs; dbh; mem_dbh }
   in
+  (* Rebuild an est's connections after Postgres drops them (restart, network reset). Blocks the
+     calling fiber, retrying every [retry]s until BOTH connections are back, so a worker stops
+     spinning on a dead handle — and stops pulling new work — until the DB returns instead of
+     failing every subsequent event forever. The job that triggered the loss is abandoned; the
+     firehose / event-syncer re-deliver it and duplicate imports are cheap. Safe from a worker
+     domain: Pg.connect uses that domain's Eio env and Eio.Time.sleep suspends on its scheduler. *)
+  let reconnect_est ?(retry = 2.0) (est : CS.est) : unit =
+    (try Pg.close est.CS.dbh with _ -> ());
+    (try Pg.close est.CS.mem_dbh with _ -> ());
+    Printf.eprintf "worker: DB connection lost; reconnecting\n%!";
+    let rec attempt () =
+      match
+        try
+          let dbh = Pg.connect cfg.cache_db in
+          let mem_dbh =
+            try Pg.connect cfg.membership_db
+            with e ->
+              (try Pg.close dbh with _ -> ());
+              raise e
+          in
+          `Ok (dbh, mem_dbh)
+        with
+        | Eio.Cancel.Cancelled _ as e -> raise e
+        | exn -> `Err exn
+      with
+      | `Ok (dbh, mem_dbh) ->
+          est.CS.dbh <- dbh;
+          est.CS.mem_dbh <- mem_dbh;
+          Printf.eprintf "worker: DB reconnected\n%!"
+      | `Err exn ->
+          Printf.eprintf "worker: DB reconnect failed (%s); retry in %.0fs\n%!"
+            (Printexc.to_string exn) retry;
+          Eio.Time.sleep clock retry;
+          attempt ()
+    in
+    attempt ()
+  in
   (* Runs in a worker domain. Counts started/completed (for queue depth & busy-workers) and the
      import outcome; completed is bumped via Fun.protect so it covers errors and cancellation.
      [Msg] = a raw firehose line (parse + spam-check + import); [Event] = an already-parsed event
@@ -104,7 +141,10 @@ let () =
         | Eio.Cancel.Cancelled _ as e -> raise e
         | exn ->
             Importer.Stats.errors stats;
-            Printf.eprintf "worker: %s\n%!" (Printexc.to_string exn))
+            Printf.eprintf "worker: %s\n%!" (Printexc.to_string exn);
+            (* A dead connection would make every subsequent event fail identically; reconnect
+               (blocking until the DB is back) so this worker resumes importing. *)
+            if Pg.is_connection_error exn then reconnect_est est)
   in
 
   Printf.printf "primal-importer: firehose %s:%d, %d workers%s\n%!" cfg.firehose_host
@@ -135,7 +175,9 @@ let () =
     while true do
       (try CS.run_scheduled_hooks hooks_est with
       | Eio.Cancel.Cancelled _ as e -> raise e
-      | exn -> Printf.eprintf "scheduled_hooks: %s\n%!" (Printexc.to_string exn));
+      | exn ->
+          Printf.eprintf "scheduled_hooks: %s\n%!" (Printexc.to_string exn);
+          if Pg.is_connection_error exn then reconnect_est hooks_est);
       Eio.Time.sleep clock 60.
     done
   in

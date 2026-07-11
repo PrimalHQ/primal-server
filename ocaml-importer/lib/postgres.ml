@@ -145,6 +145,23 @@ let connect (ci : conninfo) : dbh =
 
 let close (dbh : dbh) = PGOCaml.close dbh
 
+(* True for exceptions that mean the connection itself is gone (Postgres restart, network reset,
+   broken pipe) rather than a query/logic error. On these the handle is unusable and the caller
+   must reconnect before issuing further queries. The Eio adapter surfaces a lost socket as
+   [Eio.Net.E (Connection_reset _)] on a write (the "Broken pipe" seen in the log) or on a read, as
+   [Connection_failure _] when a fresh connect can't reach the server, and as [End_of_file] when the
+   backend closes the read side cleanly (e.g. a graceful `pg_ctl stop`). *)
+let is_connection_error : exn -> bool = function
+  | End_of_file -> true
+  | Eio.Io (Eio.Net.E (Eio.Net.Connection_reset _ | Eio.Net.Connection_failure _), _) -> true
+  | Unix.Unix_error
+      ( ( Unix.EPIPE | Unix.ECONNRESET | Unix.ECONNREFUSED | Unix.ECONNABORTED | Unix.ENOTCONN
+        | Unix.ETIMEDOUT | Unix.EHOSTUNREACH | Unix.ENETUNREACH | Unix.ENETDOWN | Unix.EHOSTDOWN ),
+        _,
+        _ ) ->
+      true
+  | _ -> false
+
 (* {1 Bounded connection pool} (exclusive lease per in-flight query; per domain).
 
    Eio.Stream acts as a bounded blocking queue of idle connections: [take] suspends the
