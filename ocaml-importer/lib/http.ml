@@ -32,10 +32,16 @@ let parse_url (u : string) : url option =
         in
         if host = "" then None else Some { scheme; host; port; path }
 
-let resolve ~net ~host ~port : Eio.Net.Sockaddr.stream =
-  match Eio.Net.getaddrinfo_stream ~service:(string_of_int port) net host with
-  | a :: _ -> a
-  | [] -> failwith (Printf.sprintf "http: cannot resolve %s:%d" host port)
+(* Resolve via pure-Eio DNS (Dns_eio), NOT getaddrinfo: libc getaddrinfo runs in a systhread
+   Eio cannot cancel, so a wedged nscd/resolver would escape the request timeout and hang the
+   fiber (the 2026-07-11 incident). IP literals skip DNS entirely. *)
+let resolve ~net ~clock ~sw ~host ~port : Eio.Net.Sockaddr.stream =
+  match Ipaddr.of_string host with
+  | Ok ip -> `Tcp (Eio.Net.Ipaddr.of_raw (Ipaddr.to_octets ip), port)
+  | Error _ -> (
+      match Dns_eio.resolve_v4 ~net ~clock ~sw host with
+      | Ok ip -> `Tcp (Eio.Net.Ipaddr.of_raw (Ipaddr.V4.to_octets ip), port)
+      | Error (`Msg m) -> failwith (Printf.sprintf "http: cannot resolve %s:%d: %s" host port m))
 
 (* De-chunk an HTTP/1.1 chunked body. *)
 let dechunk (s : string) : string =
@@ -77,11 +83,11 @@ type conn = [ Eio.Flow.two_way_ty | Eio.Resource.close_ty ] r
 
 (* Phases are recorded via Stats so a wedged request shows WHERE it is stuck (dns / connect /
    socks / tls / read) in the per-second stuck-slot report and the watchdog dump. *)
-let two_way_of_proxy ~sw ~net ~proxy ~host ~port : conn =
+let two_way_of_proxy ~sw ~net ~clock ~proxy ~host ~port : conn =
   match proxy with
   | Some (ph, pp) ->
       Stats.phase "https:dns";
-      let addr = resolve ~net ~host:ph ~port:pp in
+      let addr = resolve ~net ~clock ~sw ~host:ph ~port:pp in
       Stats.phase "https:connect";
       let f = Eio.Net.connect ~sw net addr in
       Stats.phase "https:socks";
@@ -89,7 +95,7 @@ let two_way_of_proxy ~sw ~net ~proxy ~host ~port : conn =
       (f :> conn)
   | None ->
       Stats.phase "https:dns";
-      let addr = resolve ~net ~host ~port in
+      let addr = resolve ~net ~clock ~sw ~host ~port in
       Stats.phase "https:connect";
       (Eio.Net.connect ~sw net addr :> conn)
 
@@ -108,7 +114,7 @@ let https_get ~net ~clock ?proxy ?(timeout = 10.0) (u : url) : string option =
       Switch.run @@ fun sw ->
       let result =
         Eio.Time.with_timeout clock timeout (fun () ->
-            let tcp = two_way_of_proxy ~sw ~net ~proxy ~host:u.host ~port:u.port in
+            let tcp = two_way_of_proxy ~sw ~net ~clock ~proxy ~host:u.host ~port:u.port in
             let host_dn = Domain_name.(host_exn (of_string_exn u.host)) in
             let authenticator =
               match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m

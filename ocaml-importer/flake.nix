@@ -38,6 +38,14 @@
           ocamlPkgs.mirage-crypto-rng
           ocamlPkgs.ptime
           ocamlPkgs.domain-name
+          # Pure-Eio DNS for LNURL hosts (lib/dns_eio.ml): getaddrinfo blocks a systhread that
+          # Eio cannot cancel, so it escapes the request timeout. Upstream dropped its Eio
+          # transport (dns-client-eio); we ship our own over dns-client.
+          ocamlPkgs.dns
+          ocamlPkgs.dns-client
+          ocamlPkgs.ipaddr
+          ocamlPkgs.cstruct
+          ocamlPkgs.mtime
         ];
       in {
         devShells.default = pkgs.mkShell {

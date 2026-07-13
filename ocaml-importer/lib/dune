@@ -20,7 +20,14 @@
   ca-certs
   domain-name
   mirage-crypto-rng
-  mirage-crypto-rng.unix)
+  mirage-crypto-rng.unix
+  dns
+  dns-client
+  dns-client.resolvconf
+  ipaddr
+  cstruct
+  mtime
+  mtime.clock.os)
  (foreign_stubs
   (language c)
   (names secp256k1_stubs))
