@@ -143,6 +143,10 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_PUSHGATEWAY_JOB` | `primalnode<report-node>` | Pushgateway `job` label (Prometheus exposes it as `exported_job`). |
 | `IMPORTER_STATS_FILE` | `<storage>/primalnode<report-node>/cache/db/stats.json` | Julia stats file the `cache_any` total is loaded from and persisted to. |
 | `IMPORTER_PUSHGATEWAY_INTERVAL` | `15` | Seconds between pushes. |
+| `IMPORTER_PUSH_NOTIFICATIONS` | `false` | Deliver device push notifications (APNS/FCM) via the sender subprocess (see [Push notifications](#notifications)). |
+| `IMPORTER_PUSH_NOTIFICATION_SENDER_BIN` | `$HOME/work/itk/primal/primal-net-server/push-notification-sender/target/release/push-notification-sender` | The push-notification-sender binary (JSON lines over stdin/stdout). |
+| `IMPORTER_PUSH_NOTIFICATIONS_PERIOD` | `5` | Seconds between push transmission batches (Julia `PERIOD`). |
+| `IMPORTER_PUSH_NOTIFICATIONS_LOG` | `false` | Dump each sender request/response JSON to stdout (Julia `LOG`). |
 | `PRIMALSERVER_REPORT_NODE_IDX` | `18` | Reporting node identity for the two defaults above (distinct from the firehose node `NODE_IDX`). |
 | `PRIMALSERVER_STORAGE_PATH` | `$HOME/var/primalserver` | Storage root for the default `IMPORTER_STATS_FILE`. |
 
@@ -382,10 +386,22 @@ Imports produce in-DB notifications, mirroring Julia `notification` / `notificat
 - **Side effect:** with `mem_dbh` on the real membership DB, the spam detector writes its
   `filterlist` blocks (comment-tagged `spam-detector: …`) and `import_reporting` writes there too —
   i.e. the importer contributes to the production membership filterlist, as the Julia importer does.
-- **Push notifications** (`lib/push_notifications.ml`) mirror the Julia stub and are **disabled**
-  at runtime (`enabled = false`, matching `PUSH_NOTIFICATIONS_ENABLED`); there is no APNS/FCM/
-  web-push backend to port. The token-registration helpers parse and verify input but do not
-  persist.
+- **Push notifications** (`lib/push_notifications.ml`) port the Julia `PushNotifications` module
+  (`primal-net-server/src/push_notifications.jl`): every stored, non-blocked notification is (when
+  `push_notifications_enabled`) rendered into a device push — per-user `pushNotifications`
+  settings (membership `app_settings`, defaults all-true), display names/avatars from kind-0
+  metadata (`mdpubkey`, with the membership `filterlist` block check and cached-media image
+  upgrade), event summaries with `nostr:`/`#[i]` refs resolved and URLs stripped, content images
+  via `video_thumbnails`/`media`, and one payload per device token from membership
+  `notification_tokens`. A main-domain fiber owns the **sender subprocess**
+  (`push_notification_sender_bin`, the Rust push-notification-sender speaking JSON lines): every
+  `push_notifications_period` seconds it drains the cross-domain buffer, batches by 50, groups by
+  platform, sends, and logs both directions to `t_push_notifications_log`. When idle it pings the
+  sender (`{"type":"ping"}`) and respawns it on failure (replacing Julia's blind
+  restart-if-quiet-for-180s monitor). Send metrics go to the pushgateway under `job=<job>-push`.
+  **Not ported:** the Julia TCP intake (port 20000) and its `"wallet-transaction"` type — the
+  wallet server keeps talking to the Julia cache server. The token-registration helpers parse and
+  verify input; registration itself stays with the Julia app server.
 
 ---
 

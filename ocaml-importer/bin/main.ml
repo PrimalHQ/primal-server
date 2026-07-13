@@ -45,6 +45,7 @@ let () =
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
   let domain_mgr = Eio.Stdenv.domain_mgr env in
+  let proc_mgr = Eio.Stdenv.process_mgr env in
   let proxy = Cfg.proxy_endpoint cfg in
 
   let stats = Importer.Stats.create () in
@@ -183,6 +184,14 @@ let () =
     (if gating then "ON" else "OFF")
     (if gating then "present" else "absent");
 
+  (* Device push delivery (Julia PUSH_NOTIFICATIONS_ENABLED / PushNotifications.start). The
+     [enabled] ref gates the per-notification rendering in the worker domains; the [run] fiber
+     below owns the sender subprocess. Set before the worker domains spawn. *)
+  Importer.Push_notifications.enabled := cfg.push_notifications_enabled;
+  Importer.Push_notifications.log_requests := cfg.push_notifications_log;
+  Printf.printf "primal-importer: push notifications %s\n%!"
+    (if cfg.push_notifications_enabled then "ON (" ^ cfg.push_notification_sender_bin ^ ")" else "OFF");
+
   (* Main-domain fibers share one domain, so each long-lived fiber owns an explicit Stats slot
      (the implicit per-domain [Stats.phase] is for worker domains only). *)
   let hooks_slot = Importer.Stats.new_slot "sched-hooks" in
@@ -245,6 +254,15 @@ let () =
           ());
       run_scheduled_hooks_loop;
       run_event_syncer;
+      (fun () ->
+        if cfg.push_notifications_enabled then
+          Importer.Push_notifications.run ~proc_mgr ~net ~clock ~stats ~cache_db:cfg.cache_db
+            ~sender_bin:cfg.push_notification_sender_bin ~period:cfg.push_notifications_period
+            ?pushgateway:
+              (if cfg.pushgateway_enabled then
+                 Some (cfg.pushgateway_host, cfg.pushgateway_port, cfg.pushgateway_job)
+               else None)
+            ());
       (fun () ->
         if cfg.pushgateway_enabled then
           Importer.Pushgateway.run ~net ~clock ~stats ~host:cfg.pushgateway_host

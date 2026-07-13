@@ -17,6 +17,10 @@ type t = {
   pushgateway_job : string; (* job label, Julia "primalnode<idx>" (the reporting node, see below) *)
   pushgateway_stats_file : string; (* Julia stats.json: persists the always-increasing "any" total *)
   pushgateway_interval : float; (* seconds between pushes *)
+  push_notifications_enabled : bool; (* device push delivery (Julia PUSH_NOTIFICATIONS_ENABLED) *)
+  push_notification_sender_bin : string; (* the push-notification-sender subprocess binary *)
+  push_notifications_period : float; (* seconds between transmission batches (Julia PERIOD) *)
+  push_notifications_log : bool; (* dump sender request/response JSON to stdout (Julia LOG) *)
   cs : Cache_storage.config;
   cache_db : Postgres.conninfo; (* the importer's :p0 (cache) DB — was PG* *)
   membership_db : Postgres.conninfo; (* the importer's :membership DB — was PGMEMBERSHIP* *)
@@ -98,6 +102,15 @@ let from_env () : t =
       Option.value (getenv "IMPORTER_STATS_FILE")
         ~default:(Printf.sprintf "%s/primalnode%d/cache/db/stats.json" storage_path report_node);
     pushgateway_interval = float_env "IMPORTER_PUSHGATEWAY_INTERVAL" 15.0;
+    push_notifications_enabled = bool_env "IMPORTER_PUSH_NOTIFICATIONS" false;
+    push_notification_sender_bin =
+      Option.value (getenv "IMPORTER_PUSH_NOTIFICATION_SENDER_BIN")
+        ~default:
+          (Filename.concat
+             (Option.value (getenv "HOME") ~default:".")
+             "work/itk/primal/primal-net-server/push-notification-sender/target/release/push-notification-sender");
+    push_notifications_period = float_env "IMPORTER_PUSH_NOTIFICATIONS_PERIOD" 5.0;
+    push_notifications_log = bool_env "IMPORTER_PUSH_NOTIFICATIONS_LOG" false;
     cs =
       {
         Cache_storage.verification_enabled = bool_env "IMPORTER_VERIFY" true;
@@ -177,6 +190,10 @@ let of_json (j : Yojson.Safe.t) : t =
     pushgateway_job = rstr j "pushgateway_job";
     pushgateway_stats_file = rstr j "pushgateway_stats_file";
     pushgateway_interval = rfloat j "pushgateway_interval";
+    push_notifications_enabled = rbool j "push_notifications_enabled";
+    push_notification_sender_bin = rstr j "push_notification_sender_bin";
+    push_notifications_period = rfloat j "push_notifications_period";
+    push_notifications_log = rbool j "push_notifications_log";
     cs =
       {
         Cache_storage.verification_enabled = rbool j "verification_enabled";

@@ -108,6 +108,30 @@ let decode ~hrp (addr : string) : string option =
 (* LNURL (lud06): an "lnurl"-HRP bech32 string whose payload is the ASCII URL. *)
 let lnurl_decode (lnurl : string) : string option = decode ~hrp:"lnurl" lnurl
 
+(* {1 Encoding} (mirrors Julia Bech32.bech32_encode / nip19 encoding for npub/note links). *)
+
+(* 6-symbol bech32 (not bech32m) checksum for hrp+data. *)
+let create_checksum (hrp : string) (data : int list) : int list =
+  let pm = polymod (hrp_expand hrp @ data @ [ 0; 0; 0; 0; 0; 0 ]) lxor 1 in
+  List.init 6 (fun i -> (pm lsr (5 * (5 - i))) land 31)
+
+(* Encode raw 8-bit [bytes] as a bech32 string with the given HRP (8->5 bit groups, padded). *)
+let nip19_encode ~(hrp : string) (bytes : string) : string =
+  let data8 = List.init (String.length bytes) (fun i -> Char.code bytes.[i]) in
+  match convertbits data8 ~frombits:8 ~tobits:5 ~pad:true with
+  | None -> invalid_arg "Bech32.nip19_encode"
+  | Some data5 ->
+      let combined = data5 @ create_checksum hrp data5 in
+      let b = Buffer.create (String.length hrp + 1 + List.length combined) in
+      Buffer.add_string b hrp;
+      Buffer.add_char b '1';
+      List.iter (fun d -> Buffer.add_char b charset.[d]) combined;
+      Buffer.contents b
+
+(* Julia Nostr.bech32_encode(PubKeyId) / (EventId). *)
+let encode_npub (pk : string) : string = nip19_encode ~hrp:"npub" pk
+let encode_note (eid : string) : string = nip19_encode ~hrp:"note" eid
+
 (* {1 NIP-19} (mirrors Julia Bech32.nip19_decode) — enough for for_mentiones content mentions. *)
 
 type nip19 =
