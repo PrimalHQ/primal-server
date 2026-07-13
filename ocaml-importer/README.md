@@ -171,7 +171,24 @@ The production entry point. Takes the JSON config file as its sole argument (see
 detector, the LNURL zapper verifier, the worker-domain pool, the [event syncer](#event-syncer),
 and a periodic scheduled-hooks runner, then imports forever (reconnecting to the firehose on
 drop). Imports also produce in-DB [notifications](#notifications). It prints a one-line
-per-second stats summary (receive/import/dup/reject rates, queue depth, busy workers).
+per-second stats summary:
+
+```
+[importer <wall-clock> up <uptime>] recv/imp/dup/rej/err rates | q <depth>/<cap> <pct> qw <max queue wait> |
+  busy <n>/<workers> | lnurl <ok>/<fail>/<timeout> per second | tot <imported> | rss/heap | r=<firehose reconnects>
+```
+
+plus, when any long-lived fiber has been in one non-idle phase for over 30 s, a trailing
+`| STUCK w3:https:tls 45s, …` naming the fiber and phase (workers `w0..wN`, `firehose`,
+`event-syncer`, `sched-hooks`; phases include `spam-check`, `import`, `https:dns/connect/tls/read`,
+`db-reconnect`, `submit`). Eio cannot dump suspended fibers' stacks, so this phase registry
+(`lib/stats.ml`) is the visibility mechanism. Guard rails against the failure modes we've hit:
+every LNURL fetch is bounded end-to-end (DNS→read, 10 s; slow fetches over 5 s are logged), every
+DB connection gets `statement_timeout = 30s` and `application_name = 'primal-ocaml-importer'`
+(see `Postgres.connect`), and a **stall watchdog** exits the process (for systemd's
+`Restart=always`) if workers are busy but nothing completes for 180 s, dumping all fiber phases
+first. The pushgateway fiber also publishes `importer_queue_depth`, `importer_busy_workers`,
+`importer_errors_total` and `importer_lnurl_{ok,fail,timeout}_total` alongside `cache_any`.
 
 During development, don't run this by hand — use `rebuild-restart-importer.sh` (see
 [Development loop](#development-loop)) so a fresh build is always the one running and you can

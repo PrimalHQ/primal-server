@@ -75,40 +75,58 @@ let extract_body (raw : string) : string =
 
 type conn = [ Eio.Flow.two_way_ty | Eio.Resource.close_ty ] r
 
+(* Phases are recorded via Stats so a wedged request shows WHERE it is stuck (dns / connect /
+   socks / tls / read) in the per-second stuck-slot report and the watchdog dump. *)
 let two_way_of_proxy ~sw ~net ~proxy ~host ~port : conn =
   match proxy with
   | Some (ph, pp) ->
-      let f = Eio.Net.connect ~sw net (resolve ~net ~host:ph ~port:pp) in
+      Stats.phase "https:dns";
+      let addr = resolve ~net ~host:ph ~port:pp in
+      Stats.phase "https:connect";
+      let f = Eio.Net.connect ~sw net addr in
+      Stats.phase "https:socks";
       Socks5.connect (f :> _ Eio.Flow.two_way) ~dest_host:host ~dest_port:port;
       (f :> conn)
-  | None -> (Eio.Net.connect ~sw net (resolve ~net ~host ~port) :> conn)
+  | None ->
+      Stats.phase "https:dns";
+      let addr = resolve ~net ~host ~port in
+      Stats.phase "https:connect";
+      (Eio.Net.connect ~sw net addr :> conn)
 
 (* GET an https URL, returning the response body (best-effort), or None on any failure /
-   timeout. [proxy] is an optional SOCKS5 (host, port). *)
+   timeout. [proxy] is an optional SOCKS5 (host, port).
+
+   The timeout covers the WHOLE request — DNS, TCP/SOCKS5 connect, TLS handshake, request write
+   and response read — not just the body read. A wedged LNURL endpoint once hung every worker
+   forever in the TLS handshake because only the read was bounded. One caveat remains:
+   getaddrinfo runs in a systhread that Eio cannot interrupt mid-call, so a truly hung resolver
+   still blocks past the deadline (the stall watchdog in Stats.report_loop is the backstop). *)
 let https_get ~net ~clock ?proxy ?(timeout = 10.0) (u : url) : string option =
   if u.scheme <> "https" then None
   else
     try
       Switch.run @@ fun sw ->
-      let tcp = two_way_of_proxy ~sw ~net ~proxy ~host:u.host ~port:u.port in
-      let host_dn = Domain_name.(host_exn (of_string_exn u.host)) in
-      let authenticator =
-        match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m
-      in
-      let cfg =
-        match Tls.Config.client ~authenticator ~peer_name:host_dn () with
-        | Ok c -> c
-        | Error (`Msg m) -> failwith m
-      in
-      let tls = Tls_eio.client_of_flow cfg ~host:host_dn tcp in
-      let req =
-        Printf.sprintf
-          "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: primal-importer\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
-          u.path u.host
-      in
-      Eio.Flow.copy_string req (tls :> _ Eio.Flow.sink);
       let result =
         Eio.Time.with_timeout clock timeout (fun () ->
+            let tcp = two_way_of_proxy ~sw ~net ~proxy ~host:u.host ~port:u.port in
+            let host_dn = Domain_name.(host_exn (of_string_exn u.host)) in
+            let authenticator =
+              match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m
+            in
+            let cfg =
+              match Tls.Config.client ~authenticator ~peer_name:host_dn () with
+              | Ok c -> c
+              | Error (`Msg m) -> failwith m
+            in
+            Stats.phase "https:tls";
+            let tls = Tls_eio.client_of_flow cfg ~host:host_dn tcp in
+            let req =
+              Printf.sprintf
+                "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: primal-importer\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+                u.path u.host
+            in
+            Eio.Flow.copy_string req (tls :> _ Eio.Flow.sink);
+            Stats.phase "https:read";
             let r = Eio.Buf_read.of_flow (tls :> _ Eio.Flow.source) ~max_size:(8 * 1024 * 1024) in
             Ok (Eio.Buf_read.take_all r))
       in

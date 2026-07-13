@@ -47,10 +47,13 @@ let () =
   let domain_mgr = Eio.Stdenv.domain_mgr env in
   let proxy = Cfg.proxy_endpoint cfg in
 
+  let stats = Importer.Stats.create () in
+
   (* ext_* hooks + LNURL zapper verification (the verifier closes over Eio net/clock/proxy). *)
   Importer.Cache_storage_ext.register ();
   CS.set_zapper_verifier (fun est ~zapped_pk ~zap_receipt ->
-      Importer.Lnurl.verify ~net ~clock ?proxy est ~zapped_pk ~zapper_pubkey:zap_receipt.N.pubkey);
+      Importer.Lnurl.verify ~net ~clock ?proxy ~stats est ~zapped_pk
+        ~zapper_pubkey:zap_receipt.N.pubkey);
 
   (* Spam detector shared across worker domains; processors mirror start_media_importer.jl, but
      write to the membership filterlist (no in-process Filterlist state). *)
@@ -67,7 +70,6 @@ let () =
   SD.add_spamevent_processor sd (fun est e -> Importer.Cache_storage_ext.store_spam_content_hash est e);
 
   let pool = WP.create ~capacity:cfg.queue_capacity in
-  let stats = Importer.Stats.create () in
   let make_est () : CS.est =
     Mirage_crypto_rng_unix.use_default (); (* RNG for TLS in this worker domain *)
     let dbh = Pg.connect cfg.cache_db in
@@ -81,6 +83,7 @@ let () =
      firehose / event-syncer re-deliver it and duplicate imports are cheap. Safe from a worker
      domain: Pg.connect uses that domain's Eio env and Eio.Time.sleep suspends on its scheduler. *)
   let reconnect_est ?(retry = 2.0) (est : CS.est) : unit =
+    Importer.Stats.phase "db-reconnect";
     (try Pg.close est.CS.dbh with _ -> ());
     (try Pg.close est.CS.mem_dbh with _ -> ());
     Printf.eprintf "worker: DB connection lost; reconnecting\n%!";
@@ -117,13 +120,20 @@ let () =
      from Event_syncer (import directly, no firehose framing or spam detector). *)
   let process (est : CS.est) (job : WP.job) =
     Importer.Stats.started stats;
-    Fun.protect ~finally:(fun () -> Importer.Stats.completed stats) (fun () ->
+    Importer.Stats.observe_queue_wait stats (Unix.gettimeofday () -. job.WP.enq_at);
+    Fun.protect
+      ~finally:(fun () ->
+        Importer.Stats.completed stats;
+        Importer.Stats.phase "idle")
+      (fun () ->
         try
           let result =
-            match job with
+            match job.WP.payload with
             | WP.Msg msg ->
+                Importer.Stats.phase "spam-check";
                 let now = float_of_int (Importer.Utils.current_time ()) in
                 ignore (SD.on_message sd ~est msg now);
+                Importer.Stats.phase "import";
                 CS.import_msg_into_storage est msg
             | WP.Event e ->
                 (* Synced events come from our own trusted peer nodes (already signature-verified
@@ -131,6 +141,7 @@ let () =
                    we already hold — would saturate the workers and throttle the firehose. Import
                    with verification off; all other gates (kind/deleted/preimport) still apply. *)
                 let est = { est with CS.cfg = { est.CS.cfg with CS.verification_enabled = false } } in
+                Importer.Stats.phase "import-synced";
                 CS.import_event est e
           in
           match result with
@@ -171,42 +182,59 @@ let () =
     (if gating then "ON" else "OFF")
     (if gating then "present" else "absent");
 
+  (* Main-domain fibers share one domain, so each long-lived fiber owns an explicit Stats slot
+     (the implicit per-domain [Stats.phase] is for worker domains only). *)
+  let hooks_slot = Importer.Stats.new_slot "sched-hooks" in
   let run_scheduled_hooks_loop () =
     while true do
+      Importer.Stats.set_slot hooks_slot "run";
       (try CS.run_scheduled_hooks hooks_est with
       | Eio.Cancel.Cancelled _ as e -> raise e
       | exn ->
           Printf.eprintf "scheduled_hooks: %s\n%!" (Printexc.to_string exn);
           if Pg.is_connection_error exn then reconnect_est hooks_est);
+      Importer.Stats.set_slot hooks_slot "idle";
       Eio.Time.sleep clock 60.
     done
   in
 
   (* Firehose callback (runs in the reader fiber): count the received line, then enqueue (which
-     blocks under backpressure); count submitted once it is actually on the queue. *)
+     blocks under backpressure); count submitted once it is actually on the queue. The slot makes
+     a reader stuck in [submit] (queue full, workers wedged) visible as "firehose:submit Ns" —
+     otherwise it just reads as recv 0/s, indistinguishable from a quiet firehose. *)
+  let reader_slot = Importer.Stats.new_slot "firehose" in
   let on_message msg =
     Importer.Stats.recv stats;
+    Importer.Stats.set_slot reader_slot "submit";
     WP.submit_msg pool msg;
+    Importer.Stats.set_slot reader_slot "idle";
     Importer.Stats.submitted stats
   in
 
   (* Event syncer: build a remote conninfo per peer host (same port/credentials as local, only the
      host differs), then run a fiber that periodically pulls recent events into the queue. *)
   let sync_remotes = List.map (fun host -> { cfg.cache_db with Pg.host }) cfg.event_sync_remotes in
+  let syncer_slot = Importer.Stats.new_slot "event-syncer" in
   let run_event_syncer () =
     (* The syncer owns its connections (a dedicated local conninfo + the remotes); it must not
        reuse hooks_est.dbh, which the scheduled-hooks fiber drives concurrently. *)
     if cfg.event_sync_enabled && sync_remotes <> [] then
       Importer.Event_syncer.run ~clock ~local:cfg.cache_db ~remotes:sync_remotes
         ~submit:(fun e ->
+          Importer.Stats.set_slot syncer_slot "submit";
           WP.submit_event pool e;
+          Importer.Stats.set_slot syncer_slot "idle";
           Importer.Stats.submitted stats)
         ~interval:cfg.event_sync_interval ~overlap:cfg.event_sync_overlap ()
   in
 
   Fiber.all
     [
-      (fun () -> WP.run ~domain_mgr ~net ~n:cfg.num_workers ~make_est ~process pool);
+      (fun () ->
+        WP.run
+          ~on_worker_init:(fun i ->
+            Importer.Stats.register_domain_slot (Printf.sprintf "w%d" i))
+          ~domain_mgr ~net ~n:cfg.num_workers ~make_est ~process pool);
       (fun () ->
         FC.run ~net ~clock ~host:cfg.firehose_host ~port:cfg.firehose_port ~on_message
           ~on_reconnect:(fun () -> Importer.Stats.reconnects stats)

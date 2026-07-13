@@ -51,6 +51,22 @@ let set ~net ~clock ?(timeout = 10.0) ?(typ = "counter") ~host ~port ~job (k : s
   let body = Printf.sprintf "# TYPE %s %s\n%s %d\n" k typ k v in
   post ~net ~clock ~timeout ~host ~port ~path:("/metrics/job/" ^ job) body
 
+(* Push several (name, type, value) metrics in ONE body/POST. A pushgateway POST replaces the
+   whole metric group for the job, so pushing them together keeps every metric alive. *)
+let set_many ~net ~clock ?(timeout = 10.0) ~host ~port ~job
+    (metrics : (string * string * int) list) : unit =
+  let body =
+    String.concat ""
+      (List.map (fun (k, typ, v) -> Printf.sprintf "# TYPE %s %s\n%s %d\n" k typ k v) metrics)
+  in
+  post ~net ~clock ~timeout ~host ~port ~path:("/metrics/job/" ^ job) body
+
+let rec mkdir_p (d : string) : unit =
+  if d <> "/" && d <> "." && not (Sys.file_exists d) then begin
+    mkdir_p (Filename.dirname d);
+    try Unix.mkdir d 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  end
+
 (* Load the full stats.json object (kept verbatim so the other keys survive a write) and the
    current "any" total. Missing file / parse error -> ([], 0). Mirrors Julia load_stats. *)
 let load_stats (path : string) : (string * Yojson.Safe.t) list * int =
@@ -93,6 +109,11 @@ let metric_name = "cache_any"
    [interval]s, recompute the monotonic "any" total (persisted baseline + this session's imported
    count), persist it back to [stats_file], and push it under [job]. *)
 let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval : float) () : unit =
+  (* The stats file's directory may not exist on a fresh box; create it once so save_stats does
+     not fail every cycle with Sys_error. *)
+  (try mkdir_p (Filename.dirname stats_file)
+   with exn -> Printf.eprintf "pushgateway: mkdir %s: %s\n%!" (Filename.dirname stats_file)
+       (Printexc.to_string exn));
   let base_fields, base_any = load_stats stats_file in
   Printf.printf
     "pushgateway: http://%s:%d job=%s metric=%s every %.0fs (stats file %s, baseline any=%d)\n%!"
@@ -100,7 +121,19 @@ let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval :
   while true do
     let any = base_any + Stats.imported_total stats in
     save_stats stats_file base_fields any;
-    (try set ~net ~clock ~host ~port ~job metric_name any with
+    let lnurl_ok, lnurl_fail, lnurl_timeout = Stats.lnurl_totals stats in
+    let metrics =
+      [
+        (metric_name, "counter", any);
+        ("importer_queue_depth", "gauge", Stats.queue_depth stats);
+        ("importer_busy_workers", "gauge", Stats.busy_workers stats);
+        ("importer_errors_total", "counter", Stats.errors_total stats);
+        ("importer_lnurl_ok_total", "counter", lnurl_ok);
+        ("importer_lnurl_fail_total", "counter", lnurl_fail);
+        ("importer_lnurl_timeout_total", "counter", lnurl_timeout);
+      ]
+    in
+    (try set_many ~net ~clock ~host ~port ~job metrics with
     | Eio.Cancel.Cancelled _ as e -> raise e
     | exn -> Printf.eprintf "pushgateway: %s\n%!" (Printexc.to_string exn));
     Eio.Time.sleep clock interval

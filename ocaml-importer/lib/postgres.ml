@@ -140,8 +140,29 @@ let remote_conninfo () =
     database = Option.value (getenv_opt "COMPARE_DATABASE") ~default:c.database;
   }
 
-let connect (ci : conninfo) : dbh =
-  PGOCaml.connect ~host:ci.host ~port:ci.port ~user:ci.user ~database:ci.database ()
+(* Execute one parameterless SQL statement (utility statements go through the extended
+   protocol fine). *)
+let exec (dbh : dbh) (sql : string) : unit =
+  PGOCaml.prepare dbh ~query:sql ();
+  ignore (PGOCaml.execute dbh ~params:[] ());
+  PGOCaml.close_statement dbh ()
+
+(* Every connection gets a [statement_timeout]: an unresponsive/wedged server must not hold a
+   worker fiber forever (the DB-side analogue of the LNURL http timeout — a timed-out query
+   raises, the job errors, the worker moves on). 30s is far above any legitimate importer query;
+   raise per-connection where genuinely long statements are expected. [application_name] makes
+   our backends identifiable in pg_stat_activity. Setup failures are fatal for the connection
+   (silently missing the timeout would quietly reopen the hang-forever hole). *)
+let connect ?(statement_timeout_ms = 30_000) ?(application_name = "primal-ocaml-importer")
+    (ci : conninfo) : dbh =
+  let dbh = PGOCaml.connect ~host:ci.host ~port:ci.port ~user:ci.user ~database:ci.database () in
+  (try
+     exec dbh (Printf.sprintf "set statement_timeout = %d" statement_timeout_ms);
+     exec dbh (Printf.sprintf "set application_name = '%s'" application_name)
+   with exn ->
+     (try PGOCaml.close dbh with _ -> ());
+     raise exn);
+  dbh
 
 let close (dbh : dbh) = PGOCaml.close dbh
 

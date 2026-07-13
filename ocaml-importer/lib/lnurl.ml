@@ -33,7 +33,27 @@ let extract_nostr_pubkey (body : string) : string option =
   | _ -> None
   | exception _ -> None
 
-let verify ~net ~clock ?proxy ?timeout (est : Cache_storage.est) ~(zapped_pk : string)
+(* GET the endpoint with fetch accounting: outcome counters on [stats] (ok / fail / timeout —
+   a [None] whose elapsed time reached the deadline is counted as a timeout) and a warn line for
+   any fetch slower than 5s, so a degrading LNURL provider is visible before it hurts. *)
+let timed_get ~net ~clock ?proxy ?timeout ?stats (u : Http.url) : string option =
+  let deadline = Option.value timeout ~default:10.0 in
+  let t0 = Unix.gettimeofday () in
+  let body = Http.https_get ~net ~clock ?proxy ?timeout u in
+  let dt = Unix.gettimeofday () -. t0 in
+  (match stats with
+  | Some st -> (
+      match body with
+      | Some _ -> Stats.lnurl_ok st
+      | None -> if dt >= deadline *. 0.95 then Stats.lnurl_timeout st else Stats.lnurl_fail st)
+  | None -> ());
+  if dt > 5.0 then
+    Printf.eprintf "lnurl: slow fetch (%.1fs%s) https://%s%s\n%!" dt
+      (if body = None then ", failed" else "")
+      u.Http.host u.Http.path;
+  body
+
+let verify ~net ~clock ?proxy ?timeout ?stats (est : Cache_storage.est) ~(zapped_pk : string)
     ~(zapper_pubkey : string) : bool =
   match Cache_storage.get_meta_data_event est zapped_pk with
   | None -> false
@@ -44,7 +64,7 @@ let verify ~net ~clock ?proxy ?timeout (est : Cache_storage.est) ~(zapped_pk : s
           match Http.parse_url url with
           | None -> false
           | Some u -> (
-              match Http.https_get ~net ~clock ?proxy ?timeout u with
+              match timed_get ~net ~clock ?proxy ?timeout ?stats u with
               | None -> false
               | Some body -> (
                   match extract_nostr_pubkey body with
