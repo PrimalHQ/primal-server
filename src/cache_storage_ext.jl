@@ -608,6 +608,27 @@ PUSH_NOTIFICATIONS_ENABLED = Ref(false)
 
 notification_periodic = Utils.Throttle(; period=5.0)
 
+# The pubkey that initiated the notification (the actor/sender), extracted from `args` per type.
+# `pubkey` (first arg of `notification`) is always the *receiver*; the sender lives in `args`.
+# Returns `nothing` for types with no single initiator pubkey. Arg positions mirror the call
+# sites in notifications_cb / import_reply_notifications / import_contact_list.
+function notification_initiator(notif_type::NotificationType, args)
+    idx =
+        if     notif_type in [NEW_USER_FOLLOWED_YOU, USER_UNFOLLOWED_YOU]; 1 # follower
+        elseif notif_type in [YOUR_POST_WAS_ZAPPED, YOUR_POST_WAS_LIKED, YOUR_POST_WAS_REPOSTED]; 2 # who
+        elseif notif_type == YOUR_POST_WAS_REPLIED_TO; 2 # who
+        elseif notif_type == REPLY_TO_REPLY; 2 # who_replied_to_it
+        elseif notif_type == YOU_WERE_MENTIONED_IN_POST; 2 # mentioned_by
+        elseif notif_type == YOUR_POST_WAS_MENTIONED_IN_POST; 3 # mentioned_by
+        elseif notif_type == YOUR_POST_WAS_HIGHLIGHTED; 2 # who
+        elseif notif_type == YOUR_POST_WAS_BOOKMARKED; 2 # who
+        elseif notif_type == NEW_DIRECT_MESSAGE; 2 # sender
+        else; nothing
+        end
+    isnothing(idx) && return nothing
+    length(args) >= idx ? args[idx] : nothing
+end
+
 function notification(
         est::CacheStorage,
         pubkey::Nostr.PubKeyId, notif_created_at::Int, notif_type::NotificationType,
@@ -618,10 +639,15 @@ function notification(
     callargs = (; pubkey, notif_created_at, notif_type, args)
     # @show callargs
 
+    # Spam gate: drop the notification when its *initiator* (sender) is not a human per TrustRank,
+    # matching the sender-humanness check already applied to zap notifications (ext_zap) and the
+    # trust check on follows (import_contact_list). This is a receiver-independent block on the
+    # sender, unlike the app_settings-gated per-receiver preferences below. Fails open: a DB/lookup
+    # error (caught by catch_exception) leaves the notification in place.
     let skip = Ref(false)
-        catch_exception(est, :notification_blocked_unfollowed_unverified, callargs) do
-            if get(est.pubkey_followers_cnt, pubkey, 0) == 0 &&
-               isempty(Postgres.execute(:p0, "select 1 from verified_users where pubkey = \$1 limit 1", [pubkey])[2])
+        catch_exception(est, :notification_blocked_nonhuman_sender, callargs) do
+            initiator = notification_initiator(notif_type, args)
+            if initiator isa Nostr.PubKeyId && !ext_is_human(est, initiator)
                 skip[] = true
             end
         end
