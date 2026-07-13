@@ -398,7 +398,10 @@ Imports produce in-DB notifications, mirroring Julia `notification` / `notificat
   `push_notifications_period` seconds it drains the cross-domain buffer, batches by 50, groups by
   platform, sends, and logs both directions to `t_push_notifications_log`. When idle it pings the
   sender (`{"type":"ping"}`) and respawns it on failure (replacing Julia's blind
-  restart-if-quiet-for-180s monitor). Send metrics go to the pushgateway under `job=<job>-push`.
+  restart-if-quiet-for-180s monitor). Send metrics (`push_notification_latest`,
+  `push_notification_sent`) are published by the pushgateway fiber inside the importer's job
+  group (first published after the first send), so Julia-era queries like
+  `time() - push_notification_latest` keep working unchanged.
   **Not ported:** the Julia TCP intake (port 20000) and its `"wallet-transaction"` type — the
   wallet server keeps talking to the Julia cache server. The token-registration helpers parse and
   verify input; registration itself stays with the Julia app server.

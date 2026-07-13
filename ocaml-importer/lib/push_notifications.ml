@@ -17,10 +17,11 @@
 
    - [run] (a main-domain fiber, started only when enabled) owns the subprocess: every [period]
      seconds it drains the buffer, batches by 50 and groups by platform (Julia transmission),
-     sends each request and reads its response with a timeout, logs both directions to
-     t_push_notifications_log, and publishes send metrics to the pushgateway (under its own
-     "<job>-push" label — a pushgateway POST replaces the job's whole metric group, so sharing
-     the importer job would clobber the cache_any metrics).
+     sends each request and reads its response with a timeout, and logs both directions to
+     t_push_notifications_log. Send counts/timestamps land in Stats (push_sent/push_latest); the
+     Pushgateway fiber publishes them as push_notification_sent/_latest inside the importer's
+     job group, so existing Julia-era queries (e.g. "time() - push_notification_latest") keep
+     working unchanged.
 
    - Watchdog: instead of Julia's blind restart-if-nothing-sent-for-180s monitor, [run] sends the
      sender's {"type":"ping"} request when the pipeline has been idle for [ping_interval]; a
@@ -522,17 +523,21 @@ let notification (est : CS.est) ~(recipient : string) ~(created_at : int) ~(ntyp
           in
           List.iter
             (function
-              | [ Some platform; Some token; Some environment ] ->
+              | [ Some platform; Some token; environment ] ->
+                  (* environment is NULL for almost every token row; the sender then defaults to
+                     "production" (main.rs unwrap_or), so omit the field when absent. *)
                   let payload =
                     `Assoc
-                      [
-                        ("platform", `String platform);
-                        ("token", `String token);
-                        ("environment", `String environment);
-                        ("title", `String r.title);
-                        ("body", `String r.body);
-                        ("data", `Assoc [ ("extra", `Assoc extra) ]);
-                      ]
+                      ((match environment with
+                       | Some env -> [ ("environment", `String env) ]
+                       | None -> [])
+                      @ [
+                          ("platform", `String platform);
+                          ("token", `String token);
+                          ("title", `String r.title);
+                          ("body", `String r.body);
+                          ("data", `Assoc [ ("extra", `Assoc extra) ]);
+                        ])
                   in
                   enqueue { platform; payload }
               | _ -> ())
@@ -572,10 +577,9 @@ let count_sent (platform : string) (resp : Yojson.Safe.t) : int =
     | _ -> 0
   with _ -> 0
 
-let run ~proc_mgr ~net ~clock ~(stats : Stats.t) ~(cache_db : Postgres.conninfo)
-    ~(sender_bin : string) ~(period : float) ?(ping_interval = 60.0) ?(request_timeout = 10.0)
-    ?pushgateway (* (host, port, job): push_notification_* metrics, published as job "<job>-push" *)
-    () : unit =
+let run ~proc_mgr ~clock ~(stats : Stats.t) ~(cache_db : Postgres.conninfo)
+    ~(sender_bin : string) ~(period : float) ?(ping_interval = 60.0) ?(request_timeout = 10.0) ()
+    : unit =
   (* This fiber's own cache-DB connection, for t_push_notifications_log rows. *)
   let log_dbh = ref (Postgres.connect cache_db) in
   let log_result d =
@@ -590,28 +594,6 @@ let run ~proc_mgr ~net ~clock ~(stats : Stats.t) ~(cache_db : Postgres.conninfo)
           with
           | Eio.Cancel.Cancelled _ as e -> raise e
           | _ -> ())
-  in
-  (* Julia monitor_subprocess_operation metrics, throttled to one POST per 15s. *)
-  let sent_ctr = ref 0 in
-  let t_metrics = ref (Unix.gettimeofday ()) in
-  let publish_metrics () =
-    match pushgateway with
-    | None -> ()
-    | Some (host, port, job) ->
-        let now = Unix.gettimeofday () in
-        if now -. !t_metrics >= 15.0 then begin
-          (try
-             Pushgateway.set_many ~net ~clock ~host ~port ~job:(job ^ "-push")
-               [
-                 ("push_notification_latest", "gauge", Utils.current_time ());
-                 ("push_notification_sent", "gauge", !sent_ctr);
-               ]
-           with
-          | Eio.Cancel.Cancelled _ as e -> raise e
-          | exn -> Printf.eprintf "push_notifications: pushgateway: %s\n%!" (Printexc.to_string exn));
-          sent_ctr := 0;
-          t_metrics := now
-        end
   in
   (* One subprocess session; raises Restart on any request I/O problem so the outer loop
      respawns (the switch release kills the child). *)
@@ -663,12 +645,11 @@ let run ~proc_mgr ~net ~clock ~(stats : Stats.t) ~(cache_db : Postgres.conninfo)
                 in
                 let resp = request req in
                 t_last_op := Unix.gettimeofday ();
-                let sent = count_sent platform resp in
-                sent_ctr := !sent_ctr + sent;
-                Stats.push_sent stats sent;
+                (* Feeds the stats log line and the pushgateway push_notification_* metrics
+                   (published by the Pushgateway fiber, merged into the importer's job group). *)
+                Stats.push_sent stats (count_sent platform resp);
                 log_result
-                  (`Assoc [ ("t", `Int (Utils.current_time ())); ("req", req); ("resp", resp) ]);
-                publish_metrics ())
+                  (`Assoc [ ("t", `Int (Utils.current_time ())); ("req", req); ("resp", resp) ]))
               (by_platform chunk))
           (chunks 50 ns)
       else if Unix.gettimeofday () -. !t_last_op >= ping_interval then begin

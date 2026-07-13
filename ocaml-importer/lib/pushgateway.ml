@@ -115,6 +115,9 @@ let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval :
    with exn -> Printf.eprintf "pushgateway: mkdir %s: %s\n%!" (Filename.dirname stats_file)
        (Printexc.to_string exn));
   let base_fields, base_any = load_stats stats_file in
+  (* Device-push metrics window (Julia PushNotifications.monitor_subprocess_operation publishes
+     push_notification_sent as the count since its last POST, then resets). *)
+  let p_push_sent = ref 0 in
   Printf.printf
     "pushgateway: http://%s:%d job=%s metric=%s every %.0fs (stats file %s, baseline any=%d)\n%!"
     host port job metric_name interval stats_file base_any;
@@ -132,6 +135,24 @@ let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval :
         ("importer_lnurl_fail_total", "counter", lnurl_fail);
         ("importer_lnurl_timeout_total", "counter", lnurl_timeout);
       ]
+    in
+    (* Device-push metrics (Julia PushGatewayExporter push_notification_latest/_sent), merged into
+       this job's group — a pushgateway POST replaces the whole group, so they must ride in the
+       same body as cache_any to coexist. Published only once a send has happened, so
+       "time() - push_notification_latest" panels don't alarm on a since-boot zero. *)
+    let metrics =
+      let latest = Stats.push_latest stats in
+      if latest = 0 then metrics
+      else begin
+        let total = Stats.push_sent_total stats in
+        let d_sent = total - !p_push_sent in
+        p_push_sent := total;
+        metrics
+        @ [
+            ("push_notification_latest", "gauge", latest);
+            ("push_notification_sent", "gauge", d_sent);
+          ]
+      end
     in
     (try set_many ~net ~clock ~host ~port ~job metrics with
     | Eio.Cancel.Cancelled _ as e -> raise e

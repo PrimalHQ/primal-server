@@ -256,13 +256,8 @@ let () =
       run_event_syncer;
       (fun () ->
         if cfg.push_notifications_enabled then
-          Importer.Push_notifications.run ~proc_mgr ~net ~clock ~stats ~cache_db:cfg.cache_db
-            ~sender_bin:cfg.push_notification_sender_bin ~period:cfg.push_notifications_period
-            ?pushgateway:
-              (if cfg.pushgateway_enabled then
-                 Some (cfg.pushgateway_host, cfg.pushgateway_port, cfg.pushgateway_job)
-               else None)
-            ());
+          Importer.Push_notifications.run ~proc_mgr ~clock ~stats ~cache_db:cfg.cache_db
+            ~sender_bin:cfg.push_notification_sender_bin ~period:cfg.push_notifications_period ());
       (fun () ->
         if cfg.pushgateway_enabled then
           Importer.Pushgateway.run ~net ~clock ~stats ~host:cfg.pushgateway_host
