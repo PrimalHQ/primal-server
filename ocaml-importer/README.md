@@ -183,12 +183,16 @@ plus, when any long-lived fiber has been in one non-idle phase for over 30 s, a 
 `event-syncer`, `sched-hooks`; phases include `spam-check`, `import`, `https:dns/connect/tls/read`,
 `db-reconnect`, `submit`). Eio cannot dump suspended fibers' stacks, so this phase registry
 (`lib/stats.ml`) is the visibility mechanism. Guard rails against the failure modes we've hit:
-every LNURL fetch is bounded end-to-end (DNS→read, 10 s; slow fetches over 5 s are logged), every
-DB connection gets `statement_timeout = 30s` and `application_name = 'primal-ocaml-importer'`
-(see `Postgres.connect`), and a **stall watchdog** exits the process (for systemd's
-`Restart=always`) if workers are busy but nothing completes for 180 s, dumping all fiber phases
-first. The pushgateway fiber also publishes `importer_queue_depth`, `importer_busy_workers`,
-`importer_errors_total` and `importer_lnurl_{ok,fail,timeout}_total` alongside `cache_any`.
+LNURL zapper verification runs **off the import critical path** on a dedicated 4-domain pool
+(`lib/zap_verifier.ml`, fibers `zv0..zv3`) with a url→pubkey cache and a per-host circuit
+breaker — import workers enqueue and move on (the bounded queue drops, never blocks, under
+overload); every LNURL fetch is bounded end-to-end (DNS→read, 10 s; slow fetches over 5 s are
+logged), every DB connection gets `statement_timeout = 30s` and
+`application_name = 'primal-ocaml-importer'` (see `Postgres.connect`), and a **stall watchdog**
+exits the process (for systemd's `Restart=always`) if workers are busy but nothing completes for
+180 s, dumping all fiber phases first. The pushgateway fiber also publishes
+`importer_queue_depth`, `importer_busy_workers`, `importer_errors_total` and
+`importer_lnurl_{ok,fail,timeout}_total` alongside `cache_any`.
 
 During development, don't run this by hand — use `rebuild-restart-importer.sh` (see
 [Development loop](#development-loop)) so a fresh build is always the one running and you can

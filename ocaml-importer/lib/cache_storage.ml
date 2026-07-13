@@ -835,9 +835,37 @@ let handle_repost (est : est) (e : Nostr.t) : unit =
   (* fetch_missing_events: gated by auto_fetch_missing_events (default off in Julia) and needs a
      relay fetcher (out of importer scope) — faithful no-op. *)
 
-let zapper_ok (est : est) (e : Nostr.t) ~(zapped_pk : string) : bool =
-  if (not est.cfg.verify_zappers) || List.mem e.pubkey est.cfg.trusted_zappers then true
-  else (!zapper_verifier) est ~zapped_pk ~zap_receipt:e
+(* A zap receipt that passed the cheap gates (positive amount, description, 'p' tag), plus
+   everything needed to apply its import effects once the zapper is verified. *)
+type zap_job = {
+  zj_receipt : Nostr.t;
+  zj_parent_eid : string option;
+  zj_zapped_pk : string;
+  zj_amount_sats : int;
+}
+
+(* The zap receipt's import side effects (event/pubkey zap stats, actions, ext hooks). Runs
+   inline when no verification is needed, or later on a Zap_verifier domain (with that domain's
+   own est) once the LNURL endpoint confirms the zapper. *)
+let apply_zap_effects (est : est) (j : zap_job) : unit =
+  let e = j.zj_receipt in
+  (match j.zj_parent_eid with
+  | Some parent ->
+      event_hook est parent (Event_stats_cb ("zaps", 1));
+      (match zap_sender e with
+      | Some sender ->
+          event_pubkey_action est ~eid:parent ~re:{ e with pubkey = sender } ~action:"zapped"
+      | None -> ());
+      (!ext).ext_zap est e parent j.zj_amount_sats
+  | None -> ());
+  (!ext).ext_pubkey_zap est e j.zj_zapped_pk j.zj_amount_sats
+
+(* When wired (bin/main.ml -> Zap_verifier), zap receipts needing LNURL verification are handed
+   off here — the import worker moves on immediately and the verifier pool fetches the endpoint
+   and applies the effects. Unwired (dev tools), verification falls back to the synchronous
+   [zapper_verifier]. *)
+let zap_verifier_submit : (zap_job -> unit) option ref = ref None
+let set_zap_verifier_submit f = zap_verifier_submit := Some f
 
 let handle_zap_receipt (est : est) (e : Nostr.t) : unit =
   let parent_eid = ref None and zapped_pk = ref None in
@@ -855,21 +883,22 @@ let handle_zap_receipt (est : est) (e : Nostr.t) : unit =
         | Some "description" -> has_description := true
         | _ -> ())
     e.tags;
-  let proceed =
-    !amount_sats > 0 && !has_description
-    && (match !zapped_pk with Some zp -> zapper_ok est e ~zapped_pk:zp | None -> false)
-  in
-  if proceed then begin
-    (match !parent_eid with
-    | Some parent ->
-        event_hook est parent (Event_stats_cb ("zaps", 1));
-        (match zap_sender e with
-        | Some sender -> event_pubkey_action est ~eid:parent ~re:{ e with pubkey = sender } ~action:"zapped"
-        | None -> ());
-        (!ext).ext_zap est e parent !amount_sats
-    | None -> ());
-    (match !zapped_pk with Some zp -> (!ext).ext_pubkey_zap est e zp !amount_sats | None -> ())
-  end
+  if !amount_sats > 0 && !has_description then
+    match !zapped_pk with
+    | None -> ()
+    | Some zp ->
+        let job =
+          { zj_receipt = e; zj_parent_eid = !parent_eid; zj_zapped_pk = zp;
+            zj_amount_sats = !amount_sats }
+        in
+        if (not est.cfg.verify_zappers) || List.mem e.pubkey est.cfg.trusted_zappers then
+          apply_zap_effects est job
+        else (
+          match !zap_verifier_submit with
+          | Some submit -> submit job
+          | None ->
+              if (!zapper_verifier) est ~zapped_pk:zp ~zap_receipt:e then
+                apply_zap_effects est job)
 
 let handle_categorized_people (est : est) (e : Nostr.t) : unit =
   let rec go = function

@@ -49,11 +49,12 @@ let () =
 
   let stats = Importer.Stats.create () in
 
-  (* ext_* hooks + LNURL zapper verification (the verifier closes over Eio net/clock/proxy). *)
+  (* ext_* hooks + LNURL zapper verification. Verification is OFF the import critical path:
+     workers enqueue onto the Zap_verifier pool (never blocking on third-party HTTP) and its
+     dedicated domains fetch the endpoint and apply the zap effects (see lib/zap_verifier.ml). *)
   Importer.Cache_storage_ext.register ();
-  CS.set_zapper_verifier (fun est ~zapped_pk ~zap_receipt ->
-      Importer.Lnurl.verify ~net ~clock ?proxy ~stats est ~zapped_pk
-        ~zapper_pubkey:zap_receipt.N.pubkey);
+  let zap_pool = Importer.Zap_verifier.create () in
+  CS.set_zap_verifier_submit (Importer.Zap_verifier.submit zap_pool);
 
   (* Spam detector shared across worker domains; processors mirror start_media_importer.jl, but
      write to the membership filterlist (no in-process Filterlist state). *)
@@ -235,6 +236,9 @@ let () =
           ~on_worker_init:(fun i ->
             Importer.Stats.register_domain_slot (Printf.sprintf "w%d" i))
           ~domain_mgr ~net ~n:cfg.num_workers ~make_est ~process pool);
+      (fun () ->
+        Importer.Zap_verifier.run ~domain_mgr ~net ~clock ?proxy ~n:4 ~stats ~make_est
+          ~reconnect_est:(fun est -> reconnect_est est) zap_pool);
       (fun () ->
         FC.run ~net ~clock ~host:cfg.firehose_host ~port:cfg.firehose_port ~on_message
           ~on_reconnect:(fun () -> Importer.Stats.reconnects stats)

@@ -53,20 +53,21 @@ let timed_get ~net ~clock ?proxy ?timeout ?stats (u : Http.url) : string option 
       u.Http.host u.Http.path;
   body
 
+(* The zapped user's LNURL-pay endpoint, from their latest metadata event (None: no metadata,
+   no lud16/lud06, or a malformed URL). *)
+let endpoint_url (est : Cache_storage.est) ~(zapped_pk : string) : Http.url option =
+  match Cache_storage.get_meta_data_event est zapped_pk with
+  | None -> None
+  | Some md -> Option.bind (build_url md.content) Http.parse_url
+
 let verify ~net ~clock ?proxy ?timeout ?stats (est : Cache_storage.est) ~(zapped_pk : string)
     ~(zapper_pubkey : string) : bool =
-  match Cache_storage.get_meta_data_event est zapped_pk with
+  match endpoint_url est ~zapped_pk with
   | None -> false
-  | Some md -> (
-      match build_url md.content with
+  | Some u -> (
+      match timed_get ~net ~clock ?proxy ?timeout ?stats u with
       | None -> false
-      | Some url -> (
-          match Http.parse_url url with
-          | None -> false
-          | Some u -> (
-              match timed_get ~net ~clock ?proxy ?timeout ?stats u with
-              | None -> false
-              | Some body -> (
-                  match extract_nostr_pubkey body with
-                  | Some pk -> pk = zapper_pubkey
-                  | None -> false))))
+      | Some body -> (
+          match extract_nostr_pubkey body with
+          | Some pk -> pk = zapper_pubkey
+          | None -> false))
