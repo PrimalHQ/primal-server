@@ -28,6 +28,7 @@ let negative_ttl = 600.0
 let breaker_fails = 3
 let breaker_cooldown = 300.0
 let cache_max_entries = 50_000 (* crude bound: reset the cache when it grows past this *)
+let pool_stall = 600.0 (* pool watchdog: all verifiers stuck non-idle this long -> exit *)
 
 type t = {
   queue : CS.zap_job Eio.Stream.t;
@@ -120,16 +121,25 @@ let process (t : t) ~net ~clock ?proxy ~(stats : Stats.t) (est : CS.est) (job : 
       | _ -> ())
 
 (* Run [n] verifier domains forever (mirrors Worker_pool.run): each takes jobs off the shared
-   queue with its own est, so a slow fetch delays only this pool, never the import workers. *)
+   queue with its own est, so a slow fetch delays only this pool, never the import workers.
+
+   Pool watchdog: DNS resolution (getaddrinfo in a systhread) is the one operation the request
+   timeout cannot interrupt, and the circuit breaker never trips on a hang (it needs a COMPLETED
+   failure) — so a resolver-blackholed host can wedge every verifier permanently, which the main
+   stall watchdog would never notice (imports keep completing). If ALL verifiers have been stuck
+   non-idle for [pool_stall]s, dump the fiber phases and exit for systemd's Restart=always
+   (which also clears the leaked systhreads). Zaps queued meanwhile are dropped, not lost import
+   data — re-imported receipts are dedup'd upstream. *)
 let run ~(domain_mgr : _ Eio.Domain_manager.t) ~(net : _ Eio.Net.t) ~clock ?proxy ~(n : int)
     ~(stats : Stats.t) ~(make_est : unit -> CS.est) ~(reconnect_est : CS.est -> unit) (t : t) :
     unit =
   let pg_net = (net :> Postgres.net_t) in
+  let slots = List.init n (fun i -> Stats.new_slot (Printf.sprintf "zv%d" i)) in
   let verifier i () =
     Eio.Domain_manager.run domain_mgr (fun () ->
         Switch.run @@ fun sw ->
         Postgres.set_env ~net:pg_net ~sw;
-        Stats.register_domain_slot (Printf.sprintf "zv%d" i);
+        Stats.set_domain_slot (List.nth slots i);
         let est = make_est () in
         let rec loop () =
           let job = Eio.Stream.take t.queue in
@@ -143,4 +153,24 @@ let run ~(domain_mgr : _ Eio.Domain_manager.t) ~(net : _ Eio.Net.t) ~clock ?prox
         in
         loop ())
   in
-  Fiber.all (List.init n verifier)
+  let watchdog () =
+    while true do
+      Eio.Time.sleep clock 30.0;
+      let now = Unix.gettimeofday () in
+      let stuck_age s =
+        let p, since = Stats.slot_state s in
+        if p = "idle" then 0.0 else now -. since
+      in
+      let min_age = List.fold_left (fun acc s -> Float.min acc (stuck_age s)) infinity slots in
+      if min_age >= pool_stall then begin
+        Printf.printf
+          "[importer] ZAP-VERIFIER WATCHDOG: all %d verifiers stuck for %.0fs+ (queue %d, %d \
+           dropped); fiber phases:\n%!"
+          n min_age (Eio.Stream.length t.queue) (Atomic.get t.dropped);
+        Stats.dump_slots ();
+        Printf.printf "[importer] ZAP-VERIFIER WATCHDOG: exiting so systemd restarts us\n%!";
+        exit 1
+      end
+    done
+  in
+  Fiber.all (watchdog :: List.init n verifier)

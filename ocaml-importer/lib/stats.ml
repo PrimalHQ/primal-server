@@ -103,8 +103,12 @@ let set_slot (s : slot) (phase : string) : unit =
    [phase] is a no-op (main-domain fibers own explicit slots instead). *)
 let domain_slot : slot option Domain.DLS.key = Domain.DLS.new_key (fun () -> None)
 
-let register_domain_slot (name : string) : unit =
-  Domain.DLS.set domain_slot (Some (new_slot name))
+(* Adopt an existing slot as this domain's implicit slot — for pools that create their slots up
+   front (outside the domain) so they can watch them (see Zap_verifier's pool watchdog). *)
+let set_domain_slot (s : slot) : unit = Domain.DLS.set domain_slot (Some s)
+let register_domain_slot (name : string) : unit = set_domain_slot (new_slot name)
+
+let slot_state (s : slot) : string * float = Atomic.get s.sstate
 
 let phase (p : string) : unit =
   match Domain.DLS.get domain_slot with Some s -> set_slot s p | None -> ()
