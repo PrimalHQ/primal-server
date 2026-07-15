@@ -56,7 +56,22 @@ module Eio_thread = struct
 
   let open_connection (sockaddr : Unix.sockaddr) : in_channel * out_channel =
     let addr = Eio_unix.Net.sockaddr_of_unix_stream sockaddr in
-    let sock = Eio.Net.connect ~sw:(get_sw ()) (get_net ()) addr in
+    (* eio_linux's [Eio.Net.connect] registers the new socket on the switch BEFORE connect(2)
+       and does not release it when connect fails, so connecting directly on the domain-lifetime
+       switch leaks one fd per refused attempt — a down DB host retried every event_syncer cycle
+       exhausted the fd table in ~27h and broke all outbound sockets (LNURL zap verification,
+       pushgateway) until restart. Connect under a short-lived switch, so a failed attempt's fd
+       is released with it, and keep the established socket by dup(2)-ing it onto the domain
+       switch. *)
+    let sock =
+      Switch.run @@ fun tmp_sw ->
+      let sock = Eio.Net.connect ~sw:tmp_sw (get_net ()) addr in
+      let dup =
+        Eio_unix.Fd.use_exn "dup" (Eio_unix.Net.fd (sock :> Eio_unix.Net.stream_socket_ty r))
+          (fun fd -> Unix.dup ~cloexec:true fd)
+      in
+      Eio_unix.Net.import_socket_stream ~sw:(get_sw ()) ~close_unix:true dup
+    in
     let flow = (sock :> Eio_unix.Net.stream_socket_ty r) in
     let reader =
       Eio.Buf_read.of_flow (flow :> Eio.Flow.source_ty r) ~max_size:(64 * 1024 * 1024)

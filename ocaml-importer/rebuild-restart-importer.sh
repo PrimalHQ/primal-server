@@ -81,6 +81,7 @@ loginctl enable-linger "${USER:-$(id -un)}" 2>/dev/null || true
 systemd-run --user --collect --unit="$UNIT" \
   --description="Primal OCaml importer (ocaml-importer/bin/main.exe)" \
   -p Restart=always -p RestartSec=5 -p OOMPolicy=kill -p StartLimitIntervalSec=0 \
+  -p LimitNOFILE=65536 \
   -p MemoryAccounting=yes -p MemoryHigh=9G -p MemoryMax=10G \
   -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
   -p "WorkingDirectory=$P" \
