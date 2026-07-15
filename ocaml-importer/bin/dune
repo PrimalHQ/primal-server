@@ -1,5 +1,5 @@
 (executables
- (names main dbcheck importcheck scorecheck compare phase8check zapcheck)
+ (names main dbcheck importcheck scorecheck compare phase8check zapcheck zapbackfill)
  (libraries importer eio eio.unix eio_main yojson mirage-crypto-rng.unix)
  (preprocess
   (pps pgocaml_ppx)))
