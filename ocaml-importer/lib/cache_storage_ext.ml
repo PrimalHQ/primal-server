@@ -346,21 +346,44 @@ let is_app_user (est : CS.est) (pubkey : string) : bool =
   | [] -> false
   | _ -> true
 
-(* a boolean notificationsAdditional setting; true iff a row matches Julia's
-   "... and coalesce((value->'content'->'notificationsAdditional'->KEY)::bool, DEFAULT)". Both the
-   JSON key and the default are bound parameters ($2::text disambiguates jsonb->text from the array
-   jsonb->int overload, $3::bool the coalesce default), so the SQL is a fixed literal — no
-   interpolation. *)
+(* a boolean notificationsAdditional setting, mirroring Julia's
+   "coalesce((value->'content'->'notificationsAdditional'->KEY)::bool, DEFAULT)" for rows that
+   exist (a missing row is false, as in Julia's `pubkey in est.app_settings` guard).
+
+   The JSON is decoded here rather than in SQL. app_settings.value is a plain `text` column and
+   not every row holds JSON — some are bare tokens like "POST_YOU_WERE_MENTIONED_IN_WAS_LIKED" —
+   so the old `value::jsonb` cast raised 22P02 for those users. That aborted [notification] and,
+   with it, the rest of apply_zap_effects: satszapped had already been bumped but
+   import_zap_receipt never ran, leaving the zap permanently invisible AND unmarked, so every
+   backfill pass would re-apply it. A malformed setting must degrade to the default, not throw.
+   Casting `->KEY` to bool in SQL had the same problem for a non-boolean setting value. *)
 let app_setting_flag (est : CS.est) (pubkey : string) ~(key : string) ~(default : bool) : bool =
   match
     Postgres.query est.CS.mem_dbh
-      "select 1 from app_settings where key = decode($1,'hex') and \
-       coalesce(((value::jsonb->>'content')::jsonb->'notificationsAdditional'->$2::text)::bool, \
-       $3::bool) limit 1"
-      [ hexp pubkey; Some key; Some (string_of_bool default) ]
+      "select value from app_settings where key = decode($1,'hex') limit 1" [ hexp pubkey ]
   with
-  | [] -> false
-  | _ -> true
+  | (Some value :: _) :: _ ->
+      let flag =
+        try
+          (* value is the settings event, whose "content" is itself a JSON document (usually
+             carried as a JSON string, occasionally already an object). *)
+          let content =
+            match Yojson.Safe.Util.member "content" (Yojson.Safe.from_string value) with
+            | `String s -> Yojson.Safe.from_string s
+            | other -> other
+          in
+          match
+            Yojson.Safe.Util.member key
+              (Yojson.Safe.Util.member "notificationsAdditional" content)
+          with
+          | `Bool b -> Some b
+          | _ -> None
+        with _ -> None
+      in
+      Option.value flag ~default
+  (* row present but value NULL: nothing to read, so the default stands *)
+  | (None :: _) :: _ -> default
+  | _ -> false
 
 (* recipient follows initiator (Julia pubkey_followers: follower_pubkey = recipient, pubkey =
    initiator). Cache base table, [%pgsql]-checkable. *)
@@ -714,10 +737,18 @@ let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
         let event_id = e.id and created_at = i64 e.created_at in
         ignore
           [%pgsql dbh "insert into event_hashtags_1_295f217c0e (event_id, hashtag, created_at) values ($event_id, $hashtag, $created_at)"];
-        (match [%pgsql dbh "select 1 from hashtags_1_1e5c72161a where hashtag = $hashtag limit 1"] with
-        | [] -> ignore [%pgsql dbh "insert into hashtags_1_1e5c72161a (hashtag, score) values ($hashtag, 0)"]
+        (* One statement in the steady state, not select-then-update. A handful of hashtags are
+           extremely hot (every worker touches 'the'), and each statement holds that single row's
+           lock for its whole round trip — so halving the statements halves the time the row is
+           held, which is what the 12 workers actually queue on. RETURNING distinguishes "row
+           existed and was bumped" from "no such hashtag yet" without a second read. The
+           seed-insert race (two workers inserting the same new hashtag) is pre-existing: there
+           is no unique index on hashtag, so ON CONFLICT is not available. *)
+        (match
+           [%pgsql dbh "update hashtags_1_1e5c72161a set score = score + 1 where hashtag = $hashtag returning score"]
+         with
+        | [] -> ignore [%pgsql dbh "insert into hashtags_1_1e5c72161a (hashtag, score) values ($hashtag, 1)"]
         | _ -> ());
-        ignore [%pgsql dbh "update hashtags_1_1e5c72161a set score = score + 1 where hashtag = $hashtag"];
         CS.schedule_hook est
           ~execute_at:(current_time () + (4 * 3600))
           (`List [ `String "expire_hashtag_score_cb"; `String hashtag; `Int 1 ]))

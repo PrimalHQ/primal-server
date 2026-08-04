@@ -16,7 +16,17 @@
 
    Submission never blocks: when the pool can't keep up, the job is dropped (the zap stays
    uncounted, exactly as if verification had failed) — import throughput must never depend on
-   third-party HTTP. *)
+   third-party HTTP.
+
+   A *failed* verification, on the other hand, is retried rather than dropped. A transport
+   failure says nothing about the zap's validity, yet the receipt is already stored, so nothing
+   downstream will ever revisit it: the zap is silently uncounted forever. On 2026-08-04 that
+   cost 13% of e-tagged zap receipts in a four-hour window (66 of 507) while the same fetches
+   from a standalone process on the same host succeeded 100/100 — including both zaps on
+   nevent1qqs8pnl…, whose two fetches of walletofsatoshi.com/…/btc_alm each hit the 10s deadline.
+   Deferrable outcomes (fetch failure, breaker cooldown, and the zapped user's metadata not
+   imported yet) now go on a delayed retry list; only an endpoint that answers and disowns the
+   receipt author is final. *)
 
 open Eio.Std
 module CS = Cache_storage
@@ -30,42 +40,82 @@ let breaker_cooldown = 300.0
 let cache_max_entries = 50_000 (* crude bound: reset the cache when it grows past this *)
 let pool_stall = 600.0 (* pool watchdog: all verifiers stuck non-idle this long -> exit *)
 
+(* Retry schedule for deferrable failures, in seconds after the attempt that failed. Spread wide
+   enough to outlast the negative cache (10 min) and the breaker cooldown (5 min) — a retry that
+   lands inside either just re-reads the same cached failure — and to give a missing kind-0 time
+   to arrive. Length = number of retries; after the last one the job is dropped for good. *)
+let retry_backoff = [| 90.0; 420.0; 1800.0; 5400.0 |]
+
+(* Bound on the pending-retry list. Retries are a repair path, not a queue: if this many jobs are
+   waiting, verification is broadly broken and shedding is better than unbounded growth. *)
+let retry_max = 20_000
+
+let retry_sweep_interval = 15.0
+
+(* What the endpoint told us, as cached. [None] = it never answered (transport failure), which is
+   deferrable; [Some pk_opt] = it answered, with [pk_opt] its advertised nostrPubkey if any — a
+   verdict, so a cached [Some None] must not be retried the way a cached [None] is. *)
+type answer = string option option
+
 type t = {
-  queue : CS.zap_job Eio.Stream.t;
+  (* (job, attempts already made). Import workers submit with 0; the retry fiber re-submits with
+     the count so far. *)
+  queue : (CS.zap_job * int) Eio.Stream.t;
   dropped : int Atomic.t;
-  cache : (string, string option * float) Hashtbl.t; (* url -> (nostrPubkey?, expires_at) *)
+  cache : (string, answer * float) Hashtbl.t; (* url -> (answer, expires_at) *)
   breaker : (string, int * float) Hashtbl.t; (* host -> (consecutive fails, skip until) *)
+  (* (due_at, attempts_so_far, job), unordered — the sweep scans the whole list, and the backoff
+     tiers mean insertion order is not due order anyway. Written by the verifier domains, drained
+     by the retry fiber in [run]; both under [lock]. [retries_len] tracks the length so [defer]
+     does not walk the list on every deferral. *)
+  mutable retries : (float * int * CS.zap_job) list;
+  mutable retries_len : int;
   lock : Mutex.t;
+  (* Held here rather than only passed to [run], so [submit] — called from an import worker via
+     Cache_storage's hook, with no stats handle of its own — can still account for its drops. *)
+  stats : Stats.t;
 }
 
-let create () : t =
+let create ~(stats : Stats.t) () : t =
   {
     queue = Eio.Stream.create queue_capacity;
     dropped = Atomic.make 0;
     cache = Hashtbl.create 4096;
     breaker = Hashtbl.create 64;
+    retries = [];
+    retries_len = 0;
     lock = Mutex.create ();
+    stats;
   }
 
-(* Non-blocking enqueue from an import worker; drops (with a rate-limited log) when saturated. *)
-let submit (t : t) (job : CS.zap_job) : unit =
+(* Non-blocking enqueue; drops (with a rate-limited log) when saturated. A drop here is a zap
+   that will never be counted, so it lands in zap_dropped like any other give-up. *)
+let enqueue (t : t) (job : CS.zap_job) ~(attempts : int) : bool =
   if Eio.Stream.length t.queue >= drop_threshold then begin
+    Stats.zap_dropped t.stats;
     let n = 1 + Atomic.fetch_and_add t.dropped 1 in
     if n = 1 || n mod 1000 = 0 then
-      Printf.eprintf "zap_verifier: queue full; %d verifications dropped so far\n%!" n
+      Printf.eprintf "zap_verifier: queue full; %d verifications dropped so far\n%!" n;
+    false
   end
-  else Eio.Stream.add t.queue job
+  else begin
+    Eio.Stream.add t.queue (job, attempts);
+    true
+  end
+
+(* Enqueue from an import worker: a first attempt. *)
+let submit (t : t) (job : CS.zap_job) : unit = ignore (enqueue t job ~attempts:0 : bool)
 
 let with_lock (m : Mutex.t) (f : unit -> 'a) : 'a =
   Mutex.lock m;
   Fun.protect ~finally:(fun () -> Mutex.unlock m) f
 
-type lookup = Cached of string option | Fetch | Skip
+type lookup = Cached of answer | Fetch | Skip
 
 let cache_lookup (t : t) ~(url : string) ~(host : string) ~(now : float) : lookup =
   with_lock t.lock (fun () ->
       match Hashtbl.find_opt t.cache url with
-      | Some (pk, expires) when expires > now -> Cached pk
+      | Some (ans, expires) when expires > now -> Cached ans
       | _ -> (
           match Hashtbl.find_opt t.breaker host with
           | Some (fails, until) when fails >= breaker_fails && until > now -> Skip
@@ -74,8 +124,7 @@ let cache_lookup (t : t) ~(url : string) ~(host : string) ~(now : float) : looku
 (* [None] = transport failure (DNS/connect/TLS/timeout): trips the breaker and caches negative.
    [Some pk_opt] = the endpoint answered (pk_opt = its advertised nostrPubkey, if any): resets
    the breaker and caches the answer. *)
-let record_result (t : t) ~(url : string) ~(host : string) ~(now : float)
-    (res : string option option) : unit =
+let record_result (t : t) ~(url : string) ~(host : string) ~(now : float) (res : answer) : unit =
   with_lock t.lock (fun () ->
       if Hashtbl.length t.cache > cache_max_entries then Hashtbl.reset t.cache;
       match res with
@@ -88,37 +137,76 @@ let record_result (t : t) ~(url : string) ~(host : string) ~(now : float)
       | Some pk_opt ->
           Hashtbl.remove t.breaker host;
           let ttl = match pk_opt with Some _ -> positive_ttl | None -> negative_ttl in
-          Hashtbl.replace t.cache url (pk_opt, now +. ttl))
+          Hashtbl.replace t.cache url (Some pk_opt, now +. ttl))
 
-(* Verify one zap receipt (cache/breaker first, HTTP on miss) and apply its effects if the
-   endpoint's advertised nostrPubkey matches the receipt's author. *)
-let process (t : t) ~net ~clock ?proxy ~(stats : Stats.t) (est : CS.est) (job : CS.zap_job) :
-    unit =
+(* Queue [job] for another attempt, or give up and account for the loss. [attempts] is how many
+   attempts have already been made (1 after the first). *)
+let defer (t : t) ~(stats : Stats.t) ~(attempts : int) ~(reason : string) (job : CS.zap_job) : unit
+    =
+  if attempts > Array.length retry_backoff then begin
+    Stats.zap_dropped stats;
+    Printf.eprintf "zap_verifier: giving up on zap %s after %d attempts (%s); zap uncounted\n%!"
+      (Hex_util.encode job.CS.zj_receipt.Nostr.id) attempts reason
+  end
+  else begin
+    let due = Unix.gettimeofday () +. retry_backoff.(attempts - 1) in
+    let queued =
+      with_lock t.lock (fun () ->
+          if t.retries_len >= retry_max then false
+          else begin
+            t.retries <- (due, attempts, job) :: t.retries;
+            t.retries_len <- t.retries_len + 1;
+            true
+          end)
+    in
+    if queued then Stats.zap_retry stats
+    else begin
+      Stats.zap_dropped stats;
+      let n = 1 + Atomic.fetch_and_add t.dropped 1 in
+      if n = 1 || n mod 1000 = 0 then
+        Printf.eprintf "zap_verifier: retry list full (%d); %d verifications dropped so far\n%!"
+          retry_max n
+    end
+  end
+
+(* Decide one zap receipt (cache/breaker first, HTTP on miss). Writes nothing, so the caller can
+   retry any failure here without risking half-applied effects.
+
+   [Verified]: the endpoint's advertised nostrPubkey is the receipt's author.
+   [Unverified]: the endpoint answered and its nostrPubkey is absent or someone else's — a
+     verdict, and retrying cannot change it.
+   [Deferred]: no metadata for the zapped user yet, the fetch failed, or the host is in breaker
+     cooldown — none of which says anything about the zap. *)
+type verdict = Verified | Unverified | Deferred of string
+
+let verify (t : t) ~net ~clock ?proxy ~(stats : Stats.t) (est : CS.est) (job : CS.zap_job) :
+    verdict =
   Stats.phase "zap:endpoint";
   match Lnurl.endpoint_url est ~zapped_pk:job.CS.zj_zapped_pk with
-  | None -> ()
+  | None -> Deferred "no lnurl endpoint for zapped pubkey"
   | Some u -> (
       let url = Printf.sprintf "https://%s:%d%s" u.Http.host u.Http.port u.Http.path in
       let now = Unix.gettimeofday () in
+      (* [Error reason] = we never got an answer; [Ok pk_opt] = the endpoint answered. *)
       let advertised =
         match cache_lookup t ~url ~host:u.Http.host ~now with
-        | Cached pk -> pk
-        | Skip -> None
+        | Cached (Some pk_opt) -> Ok pk_opt (* endpoint answered (cached verdict) *)
+        | Cached None -> Error "cached fetch failure"
+        | Skip -> Error "host in circuit-breaker cooldown"
         | Fetch -> (
             match Lnurl.timed_get ~net ~clock ?proxy ~stats u with
             | None ->
                 record_result t ~url ~host:u.Http.host ~now None;
-                None
+                Error "lnurl fetch failed"
             | Some body ->
                 let pk = Lnurl.extract_nostr_pubkey body in
                 record_result t ~url ~host:u.Http.host ~now (Some pk);
-                pk)
+                Ok pk)
       in
       match advertised with
-      | Some pk when pk = job.CS.zj_receipt.Nostr.pubkey ->
-          Stats.phase "zap:apply";
-          CS.apply_zap_effects est job
-      | _ -> ())
+      | Ok (Some pk) when pk = job.CS.zj_receipt.Nostr.pubkey -> Verified
+      | Ok _ -> Unverified
+      | Error reason -> Deferred reason)
 
 (* Run [n] verifier domains forever (mirrors Worker_pool.run): each takes jobs off the shared
    queue with its own est, so a slow fetch delays only this pool, never the import workers.
@@ -141,17 +229,59 @@ let run ~(domain_mgr : _ Eio.Domain_manager.t) ~(net : _ Eio.Net.t) ~clock ?prox
         Postgres.set_env ~net:pg_net ~sw;
         Stats.set_domain_slot (List.nth slots i);
         let est = make_est () in
+        let fail exn =
+          Printf.eprintf "zap_verifier: %s\n%!" (Printexc.to_string exn);
+          if Postgres.is_connection_error exn then reconnect_est est
+        in
         let rec loop () =
-          let job = Eio.Stream.take t.queue in
-          (try process t ~net ~clock ?proxy ~stats est job with
-          | Eio.Cancel.Cancelled _ as e -> raise e
-          | exn ->
-              Printf.eprintf "zap_verifier: %s\n%!" (Printexc.to_string exn);
-              if Postgres.is_connection_error exn then reconnect_est est);
+          let job, prior = Eio.Stream.take t.queue in
+          let attempts = prior + 1 in
+          (match
+             try Ok (verify t ~net ~clock ?proxy ~stats est job) with
+             | Eio.Cancel.Cancelled _ as e -> raise e
+             | exn -> Error exn
+           with
+          | Ok Verified -> (
+              Stats.phase "zap:apply";
+              (* Not retried on failure: apply_zap_effects is several autocommitted statements,
+                 so a second run after a partial one would double-count sats and duplicate the
+                 og_zap_receipts row. Losing the zap is the lesser error. *)
+              try
+                CS.apply_zap_effects est job;
+                Stats.zap_ok stats
+              with
+              | Eio.Cancel.Cancelled _ as e -> raise e
+              | exn ->
+                  fail exn;
+                  Stats.zap_dropped stats;
+                  Printf.eprintf "zap_verifier: zap %s verified but not applied; zap uncounted\n%!"
+                    (Hex_util.encode job.CS.zj_receipt.Nostr.id))
+          | Ok Unverified -> Stats.zap_unverified stats
+          | Ok (Deferred reason) -> defer t ~stats ~attempts ~reason job
+          (* Nothing was written, so this is safe to retry. *)
+          | Error exn ->
+              fail exn;
+              defer t ~stats ~attempts ~reason:(Printexc.to_string exn) job);
           Stats.phase "idle";
           loop ()
         in
         loop ())
+  in
+  (* Move due retries back onto the queue. Runs on the calling (main) domain: the verifier
+     domains only ever append to [t.retries], so a stuck verifier cannot block rescheduling. *)
+  let retry_fiber () =
+    while true do
+      Eio.Time.sleep clock retry_sweep_interval;
+      let now = Unix.gettimeofday () in
+      let due =
+        with_lock t.lock (fun () ->
+            let due, pending = List.partition (fun (at, _, _) -> at <= now) t.retries in
+            t.retries <- pending;
+            t.retries_len <- List.length pending;
+            due)
+      in
+      List.iter (fun (_, attempts, job) -> ignore (enqueue t job ~attempts : bool)) due
+    done
   in
   let watchdog () =
     while true do
@@ -165,12 +295,14 @@ let run ~(domain_mgr : _ Eio.Domain_manager.t) ~(net : _ Eio.Net.t) ~clock ?prox
       if min_age >= pool_stall then begin
         Printf.printf
           "[importer] ZAP-VERIFIER WATCHDOG: all %d verifiers stuck for %.0fs+ (queue %d, %d \
-           dropped); fiber phases:\n%!"
-          n min_age (Eio.Stream.length t.queue) (Atomic.get t.dropped);
+           awaiting retry, %d dropped); fiber phases:\n%!"
+          n min_age (Eio.Stream.length t.queue)
+          (with_lock t.lock (fun () -> t.retries_len))
+          (Atomic.get t.dropped);
         Stats.dump_slots ();
         Printf.printf "[importer] ZAP-VERIFIER WATCHDOG: exiting so systemd restarts us\n%!";
         exit 1
       end
     done
   in
-  Fiber.all (watchdog :: List.init n verifier)
+  Fiber.all (watchdog :: retry_fiber :: List.init n verifier)

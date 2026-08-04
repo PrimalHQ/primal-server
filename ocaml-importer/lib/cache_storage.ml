@@ -327,12 +327,61 @@ let scheduled_hook_execute (est : est) (j : Yojson.Safe.t) : unit =
       (!ext).expire_hashtag_score_cb est hashtag d
   | _ -> ()
 
-let run_scheduled_hooks (est : est) : unit =
+(* Rows claimed per round. The original select-all/execute-all/delete-all shape wedged the runner
+   permanently once the backlog grew (2026-08-04: 4.3M due rows, one invocation running for 69h
+   and never reaching the DELETE, so no progress was ever committed and every restart redid the
+   same work from scratch — while its 4.3M single-row UPDATEs saturated Postgres and starved the
+   import workers). Claiming a bounded batch with DELETE .. RETURNING makes each batch's progress
+   durable, so the runner always converges. *)
+let scheduled_hooks_batch = 20_000
+
+(* Atomically claim up to [n] due hooks: the DELETE both removes and yields them, so a crash
+   mid-batch loses at most one batch instead of replaying the whole backlog. ctid keeps the
+   delete to exactly the rows the inner ordered/limited scan picked. *)
+let claim_scheduled_hooks (est : est) ~(now : int64) ~(n : int64) : string list =
   let dbh = est.dbh in
+  [%pgsql dbh
+    "delete from scheduled_hooks where ctid in \
+     (select ctid from scheduled_hooks where execute_at <= $now order by execute_at limit $n) \
+     returning funcall"]
+
+(* Run one claimed batch. expire_hashtag_score_cb decrements are folded per hashtag first: a
+   batch is dominated by a few hot tags (the tag 'the' alone accounted for 80k of the 4.3M
+   backlog), so
+   summing the deltas turns tens of thousands of UPDATEs into one per distinct hashtag. *)
+let run_scheduled_hooks_batch (est : est) (funcalls : string list) : unit =
+  let hashtag_deltas : (string, int) Hashtbl.t = Hashtbl.create 4096 in
+  let others = ref [] in
+  List.iter
+    (fun s ->
+      match Yojson.Safe.from_string s with
+      | `List (`String "expire_hashtag_score_cb" :: `String hashtag :: `Int d :: _) ->
+          let prev = Option.value ~default:0 (Hashtbl.find_opt hashtag_deltas hashtag) in
+          Hashtbl.replace hashtag_deltas hashtag (prev + d)
+      | j -> others := j :: !others
+      | exception _ -> ())
+    funcalls;
+  Hashtbl.iter (fun hashtag d -> (!ext).expire_hashtag_score_cb est hashtag d) hashtag_deltas;
+  List.iter (fun j -> scheduled_hook_execute est j) (List.rev !others)
+
+(* Drain the due backlog in batches. [max_batches] bounds one invocation so the caller's fiber
+   comes back periodically (and its stats slot goes idle) even with millions of rows pending;
+   the periodic runner simply picks up where this left off. Returns the number of hooks run. *)
+let run_scheduled_hooks ?(max_batches = 50) (est : est) : int =
   let now = i64 (Utils.current_time ()) in
-  let due = [%pgsql dbh "select funcall from scheduled_hooks where execute_at <= $now"] in
-  List.iter (fun funcall -> scheduled_hook_execute est (Yojson.Safe.from_string funcall)) due;
-  ignore [%pgsql dbh "delete from scheduled_hooks where execute_at <= $now"]
+  let n = Int64.of_int scheduled_hooks_batch in
+  let total = ref 0 in
+  (try
+     for _ = 1 to max_batches do
+       let due = claim_scheduled_hooks est ~now ~n in
+       let got = List.length due in
+       if got = 0 then raise Exit;
+       run_scheduled_hooks_batch est due;
+       total := !total + got;
+       if got < scheduled_hooks_batch then raise Exit
+     done
+   with Exit -> ());
+  !total
 
 (* {1 event_pubkey_actions} (Julia init_event_pubkey_action / event_pubkey_action) *)
 

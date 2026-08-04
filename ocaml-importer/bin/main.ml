@@ -54,7 +54,7 @@ let () =
      workers enqueue onto the Zap_verifier pool (never blocking on third-party HTTP) and its
      dedicated domains fetch the endpoint and apply the zap effects (see lib/zap_verifier.ml). *)
   Importer.Cache_storage_ext.register ();
-  let zap_pool = Importer.Zap_verifier.create () in
+  let zap_pool = Importer.Zap_verifier.create ~stats () in
   CS.set_zap_verifier_submit (Importer.Zap_verifier.submit zap_pool);
 
   (* Spam detector shared across worker domains; processors mirror start_media_importer.jl, but
@@ -198,7 +198,14 @@ let () =
   let run_scheduled_hooks_loop () =
     while true do
       Importer.Stats.set_slot hooks_slot "run";
-      (try CS.run_scheduled_hooks hooks_est with
+      let t0 = Unix.gettimeofday () in
+      (try
+         let n = CS.run_scheduled_hooks hooks_est in
+         (* Only worth a line when there was a real backlog; the steady state is a few hundred. *)
+         if n >= CS.scheduled_hooks_batch then
+           Printf.printf "scheduled_hooks: ran %d due hooks in %.1fs\n%!" n
+             (Unix.gettimeofday () -. t0)
+       with
       | Eio.Cancel.Cancelled _ as e -> raise e
       | exn ->
           Printf.eprintf "scheduled_hooks: %s\n%!" (Printexc.to_string exn);

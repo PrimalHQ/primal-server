@@ -173,13 +173,17 @@ and config from the environment variables above.
 The production entry point. Takes the JSON config file as its sole argument (see
 [Configuration](#configuration-json-file)). Wires the firehose client, the spam
 detector, the LNURL zapper verifier, the worker-domain pool, the [event syncer](#event-syncer),
-and a periodic scheduled-hooks runner, then imports forever (reconnecting to the firehose on
+and a periodic scheduled-hooks runner (which claims due `scheduled_hooks` rows in batches with
+`DELETE .. RETURNING`, folding the per-hashtag score decrements together — draining the table in
+one unbounded select/execute/delete could never commit progress once the backlog reached
+millions of rows), then imports forever (reconnecting to the firehose on
 drop). Imports also produce in-DB [notifications](#notifications). It prints a one-line
 per-second stats summary:
 
 ```
 [importer <wall-clock> up <uptime>] recv/imp/dup/rej/err rates | q <depth>/<cap> <pct> qw <max queue wait> |
-  busy <n>/<workers> | lnurl <ok>/<fail>/<timeout> per second | tot <imported> | rss/heap | r=<firehose reconnects>
+  busy <n>/<workers> | lnurl <ok>/<fail>/<timeout> per second |
+  zap <verified>/<retried>/<unverified>/<dropped> cumulative | tot <imported> | rss/heap | r=<firehose reconnects>
 ```
 
 plus, when any long-lived fiber has been in one non-idle phase for over 30 s, a trailing
@@ -190,13 +194,21 @@ plus, when any long-lived fiber has been in one non-idle phase for over 30 s, a 
 LNURL zapper verification runs **off the import critical path** on a dedicated 4-domain pool
 (`lib/zap_verifier.ml`, fibers `zv0..zv3`) with a url→pubkey cache and a per-host circuit
 breaker — import workers enqueue and move on (the bounded queue drops, never blocks, under
-overload); every LNURL fetch is bounded end-to-end (DNS→read, 10 s; slow fetches over 5 s are
-logged), every DB connection gets `statement_timeout = 30s` and
+overload). A verification that *fails* is retried rather than dropped: fetch failures, breaker
+cooldowns and a not-yet-imported kind-0 all go on a delayed retry list
+(`retry_backoff = 90/420/1800/5400 s`, capped at `retry_max` pending), because the receipt is
+already stored and nothing downstream would ever revisit it — an uncounted zap is permanent.
+Only an endpoint that answers and disowns the receipt author is final, and only a verified zap
+whose DB apply throws is dropped without retry (re-running the half-applied autocommitted
+statements would double-count sats). Every LNURL fetch is bounded end-to-end (DNS→read, 10 s;
+slow fetches over 5 s are logged), every DB connection gets `statement_timeout = 30s` and
 `application_name = 'primal-ocaml-importer'` (see `Postgres.connect`), and a **stall watchdog**
 exits the process (for systemd's `Restart=always`) if workers are busy but nothing completes for
 180 s, dumping all fiber phases first. The pushgateway fiber also publishes
 `importer_queue_depth`, `importer_busy_workers`, `importer_errors_total` and
-`importer_lnurl_{ok,fail,timeout}_total` alongside `cache_any`.
+`importer_lnurl_{ok,fail,timeout}_total` and
+`importer_zap_{verified,retry,unverified,dropped}_total` alongside `cache_any`
+(`importer_zap_dropped_total` is the alertable one — those zaps stay uncounted).
 
 During development, don't run this by hand — use `rebuild-restart-importer.sh` (see
 [Development loop](#development-loop)) so a fresh build is always the one running and you can

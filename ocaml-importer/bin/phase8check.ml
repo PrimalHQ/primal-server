@@ -33,7 +33,7 @@ let () =
   let past = Int64.of_int (Importer.Utils.current_time () - 10) in
   let funcall = {|["expire_hashtag_score_cb","phase8tag",2]|} in
   ignore [%pgsql dbh "insert into scheduled_hooks (execute_at, funcall) values ($past, $funcall)"];
-  CS.run_scheduled_hooks est;
+  ignore (CS.run_scheduled_hooks est : int);
   let score = match [%pgsql dbh "select score from hashtags_1_1e5c72161a where hashtag = $ht"] with s :: _ -> s | [] -> -1L in
   let remaining = match [%pgsql dbh "select count(*) from scheduled_hooks where funcall = $funcall"] with Some n :: _ -> n | _ -> -1L in
   Printf.printf "hashtag score after expiry=%Ld (expect 3), due hooks remaining=%Ld (expect 0)\n" score remaining;

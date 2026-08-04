@@ -125,6 +125,7 @@ let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval :
     let any = base_any + Stats.imported_total stats in
     save_stats stats_file base_fields any;
     let lnurl_ok, lnurl_fail, lnurl_timeout = Stats.lnurl_totals stats in
+    let zap_ok, zap_retry, zap_unverified, zap_dropped = Stats.zap_totals stats in
     let metrics =
       [
         (metric_name, "counter", any);
@@ -134,6 +135,11 @@ let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval :
         ("importer_lnurl_ok_total", "counter", lnurl_ok);
         ("importer_lnurl_fail_total", "counter", lnurl_fail);
         ("importer_lnurl_timeout_total", "counter", lnurl_timeout);
+        (* zap_dropped rising is the alertable one: those zaps are uncounted for good. *)
+        ("importer_zap_verified_total", "counter", zap_ok);
+        ("importer_zap_retry_total", "counter", zap_retry);
+        ("importer_zap_unverified_total", "counter", zap_unverified);
+        ("importer_zap_dropped_total", "counter", zap_dropped);
       ]
     in
     (* Device-push metrics (Julia PushGatewayExporter push_notification_latest/_sent), merged into

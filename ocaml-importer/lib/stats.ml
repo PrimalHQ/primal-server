@@ -18,6 +18,13 @@ type t = {
   lnurl_ok : int Atomic.t;      (* LNURL zapper-verification fetches that returned a body *)
   lnurl_fail : int Atomic.t;    (* ... that failed fast (DNS/connect/TLS/HTTP error) *)
   lnurl_timeout : int Atomic.t; (* ... that hit the request deadline *)
+  (* Zap-receipt verification outcomes. A zap whose zapper cannot be verified is never counted
+     (no og_zap_receipts row, no satszapped, no notification), so these are the only visibility
+     into silently-uncounted zaps. *)
+  zap_ok : int Atomic.t;         (* verified: import effects applied *)
+  zap_retry : int Atomic.t;      (* deferred (no metadata / fetch failure) and requeued *)
+  zap_unverified : int Atomic.t; (* endpoint answered but disowned the receipt author: final *)
+  zap_dropped : int Atomic.t;    (* given up on: retries exhausted, or queue/retry list full *)
   push_sent : int Atomic.t;     (* device push notifications delivered (per sender responses) *)
   push_latest : int Atomic.t;   (* unix time of the last completed send op (0 = never) *)
   qwait_max_ms : int Atomic.t;  (* max queue wait (submit -> dequeue) seen since last report *)
@@ -37,6 +44,10 @@ let create () =
     lnurl_ok = Atomic.make 0;
     lnurl_fail = Atomic.make 0;
     lnurl_timeout = Atomic.make 0;
+    zap_ok = Atomic.make 0;
+    zap_retry = Atomic.make 0;
+    zap_unverified = Atomic.make 0;
+    zap_dropped = Atomic.make 0;
     push_sent = Atomic.make 0;
     push_latest = Atomic.make 0;
     qwait_max_ms = Atomic.make 0;
@@ -56,6 +67,10 @@ let reconnects t = Atomic.incr t.reconnects
 let lnurl_ok t = Atomic.incr t.lnurl_ok
 let lnurl_fail t = Atomic.incr t.lnurl_fail
 let lnurl_timeout t = Atomic.incr t.lnurl_timeout
+let zap_ok t = Atomic.incr t.zap_ok
+let zap_retry t = Atomic.incr t.zap_retry
+let zap_unverified t = Atomic.incr t.zap_unverified
+let zap_dropped t = Atomic.incr t.zap_dropped
 
 (* One sender response can report a whole batch, so this bump takes a count; it also stamps
    push_latest (the Julia push_notification_latest metric source). *)
@@ -82,6 +97,13 @@ let queue_depth t = max 0 (Atomic.get t.submitted - Atomic.get t.started)
 let busy_workers t = max 0 (Atomic.get t.started - Atomic.get t.completed)
 let errors_total t = Atomic.get t.errors
 let lnurl_totals t = (Atomic.get t.lnurl_ok, Atomic.get t.lnurl_fail, Atomic.get t.lnurl_timeout)
+
+(* (verified, retried, unverified, dropped) — cumulative. *)
+let zap_totals t =
+  ( Atomic.get t.zap_ok,
+    Atomic.get t.zap_retry,
+    Atomic.get t.zap_unverified,
+    Atomic.get t.zap_dropped )
 
 (* {1 Fiber phase slots}
 
@@ -223,6 +245,9 @@ let report_loop ?(watchdog_stall_s = 180) ~clock ~capacity ~workers (t : t) : un
     and d_lto = g t.lnurl_timeout - !p_lto in
     p_lok := g t.lnurl_ok; p_lfail := g t.lnurl_fail; p_lto := g t.lnurl_timeout;
     let push_total = g t.push_sent in
+    (* Cumulative, not per-second: an uncounted zap is rare and individually significant, so what
+       matters is the running total since start, not the rate in the last second. *)
+    let z_ok, z_retry, z_unver, z_drop = zap_totals t in
     let qw_ms = Atomic.exchange t.qwait_max_ms 0 in
     (* Wall-clock timestamp (uptime alone is painful to correlate with systemd/DB incidents). *)
     let tm = Unix.localtime (Unix.gettimeofday ()) in
@@ -244,8 +269,8 @@ let report_loop ?(watchdog_stall_s = 180) ~clock ~capacity ~workers (t : t) : un
           ^ (if extra > 0 then Printf.sprintf " (+%d)" extra else "")
     in
     Printf.printf
-      "[importer %s up %s] recv %d/s  imp %d/s  dup %d/s  rej %d/s  err %d/s | q %d/%d %.1f%% qw %.1fs | busy %d/%d | lnurl %d/%d/%d | push %d | tot %d | rss %s heap %s | r=%d%s\n%!"
+      "[importer %s up %s] recv %d/s  imp %d/s  dup %d/s  rej %d/s  err %d/s | q %d/%d %.1f%% qw %.1fs | busy %d/%d | lnurl %d/%d/%d | zap %d/%d/%d/%d | push %d | tot %d | rss %s heap %s | r=%d%s\n%!"
       stamp (fmt_hms uptime) d_recv d_imp d_dup d_rej d_err depth capacity pct
-      (float_of_int qw_ms /. 1000.) busy workers d_lok d_lfail d_lto push_total imp
-      (fmt_bytes rss) (fmt_bytes heap) rc stuck
+      (float_of_int qw_ms /. 1000.) busy workers d_lok d_lfail d_lto z_ok z_retry z_unver z_drop
+      push_total imp (fmt_bytes rss) (fmt_bytes heap) rc stuck
   done
