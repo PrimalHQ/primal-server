@@ -617,9 +617,17 @@ function parse_video_dimensions(data::Vector{UInt8})
     res
 end
 
+# `file` reads at most a few MB (7 MiB for file-5.45) and then exits, so piping
+# a larger buffer into its stdin kills the writer task with EPIPE and `read`
+# throws TaskFailedException -- even though the mimetype was already determined
+# correctly. Go through a temp file instead, like parse_video_dimensions does.
 function parse_mimetype(data::Vector{UInt8})
     isempty(data) && return "inode/x-empty"
-    String(chomp(read(pipeline(`file -b --mime-type -`; stdin=IOBuffer(data)), String)))
+    mktemp() do fn, io
+        write(io, data)
+        close(io)
+        String(chomp(read(pipeline(`file -b --mime-type $fn`; stdin=devnull), String)))
+    end
 end
 
 function extract_video_frames(data::Vector{UInt8}; nframes=5, image_format="mjpeg")

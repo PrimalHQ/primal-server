@@ -251,16 +251,22 @@ pub async fn parse_mimetype(data: &[u8]) -> String {
     };
 
     if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(data).await.is_err() {
-            let _ = child.kill().await;
-            return "application/octet-stream".into();
-        }
+        // `file` reads at most a few MB (7 MiB for file-5.45) and then exits,
+        // so write_all fails with EPIPE on anything larger. That is not an
+        // error: `file` has already printed the mimetype and exits 0. Drop
+        // stdin and use whatever it produced.
+        let _ = stdin.write_all(data).await;
         drop(stdin);
     }
 
     match child.wait_with_output().await {
         Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
+            let mimetype = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if mimetype.is_empty() {
+                "application/octet-stream".into()
+            } else {
+                mimetype
+            }
         }
         _ => "application/octet-stream".into(),
     }
