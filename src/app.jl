@@ -559,9 +559,10 @@ function author_nip05_domain(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
     d isa AbstractDict || return nothing
     nip05 = get(d, "nip05", nothing)
     nip05 isa AbstractString || return nothing
-    parts = split(nip05, '@')
-    length(parts) == 2 || return nothing
-    lowercase(strip(parts[2]))
+    s = lowercase(strip(nip05))
+    i = findlast('@', s)
+    domain = isnothing(i) ? s : s[nextind(s, i):end]
+    (isempty(domain) || occursin(r"[\s/]", domain)) ? nothing : domain
 end
 
 function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
@@ -580,7 +581,7 @@ function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nos
     else
         something(cached)
     end
-    domain !== nothing && domain in TRENDING_BLOCKED_DOMAINS
+    domain !== nothing && any(d -> domain == d || endswith(domain, "." * d), TRENDING_BLOCKED_DOMAINS)
 end
 is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId) = false
 
