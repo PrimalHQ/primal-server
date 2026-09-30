@@ -11,7 +11,7 @@ import ..Utils
 using ..Utils
 import ..Postgres
 
-SAVE_MESSAGES = Ref(true)
+SAVE_MESSAGES = Ref(false)
 PROXY_URI = Ref{Union{String,Nothing}}(nothing)
 EVENTS_DATA_DIR = Ref{Any}(nothing)
 

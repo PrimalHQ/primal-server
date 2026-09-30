@@ -925,75 +925,75 @@ precompile(Tuple{typeof(JSON.json), NamedTuple{(:pubkey, :follows_count, :follow
 precompile(Tuple{typeof(JSON.json), NamedTuple{(:pubkey, :follows_count, :followers_count, :note_count, :long_form_note_count, :reply_count, :time_joined, :relay_count, :total_zap_count, :total_satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Vararg{Int64, 9}}}})
 precompile(Tuple{typeof(JSON.json), NamedTuple{(:since, :until, :order_by), Tuple{Int64, Int64, Symbol}}})
 precompile(Tuple{typeof(JSON.json), NamedTuple{(:your_follows, :your_inner_network, :your_outer_network, :all_users), NTuple{4, Int64}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Array{Any, 1}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Array{Pair{String, Float32}, 1}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Array{String, 1}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Base.Dict{Any, Any}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Base.Dict{String, Base.Dict{Symbol, Any}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Base.Dict{String, Int64}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Bool})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :created_at, :sender, :receiver, :amount_sats, :zap_receipt_id), Tuple{PrimalServer.Nostr.EventId, Int64, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.Nostr.EventId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :likes, :replies, :mentions, :reposts, :zaps, :satszapped, :score, :score24h), Tuple{PrimalServer.Nostr.EventId, Vararg{Int64, 8}}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :replied, :liked, :reposted, :zapped), Tuple{PrimalServer.Nostr.EventId, Vararg{Bool, 4}}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :resources), Tuple{PrimalServer.Nostr.EventId, Array{Any, 1}}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :words), Tuple{PrimalServer.Nostr.EventId, Int64}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:order_by,), Tuple{Symbol}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :follower), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_liked_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_replied_to_it, :reply), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.EventId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_reposed_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_zapped_it, :satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, Int64}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_you_were_mentioned_in, :who_liked_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_you_were_mentioned_in, :who_replied_to_it, :reply), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.EventId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_you_were_mentioned_in, :who_reposted_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_liked_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_replied_to_it, :reply), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.EventId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_reposted_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_zapped_it, :satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, Int64}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :your_post_were_mentioned_in, :your_post_was_mentioned_by), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :you_were_mentioned_in), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :you_were_mentioned_in, :you_were_mentioned_by), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :followers_count), Tuple{PrimalServer.Nostr.PubKeyId, Int64}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :follows_count, :followers_count, :note_count, :long_form_note_count, :reply_count, :time_joined, :relay_count, :total_zap_count, :total_satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Int64, Int64, Int64, Int64, Int64, Nothing, Int64, Int64, Int64}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :follows_count, :followers_count, :note_count, :long_form_note_count, :reply_count, :time_joined, :relay_count, :total_zap_count, :total_satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Vararg{Int64, 9}}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:since, :until, :order_by), Tuple{Int64, Int64, Symbol}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:your_follows, :your_inner_network, :your_outer_network, :all_users), NTuple{4, Int64}}})
-precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, PrimalServer.Nostr.Event})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Array{Any, 1}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Array{NamedTuple{(:kind, :content), Tuple{Int64, String}}, 1}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Array{String, 1}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Base.Dict{String, Any}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Base.Pairs{Symbol, Any, NTuple{4, Symbol}, NamedTuple{(:query, :user_pubkey, :until, :limit), Tuple{String, String, Int64, Int64}}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Base.Pairs{Symbol, Any, Tuple{Symbol, Symbol, Symbol}, NamedTuple{(:query, :user_pubkey, :limit), Tuple{String, String, Int64}}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:kind, :content), Tuple{Int64, String}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:kind, :pubkey, :content), Tuple{Int64, PrimalServer.Nostr.PubKeyId, String}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:kind, :tags), Tuple{Int64, Array{Any, 1}}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:s, :a, :w, :h, :mt, :dur, :media_url), Tuple{Char, Int64, Int64, Int64, String, Float64, String}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:url, :mimetype, :md_title, :md_description, :md_image, :icon_url), NTuple{6, String}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:url, :variants, :mt), Tuple{String, Array{Any, 1}, String}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:url, :variants), Tuple{String, Array{Any, 1}}}})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Nothing})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, PrimalServer.Nostr.Event})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, PrimalServer.Nostr.TagAny})
-precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String, Array{Any, 1}})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String, Int64})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String, String})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Array{Any, 1}})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Array{PrimalServer.Nostr.Tag, 1}})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Base.Dict{Any, Any}})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Bool})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Char})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Float64})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Int32})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Int64})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Nothing})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.DB.NotificationType})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.Nostr.EventId})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.Nostr.PubKeyId})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.Nostr.Sig})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, String})
-precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Symbol})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Array{Any, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Array{Pair{String, Float32}, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Array{String, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Base.Dict{Any, Any}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Base.Dict{String, Base.Dict{Symbol, Any}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Base.Dict{String, Int64}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, Bool})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :created_at, :sender, :receiver, :amount_sats, :zap_receipt_id), Tuple{PrimalServer.Nostr.EventId, Int64, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.Nostr.EventId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :likes, :replies, :mentions, :reposts, :zaps, :satszapped, :score, :score24h), Tuple{PrimalServer.Nostr.EventId, Vararg{Int64, 8}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :replied, :liked, :reposted, :zapped), Tuple{PrimalServer.Nostr.EventId, Vararg{Bool, 4}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :resources), Tuple{PrimalServer.Nostr.EventId, Array{Any, 1}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:event_id, :words), Tuple{PrimalServer.Nostr.EventId, Int64}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:order_by,), Tuple{Symbol}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :follower), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_liked_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_replied_to_it, :reply), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.EventId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_reposed_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_your_post_was_mentioned_in, :your_post, :who_zapped_it, :satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, Int64}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_you_were_mentioned_in, :who_liked_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_you_were_mentioned_in, :who_replied_to_it, :reply), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.EventId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :post_you_were_mentioned_in, :who_reposted_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_liked_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_replied_to_it, :reply), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, PrimalServer.Nostr.EventId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_reposted_it), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :who_zapped_it, :satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, Int64}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :your_post, :your_post_were_mentioned_in, :your_post_was_mentioned_by), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :you_were_mentioned_in), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :created_at, :type, :you_were_mentioned_in, :you_were_mentioned_by), Tuple{PrimalServer.Nostr.PubKeyId, Int64, PrimalServer.DB.NotificationType, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :followers_count), Tuple{PrimalServer.Nostr.PubKeyId, Int64}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :follows_count, :followers_count, :note_count, :long_form_note_count, :reply_count, :time_joined, :relay_count, :total_zap_count, :total_satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Int64, Int64, Int64, Int64, Int64, Nothing, Int64, Int64, Int64}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:pubkey, :follows_count, :followers_count, :note_count, :long_form_note_count, :reply_count, :time_joined, :relay_count, :total_zap_count, :total_satszapped), Tuple{PrimalServer.Nostr.PubKeyId, Vararg{Int64, 9}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:since, :until, :order_by), Tuple{Int64, Int64, Symbol}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, NamedTuple{(:your_follows, :your_inner_network, :your_outer_network, :all_users), NTuple{4, Int64}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.print), Base.GenericIOBuffer{Array{UInt8, 1}}, PrimalServer.Nostr.Event})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Array{Any, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Array{NamedTuple{(:kind, :content), Tuple{Int64, String}}, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Array{String, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Base.Dict{String, Any}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Base.Pairs{Symbol, Any, NTuple{4, Symbol}, NamedTuple{(:query, :user_pubkey, :until, :limit), Tuple{String, String, Int64, Int64}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Base.Pairs{Symbol, Any, Tuple{Symbol, Symbol, Symbol}, NamedTuple{(:query, :user_pubkey, :limit), Tuple{String, String, Int64}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:kind, :content), Tuple{Int64, String}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:kind, :pubkey, :content), Tuple{Int64, PrimalServer.Nostr.PubKeyId, String}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:kind, :tags), Tuple{Int64, Array{Any, 1}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:s, :a, :w, :h, :mt, :dur, :media_url), Tuple{Char, Int64, Int64, Int64, String, Float64, String}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:url, :mimetype, :md_title, :md_description, :md_image, :icon_url), NTuple{6, String}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:url, :variants, :mt), Tuple{String, Array{Any, 1}, String}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, NamedTuple{(:url, :variants), Tuple{String, Array{Any, 1}}}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Nothing})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, PrimalServer.Nostr.Event})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, PrimalServer.Nostr.TagAny})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_element), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String, Array{Any, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String, Int64})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, String, String})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Array{Any, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Array{PrimalServer.Nostr.Tag, 1}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Base.Dict{Any, Any}})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Bool})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Char})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Float64})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Int32})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Int64})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Nothing})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.DB.NotificationType})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.Nostr.EventId})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.Nostr.PubKeyId})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, PrimalServer.Nostr.Sig})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, String})
+isdefined(JSON, :Writer) && precompile(Tuple{typeof(JSON.Writer.show_pair), JSON.Writer.CompactContext{Base.GenericIOBuffer{Array{UInt8, 1}}}, JSON.Serializations.StandardSerialization, Symbol, Symbol})
 precompile(Tuple{typeof(OrderedCollections.hashindex), NamedTuple{(:kind, :content), Tuple{Int64, String}}, Int64})
 precompile(Tuple{typeof(OrderedCollections.hashindex), PrimalServer.Nostr.Event, Int64})
 precompile(Tuple{typeof(Pkg.API.instantiate)})
@@ -1026,136 +1026,136 @@ precompile(Tuple{typeof(PrimalServer.Utils.active_sleep), Float64, Base.RefValue
 precompile(Tuple{typeof(PrimalServer.Utils.print_exceptions)})
 precompile(Tuple{typeof(PrimalServer.Utils.print_exceptions), Base.TTY})
 precompile(Tuple{typeof(Random.seed!), Array{UInt64, 1}})
-precompile(Tuple{typeof(REPL.REPLCompletions.UndefVarError_hint), Base.TTY, UndefVarError})
-precompile(Tuple{typeof(Sockets.connect!), Sockets.TCPSocket, Sockets.IPv4, UInt64})
-precompile(Tuple{typeof(Sockets.uv_connectcb), Ptr{Nothing}, Int32})
-precompile(Tuple{typeof(Sockets.uv_getaddrinfocb), Ptr{Nothing}, Int32, Ptr{Nothing}})
-precompile(Tuple{typeof(Sockets.wait_connected), Sockets.TCPSocket})
-precompile(Tuple{typeof(StaticArrays._axes), StaticArraysCore.Size{(32,)}})
-precompile(Tuple{typeof(StaticArrays._axes), StaticArraysCore.Size{(64,)}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_length), Type{Tuple{32}}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_length), Type{Tuple{64}}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_minimum), Type{Tuple{32}}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_minimum), Type{Tuple{64}}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_prod), Type{Tuple{32}}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_prod), Type{Tuple{64}}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_tuple), Type{Tuple{32}}})
-precompile(Tuple{typeof(StaticArraysCore.tuple_tuple), Type{Tuple{64}}})
-precompile(Tuple{typeof(StaticArrays.dimension_mismatch_fail), Type, Array{UInt8, 1}})
-precompile(Tuple{typeof(StaticArrays.has_eltype), Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}})
-precompile(Tuple{typeof(StaticArrays.has_eltype), Type{StaticArraysCore.SArray{Tuple{64}, UInt8, 1, 64}}})
-precompile(Tuple{typeof(StaticArrays.has_ndims), Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}})
-precompile(Tuple{typeof(StaticArrays.has_ndims), Type{StaticArraysCore.SArray{Tuple{64}, UInt8, 1, 64}}})
-precompile(Tuple{typeof(StaticArrays.has_size), Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}})
-precompile(Tuple{typeof(StaticArrays.has_size), Type{StaticArraysCore.SArray{Tuple{64}, UInt8, 1, 64}}})
-precompile(Tuple{typeof(StaticArrays._Length), Int64})
-precompile(Tuple{typeof(Test.do_test), Test.ExecutionResult, Any})
-precompile(Tuple{typeof(URIs._length_assert)})
-precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, Array{Any, 1}})
-precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, Int32})
-precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, PrimalServer.Nostr.EventId})
-precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, PrimalServer.Nostr.PubKeyId})
-precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, TypeVar})
-precompile(Tuple{Type{Pkg.Registry.RegistryInstance}, String, String, Base.UUID, String, String, Base.Dict{Base.UUID, Pkg.Registry.PkgEntry}, Base.SHA1, Base.Dict{String, String}, Base.Dict{String, Base.UUID}})
-precompile(Tuple{Type{PrimalServer.Nostr.Event}, Base.Dict{String, Any}})
-precompile(Tuple{Type{PrimalServer.Nostr.EventId}, Array{Any, 1}})
-precompile(Tuple{Type{PrimalServer.Nostr.EventId}, String})
-precompile(Tuple{Type{PrimalServer.Nostr.Event}, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, Int64, Int64, Array{PrimalServer.Nostr.TagAny, 1}, String, PrimalServer.Nostr.Sig})
-precompile(Tuple{Type{PrimalServer.Nostr.PubKeyId}, Array{Any, 1}})
-precompile(Tuple{Type{PrimalServer.Nostr.PubKeyId}, Nothing})
-precompile(Tuple{Type{PrimalServer.Nostr.PubKeyId}, String})
-precompile(Tuple{Type{Ptr{UInt64}}, Int64})
-precompile(Tuple{Type{Ptr{UInt8}}, Ptr{Nothing}})
-precompile(Tuple{Type{Sockets.IPv4}, Int64})
-precompile(Tuple{Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}, NTuple{32, Int64}})
-precompile(Tuple{Type{StaticArraysCore.Size{S} where S}, Type{Tuple{32}}})
-precompile(Tuple{Type{StaticArraysCore.Size{S} where S}, Type{Tuple{64}}})
-precompile(Tuple{Type{StaticArrays.Length{32}}})
-precompile(Tuple{Type{StaticArrays.Length{64}}})
-precompile(Tuple{Type{Tuple}, StaticArraysCore.Size{(32,)}})
-precompile(Tuple{Type{Tuple}, StaticArraysCore.Size{(64,)}})
+try precompile(Tuple{typeof(REPL.REPLCompletions.UndefVarError_hint), Base.TTY, UndefVarError}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Sockets.connect!), Sockets.TCPSocket, Sockets.IPv4, UInt64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Sockets.uv_connectcb), Ptr{Nothing}, Int32}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Sockets.uv_getaddrinfocb), Ptr{Nothing}, Int32, Ptr{Nothing}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Sockets.wait_connected), Sockets.TCPSocket}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays._axes), StaticArraysCore.Size{(32,)}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays._axes), StaticArraysCore.Size{(64,)}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_length), Type{Tuple{32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_length), Type{Tuple{64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_minimum), Type{Tuple{32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_minimum), Type{Tuple{64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_prod), Type{Tuple{32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_prod), Type{Tuple{64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_tuple), Type{Tuple{32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArraysCore.tuple_tuple), Type{Tuple{64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays.dimension_mismatch_fail), Type, Array{UInt8, 1}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays.has_eltype), Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays.has_eltype), Type{StaticArraysCore.SArray{Tuple{64}, UInt8, 1, 64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays.has_ndims), Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays.has_ndims), Type{StaticArraysCore.SArray{Tuple{64}, UInt8, 1, 64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays.has_size), Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays.has_size), Type{StaticArraysCore.SArray{Tuple{64}, UInt8, 1, 64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(StaticArrays._Length), Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Test.do_test), Test.ExecutionResult, Any}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(URIs._length_assert)}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, Array{Any, 1}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, Int32}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, PrimalServer.Nostr.EventId}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, PrimalServer.Nostr.PubKeyId}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Pair{A, B} where B where A}, Symbol, TypeVar}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Pkg.Registry.RegistryInstance}, String, String, Base.UUID, String, String, Base.Dict{Base.UUID, Pkg.Registry.PkgEntry}, Base.SHA1, Base.Dict{String, String}, Base.Dict{String, Base.UUID}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{PrimalServer.Nostr.Event}, Base.Dict{String, Any}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{PrimalServer.Nostr.EventId}, Array{Any, 1}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{PrimalServer.Nostr.EventId}, String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{PrimalServer.Nostr.Event}, PrimalServer.Nostr.EventId, PrimalServer.Nostr.PubKeyId, Int64, Int64, Array{PrimalServer.Nostr.TagAny, 1}, String, PrimalServer.Nostr.Sig}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{PrimalServer.Nostr.PubKeyId}, Array{Any, 1}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{PrimalServer.Nostr.PubKeyId}, Nothing}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{PrimalServer.Nostr.PubKeyId}, String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Ptr{UInt64}}, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Ptr{UInt8}}, Ptr{Nothing}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Sockets.IPv4}, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{StaticArraysCore.SArray{Tuple{32}, UInt8, 1, 32}}, NTuple{32, Int64}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{StaticArraysCore.Size{S} where S}, Type{Tuple{32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{StaticArraysCore.Size{S} where S}, Type{Tuple{64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{StaticArrays.Length{32}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{StaticArrays.Length{64}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Tuple}, StaticArraysCore.Size{(32,)}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Tuple}, StaticArraysCore.Size{(64,)}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
 
 
 
 
 
 
-precompile(Tuple{Type{Array{Dates.DateTime, 1}}, UndefInitializer, Tuple{Int64}})
-precompile(Tuple{Type{Dates.DateTime}, Dates.DateTime})
-precompile(Tuple{Type{NamedTuple{(:connsel, :init_queries), T} where T<:Tuple}, Tuple{String, Array{String, 1}}})
-precompile(Tuple{Type{NamedTuple{(:connsel, :keycolumn, :valuecolumn), T} where T<:Tuple}, Tuple{String, String, String}})
-precompile(Tuple{Type{NamedTuple{(:ignore_loaded,), T} where T<:Tuple}, Tuple{Bool}})
-precompile(Tuple{Type{NamedTuple{(:interval,), T} where T<:Tuple}, Tuple{Float64}})
-precompile(Tuple{Type{NamedTuple{(:keycolumn, :valuecolumn), T} where T<:Tuple}, Tuple{String, String}})
-precompile(Tuple{Type{NamedTuple{(:name, :uuid, :version, :path), T} where T<:Tuple}, Tuple{String, Base.UUID, Base.VersionNumber, String}})
-precompile(Tuple{Type{NamedTuple{(:path, :size, :link), T} where T<:Tuple}, Tuple{String, Int64, String}})
-precompile(Tuple{Type{NamedTuple{(:period,), T} where T<:Tuple}, Tuple{Float64}})
-precompile(Tuple{Type{NamedTuple{(:period,), T} where T<:Tuple}, Tuple{Int64}})
-precompile(Tuple{Type{NamedTuple{(:table,), T} where T<:Tuple}, Tuple{String}})
-precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Base.SHA1, Base.VersionNumber}})
-precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}})
-precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Pkg.Versions.VersionSpec}})
-precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, String, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}})
-precompile(Tuple{Type{NamedTuple{(:uuid, :name, :version, :tree_hash), T} where T<:Tuple}, Tuple{Base.UUID, String, Base.VersionNumber, Base.SHA1}})
-precompile(Tuple{Type{NamedTuple{(:uuid, :name, :version, :tree_hash), T} where T<:Tuple}, Tuple{Base.UUID, String, Base.VersionNumber, Nothing}})
-precompile(Tuple{typeof(Base.:(==)), Bool, Bool})
-precompile(Tuple{typeof(Base.:(!=)), Char, Char})
-precompile(Tuple{typeof(Base.close), Base.DevNull})
-precompile(Tuple{typeof(Base.convert), Type{Base.Dict{String, Union{Array{String, 1}, String}}}, Base.Dict{String, Any}})
-precompile(Tuple{typeof(Base.convert), Type{Union{Nothing, Base.UUID}}, Base.UUID})
-precompile(Tuple{typeof(Base.convert), Type{Union{Nothing, Pkg.Types.UpgradeLevel, Base.VersionNumber, Pkg.Versions.VersionSpec}}, Base.VersionNumber})
-precompile(Tuple{typeof(Base.deepcopy_internal), Array{String, 1}, Base.IdDict{Any, Any}})
-precompile(Tuple{typeof(Base.deepcopy_internal), Tuple{UInt64}, Base.IdDict{Any, Any}})
-precompile(Tuple{typeof(Base.eof), Base.PipeEndpoint})
-precompile(Tuple{typeof(Base.Filesystem.isdir), String})
-precompile(Tuple{typeof(Base.get), Base.Dict{String, Any}, String, Bool})
-precompile(Tuple{typeof(Base.getindex), Base.EnvDict, String})
-precompile(Tuple{typeof(Base.hashindex), Symbol, Int64})
-precompile(Tuple{typeof(Base.ifelse), Bool, Float64, Float64})
-precompile(Tuple{typeof(Base.indexed_iterate), Pair{String, Any}, Int64})
-precompile(Tuple{typeof(Base.indexed_iterate), Pair{String, Any}, Int64, Int64})
-precompile(Tuple{typeof(Base.invokelatest), Any})
-precompile(Tuple{typeof(Base.iterate), Base.Dict{String, Any}, Int64})
-precompile(Tuple{typeof(Base.iterate), Base.Set{Symbol}})
-precompile(Tuple{typeof(Base.iterate), Base.Set{Symbol}, Int64})
-precompile(Tuple{typeof(Base.length), Array{Union{}, 1}})
-precompile(Tuple{typeof(Base.MainInclude.include), String})
-precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:init_extra_indexes,), Tuple{Array{String, 1}}}}})
-precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:init_queries,), Tuple{Array{String, 1}}}}})
-precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:keycolumn, :init_queries), Tuple{String, Array{String, 1}}}}})
-precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:keycolumn, :valuecolumn, :init_queries), Tuple{String, String, Array{String, 1}}}}})
-precompile(Tuple{typeof(Base.print), Base.GenericIOBuffer{Array{UInt8, 1}}, UInt16})
-precompile(Tuple{typeof(Base.print), Base.GenericIOBuffer{Array{UInt8, 1}}, UInt64})
-precompile(Tuple{typeof(Base.readbytes!), Base.PipeEndpoint, Array{UInt8, 1}, Int64})
-precompile(Tuple{typeof(Base.setindex!), Base.Dict{String, Union{Array{String, 1}, String}}, Array{String, 1}, String})
-precompile(Tuple{typeof(Base.setindex!), Base.RefValue{Float64}, Float64})
-precompile(Tuple{typeof(Base.setproperty!), Pkg.Types.PackageEntry, Symbol, Base.Dict{String, String}})
-precompile(Tuple{typeof(Base.setproperty!), Pkg.Types.Project, Symbol, Base.UUID})
-precompile(Tuple{typeof(Base.setproperty!), Pkg.Types.Project, Symbol, Base.VersionNumber})
-precompile(Tuple{typeof(Base.signbit), Int64})
-precompile(Tuple{typeof(Base.similar), Array{Any, 1}})
-precompile(Tuple{typeof(Base.something), Bool, Bool})
-precompile(Tuple{typeof(Base.trailing_zeros), Int64})
-precompile(Tuple{typeof(Base.tryparse), Type{Bool}, String})
-precompile(Tuple{typeof(Base.unlock), Base.ReentrantLock})
-precompile(Tuple{typeof(Base.unsafe_read), Base.PipeEndpoint, Ptr{UInt8}, UInt64})
-precompile(Tuple{typeof(Base.wait), Task})
-precompile(Tuple{typeof(Core.Compiler.eltype), Type{Array{UInt64, 1}}})
-precompile(Tuple{typeof(Core.convert), Type{DataType}, Type{Array{UInt8, 1}}})
-precompile(Tuple{typeof(Core.convert), Type{DataType}, Type{Decimals.Decimal}})
-precompile(Tuple{typeof(Core.convert), Type{UnionAll}, Type{Base.Dict{K, V} where V where K}})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:name, :uuid, :version, :path), Tuple{String, Base.UUID, Base.VersionNumber, String}}, Type{Pkg.Types.PackageSpec}})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:throw_error,), Tuple{Bool}}, typeof(Base.Libc.Libdl.dlopen), String})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Base.SHA1, Base.VersionNumber}}, Type{Pkg.Types.PackageSpec}})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}}, Type{Pkg.Types.PackageSpec}})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Pkg.Versions.VersionSpec}}, Type{Pkg.Types.PackageSpec}})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, String, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}}, Type{Pkg.Types.PackageSpec}})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :version, :tree_hash), Tuple{Base.UUID, String, Base.VersionNumber, Base.SHA1}}, Type{Pkg.Types.PackageSpec}})
-precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :version, :tree_hash), Tuple{Base.UUID, String, Base.VersionNumber, Nothing}}, Type{Pkg.Types.PackageSpec}})
-precompile(Tuple{typeof(Pkg.API.instantiate)})
-precompile(Tuple{typeof(Pkg.Types.read_project_deps), Base.Dict{String, Any}, String})
-precompile(Tuple{typeof(Pkg.Types.read_project_uuid), String})
-precompile(Tuple{typeof(Pkg.Types.read_project_version), String})
-precompile(Tuple{Type{Pkg.Registry.RegistryInstance}, String, String, Base.UUID, String, String, Base.Dict{Base.UUID, Pkg.Registry.PkgEntry}, Base.SHA1, Base.Dict{String, String}, Base.Dict{String, Base.UUID}})
+try precompile(Tuple{Type{Array{Dates.DateTime, 1}}, UndefInitializer, Tuple{Int64}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Dates.DateTime}, Dates.DateTime}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:connsel, :init_queries), T} where T<:Tuple}, Tuple{String, Array{String, 1}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:connsel, :keycolumn, :valuecolumn), T} where T<:Tuple}, Tuple{String, String, String}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:ignore_loaded,), T} where T<:Tuple}, Tuple{Bool}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:interval,), T} where T<:Tuple}, Tuple{Float64}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:keycolumn, :valuecolumn), T} where T<:Tuple}, Tuple{String, String}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:name, :uuid, :version, :path), T} where T<:Tuple}, Tuple{String, Base.UUID, Base.VersionNumber, String}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:path, :size, :link), T} where T<:Tuple}, Tuple{String, Int64, String}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:period,), T} where T<:Tuple}, Tuple{Float64}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:period,), T} where T<:Tuple}, Tuple{Int64}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:table,), T} where T<:Tuple}, Tuple{String}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Base.SHA1, Base.VersionNumber}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Pkg.Versions.VersionSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), T} where T<:Tuple}, Tuple{Base.UUID, String, String, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:uuid, :name, :version, :tree_hash), T} where T<:Tuple}, Tuple{Base.UUID, String, Base.VersionNumber, Base.SHA1}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{NamedTuple{(:uuid, :name, :version, :tree_hash), T} where T<:Tuple}, Tuple{Base.UUID, String, Base.VersionNumber, Nothing}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.:(==)), Bool, Bool}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.:(!=)), Char, Char}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.close), Base.DevNull}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.convert), Type{Base.Dict{String, Union{Array{String, 1}, String}}}, Base.Dict{String, Any}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.convert), Type{Union{Nothing, Base.UUID}}, Base.UUID}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.convert), Type{Union{Nothing, Pkg.Types.UpgradeLevel, Base.VersionNumber, Pkg.Versions.VersionSpec}}, Base.VersionNumber}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.deepcopy_internal), Array{String, 1}, Base.IdDict{Any, Any}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.deepcopy_internal), Tuple{UInt64}, Base.IdDict{Any, Any}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.eof), Base.PipeEndpoint}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.Filesystem.isdir), String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.get), Base.Dict{String, Any}, String, Bool}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.getindex), Base.EnvDict, String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.hashindex), Symbol, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.ifelse), Bool, Float64, Float64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.indexed_iterate), Pair{String, Any}, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.indexed_iterate), Pair{String, Any}, Int64, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.invokelatest), Any}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.iterate), Base.Dict{String, Any}, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.iterate), Base.Set{Symbol}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.iterate), Base.Set{Symbol}, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.length), Array{Union{}, 1}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.MainInclude.include), String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:init_extra_indexes,), Tuple{Array{String, 1}}}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:init_queries,), Tuple{Array{String, 1}}}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:keycolumn, :init_queries), Tuple{String, Array{String, 1}}}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base._nt_names), Type{NamedTuple{(:keycolumn, :valuecolumn, :init_queries), Tuple{String, String, Array{String, 1}}}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.print), Base.GenericIOBuffer{Array{UInt8, 1}}, UInt16}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.print), Base.GenericIOBuffer{Array{UInt8, 1}}, UInt64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.readbytes!), Base.PipeEndpoint, Array{UInt8, 1}, Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.setindex!), Base.Dict{String, Union{Array{String, 1}, String}}, Array{String, 1}, String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.setindex!), Base.RefValue{Float64}, Float64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.setproperty!), Pkg.Types.PackageEntry, Symbol, Base.Dict{String, String}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.setproperty!), Pkg.Types.Project, Symbol, Base.UUID}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.setproperty!), Pkg.Types.Project, Symbol, Base.VersionNumber}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.signbit), Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.similar), Array{Any, 1}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.something), Bool, Bool}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.trailing_zeros), Int64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.tryparse), Type{Bool}, String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.unlock), Base.ReentrantLock}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.unsafe_read), Base.PipeEndpoint, Ptr{UInt8}, UInt64}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Base.wait), Task}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.Compiler.eltype), Type{Array{UInt64, 1}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.convert), Type{DataType}, Type{Array{UInt8, 1}}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.convert), Type{DataType}, Type{Decimals.Decimal}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.convert), Type{UnionAll}, Type{Base.Dict{K, V} where V where K}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:name, :uuid, :version, :path), Tuple{String, Base.UUID, Base.VersionNumber, String}}, Type{Pkg.Types.PackageSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:throw_error,), Tuple{Bool}}, typeof(Base.Libc.Libdl.dlopen), String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Base.SHA1, Base.VersionNumber}}, Type{Pkg.Types.PackageSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}}, Type{Pkg.Types.PackageSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, Nothing, Bool, Pkg.Types.GitRepo, Nothing, Pkg.Versions.VersionSpec}}, Type{Pkg.Types.PackageSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :path, :pinned, :repo, :tree_hash, :version), Tuple{Base.UUID, String, String, Bool, Pkg.Types.GitRepo, Nothing, Base.VersionNumber}}, Type{Pkg.Types.PackageSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :version, :tree_hash), Tuple{Base.UUID, String, Base.VersionNumber, Base.SHA1}}, Type{Pkg.Types.PackageSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Core.kwcall), NamedTuple{(:uuid, :name, :version, :tree_hash), Tuple{Base.UUID, String, Base.VersionNumber, Nothing}}, Type{Pkg.Types.PackageSpec}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Pkg.API.instantiate)}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Pkg.Types.read_project_deps), Base.Dict{String, Any}, String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Pkg.Types.read_project_uuid), String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{typeof(Pkg.Types.read_project_version), String}) catch end  # stdlib/dependency internals: may not exist on this Julia version
+try precompile(Tuple{Type{Pkg.Registry.RegistryInstance}, String, String, Base.UUID, String, String, Base.Dict{Base.UUID, Pkg.Registry.PkgEntry}, Base.SHA1, Base.Dict{String, String}, Base.Dict{String, Base.UUID}}) catch end  # stdlib/dependency internals: may not exist on this Julia version
 
 

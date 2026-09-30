@@ -984,19 +984,6 @@ function api_handler(req::HTTP.Request)
     end
 end
 
-function collect_metadata(pubkeys)
-    mds = Dict{Nostr.PubKeyId, Nostr.Event}()
-    for pk in pubkeys
-        if !haskey(mds, pk) && pk in est[].meta_data
-            eid = est[].meta_data[pk]
-            if eid in est[].events
-                mds[pk] = est[].events[eid]
-            end
-        end
-    end
-    Dict([Nostr.hex(pk)=>md for (pk, md) in mds])
-end
-
 function suggestions_handler(req::HTTP.Request)
     catch_exception(:suggestions_handler, req) do
         req.method == "OPTIONS" && return HTTP.Response(200, api_headers, "ok")
@@ -1126,9 +1113,10 @@ function purge_media_(pubkey::Union{Nothing,Nostr.PubKeyId}, surl::String; reaso
                     end
                     if s3_provider == :bunny
                         # bunny_purge()
-                    elseif s3_provider == :cloudflare
-                        if !isnothing(CLOUDFLARE_CACHE_ZONE_ID[]) && !isnothing(CLOUDFLARE_API_KEY[])
-                            s3_url = "https://$(Main.S3_CONFIGS[s3_provider].domain)$p"
+                    elseif s3_provider in (:cloudflare, :cloudflare2)
+                        cf_domain = get(Main.S3_CONFIGS[s3_provider], :domain, nothing)
+                        if !isnothing(CLOUDFLARE_CACHE_ZONE_ID[]) && !isnothing(CLOUDFLARE_API_KEY[]) && !isnothing(cf_domain)
+                            s3_url = "https://$(cf_domain)$p"
                             r = JSON.parse(String(HTTP.request("POST", "https://api.cloudflare.com/client/v4/zones/$(CLOUDFLARE_CACHE_ZONE_ID[])/purge_cache",
                                                                ["Authorization"=>"Bearer $(CLOUDFLARE_API_KEY[])", "Content-Type"=>"application/json" ], 
                                                                JSON.json((; files=[s3_url]))).body))
