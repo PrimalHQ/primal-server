@@ -252,7 +252,8 @@ function on_connect(client)
         # created_at = trunc(Int, datetime2unix(DateTime("2025-09-20T00:00"))) 
         # created_at = trunc(Int, datetime2unix(DateTime("2025-12-20T00:00"))) 
         # created_at = trunc(Int, datetime2unix(DateTime("2026-03-20T00:00"))) 
-        created_at = trunc(Int, datetime2unix(DateTime("2026-06-20T00:00"))) 
+        # created_at = trunc(Int, datetime2unix(DateTime("2026-06-20T00:00"))) 
+        created_at = trunc(Int, datetime2unix(DateTime("2026-09-18T00:00"))) 
 
         eact = Nostr.Event(seckey, pubkey,
                            created_at,
