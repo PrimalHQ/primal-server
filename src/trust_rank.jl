@@ -11,6 +11,7 @@ humaness_threshold = Ref(0.0)
 external_resources_threshold = Ref(0.0)
 
 function load(tr)
+    return
     lock(pubkey_rank) do pubkey_rank
         lock(pubkey_rank_sorted) do pubkey_rank_sorted
             merge!(pubkey_rank, tr)
