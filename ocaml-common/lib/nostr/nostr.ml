@@ -52,6 +52,7 @@ let kind_live_event = 30311
 let kind_video_long_form = 34235
 let kind_video_short_form = 34236
 let kind_comment = 1111
+let kind_live_event_mutelist = 10555
 
 (* Canonical NIP-01 serialization for the event id.
 
@@ -179,3 +180,20 @@ let event_from_msg (j : Yojson.Safe.t) : (string option * t) option =
 
 let id_hex (e : t) : string = Hex_util.encode e.id
 let pubkey_hex (e : t) : string = Hex_util.encode e.pubkey
+
+(* {1 Serialization} *)
+
+(* JSON object of an event, hex-encoding id/pubkey/sig (the NIP-01 wire form). *)
+let to_json (e : t) : Yojson.Safe.t =
+  `Assoc
+    [
+      ("id", `String (Hex_util.encode e.id));
+      ("pubkey", `String (Hex_util.encode e.pubkey));
+      ("created_at", `Int e.created_at);
+      ("kind", `Int e.kind);
+      ("tags", `List (List.map (fun (tg : tag) -> `List tg) e.tags));
+      ("content", `String e.content);
+      ("sig", `String (Hex_util.encode e.sig_));
+    ]
+
+let to_string (e : t) : string = Yojson.Safe.to_string (to_json e)

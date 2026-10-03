@@ -60,6 +60,15 @@ the correct rows:
 Don't launch `main.exe` / `dune exec bin/main.exe` by hand for iterative work — that risks two
 importers writing to the same DB. The script's stop step prevents that.
 
+## Phase 1 completion (ocaml-plan.md §7)
+
+`lib/import_listener.ml` (typed import line protocol, replaces the Julia EVAL port for `import_events`),
+`lib/dag_index.ml` (per-event DAG indexers), `Cache_storage.expire_scores`, and in
+`cache_storage_ext.ml`: `update_user_search`, the ws-importer writes (live events / follow packs /
+zap invoices / live mute lists) and `update_content_moderation_rules` (cmr_* tables). Flags in the
+JSON config: `expire_scores_enabled` and `scheduled_hooks_enabled` must not both run here AND in the
+Julia importer node (double decrements) — see README → Phase 1.
+
 ## Gotchas
 
 - Inline SQL targets primal1's **version-hashed base tables** directly (e.g. `event`,

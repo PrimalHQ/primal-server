@@ -192,6 +192,18 @@ let () =
   Printf.printf "primal-importer: push notifications %s\n%!"
     (if cfg.push_notifications_enabled then "ON (" ^ cfg.push_notification_sender_bin ^ ")" else "OFF");
 
+  (* Phase 1 importer completion (ocaml-plan.md §7.1). *)
+  Importer.Cache_storage_ext.default_settings_file := cfg.default_settings_file;
+  Importer.Cache_storage_ext.content_moderation_rules_enabled := cfg.content_moderation_rules_enabled;
+  Printf.printf
+    "primal-importer: scheduled_hooks %s, expire_scores %s, content_moderation_rules %s, import listener %s\n%!"
+    (if cfg.scheduled_hooks_enabled then "ON" else "OFF")
+    (if cfg.expire_scores_enabled then "ON" else "OFF")
+    (if cfg.content_moderation_rules_enabled then "ON" else "OFF")
+    (if cfg.import_listener_enabled then
+       Printf.sprintf "ON (%s:%d)" cfg.import_listener_host cfg.import_listener_port
+     else "OFF");
+
   (* Main-domain fibers share one domain, so each long-lived fiber owns an explicit Stats slot
      (the implicit per-domain [Stats.phase] is for worker domains only). *)
   let hooks_slot = Importer.Stats.new_slot "sched-hooks" in
@@ -200,11 +212,19 @@ let () =
       Importer.Stats.set_slot hooks_slot "run";
       let t0 = Unix.gettimeofday () in
       (try
-         let n = CS.run_scheduled_hooks hooks_est in
-         (* Only worth a line when there was a real backlog; the steady state is a few hundred. *)
-         if n >= CS.scheduled_hooks_batch then
-           Printf.printf "scheduled_hooks: ran %d due hooks in %.1fs\n%!" n
-             (Unix.gettimeofday () -. t0)
+         if cfg.scheduled_hooks_enabled then begin
+           let n = CS.run_scheduled_hooks hooks_est in
+           (* Only worth a line when there was a real backlog; the steady state is a few hundred. *)
+           if n >= CS.scheduled_hooks_batch then
+             Printf.printf "scheduled_hooks: ran %d due hooks in %.1fs\n%!" n
+               (Unix.gettimeofday () -. t0)
+         end;
+         (* Julia CacheStorage.periodic runs expire_scores in the same 60 s loop. *)
+         if cfg.expire_scores_enabled then begin
+           Importer.Stats.set_slot hooks_slot "expire-scores";
+           let n = CS.expire_scores hooks_est in
+           if n > 0 then Printf.printf "expire_scores: expired %d score24h contributions\n%!" n
+         end
        with
       | Eio.Cancel.Cancelled _ as e -> raise e
       | exn ->
@@ -261,6 +281,13 @@ let () =
           ());
       run_scheduled_hooks_loop;
       run_event_syncer;
+      (fun () ->
+        if cfg.import_listener_enabled then
+          Importer.Import_listener.run ~net ~clock ?proxy ~host:cfg.import_listener_host
+            ~port:cfg.import_listener_port ~est:(make_est ())
+            ~reconnect_est:(fun est -> reconnect_est est)
+            ~broadcast_timeout:cfg.relay_broadcast_timeout
+            ~poll_votes_enabled:cfg.poll_vote_import_enabled ());
       (fun () ->
         if cfg.push_notifications_enabled then
           Importer.Push_notifications.run ~proc_mgr ~clock ~stats ~cache_db:cfg.cache_db

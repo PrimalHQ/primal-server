@@ -25,6 +25,16 @@ type t = {
   cache_db : Postgres.conninfo; (* the importer's :p0 (cache) DB — was PG* *)
   membership_db : Postgres.conninfo; (* the importer's :membership DB — was PGMEMBERSHIP* *)
   humaness_threshold : float option; (* None = compute from pubkey_trustrank at startup *)
+  (* Phase 1 (ocaml-plan.md §7): importer completion *)
+  import_listener_enabled : bool; (* typed import line protocol replacing the Julia EVAL port *)
+  import_listener_host : string;
+  import_listener_port : int; (* 12000+N once the Julia node is gone; another port meanwhile *)
+  expire_scores_enabled : bool; (* Julia CacheStorage.periodic expire_scores; enable once Julia's stops *)
+  scheduled_hooks_enabled : bool; (* run_scheduled_hooks; both runners active = double decrements *)
+  content_moderation_rules_enabled : bool; (* cmr_* recompute on mute/allow list changes *)
+  default_settings_file : string option; (* content-moderation default-settings.json (cmr defaults) *)
+  relay_broadcast_timeout : float; (* seconds per relay for reply broadcasting *)
+  poll_vote_import_enabled : bool; (* Julia DAG.POLL_VOTE_IMPORT_ENABLED for the instant indexers *)
 }
 
 let getenv = Sys.getenv_opt
@@ -89,7 +99,7 @@ let from_env () : t =
       (match getenv "IMPORTER_EVENT_SYNC_REMOTES" with
       | Some s when String.trim s <> "" ->
           String.split_on_char ',' s |> List.map String.trim |> List.filter (fun h -> h <> "")
-      | _ -> [ "192.168.40.7"; "192.168.42.7"; "192.168.43.7"; "192.168.44.7" ]);
+      | _ -> [ "<peer-host>"; "<media-host>"; "<peer-host>"; "<julia-host>" ]);
     event_sync_interval = float_env "IMPORTER_EVENT_SYNC_INTERVAL" 60.0;
     event_sync_overlap = int_env "IMPORTER_EVENT_SYNC_OVERLAP" 600;
     pushgateway_enabled = bool_env "IMPORTER_PUSHGATEWAY" true;
@@ -108,7 +118,7 @@ let from_env () : t =
         ~default:
           (Filename.concat
              (Option.value (getenv "HOME") ~default:".")
-             "work/itk/primal/primal-net-server/push-notification-sender/target/release/push-notification-sender");
+             "<config-dir>/primal-net-server/push-notification-sender/target/release/push-notification-sender");
     push_notifications_period = float_env "IMPORTER_PUSH_NOTIFICATIONS_PERIOD" 5.0;
     push_notifications_log = bool_env "IMPORTER_PUSH_NOTIFICATIONS_LOG" false;
     cs =
@@ -128,6 +138,15 @@ let from_env () : t =
       (match getenv "IMPORTER_HUMANESS_THRESHOLD" with
       | Some v -> ( try Some (float_of_string v) with _ -> None)
       | None -> None);
+    import_listener_enabled = bool_env "IMPORTER_IMPORT_LISTENER" false;
+    import_listener_host = Option.value (getenv "IMPORTER_IMPORT_LISTENER_HOST") ~default:"0.0.0.0";
+    import_listener_port = int_env "IMPORTER_IMPORT_LISTENER_PORT" (12000 + report_node);
+    expire_scores_enabled = bool_env "IMPORTER_EXPIRE_SCORES" false;
+    scheduled_hooks_enabled = bool_env "IMPORTER_SCHEDULED_HOOKS" true;
+    content_moderation_rules_enabled = bool_env "IMPORTER_CONTENT_MODERATION_RULES" true;
+    default_settings_file = getenv "IMPORTER_DEFAULT_SETTINGS_FILE";
+    relay_broadcast_timeout = float_env "IMPORTER_RELAY_BROADCAST_TIMEOUT" 15.0;
+    poll_vote_import_enabled = bool_env "IMPORTER_POLL_VOTE_IMPORT" true;
   }
 
 (* {1 JSON configuration file} — the runtime config source. (The environment is only read by
@@ -206,6 +225,15 @@ let of_json (j : Yojson.Safe.t) : t =
     cache_db = conninfo_of_json (field j "cache_db");
     membership_db = conninfo_of_json (field j "membership_db");
     humaness_threshold = rfloat_opt j "humaness_threshold";
+    import_listener_enabled = rbool j "import_listener_enabled";
+    import_listener_host = rstr j "import_listener_host";
+    import_listener_port = rint j "import_listener_port";
+    expire_scores_enabled = rbool j "expire_scores_enabled";
+    scheduled_hooks_enabled = rbool j "scheduled_hooks_enabled";
+    content_moderation_rules_enabled = rbool j "content_moderation_rules_enabled";
+    default_settings_file = rstr_opt j "default_settings_file";
+    relay_broadcast_timeout = rfloat j "relay_broadcast_timeout";
+    poll_vote_import_enabled = rbool j "poll_vote_import_enabled";
   }
 
 (* Wrap Yojson/Util exceptions in Config_error so callers get one file-scoped error type. *)

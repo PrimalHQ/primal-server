@@ -40,3 +40,27 @@ let filterlist_grp_of_string = function
   | "in_app_purchase" -> In_app_purchase
   | "trending" -> Trending
   | s -> invalid_arg ("filterlist_grp_of_string: " ^ s)
+
+(* Content-moderation rule enums (cmr_* tables written by update_content_moderation_rules). *)
+
+type cmr_scope = Content | Trending
+
+let string_of_cmr_scope = function Content -> "content" | Trending -> "trending"
+
+let cmr_scope_of_string = function
+  | "content" -> Content
+  | "trending" -> Trending
+  | s -> invalid_arg ("cmr_scope_of_string: " ^ s)
+
+let cmr_scope_of_string_opt s = try Some (cmr_scope_of_string s) with Invalid_argument _ -> None
+
+type cmr_grp = Primal_spam | Primal_nsfw
+
+let string_of_cmr_grp = function Primal_spam -> "primal_spam" | Primal_nsfw -> "primal_nsfw"
+
+let cmr_grp_of_string = function
+  | "primal_spam" -> Primal_spam
+  | "primal_nsfw" -> Primal_nsfw
+  | s -> invalid_arg ("cmr_grp_of_string: " ^ s)
+
+let cmr_grp_of_string_opt s = try Some (cmr_grp_of_string s) with Invalid_argument _ -> None

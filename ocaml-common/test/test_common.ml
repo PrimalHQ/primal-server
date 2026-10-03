@@ -91,6 +91,25 @@ let test_phases () =
   let p, _ = Phases.slot_state s in
   Alcotest.(check string) "implicit domain slot" "idle" p
 
+(* Nostr.to_json must round-trip through of_json and preserve the id. *)
+let test_event_json_roundtrip () =
+  let events = read_events "events.jsonl" in
+  List.iteri
+    (fun i e ->
+      let e2 = N.of_json (N.to_json e) in
+      Alcotest.(check bool) (Printf.sprintf "event %d roundtrip" i) true (e = e2);
+      Alcotest.(check string) (Printf.sprintf "event %d id" i) (N.id_hex e) (Hex_util.encode (N.id_of e2)))
+    events
+
+let relay_url_t = Alcotest.(option (pair (pair bool string) (pair int string)))
+let pr u = Option.map (fun (a, b, c, d) -> ((a, b), (c, d))) (Relay_broadcast.parse_relay_url u)
+
+let test_relay_url () =
+  Alcotest.check relay_url_t "wss default" (Some ((true, "relay.primal.net"), (443, "/"))) (pr "wss://relay.primal.net");
+  Alcotest.check relay_url_t "ws with port and path" (Some ((false, "<internal-relay-host>"), (7777, "/x"))) (pr "ws://<internal-relay-host>:7777/x");
+  Alcotest.check relay_url_t "trailing slash" (Some ((true, "nos.lol"), (443, "/"))) (pr "wss://nos.lol/");
+  Alcotest.check relay_url_t "http rejected" None (pr "https://x.y")
+
 let test_procinfo () =
   Alcotest.(check string) "hms" "01:01:05" (Procinfo.fmt_hms 3665);
   Alcotest.(check string) "bytes K" "1K" (Procinfo.fmt_bytes 1024);
@@ -107,7 +126,12 @@ let () =
           Alcotest.test_case "lnurl lud06" `Quick test_bech32_lnurl;
           Alcotest.test_case "nip19 npub" `Quick test_nip19_npub;
         ] );
-      ("nostr", [ Alcotest.test_case "real events" `Quick test_real_events ]);
+      ( "nostr",
+        [
+          Alcotest.test_case "real events" `Quick test_real_events;
+          Alcotest.test_case "json roundtrip" `Quick test_event_json_roundtrip;
+        ] );
+      ("relay_broadcast", [ Alcotest.test_case "parse url" `Quick test_relay_url ]);
       ("phases", [ Alcotest.test_case "slots" `Quick test_phases ]);
       ("procinfo", [ Alcotest.test_case "formatting" `Quick test_procinfo ]);
     ]

@@ -1937,6 +1937,24 @@ end
 
 IMPORT_EVENTS_SERVER = Ref{Any}(nothing)
 
+# OCaml importer import listener (ocaml-plan.md §7.2): when set to (host, port), import_events sends
+# the events over the newline-JSON line protocol ["IMPORT", [events]] -> ["OK", {imported, errors, ...}]
+# instead of remote-evaluating Julia code in the importer node (rex over the FirehoseServer EVAL port).
+IMPORT_EVENTS_LINE_SERVER = Ref{Any}(nothing)
+
+function import_events_via_line_server(events::Vector)
+    host, port = IMPORT_EVENTS_LINE_SERVER[]
+    sock = Sockets.connect(host, port)
+    try
+        write(sock, JSON.json(["IMPORT", events]) * "\n")
+        r = JSON.parse(readline(sock))
+        r[1] == "OK" || error("import listener: $r")
+        (r[2]["imported"], r[2]["errors"])
+    finally
+        close(sock)
+    end
+end
+
 # Referenced by primalnode_config.jl (append!(App.FOLLOW_LIST_EVENTS, [])); kept as an empty
 # appendable global so a cold start can load the config. No src logic reads it.
 FOLLOW_LIST_EVENTS = []
@@ -1944,6 +1962,22 @@ FOLLOW_LIST_EVENTS = []
 function import_events(est::DB.CacheStorage; events::Vector=[], replicated=false)
     replicated || replicate_request(:import_events; events)
     est.readonly[] && return []
+
+    if !isnothing(IMPORT_EVENTS_LINE_SERVER[])
+        for e in events
+            e = Nostr.Event(e)
+            DB.add_human_override(est, e.pubkey, true, "import_events")
+        end
+        imported, errors = try
+            import_events_via_line_server(events)
+        catch ex
+            println("import_events: line server error: $ex")
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+            (0, length(events))
+        end
+        return [(; kind=Int(EVENT_IMPORT_STATUS), content=JSON.json((; imported, errors)))]
+    end
+
     isnothing(IMPORT_EVENTS_SERVER[]) && return []
 
     cnt = Ref(0)
@@ -4300,7 +4334,7 @@ end
 
 function events_nip46(est::DB.CacheStorage; event_ids::Vector)
     res = []
-    session = Postgres.make_session(Postgres.PGConnStr("host=192.168.44.7 port=54017 dbname=primal1 user=pr"))
+    session = Postgres.make_session(Postgres.PGConnStr("host=<julia-host> port=54017 dbname=primal1 user=pr"))
     try
         for eid in event_ids 
             eid = castmaybe(eid, Nostr.EventId)

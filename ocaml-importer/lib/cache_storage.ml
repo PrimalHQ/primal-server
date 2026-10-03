@@ -67,6 +67,10 @@ type ext_hooks = {
   ext_long_form_note : est -> Nostr.t -> unit;
   ext_video_note : est -> Nostr.t -> unit;
   ext_live_event : est -> Nostr.t -> unit;
+  ext_follow_pack : est -> Nostr.t -> unit;          (* kind 39089 follow packs -> follow_lists *)
+  ext_live_event_mutelist : est -> Nostr.t -> unit;  (* kind 10555 -> live_event_pubkey_filterlist *)
+  ext_zap_receipt_invoice : est -> Nostr.t -> unit;  (* kind 9735 -> zap_receipt_invoices *)
+  update_content_moderation_rules : est -> string -> unit; (* user pubkey: recompute cmr_* *)
   ext_is_hidden_event : est -> string -> bool;           (* eid *)
   ext_is_hidden_pubkey : est -> string -> bool;          (* pubkey *)
   import_reporting : est -> Nostr.t -> unit;             (* kind-1984 reporting events *)
@@ -94,6 +98,10 @@ let no_ext =
     ext_long_form_note = (fun _ _ -> ());
     ext_video_note = (fun _ _ -> ());
     ext_live_event = (fun _ _ -> ());
+    ext_follow_pack = (fun _ _ -> ());
+    ext_live_event_mutelist = (fun _ _ -> ());
+    ext_zap_receipt_invoice = (fun _ _ -> ());
+    update_content_moderation_rules = (fun _ _ -> ());
     ext_is_hidden_event = (fun _ _ -> false);
     ext_is_hidden_pubkey = (fun _ _ -> false);
     import_reporting = (fun _ _ -> ());
@@ -917,6 +925,9 @@ let zap_verifier_submit : (zap_job -> unit) option ref = ref None
 let set_zap_verifier_submit f = zap_verifier_submit := Some f
 
 let handle_zap_receipt (est : est) (e : Nostr.t) : unit =
+  (* ws-importer's zap_receipt_invoices row (invoice text per receipt), independent of zapper
+     verification. *)
+  (!ext).ext_zap_receipt_invoice est e;
   let parent_eid = ref None and zapped_pk = ref None in
   let amount_sats = ref 0 and has_description = ref false in
   List.iter
@@ -955,12 +966,15 @@ let handle_categorized_people (est : est) (e : Nostr.t) : unit =
     | tg :: rest -> (
         if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "d" then
           match Nostr.tag_field tg 1 with
-          | Some "mute" -> upsert_pubkey_event_id est ~table:`Mute_list_2 ~key:e.pubkey ~value:e.id
-              (* Julia also update_content_moderation_rules: app_settings-gated, recomputes the
-                 cmr_* tables via App.import_content_moderation_rules — a serving/App-layer job
-                 (the importer doesn't own app_settings), so it is a no-op in the import path. *)
-          | Some "mutelists" -> upsert_pubkey_event_id est ~table:`Mute_lists ~key:e.pubkey ~value:e.id
-          | Some "allowlist" -> upsert_pubkey_event_id est ~table:`Allow_list ~key:e.pubkey ~value:e.id
+          | Some "mute" ->
+              upsert_pubkey_event_id est ~table:`Mute_list_2 ~key:e.pubkey ~value:e.id;
+              (!ext).update_content_moderation_rules est e.pubkey
+          | Some "mutelists" ->
+              upsert_pubkey_event_id est ~table:`Mute_lists ~key:e.pubkey ~value:e.id;
+              (!ext).update_content_moderation_rules est e.pubkey
+          | Some "allowlist" ->
+              upsert_pubkey_event_id est ~table:`Allow_list ~key:e.pubkey ~value:e.id;
+              (!ext).update_content_moderation_rules est e.pubkey
           | Some identifier ->
               let dbh = est.dbh in
               let pubkey = e.pubkey and created_at = i64 e.created_at and event_id = e.id in
@@ -1126,13 +1140,16 @@ let dispatch_kind (est : est) (e : Nostr.t) : unit =
   else if k = Nostr.kind_event_deletion then import_delete_event est e
   else if k = Nostr.kind_repost then handle_repost est e
   else if k = Nostr.kind_zap_receipt then handle_zap_receipt est e
-  else if k = Nostr.kind_mute_list then
-    upsert_pubkey_event_id est ~table:`Mute_list ~key:e.pubkey ~value:e.id
-    (* update_content_moderation_rules: app_settings-gated serving-layer recompute — no-op here *)
+  else if k = Nostr.kind_mute_list then begin
+    upsert_pubkey_event_id est ~table:`Mute_list ~key:e.pubkey ~value:e.id;
+    (!ext).update_content_moderation_rules est e.pubkey
+  end
   else if k = Nostr.kind_categorized_people then handle_categorized_people est e
   else if k = Nostr.kind_comment then handle_note_reply est e
   else if k = Nostr.kind_long_form_content then (!ext).ext_long_form_note est e
   else if k = Nostr.kind_live_event then (!ext).ext_live_event est e
+  else if k = Nostr.kind_follow_pack then (!ext).ext_follow_pack est e
+  else if k = Nostr.kind_live_event_mutelist then (!ext).ext_live_event_mutelist est e
   else if k = Nostr.kind_video_long_form || k = Nostr.kind_video_short_form then
     (!ext).ext_video_note est e
   else if k = Nostr.kind_relay_list_metadata then begin
@@ -1198,3 +1215,37 @@ let import_msg_into_storage (est : est) (msg : string) : import_result =
     | Some (_relay, e) -> import_event est e
     | None -> Rejected
     | exception _ -> Rejected
+
+(* {1 Periodic: expire_scores} (Julia cache_storage_ext.jl:984, run by CacheStorage.periodic every
+   60 s). Each scoring action schedules a score_expiry row to take its score24h contribution back
+   24 h later. Julia loops row by row; here one set-based update (summed per event, so several due
+   rows for one event are all applied) followed by the same delete. Returns the expired row count. *)
+let expire_scores (est : est) : int =
+  let dbh = est.dbh in
+  let tnow = i64 (Utils.current_time ()) in
+  ignore
+    [%pgsql dbh
+      "update event_stats_1_1b380f4869 es set score24h = es.score24h - d.change \
+       from (select event_id, sum(change) as change from score_expiry where expire_at <= $tnow group by event_id) d \
+       where es.event_id = d.event_id"];
+  List.length [%pgsql dbh "delete from score_expiry where expire_at <= $tnow returning event_id"]
+
+(* Julia DB.add_human_override (cache_storage_ext.jl:1053): the API marks the author of every
+   event imported through import_events as human. *)
+let add_human_override (est : est) ~(pubkey : string) ~(is_human : bool) ~(source : string) : unit =
+  let dbh = est.dbh in
+  ignore
+    [%pgsql dbh
+      "insert into human_override (pubkey, is_human, added_at, source) values ($pubkey, $is_human, now(), $source) \
+       on conflict (pubkey) do update set is_human = excluded.is_human, source = excluded.source"]
+
+(* Julia DB.get_trusted_followers_count (cache_storage_ext.jl:1083). *)
+let get_trusted_followers_count (est : est) (pubkey : string) : int64 =
+  let dbh = est.dbh in
+  match
+    [%pgsql dbh
+      "select count(1) from pubkey_followers_1_d52305fb47 pf, pubkey_trustrank tr \
+       where pf.pubkey = $pubkey and pf.follower_pubkey = tr.pubkey and tr.rank > 0"]
+  with
+  | Some n :: _ -> n
+  | _ -> 0L

@@ -154,6 +154,41 @@ cache connection**, so only the `PG*` set is required.
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`.
 
+### Phase 1 importer completion (ocaml-plan.md §7)
+
+| JSON key | Default (env for dev tools) | Purpose |
+|---|---|---|
+| `import_listener_enabled` | `false` (`IMPORTER_IMPORT_LISTENER`) | Serve the typed import line protocol (below) that replaces the Julia FirehoseServer `EVAL`/`EXPR` channel for the API's `import_events`. |
+| `import_listener_host` / `import_listener_port` | `0.0.0.0` / `12000+report_node` | Bind address. While the Julia importer node still owns `12000+N`, production uses another port (12118) and the Julia API's `App.IMPORT_EVENTS_LINE_SERVER[] = (host, port)` points at it. |
+| `expire_scores_enabled` | `false` (`IMPORTER_EXPIRE_SCORES`) | Run Julia's `expire_scores` every 60 s (score24h decay via `score_expiry`). Enable only after the Julia node's `CacheStorage.periodic` is stopped (`Main.cache_storage.periodic_task_running[] = false`), otherwise both decrement. |
+| `scheduled_hooks_enabled` | `true` (`IMPORTER_SCHEDULED_HOOKS`) | Run the `scheduled_hooks` drain (hashtag score expiry). Same double-run caveat with the Julia node. |
+| `content_moderation_rules_enabled` | `true` | On mute/allow-list events (kinds 10000, 30000 `mute`/`mutelists`/`allowlist`) of Primal app users, recompute the `cmr_*` tables and notify live-event subscribers (`primal_events`, kind 11000001). |
+| `default_settings_file` | `null` | `content-moderation/default-settings.json`, deep-merged under each user's app settings (Julia `ext_user_get_settings`). |
+| `relay_broadcast_timeout` | `15.0` | Per-relay budget when re-broadcasting a reply's thread parents to the author's relays (Julia `broadcast_reply`). |
+| `poll_vote_import_enabled` | `true` | Julia `DAG.POLL_VOTE_IMPORT_ENABLED` for the per-event poll-stats indexer. |
+
+Also always on since Phase 1 (no key): `update_user_search` on metadata changes, the ws-importer
+table writes (`live_event_participants` with participant-proof verification, `follow_lists`,
+`zap_receipt_invoices`, `live_event_pubkey_filterlist`, `pg_notify('cache_storage', …)` for live
+events), `add_human_override` on listener imports.
+
+#### Import line protocol (`lib/import_listener.ml`)
+
+Newline-delimited JSON over TCP, one reply line per request line:
+
+```
+["EVENT", "<subid>", {event}]   -> ["OK", "<id hex>", "imported" | "duplicate" | "rejected" | "error"]
+["IMPORT", [{event}, ...]]      -> ["OK", {"imported": n, "duplicates": n, "rejected": n, "errors": n}]
+anything else                   -> ["NOTICE", "unsupported message"]
+```
+
+Each event is signature-verified and imported synchronously (own connection pair, one request at a
+time), then the per-event DAG indexers run (`lib/dag_index.ml`: `basic_tags`, `zap_receipts`,
+`poll_stats`/`poll_user_votes`, `event_mentions`) and, for text notes, the thread root/reply
+targets are re-broadcast to the author's relays (`Relay_broadcast`). This is exactly what the Julia
+`import_events` path remote-evaluated in the importer node, minus the code execution.
+
+
 > **Note on trustrank-gated data.** `og_zap_receipts`, the `replies` stat counter, and the
 > per-event score require trustrank data (`pubkey_trustrank`), which is produced by the
 > separate Julia TrustRankMaker. A bare reference DB has none, so those stay empty even

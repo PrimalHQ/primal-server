@@ -147,7 +147,7 @@ let for_hashtags (e : Nostr.t) (body : string -> unit) : unit =
    We implement the tag-derived mentions — #[N] content refs into the tag list, and a/e tags
    carrying a 4th "mention" marker (a-tags resolved to their current event id). The bech32
    "nostr:" content mentions (re_mention / nip19_decode) are a TODO pending bech32.ml. *)
-let for_mentiones (est : CS.est) (e : Nostr.t) (body : Nostr.tag -> unit) : unit =
+let for_mentiones ?(resolve_a = true) (est : CS.est) (e : Nostr.t) (body : Nostr.tag -> unit) : unit =
   if
     e.kind = Nostr.kind_text_note
     || e.kind = Nostr.kind_long_form_content
@@ -190,6 +190,7 @@ let for_mentiones (est : CS.est) (e : Nostr.t) (body : Nostr.tag -> unit) : unit
         if Nostr.tag_len tg >= 4 && Nostr.tag_field tg 3 = Some "mention" then
           match Nostr.tag_name tg with
           | Some "e" -> push_tag tg
+          | Some "a" when not resolve_a -> push_tag tg
           | Some "a" -> (
               match Nostr.tag_field tg 1 with
               | Some s -> (
@@ -219,6 +220,8 @@ let for_mentiones (est : CS.est) (e : Nostr.t) (body : Nostr.tag -> unit) : unit
            match Bech32.nip19_decode tok with
            | Some (Bech32.Npub pk) | Some (Bech32.Nprofile pk) -> push "p" (Hex_util.encode pk)
            | Some (Bech32.Note eid) | Some (Bech32.Nevent eid) -> push "e" (Hex_util.encode eid)
+           | Some (Bech32.Naddr { kind; author; identifier }) when not resolve_a ->
+               push "a" (Printf.sprintf "%d:%s:%s" kind (Hex_util.encode author) identifier)
            | Some (Bech32.Naddr { kind; author; identifier }) -> (
                match CS.lookup_parametrized_replaceable_event est ~kind ~pubkey:author ~identifier with
                | Some eid -> push "e" (Hex_util.encode eid)
@@ -703,8 +706,41 @@ let ext_pubkey (est : CS.est) (pubkey : string) : unit =
   ignore
     [%pgsql dbh "insert into pubkey_zapped_1_17f1f622a9 (pubkey, zaps, satszapped) values ($pubkey, 0, 0) on conflict do nothing"]
 
-(* update_user_search (FTS) + metadata media import; both deferred. *)
-let ext_metadata_changed (_est : CS.est) (_e : Nostr.t) : unit = ()
+(* Julia update_user_search (cache_storage_ext.jl:958): the full-text-search row for a human
+   user's current metadata (one tsvector per searchable field). Non-humans get no row. *)
+let update_user_search (est : CS.est) (pubkey : string) : bool =
+  if not (ext_is_human est pubkey) then false
+  else begin
+    let dbh = est.CS.dbh in
+    ignore [%pgsql dbh "delete from user_search where pubkey = $pubkey"];
+    match
+      [%pgsql dbh
+        "select m.value, e.content from meta_data_1_323bc43167 m, event e where m.key = $pubkey and e.id = m.value"]
+    with
+    | (mdid, content) :: _ -> (
+        match Yojson.Safe.from_string content with
+        | `Assoc fields ->
+            let f k = match List.assoc_opt k fields with Some (`String s) -> Some s | _ -> None in
+            let name = f "name" and username = f "username" and display_name = f "display_name"
+            and displayname = f "displayName" and nip05 = f "nip05" and lud16 = f "lud16" in
+            ignore
+              [%pgsql dbh
+                "insert into user_search (pubkey, event_id, name, username, display_name, displayname, nip05, lud16) \
+                 values ($pubkey, $mdid, to_tsvector('simple', $?name), to_tsvector('simple', $?username), \
+                         to_tsvector('simple', $?display_name), to_tsvector('simple', $?displayname), \
+                         to_tsvector('simple', $?nip05), to_tsvector('simple', $?lud16))"];
+            true
+        | _ -> false
+        | exception _ -> false)
+    | [] -> false
+  end
+
+(* Julia ext_metadata_changed: update_user_search (the metadata media import branch is gated on
+   DOWNLOAD_MEDIA, off). *)
+let ext_metadata_changed (est : CS.est) (e : Nostr.t) : unit =
+  try ignore (update_user_search est e.pubkey) with
+  | Eio.Cancel.Cancelled _ as ex -> raise ex
+  | exn -> Printf.eprintf "update_user_search: %s\n%!" (Printexc.to_string exn)
 
 let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
   check_spam_content_hash est e;
@@ -808,7 +844,6 @@ let ext_pubkey_zap (est : CS.est) (e : Nostr.t) (zapped_pk : string) (amount_sat
 (* long-form / video / live: only media imports, all gated on DOWNLOAD_MEDIA — no-ops here. *)
 let ext_long_form_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls est e
 let ext_video_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls est e
-let ext_live_event (_est : CS.est) (_e : Nostr.t) : unit = ()
 
 (* Julia ext_preimport_check: !(pubkey in Filterlist.import_pubkey_blocked) — read the local
    filterlist. *)
@@ -904,6 +939,547 @@ let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at 
         end
       end
 
+
+(* {1 Phase 1 importer completion} (ocaml-plan.md §7.1): the Julia-only importer duties and the
+   Rust ws-importer's table writes, all per-event hooks on the import path. *)
+
+let log_p1 fmt = Printf.ksprintf (fun s -> Printf.printf "[importer] %s\n%!" s) fmt
+
+let tags_of_json (s : string) : Nostr.tag list =
+  match Yojson.Safe.from_string s with
+  | `List l -> List.filter_map (function `List tg -> Some tg | _ -> None) l
+  | _ -> []
+  | exception _ -> []
+
+(* Run [f] inside a transaction on [dbh]; rollback on any exception (re-raised). *)
+let in_transaction (dbh : Postgres.dbh) (f : unit -> unit) : unit =
+  PGOCaml.begin_work dbh;
+  match f () with
+  | () -> PGOCaml.commit dbh
+  | exception e ->
+      (try PGOCaml.rollback dbh with _ -> ());
+      raise e
+
+let p_tag_pubkeys (e : Nostr.t) : string list =
+  List.filter_map
+    (fun tg ->
+      if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "p" then
+        Option.bind (Nostr.tag_field tg 1) CS.decode32
+      else None)
+    e.tags
+
+let d_tag (e : Nostr.t) : string option =
+  List.find_map
+    (fun tg -> if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "d" then Nostr.tag_field tg 1 else None)
+    e.tags
+
+(* {2 Live events (kind 30311)} — primal-cache nostr.rs parse_live_event / verify_participant_proof
+   and ws-importer.rs process_event_import. *)
+
+(* Proof = BIP340 signature by the participant over sha256("kind:host_pubkey_hex:identifier"). *)
+let verify_participant_proof ~participant ~proof_hex ~kind ~event_pubkey ~identifier : bool =
+  match Hex_util.decode_opt proof_hex with
+  | Some proof when String.length proof = 64 ->
+      let msg = Printf.sprintf "%d:%s:%s" kind (Hex_util.encode event_pubkey) identifier in
+      let msg_hash = Digestif.SHA256.(to_raw_string (digest_string msg)) in
+      Secp256k1.verify ~msg_hash ~serialized_pubkey:participant ~signature:proof
+  | _ -> false
+
+type live_status = Live | Ended | Unknown_status
+
+let ext_live_event (est : CS.est) (e : Nostr.t) : unit =
+  let identifier = ref None and status = ref Unknown_status and candidates = ref [] in
+  List.iter
+    (fun tg ->
+      match Nostr.tag_name tg with
+      | Some "p" -> (
+          match Option.bind (Nostr.tag_field tg 1) CS.decode32 with
+          | Some pk ->
+              (* p tag: [p, pubkey, relay, role, proof] *)
+              let is_host =
+                match Nostr.tag_field tg 3 with
+                | Some r -> String.lowercase_ascii r = "host"
+                | None -> false
+              in
+              candidates := (pk, is_host, Nostr.tag_field tg 4) :: !candidates
+          | None -> ())
+      | Some "d" -> identifier := Nostr.tag_field tg 1
+      | Some "status" -> (
+          match Nostr.tag_field tg 1 with
+          | Some "live" -> status := Live
+          | Some "ended" -> status := Ended
+          | _ -> ())
+      | _ -> ())
+    e.tags;
+  match !identifier with
+  | None -> ()
+  | Some identifier ->
+      let participants =
+        List.filter_map
+          (fun (pk, is_host, proof) ->
+            match proof with
+            | Some proof_hex ->
+                if verify_participant_proof ~participant:pk ~proof_hex ~kind:e.kind
+                     ~event_pubkey:e.pubkey ~identifier
+                then Some (pk, is_host)
+                else begin
+                  log_p1 "live event %s: invalid proof for participant %s" (Nostr.id_hex e)
+                    (Hex_util.encode pk);
+                  None
+                end
+            | None -> Some (pk, is_host) (* no proof: allowed, as in ws-importer *))
+          (List.rev !candidates)
+      in
+      let dbh = est.CS.dbh in
+      let kind = i64 e.kind and pubkey = e.pubkey and event_id = e.id and created_at = i64 e.created_at in
+      (match !status with
+      | Live ->
+          in_transaction dbh (fun () ->
+              ignore
+                [%pgsql dbh
+                  "delete from live_event_participants where kind = $kind and pubkey = $pubkey and identifier = $identifier"];
+              List.iter
+                (fun (participant_pubkey, is_host) ->
+                  if is_host then
+                    ignore
+                      [%pgsql dbh
+                        "insert into live_event_participants (kind, pubkey, identifier, participant_pubkey, event_id, created_at) \
+                         values ($kind, $pubkey, $identifier, $participant_pubkey, $event_id, $created_at) on conflict do nothing"])
+                participants)
+      | Ended ->
+          ignore
+            [%pgsql dbh
+              "delete from live_event_participants where kind = $kind and pubkey = $pubkey and identifier = $identifier"]
+      | Unknown_status -> ());
+      (* report to the cache-storage listener (LIVE_EVENT_HAPPENING notifications, Phase 6) *)
+      let payload =
+        Yojson.Safe.to_string
+          (`Assoc
+            [
+              ("type", `String "live_event");
+              ("kind", `Int e.kind);
+              ("pubkey", `String (Hex_util.encode pubkey));
+              ("identifier", `String identifier);
+            ])
+      in
+      ignore [%pgsql dbh "select pg_notify('cache_storage', $payload)"]
+
+(* {2 Follow packs (kind 39089)} — ws-importer.rs FOLLOW_LIST -> follow_lists. *)
+let ext_follow_pack (est : CS.est) (e : Nostr.t) : unit =
+  match d_tag e with
+  | None -> ()
+  | Some identifier ->
+      let dbh = est.CS.dbh and pubkey = e.pubkey in
+      let pks = p_tag_pubkeys e in
+      in_transaction dbh (fun () ->
+          ignore [%pgsql dbh "delete from follow_lists where pubkey = $pubkey and identifier = $identifier"];
+          List.iter
+            (fun follow_pubkey ->
+              ignore
+                [%pgsql dbh
+                  "insert into follow_lists (pubkey, identifier, follow_pubkey) values ($pubkey, $identifier, $follow_pubkey) \
+                   on conflict (pubkey, identifier, follow_pubkey) do update set follow_pubkey = excluded.follow_pubkey"])
+            pks)
+
+(* {2 Live-event mute list (kind 10555)} — ws-importer.rs LIVE_EVENT_MUTELIST. *)
+let ext_live_event_mutelist (est : CS.est) (e : Nostr.t) : unit =
+  let dbh = est.CS.dbh in
+  let user_pubkey = e.pubkey and event_id = e.id and created_at = i64 e.created_at in
+  let pks = p_tag_pubkeys e in
+  in_transaction dbh (fun () ->
+      ignore [%pgsql dbh "delete from live_event_pubkey_filterlist where user_pubkey = $user_pubkey"];
+      List.iter
+        (fun blocked_pubkey ->
+          ignore
+            [%pgsql dbh
+              "insert into live_event_pubkey_filterlist (user_pubkey, blocked_pubkey, event_id, created_at) \
+               values ($user_pubkey, $blocked_pubkey, $event_id, $created_at) on conflict (user_pubkey, blocked_pubkey) do nothing"])
+        pks)
+
+(* {2 Zap receipt invoices (kind 9735)} — primal-cache parse_zap_receipt: receiver (p), sender (P or
+   description.pubkey), a parsable bolt11 -> zap_receipt_invoices. *)
+let ext_zap_receipt_invoice (est : CS.est) (e : Nostr.t) : unit =
+  let receiver = ref None and sender = ref None and invoice = ref None in
+  List.iter
+    (fun tg ->
+      if Nostr.tag_len tg >= 2 then
+        match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+        | Some "p", Some h -> receiver := CS.decode32 h
+        | Some "P", Some h -> sender := CS.decode32 h
+        | Some "bolt11", Some b -> invoice := Some b
+        | Some "description", Some d -> (
+            try
+              match Yojson.Safe.Util.member "pubkey" (Yojson.Safe.from_string d) with
+              | `String p -> ( match CS.decode32 p with Some pk -> sender := Some pk | None -> ())
+              | _ -> ()
+            with _ -> ())
+        | _ -> ())
+    e.tags;
+  match (!receiver, !sender, !invoice) with
+  | Some _, Some _, Some invoice when CS.parse_bolt11 invoice <> None ->
+      let dbh = est.CS.dbh and zap_receipt_eid = e.id in
+      ignore
+        [%pgsql dbh
+          "insert into zap_receipt_invoices (zap_receipt_eid, invoice) values ($zap_receipt_eid, $invoice) on conflict do nothing"]
+  | _ -> ()
+
+(* {2 Content moderation rules} — Julia update_content_moderation_rules (cache_storage.jl:1775) +
+   App.compile_content_moderation_rules / import_content_moderation_rules (app.jl:358/488).
+   Recomputes the user's cmr_* tables from their settings and mute/allow lists whenever one of those
+   lists changes, and pokes the live-event subscribers (kind 11000001 on primal_events). *)
+
+let content_moderation_rules_enabled = ref true
+let default_settings_file : string option ref = ref None
+let default_settings_cache : (float * Yojson.Safe.t) option ref = ref None
+
+(* Julia parsed_default_settings: the content-moderation repo's default-settings.json, re-read
+   when its mtime changes. *)
+let default_settings () : Yojson.Safe.t =
+  match !default_settings_file with
+  | None -> `Assoc []
+  | Some path -> (
+      let mtime = try (Unix.stat path).Unix.st_mtime with _ -> 0. in
+      match !default_settings_cache with
+      | Some (m, j) when m = mtime -> j
+      | _ ->
+          let j = try Yojson.Safe.from_file path with _ -> `Assoc [] in
+          default_settings_cache := Some (mtime, j);
+          j)
+
+let rec deepmerge (a : Yojson.Safe.t) (b : Yojson.Safe.t) : Yojson.Safe.t =
+  match (a, b) with
+  | `Assoc fa, `Assoc fb ->
+      let merged =
+        List.map
+          (fun (k, va) -> match List.assoc_opt k fb with Some vb -> (k, deepmerge va vb) | None -> (k, va))
+          fa
+      in
+      let extra = List.filter (fun (k, _) -> not (List.mem_assoc k fa)) fb in
+      `Assoc (merged @ extra)
+  | _, b -> b
+
+(* Julia App.ext_user_get_settings: defaults deep-merged with the user's app_settings content. *)
+let user_settings (est : CS.est) (pubkey : string) : Yojson.Safe.t =
+  let defaults = default_settings () in
+  match
+    Postgres.query est.CS.mem_dbh "select value from app_settings where key = decode($1,'hex') limit 1"
+      [ hexp pubkey ]
+  with
+  | (Some value :: _) :: _ -> (
+      try
+        let content =
+          match Yojson.Safe.Util.member "content" (Yojson.Safe.from_string value) with
+          | `String s -> Yojson.Safe.from_string s
+          | other -> other
+        in
+        deepmerge defaults content
+      with _ -> defaults)
+  | _ -> defaults
+
+type cmr = {
+  cmr_pubkeys : (string, string * string list) Hashtbl.t; (* pubkey -> (parent, scopes) *)
+  cmr_groups : (string * string list) list; (* group name -> scopes *)
+  cmr_pubkeys_allowed : string list;
+  cmr_threads : string list;
+  cmr_hashtags : string list;
+  cmr_words : string list;
+}
+
+let list_event_id (est : CS.est) table (key : string) : string option =
+  let dbh = est.CS.dbh in
+  let r =
+    match table with
+    | `Mute_list -> [%pgsql dbh "select value from mute_list_1_f693a878b9 where key = $key"]
+    | `Mute_list_2 -> [%pgsql dbh "select value from mute_list_2_1_949b3d746b where key = $key"]
+    | `Mute_lists -> [%pgsql dbh "select value from mute_lists_1_d90e559628 where key = $key"]
+    | `Allow_list -> [%pgsql dbh "select value from allow_list_1_f1da08e9c8 where key = $key"]
+  in
+  match r with v :: _ -> Some v | [] -> None
+
+let event_tags (est : CS.est) (eid : string) : Nostr.tag list =
+  match CS.get_event est eid with Some e -> e.tags | None -> []
+
+let uniq (l : string list) : string list =
+  let seen = Hashtbl.create 16 in
+  List.filter (fun x -> if Hashtbl.mem seen x then false else (Hashtbl.add seen x (); true)) (List.rev l)
+
+let compile_content_moderation_rules (est : CS.est) (pubkey : string) : cmr =
+  let empty =
+    { cmr_pubkeys = Hashtbl.create 1; cmr_groups = []; cmr_pubkeys_allowed = []; cmr_threads = [];
+      cmr_hashtags = []; cmr_words = [] }
+  in
+  let settings = user_settings est pubkey in
+  let member k j = try Yojson.Safe.Util.member k j with _ -> `Null in
+  let apply = match member "applyContentModeration" settings with `Bool b -> b | _ -> false in
+  if not apply then empty
+  else begin
+    let strings = function `List l -> List.filter_map (function `String s -> Some s | _ -> None) l | _ -> [] in
+    (* mute_lists (kind 30000, d=mutelists): the mute lists of OTHER users this user applies,
+       with per-entry scopes in the 5th tag field. *)
+    let ml_pubkeys : (string, string list) Hashtbl.t = Hashtbl.create 8 in
+    (match list_event_id est `Mute_lists pubkey with
+    | Some mlseid ->
+        List.iter
+          (fun tg ->
+            if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "p" then
+              match Option.bind (Nostr.tag_field tg 1) CS.decode32 with
+              | Some pk ->
+                  let scopes =
+                    if Nostr.tag_len tg >= 5 then
+                      match Nostr.tag_field tg 4 with
+                      | Some s -> ( try strings (Yojson.Safe.from_string s) with _ -> [])
+                      | None -> []
+                    else [ "content"; "trending" ]
+                  in
+                  if scopes <> [] then Hashtbl.replace ml_pubkeys pk scopes
+              | None -> ())
+          (event_tags est mlseid)
+    | None -> ());
+    let pubkeys : (string, string * string list) Hashtbl.t = Hashtbl.create 64 in
+    let threads = ref [] and hashtags = ref [] and words = ref [] in
+    let ppks = pubkey :: Hashtbl.fold (fun k _ acc -> k :: acc) ml_pubkeys [] in
+    List.iter
+      (fun ppk ->
+        List.iter
+          (fun table ->
+            match list_event_id est table ppk with
+            | Some eid ->
+                List.iter
+                  (fun tg ->
+                    if Nostr.tag_len tg >= 2 then
+                      match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+                      | Some "p", Some h -> (
+                          match CS.decode32 h with
+                          | Some pk ->
+                              Hashtbl.replace pubkeys pk
+                                (ppk, Option.value (Hashtbl.find_opt ml_pubkeys ppk) ~default:[])
+                          | None -> ())
+                      | Some "e", Some h -> (
+                          match CS.decode32 h with Some eid -> threads := eid :: !threads | None -> ())
+                      | Some "t", Some ht -> hashtags := ht :: !hashtags
+                      | Some "word", Some w -> words := w :: !words
+                      | _ -> ())
+                  (event_tags est eid)
+            | None -> ())
+          [ `Mute_list; `Mute_list_2 ])
+      ppks;
+    let groups =
+      match member "contentModeration" settings with
+      | `List l ->
+          List.filter_map
+            (fun cm ->
+              match (member "name" cm, member "scopes" cm) with
+              | `String name, (`List _ as sc) ->
+                  let scopes = strings sc in
+                  if scopes <> [] then Some (name, scopes) else None
+              | _ -> None)
+            l
+      | _ -> []
+    in
+    let allowed =
+      match list_event_id est `Allow_list pubkey with
+      | Some eid ->
+          List.filter_map
+            (fun tg ->
+              if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "p" then
+                Option.bind (Nostr.tag_field tg 1) CS.decode32
+              else None)
+            (event_tags est eid)
+      | None -> []
+    in
+    { cmr_pubkeys = pubkeys; cmr_groups = groups; cmr_pubkeys_allowed = uniq allowed;
+      cmr_threads = uniq !threads; cmr_hashtags = uniq !hashtags; cmr_words = uniq !words }
+  end
+
+(* Julia make_tsquery (app.jl:532): each word with non-[a-zA-Z0-9_] replaced by spaces, whitespace
+   collapsed and trimmed, quoted with escaped spaces; words OR-ed. *)
+let make_tsquery (ws : string list) : string =
+  let norm w =
+    let b = Buffer.create (String.length w) in
+    String.iter
+      (fun c ->
+        if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '_'
+        then Buffer.add_char b c
+        else Buffer.add_char b ' ')
+      w;
+    let parts = String.split_on_char ' ' (Buffer.contents b) |> List.filter (fun s -> s <> "") in
+    "\"" ^ String.concat "\\ " parts ^ "\""
+  in
+  String.concat " | " (List.map norm ws)
+
+let both_scopes = [ Content; Trending ]
+let scopes_of (l : string list) = if l = [] then both_scopes else List.filter_map cmr_scope_of_string_opt l
+
+let import_content_moderation_rules (est : CS.est) (user_pubkey : string) (cmr : cmr) : unit =
+  let dbh = est.CS.dbh in
+  in_transaction dbh (fun () ->
+      ignore [%pgsql dbh "delete from cmr_pubkeys_scopes where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_pubkeys_parent where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_groups where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_pubkeys_allowed where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_threads where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_hashtags where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_words where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_hashtags_2 where user_pubkey = $user_pubkey"];
+      ignore [%pgsql dbh "delete from cmr_words_2 where user_pubkey = $user_pubkey"];
+      Hashtbl.iter
+        (fun pubkey (parent, scopes) ->
+          List.iter
+            (fun scope ->
+              ignore
+                [%pgsql dbh
+                  "insert into cmr_pubkeys_scopes (user_pubkey, pubkey, scope) values ($user_pubkey, $pubkey, $scope)"])
+            (scopes_of scopes);
+          ignore
+            [%pgsql dbh
+              "insert into cmr_pubkeys_parent (user_pubkey, pubkey, parent) values ($user_pubkey, $pubkey, $parent)"])
+        cmr.cmr_pubkeys;
+      List.iter
+        (fun (name, scopes) ->
+          match cmr_grp_of_string_opt name with
+          | None -> ()
+          | Some grp ->
+              List.iter
+                (fun scope ->
+                  ignore
+                    [%pgsql dbh
+                      "insert into cmr_groups (user_pubkey, grp, scope) values ($user_pubkey, $grp, $scope)"])
+                (scopes_of scopes))
+        cmr.cmr_groups;
+      List.iter
+        (fun pubkey ->
+          ignore [%pgsql dbh "insert into cmr_pubkeys_allowed (user_pubkey, pubkey) values ($user_pubkey, $pubkey)"])
+        cmr.cmr_pubkeys_allowed;
+      List.iter
+        (fun scope ->
+          List.iter
+            (fun event_id ->
+              ignore
+                [%pgsql dbh
+                  "insert into cmr_threads (user_pubkey, event_id, scope) values ($user_pubkey, $event_id, $scope)"])
+            cmr.cmr_threads;
+          List.iter
+            (fun hashtag ->
+              ignore
+                [%pgsql dbh
+                  "insert into cmr_hashtags (user_pubkey, hashtag, scope) values ($user_pubkey, $hashtag, $scope)"])
+            cmr.cmr_hashtags;
+          List.iter
+            (fun word ->
+              ignore
+                [%pgsql dbh "insert into cmr_words (user_pubkey, word, scope) values ($user_pubkey, $word, $scope)"])
+            cmr.cmr_words;
+          if cmr.cmr_hashtags <> [] then begin
+            let q = make_tsquery cmr.cmr_hashtags in
+            ignore
+              [%pgsql dbh
+                "insert into cmr_hashtags_2 (user_pubkey, scope, hashtags) values ($user_pubkey, $scope, to_tsquery('simple', $q))"]
+          end;
+          if cmr.cmr_words <> [] then begin
+            let q = make_tsquery cmr.cmr_words in
+            ignore
+              [%pgsql dbh
+                "insert into cmr_words_2 (user_pubkey, scope, words) values ($user_pubkey, $scope, to_tsquery('simple', $q))"]
+          end)
+        both_scopes)
+
+(* Julia send_event_to_ws_connector for the user's live events hosted in the last hour: a synthetic
+   kind-11000001 event on the primal_events channel tells live-feed subscribers that this user's
+   moderation changed. (The 32-char zero id/pubkey are Julia's quirk, kept verbatim.) *)
+let notify_user_live_events (est : CS.est) (pubkey : string) : unit =
+  let dbh = est.CS.dbh in
+  let kind = 30311L in
+  List.iter
+    (fun ej ->
+      match ej with
+      | None -> ()
+      | Some ej -> (
+          match Nostr.of_json (Yojson.Safe.from_string ej) with
+          | exception _ -> ()
+          | e ->
+              let identifier = ref None and host = ref false in
+              List.iter
+                (fun tg ->
+                  match Nostr.tag_name tg with
+                  | Some "d" when Nostr.tag_len tg >= 2 -> identifier := Nostr.tag_field tg 1
+                  | Some "p"
+                    when Nostr.tag_len tg >= 4
+                         && Option.map String.lowercase_ascii (Nostr.tag_field tg 3) = Some "host" ->
+                      host := true
+                  | _ -> ())
+                e.tags;
+              if !host then begin
+                let a =
+                  Printf.sprintf "%Ld:%s:%s" kind (Hex_util.encode pubkey)
+                    (Option.value !identifier ~default:"")
+                in
+                let payload =
+                  Yojson.Safe.to_string
+                    (`Assoc
+                      [
+                        ("id", `String (String.make 32 '0'));
+                        ("pubkey", `String (String.make 32 '0'));
+                        ("sig", `String (String.make 64 '0'));
+                        ("created_at", `Int (Utils.current_time ()));
+                        ("kind", `Int 11_000_001);
+                        ("content", `String "");
+                        ("tags", `List [ `List [ `String "a"; `String a ] ]);
+                      ])
+                in
+                ignore [%pgsql dbh "select pg_notify('primal_events', $payload)"]
+              end))
+    [%pgsql dbh "select user_live_events($kind, $pubkey)"]
+
+let update_content_moderation_rules (est : CS.est) (pubkey : string) : unit =
+  if !content_moderation_rules_enabled && !app_settings_present && is_app_user est pubkey then begin
+    (try import_content_moderation_rules est pubkey (compile_content_moderation_rules est pubkey) with
+    | Eio.Cancel.Cancelled _ as e -> raise e
+    | exn -> log_p1 "update_content_moderation_rules %s: %s" (Hex_util.encode pubkey) (Printexc.to_string exn));
+    try notify_user_live_events est pubkey with
+    | Eio.Cancel.Cancelled _ as e -> raise e
+    | exn -> log_p1 "notify_user_live_events %s: %s" (Hex_util.encode pubkey) (Printexc.to_string exn)
+  end
+
+(* {2 User relays} — Julia App.get_user_relays (app.jl:2263): the kind-10002 relay list, else the
+   relays in the kind-3 contact list content. URLs only. *)
+let get_user_relays (est : CS.est) (pubkey : string) : string list =
+  let dbh = est.CS.dbh in
+  let from_relay_list =
+    match
+      [%pgsql dbh
+        "select e.tags from relay_list_metadata_1_801a17fc93 r, event e where r.pubkey = $pubkey and e.id = r.event_id"]
+    with
+    | tags :: _ ->
+        List.filter_map
+          (fun tg ->
+            if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "r" then Nostr.tag_field tg 1 else None)
+          (tags_of_json tags)
+    | [] -> []
+  in
+  let relays =
+    if from_relay_list <> [] then from_relay_list
+    else
+      match
+        [%pgsql dbh
+          "select e.content from contact_lists_1_1abdf474bd c, event e where c.key = $pubkey and e.id = c.value"]
+      with
+      | content :: _ -> (
+          try
+            match Yojson.Safe.from_string content with
+            | `Assoc l ->
+                List.filter_map
+                  (fun (url, dd) ->
+                    match dd with
+                    | `Assoc flags when url <> "" && List.exists (fun (_, v) -> v = `Bool true) flags ->
+                        Some url
+                    | _ -> None)
+                  l
+            | _ -> []
+          with _ -> [])
+      | [] -> []
+  in
+  List.sort_uniq compare relays
+
 (* {1 registration} *)
 
 let ext_hooks : CS.ext_hooks =
@@ -920,6 +1496,10 @@ let ext_hooks : CS.ext_hooks =
     ext_long_form_note = ext_long_form_note;
     ext_video_note = ext_video_note;
     ext_live_event = ext_live_event;
+    ext_follow_pack = ext_follow_pack;
+    ext_live_event_mutelist = ext_live_event_mutelist;
+    ext_zap_receipt_invoice = ext_zap_receipt_invoice;
+    update_content_moderation_rules = update_content_moderation_rules;
     ext_is_hidden_event = ext_is_hidden_event;
     ext_is_hidden_pubkey = ext_is_hidden_pubkey;
     import_reporting = import_reporting;
