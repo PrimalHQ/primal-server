@@ -2,10 +2,10 @@
    from a trusted (human) pubkey, and confirm event_stats.score / score24h / score_expiry land.
    Verification is disabled so we can use synthetic (unsigned) events. *)
 open Eio.Std
-module Pg = Importer.Postgres
+module Pg = Primal_common.Postgres
 module CS = Importer.Cache_storage
-module N = Importer.Nostr
-module PGOCaml = Importer.Postgres.PGOCaml
+module N = Primal_common.Nostr
+module PGOCaml = Primal_common.Postgres.PGOCaml
 
 let b32 c = String.make 32 c (* a distinct 32-byte id/pubkey *)
 
@@ -18,7 +18,7 @@ let () =
   let est = { CS.cfg = { CS.default_config with verification_enabled = false }; dbh; mem_dbh = dbh } in
   let parent_id = b32 '\xA1' and parent_pk = b32 '\xB1' in
   let liker_pk = b32 '\xC1' in
-  let now = Importer.Utils.current_time () in
+  let now = Primal_common.Utils.current_time () in
   (* trust the liker so ext_is_human is true *)
   ignore [%pgsql dbh "delete from pubkey_trustrank where pubkey = $liker_pk"];
   let rank = 1.0 in
@@ -29,7 +29,7 @@ let () =
   in
   let reaction : N.t =
     { id = b32 '\xA2'; pubkey = liker_pk; created_at = now; kind = N.kind_reaction;
-      tags = [ [ `String "e"; `String (Importer.Hex_util.encode parent_id) ] ];
+      tags = [ [ `String "e"; `String (Primal_common.Hex_util.encode parent_id) ] ];
       content = "+"; sig_ = b32 '\x00' }
   in
   assert (CS.import_event est parent = CS.Imported);

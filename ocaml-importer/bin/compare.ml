@@ -1,6 +1,6 @@
 (* Verification tool (plan milestone 6): diff recent rows in the importer's relevant tables
    between the LOCAL Postgres (this host's OCaml importer) and a REMOTE one (the Julia importer,
-   default 192.168.44.7, same port/credentials/dbname — override host with COMPARE_HOST).
+   default <julia-host>, same port/credentials/dbname — override host with COMPARE_HOST).
 
    Both importers consume the same firehose, so recent rows should match closely; larger diffs
    flag bugs to fix. We window on the event's created_at (intrinsic and identical across both,
@@ -11,10 +11,10 @@
    Score / score24h are intentionally NOT compared (time-decayed, expected to differ). *)
 
 open Eio.Std
-module Pg = Importer.Postgres
-module PGOCaml = Importer.Postgres.PGOCaml
+module Pg = Primal_common.Postgres
+module PGOCaml = Primal_common.Postgres.PGOCaml
 
-let hx = Importer.Hex_util.encode
+let hx = Primal_common.Hex_util.encode
 let i64 = Int64.of_int
 
 module SM = Map.Make (String)
@@ -113,7 +113,7 @@ let () =
   Eio_main.run @@ fun env ->
   Switch.run @@ fun sw ->
   Pg.set_env ~net:(Eio.Stdenv.net env) ~sw;
-  let now = Importer.Utils.current_time () in
+  let now = Primal_common.Utils.current_time () in
   let since = i64 (now - window) and until = i64 (now - margin) in
   let lci = Pg.cache_conninfo () and rci = Pg.remote_conninfo () in
   Printf.printf "comparing created_at in [now-%ds, now-%ds]\n  local  = %s:%d/%s\n  remote = %s:%d/%s\n\n%!"

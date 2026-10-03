@@ -10,21 +10,21 @@ let phase name t f =
   ignore t;
   r
 
-let probe ~net ~clock (u : Importer.Http.url) =
+let probe ~net ~clock (u : Primal_common.Http.url) =
   let t0 = Unix.gettimeofday () in
   let res =
     try
       Switch.run @@ fun sw ->
       (match Eio.Time.with_timeout clock 20.0 (fun () ->
           let addr = phase "dns" () (fun () ->
-              Importer.Http.resolve ~net ~clock ~sw ~host:u.Importer.Http.host
-                ~port:u.Importer.Http.port)
+              Primal_common.Http.resolve ~net ~clock ~sw ~host:u.Primal_common.Http.host
+                ~port:u.Primal_common.Http.port)
           in
           (match addr with
            | `Tcp (ip, p) -> Printf.printf "  addr     %s:%d\n%!" (Format.asprintf "%a" Eio.Net.Ipaddr.pp ip) p
            | _ -> ());
           let tcp = phase "connect" () (fun () -> Eio.Net.connect ~sw net addr) in
-          let host_dn = Domain_name.(host_exn (of_string_exn u.Importer.Http.host)) in
+          let host_dn = Domain_name.(host_exn (of_string_exn u.Primal_common.Http.host)) in
           let auth = match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m in
           let cfg =
             match Tls.Config.client ~authenticator:auth ~peer_name:host_dn () with
@@ -37,7 +37,7 @@ let probe ~net ~clock (u : Importer.Http.url) =
           let req =
             Printf.sprintf
               "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: primal-importer\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
-              u.Importer.Http.path u.Importer.Http.host
+              u.Primal_common.Http.path u.Primal_common.Http.host
           in
           phase "write" () (fun () -> Eio.Flow.copy_string req (tls :> _ Eio.Flow.sink));
           let raw = phase "read" () (fun () ->
@@ -68,11 +68,11 @@ let () =
   in
   List.iter
     (fun us ->
-      match Importer.Http.parse_url us with
+      match Primal_common.Http.parse_url us with
       | None -> Printf.printf "bad url %s\n%!" us
       | Some u ->
           for i = 1 to rounds do
-            Printf.printf "%s #%d\n%!" u.Importer.Http.host i;
+            Printf.printf "%s #%d\n%!" u.Primal_common.Http.host i;
             probe ~net ~clock u
           done)
     urls

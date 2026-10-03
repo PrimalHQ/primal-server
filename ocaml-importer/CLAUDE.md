@@ -7,13 +7,18 @@ full layout, binaries, and environment variables.
 
 ## Build / run
 
-All dune commands run inside the project's flake dev shell. Set `P` to this directory:
+Since Phase 0 of `../ocaml-plan.md` this project is part of the repo-wide dune workspace
+(`../dune-workspace`): the generic modules live in `../ocaml-common` (library `primal_common`,
+opened via `-open Primal_common` in the dune files), `_build/` is at the repo root
+(`../_build/default/ocaml-importer/bin/main.exe`), and the toolchain is `../ocaml-common/flake.nix`
+(this project has no flake of its own). All dune commands run inside that dev shell. Set `P` to this
+directory:
 
 ```sh
-P=$HOME/work/itk/primal/primal-net-server/primal-server/ocaml-importer
+P=<checkout>/ocaml-importer
 cd "$P"
-nix develop "path:$P" -c dune build @all   # build (fails if any inline [%pgsql] mismatches primal1)
-nix develop "path:$P" -c dune build @check  # type-check only
+nix develop "path:$P/../ocaml-common" -c dune build @all   # build (fails if any inline [%pgsql] mismatches primal1)
+nix develop "path:$P/../ocaml-common" -c dune build @check  # type-check only
 ```
 
 `PGDATABASE=primal1` (live DB) is used for BOTH compile-time SQL checking and runtime. The
@@ -23,7 +28,7 @@ reference DB `primal_importer_ref` is only for occasional tests.
 
 `main.exe` reads **all** of its settings from a single JSON file given as its sole argument
 (`main.exe <config.json>`); the environment is **not** consulted at runtime. The file lives at
-`$HOME/work/itk/primal/primal-importer-config.json` and `rebuild-restart-importer.sh` passes it
+`$PRIMAL_CONFIG_DIR/primal-importer-config.json` and `rebuild-restart-importer.sh` passes it
 automatically (override with `IMPORTER_CONFIG`). Every key is required. To change a runtime
 setting, edit that JSON file and restart. The defaults are documented in `README.md` →
 Configuration and encoded in `Config.from_env` (`lib/config.ml`), which the dev tools
@@ -37,7 +42,7 @@ file.
 any importer already running from this project's binary — matched by full exe path, never by bare
 name. The service runs in its own cgroup with a 10G `MemoryMax` and **auto-restarts** on any exit,
 including an OOM `SIGKILL` (`Restart=always`, `OOMPolicy=kill`). Its stdout+stderr are appended to
-`$HOME/var/primalserver/ocaml-importer.log` (the script truncates it once at the manual restart,
+`$PRIMAL_VAR_DIR/ocaml-importer.log` (the script truncates it once at the manual restart,
 then the service appends across auto-restarts); the pid and the log/status/stop commands print to
 stderr. Inspect or stop it with `systemctl --user status|stop primal-ocaml-importer`.
 
@@ -47,7 +52,7 @@ the correct rows:
 
 1. Edit code/SQL.
 2. `./rebuild-restart-importer.sh` (a broken build leaves the running importer untouched).
-3. Watch `tail -f $HOME/var/primalserver/ocaml-importer.log` (per-second stats, `event_syncer:`
+3. Watch `tail -f $PRIMAL_VAR_DIR/ocaml-importer.log` (per-second stats, `event_syncer:`
    lines, any `worker:`/exception output) and query the DB to confirm the data is correct, e.g.
    `event`, `event_stats_1_1b380f4869`, `pubkey_notifications_1_e5459ab9dd`,
    `pubkey_notification_cnts_1_d78f6fcade`.

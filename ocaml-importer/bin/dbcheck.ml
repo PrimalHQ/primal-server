@@ -1,6 +1,6 @@
 (* Smoke-test the Eio-native PGOCaml adapter against the reference DB. *)
 open Eio.Std
-module Pg = Importer.Postgres
+module Pg = Primal_common.Postgres
 
 let () =
   Eio_main.run @@ fun env ->

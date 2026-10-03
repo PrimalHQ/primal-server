@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild the importer with dune and, if the build succeeds, (re)start main.exe as a transient
-# systemd --user service logging to $HOME/var/primalserver/ocaml-importer.log.
+# systemd --user service logging to $PRIMAL_VAR_DIR/ocaml-importer.log.
 #
 # Why a systemd service (not the old `setsid ... &`): it puts main.exe in its OWN cgroup with
 # memory accounting (so its RSS is attributed to it, not lumped into the shared tmux scope that the
@@ -14,26 +14,30 @@
 # DB. Process matching is by the full exe path, never the bare name "main.exe" — other unrelated
 # main.exe binaries run on this box (e.g. ocaml-handlers) and must not be touched.
 #
-# The build/run use the project flake's dev shell (nix develop "path:$P"), so main.exe inherits
-# the C-library paths from flake.nix. main.exe reads ALL of its settings from the JSON config file
+# The build/run use the shared ocaml-common flake's dev shell (nix develop "path:$COMMON"), so
+# main.exe inherits the C-library paths from that flake.nix. main.exe reads ALL of its settings from the JSON config file
 # passed as its sole argument (see $CONFIG below); the environment is no longer consulted at
 # runtime. Edit that file directly to change a setting, then re-run this script.
 set -euo pipefail
 
 # Project dir = this script's directory; derive everything else from it.
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-EXE="$P/_build/default/bin/main.exe"
+# The repo root is the dune workspace (see ../dune-workspace): _build lives there, and the toolchain
+# dev shell is ocaml-common's flake (shared by every OCaml project in the repo).
+ROOT="$(cd -- "$P/.." && pwd -P)"
+COMMON="$ROOT/ocaml-common"
+EXE="$ROOT/_build/default/ocaml-importer/bin/main.exe"
 # All runtime settings come from this JSON file; override the path with IMPORTER_CONFIG.
-CONFIG="${IMPORTER_CONFIG:-$HOME/work/itk/primal/primal-importer-config.json}"
-LOG="$HOME/var/primalserver/ocaml-importer.log"
-PIDFILE="$HOME/var/primalserver/ocaml-importer.pid"
+CONFIG="${IMPORTER_CONFIG:-$PRIMAL_CONFIG_DIR/primal-importer-config.json}"
+LOG="$PRIMAL_VAR_DIR/ocaml-importer.log"
+PIDFILE="$PRIMAL_VAR_DIR/ocaml-importer.pid"
 UNIT=primal-ocaml-importer          # transient systemd --user unit name (-> $UNIT.service)
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"  # abs path: user manager PATH lacks nix
 
 # 1. Rebuild everything. On failure, stop here WITHOUT touching the running importer, so a broken
 #    build leaves the current (working) process undisturbed. Build output goes to this terminal.
-echo "building $P (dune build @all) ..." >&2
-nix develop "path:$P" -c dune build @all
+echo "building $P (dune build @all, workspace root $ROOT) ..." >&2
+(cd "$P" && nix develop "path:$COMMON" -c dune build @all)
 
 # 1b. The config file is required. Check it now — before touching the running importer — so a
 #     missing config leaves the current process undisturbed (same policy as a broken build).
@@ -85,7 +89,7 @@ systemd-run --user --collect --unit="$UNIT" \
   -p MemoryAccounting=yes -p MemoryHigh=9G -p MemoryMax=10G \
   -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
   -p "WorkingDirectory=$P" \
-  -- "$NIX" develop "path:$P" -c "$EXE" "$CONFIG"
+  -- "$NIX" develop "path:$COMMON" -c "$EXE" "$CONFIG"
 
 # 4. Wait for main.exe (spawned by `nix develop`) to appear, record its PID, confirm the unit is up.
 pid=""

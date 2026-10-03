@@ -1,0 +1,4 @@
+(test
+ (name test_common)
+ (libraries primal_common alcotest yojson)
+ (deps events.jsonl))

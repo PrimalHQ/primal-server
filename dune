@@ -1,0 +1,3 @@
+; Only the OCaml projects are part of the dune workspace; everything else in this repo
+; (Julia, Rust, SQL dumps) is invisible to dune.
+(dirs ocaml-common ocaml-api ocaml-importer ocaml-fetcher ocaml-jobs)

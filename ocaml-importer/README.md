@@ -9,24 +9,26 @@ parses them, and writes them into PostgreSQL via inline `[%pgsql]` queries that 
 Module and function names mirror the Julia source so the two codebases navigate the same
 way (`import_event`, `import_contact_list`, `event_pubkey_action`, `ext_text_note`, …).
 
-This project is **standalone** — it shares no code with `ocaml-handlers`. It is Eio-native
-(no Lwt).
+The generic modules (Postgres adapter, Nostr, bech32, secp256k1, HTTP/DNS/SOCKS5 clients,
+pushgateway, worker pool, phase slots, filterlist) live in `../ocaml-common` (library
+`primal_common`) and are shared with the other OCaml daemons of `../ocaml-plan.md`; this project
+holds only the importer itself. It is Eio-native (no Lwt). Unit tests for the shared modules are in
+`../ocaml-common/test`.
 
 ---
 
 ## Building and the dev shell
 
-Everything runs inside the project's Nix flake. Because this directory is **untracked by
-git**, refer to the flake with the `path:` scheme (the plain `.#` form will not see the
-files):
+Everything runs inside the shared `../ocaml-common` Nix flake (one dune workspace rooted at the
+repo root, so `_build/` is `../_build`):
 
 ```sh
-P=$HOME/work/itk/primal/primal-net-server/primal-server/ocaml-importer
+P=<checkout>/ocaml-importer
 
-nix develop "path:$P"                       # interactive dev shell
-nix develop "path:$P" -c dune build @all    # build everything
-nix develop "path:$P" -c dune test          # run the unit tests (alcotest)
-nix develop "path:$P" -c dune exec bin/main.exe   # run a binary
+nix develop "path:$P/../ocaml-common"                       # interactive dev shell
+nix develop "path:$P/../ocaml-common" -c dune build @all    # build everything
+nix develop "path:$P/../ocaml-common" -c dune test          # unit tests live in ../ocaml-common/test
+nix develop "path:$P/../ocaml-common" -c dune exec bin/main.exe   # run a binary
 ```
 
 The dev shell exports the `PG*` variables (see below). By default they point the `[%pgsql]`
@@ -44,7 +46,7 @@ targets primal1's base tables by name, so the reference DB must mirror that sche
 `primal_importer_ref`, both on `127.0.0.1:54017`, user `pr`) and cannot be overridden:
 
 ```sh
-nix develop "path:$P" -c sql/refdb-setup.sh
+nix develop "path:$P/../ocaml-common" -c sql/refdb-setup.sh
 ```
 
 Each run **drops and recreates** the reference DB, then clones only primal1's `public` schema
@@ -61,7 +63,7 @@ schema preserved so `dune build` still type-checks), run the explicit counterpar
 setup script:
 
 ```sh
-nix develop "path:$P" -c sql/refdb-truncate.sh
+nix develop "path:$P/../ocaml-common" -c sql/refdb-truncate.sh
 ```
 
 It takes **no arguments**. The connection is **hardcoded** to `primal_importer_ref` on
@@ -76,7 +78,7 @@ It can therefore *only* ever truncate the reference DB and can never touch a liv
 
 `bin/main` (the importer) reads **all** of its settings from a single JSON config file passed
 as its sole command-line argument; the environment is **not** consulted at runtime. The file
-lives at `$HOME/work/itk/primal/primal-importer-config.json` (outside the repo — it is a
+lives at `$PRIMAL_CONFIG_DIR/primal-importer-config.json` (outside the repo — it is a
 deployment artifact); `rebuild-restart-importer.sh` passes that path automatically (override with
 `IMPORTER_CONFIG`). Edit the file directly to change a setting, then restart.
 
@@ -108,11 +110,11 @@ cache connection**, so only the `PG*` set is required.
 | `PGPORT` | `54017` | Cache DB port. |
 | `PGUSER` | `pr` | Cache DB user. |
 | `PGDATABASE` | `primal1` | Cache DB name; the **live** DB used for both compile-time `[%pgsql]` checks and runtime (dev shell sets this). The code fallback when unset is `primal_importer_ref`. |
-| `PGMEMBERSHIPHOST` | `192.168.11.7` (dev shell); code fallback `= PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`, and the notification-gate tables `app_settings` / `notification_settings` (see [Notifications](#notifications)). The dev shell sets this to the real membership DB so the serving-layer notification gates are active; the code fallback when unset is the cache connection. |
+| `PGMEMBERSHIPHOST` | `<membership-db-host>` (dev shell); code fallback `= PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`, and the notification-gate tables `app_settings` / `notification_settings` (see [Notifications](#notifications)). The dev shell sets this to the real membership DB so the serving-layer notification gates are active; the code fallback when unset is the cache connection. |
 | `PGMEMBERSHIPPORT` | `5432` (dev shell); fallback `= PGPORT` | Membership DB port. |
 | `PGMEMBERSHIPUSER` | `primal` (dev shell); fallback `= PGUSER` | Membership DB user. |
 | `PGMEMBERSHIPDATABASE` | `primal` (dev shell); fallback `= PGDATABASE` | Membership DB name. |
-| `COMPARE_HOST` | `192.168.44.7` | Remote DB host for `bin/compare` (the Julia importer's Postgres). |
+| `COMPARE_HOST` | `<julia-host>` | Remote DB host for `bin/compare` (the Julia importer's Postgres). |
 | `COMPARE_PORT` | = `PGPORT` | Remote DB port. |
 | `COMPARE_USER` | = `PGUSER` | Remote DB user. |
 | `COMPARE_DATABASE` | = `PGDATABASE` | Remote DB name (e.g. `primal1` on the Julia box). |
@@ -128,13 +130,13 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_QUEUE_CAPACITY` | `10000` | Bounded firehose→workers queue size (backpressure; never drops). |
 | `IMPORTER_VERIFY` | `true` | Verify each event's BIP340 signature before import. |
 | `VERIFY_ZAPPERS` | `true` | Verify zap receipts via LNURL (see proxy below). When `false`, all zappers pass. |
-| `PRIMALSERVER_PROXY` | *(none)* | SOCKS5 proxy for LNURL egress, e.g. `socks5h://192.168.41.2:1080` (a bare `host:port` also works). `socks5h://` resolves DNS at the proxy. |
+| `PRIMALSERVER_PROXY` | *(none)* | SOCKS5 proxy for LNURL egress, e.g. `socks5h://<socks-proxy-host>:1080` (a bare `host:port` also works). `socks5h://` resolves DNS at the proxy. |
 | `IMPORTER_DISABLE_TRUSTRANK` | `false` | When `true`, seed `pubkey_trustrank = 1.0` for every new pubkey so `ext_is_human` is true for everyone (use when no TrustRankMaker feeds this DB). |
 | `IMPORTER_HUMANESS_THRESHOLD` | *(computed)* | `ext_is_human` passes when `pubkey_trustrank.rank >` this threshold. Unset, it is computed once at startup as the rank of the 50,000th-highest-ranked pubkey in `pubkey_trustrank` (mirroring Julia `TrustRank.load`; `0.0` if the table is empty). Set it to pin an explicit override. |
 | `IMPORTER_IMPORT_REPORTING` | `false` | Process NIP-56 kind-1984 reports into the membership `filterlist`. |
 | `IMPORTER_REPORTING_WHITELIST` | *(empty)* | Comma-separated **hex** pubkeys allowed to file reports (only honored when `IMPORTER_IMPORT_REPORTING=true`). |
 | `IMPORTER_EVENT_SYNC` | `true` | Enable the event syncer (pull recent events from peer nodes into the import queue — see [Event syncer](#event-syncer)). |
-| `IMPORTER_EVENT_SYNC_REMOTES` | `192.168.40.7,192.168.42.7,192.168.43.7,192.168.44.7` | Comma-separated peer Postgres hosts to pull from (same port/credentials as the local cache DB). |
+| `IMPORTER_EVENT_SYNC_REMOTES` | `<peer-host>,<media-host>,<peer-host>,<julia-host>` | Comma-separated peer Postgres hosts to pull from (same port/credentials as the local cache DB). |
 | `IMPORTER_EVENT_SYNC_INTERVAL` | `60` | Seconds between sync cycles. |
 | `IMPORTER_EVENT_SYNC_OVERLAP` | `600` | Seconds of lookback behind the local max `created_at` each cycle (the 10-minute self-healing window). |
 | `IMPORTER_PUSHGATEWAY` | `true` | Publish the cumulative imported-event count (`cache_any`) to a Prometheus pushgateway (see [Pushgateway](#pushgateway)). |
@@ -144,11 +146,11 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_STATS_FILE` | `<storage>/primalnode<report-node>/cache/db/stats.json` | Julia stats file the `cache_any` total is loaded from and persisted to. |
 | `IMPORTER_PUSHGATEWAY_INTERVAL` | `15` | Seconds between pushes. |
 | `IMPORTER_PUSH_NOTIFICATIONS` | `false` | Deliver device push notifications (APNS/FCM) via the sender subprocess (see [Push notifications](#notifications)). |
-| `IMPORTER_PUSH_NOTIFICATION_SENDER_BIN` | `$HOME/work/itk/primal/primal-net-server/push-notification-sender/target/release/push-notification-sender` | The push-notification-sender binary (JSON lines over stdin/stdout). |
+| `IMPORTER_PUSH_NOTIFICATION_SENDER_BIN` | `<parent-checkout>/push-notification-sender/target/release/push-notification-sender` | The push-notification-sender binary (JSON lines over stdin/stdout). |
 | `IMPORTER_PUSH_NOTIFICATIONS_PERIOD` | `5` | Seconds between push transmission batches (Julia `PERIOD`). |
 | `IMPORTER_PUSH_NOTIFICATIONS_LOG` | `false` | Dump each sender request/response JSON to stdout (Julia `LOG`). |
 | `PRIMALSERVER_REPORT_NODE_IDX` | `18` | Reporting node identity for the two defaults above (distinct from the firehose node `NODE_IDX`). |
-| `PRIMALSERVER_STORAGE_PATH` | `$HOME/var/primalserver` | Storage root for the default `IMPORTER_STATS_FILE`. |
+| `PRIMALSERVER_STORAGE_PATH` | `$PRIMAL_VAR_DIR` | Storage root for the default `IMPORTER_STATS_FILE`. |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`.
 
@@ -163,7 +165,7 @@ Booleans accept `1/true/yes/on` and `0/false/no/off`.
 ## Binaries
 
 Build any of them with `dune build bin/<name>.exe` and run with
-`nix develop "path:$P" -c dune exec bin/<name>.exe [args]` (or run the built artifact
+`nix develop "path:$P/../ocaml-common" -c dune exec bin/<name>.exe [args]` (or run the built artifact
 directly: `_build/default/bin/<name>.exe [args]`). `bin/main` takes a required JSON config
 path (see [Configuration](#configuration-json-file)); the dev tools read their DB connection
 and config from the environment variables above.
@@ -216,10 +218,10 @@ watch the live DB.
 
 ```sh
 # run the importer with all settings from the JSON file (firehose, workers, DBs, proxy, …)
-nix develop "path:$P" -c dune exec bin/main.exe -- $HOME/work/itk/primal/primal-importer-config.json
+nix develop "path:$P/../ocaml-common" -c dune exec bin/main.exe -- $PRIMAL_CONFIG_DIR/primal-importer-config.json
 
 # to change a setting (e.g. explicit firehose port, LNURL proxy, trustrank seeding), edit the JSON
-# file — proxy: "socks5h://192.168.41.2:1080", disable_trustrank: true, firehose_port: 9017 — and
+# file — proxy: "socks5h://<socks-proxy-host>:1080", disable_trustrank: true, firehose_port: 9017 — and
 # restart.
 ```
 
@@ -239,8 +241,8 @@ only-local / only-remote / mismatch with sample diffs.
 
 ```sh
 # compare the last 7 minutes (excluding the most recent minute) against primal1
-COMPARE_HOST=192.168.44.7 COMPARE_DATABASE=primal1 \
-nix develop "path:$P" -c dune exec bin/compare.exe 420 60
+COMPARE_HOST=<julia-host> COMPARE_DATABASE=primal1 \
+nix develop "path:$P/../ocaml-common" -c dune exec bin/compare.exe 420 60
 ```
 
 Tables compared: `events`, `event_stats` (likes…satszapped; score/score24h excluded as
@@ -256,9 +258,9 @@ Uses `PRIMALSERVER_PROXY` for egress. Reports how many verified.
 - `N` — default `20`
 
 ```sh
-PGHOST=192.168.44.7 PGDATABASE=primal1 \
-PRIMALSERVER_PROXY=socks5h://192.168.41.2:1080 \
-nix develop "path:$P" -c dune exec bin/zapcheck.exe 20
+PGHOST=<julia-host> PGDATABASE=primal1 \
+PRIMALSERVER_PROXY=socks5h://<socks-proxy-host>:1080 \
+nix develop "path:$P/../ocaml-common" -c dune exec bin/zapcheck.exe 20
 ```
 
 ### `importcheck [path-to-events.jsonl]` — replay events from a file
@@ -270,7 +272,7 @@ Imports events (one JSON event object per line) into the cache DB through the fu
 - `path` — default `test/events.jsonl`
 
 ```sh
-nix develop "path:$P" -c dune exec bin/importcheck.exe /path/to/events.jsonl
+nix develop "path:$P/../ocaml-common" -c dune exec bin/importcheck.exe /path/to/events.jsonl
 ```
 
 ### `dbcheck` — adapter smoke test
@@ -279,7 +281,7 @@ Connects to the cache DB with the Eio-native PGOCaml adapter and runs `select 1`
 Use it to confirm DB connectivity / credentials.
 
 ```sh
-nix develop "path:$P" -c dune exec bin/dbcheck.exe
+nix develop "path:$P/../ocaml-common" -c dune exec bin/dbcheck.exe
 ```
 
 ### `scorecheck` — score_event_cb firing check
@@ -289,7 +291,7 @@ Imports a synthetic note and a like from a trusted pubkey and asserts that
 rows in the cache DB (verification disabled so synthetic unsigned events are accepted).
 
 ```sh
-nix develop "path:$P" -c dune exec bin/scorecheck.exe
+nix develop "path:$P/../ocaml-common" -c dune exec bin/scorecheck.exe
 ```
 
 ### `phase8check` — filterlist / scheduled-hook / reporting check
@@ -300,7 +302,7 @@ blocking the reported pubkey/event. No args. Uses the cache DB for both roles an
 after itself.
 
 ```sh
-nix develop "path:$P" -c dune exec bin/phase8check.exe
+nix develop "path:$P/../ocaml-common" -c dune exec bin/phase8check.exe
 ```
 
 ---
@@ -313,13 +315,13 @@ while developing: it rebuilds everything with dune and, **only if the build succ
 its own cgroup, replacing any importer already running from this project's binary. The service has
 a 10G `MemoryMax` and auto-restarts on any exit, including an OOM `SIGKILL`. stdout+stderr
 (including the per-second stats line and `event_syncer:` lines) are appended to
-`$HOME/var/primalserver/ocaml-importer.log` (truncated once at the manual restart, then appended
+`$PRIMAL_VAR_DIR/ocaml-importer.log` (truncated once at the manual restart, then appended
 across auto-restarts); the pid and the log/status/stop commands are printed to stderr. Inspect or
 stop it with `systemctl --user status|stop primal-ocaml-importer`.
 
 ```sh
 ./rebuild-restart-importer.sh
-# tail -f $HOME/var/primalserver/ocaml-importer.log
+# tail -f $PRIMAL_VAR_DIR/ocaml-importer.log
 ```
 
 **Use it after any change to importer code or SQL.** Because `main` writes to the live `primal1`
@@ -327,7 +329,7 @@ DB, keeping a freshly-built `main` always running lets you verify in real time t
 produces the right rows — edit, `./rebuild-restart-importer.sh`, then watch the log and query the
 DB (e.g. `event`, `event_stats_1_1b380f4869`, `pubkey_notifications_1_e5459ab9dd`). To change a
 runtime setting (proxy, worker count, sync remotes, …), edit the JSON config file
-(`$HOME/work/itk/primal/primal-importer-config.json`, or the path in `$IMPORTER_CONFIG`) and re-run
+(`$PRIMAL_CONFIG_DIR/primal-importer-config.json`, or the path in `$IMPORTER_CONFIG`) and re-run
 the script — `main.exe` reads every setting from that file and does not consult the environment at
 runtime.
 

@@ -1,0 +1,7 @@
+(lang dune 3.0)
+(name primal_common)
+; A public library name is required for other dune projects in the workspace (ocaml-importer,
+; ocaml-api, ...) to depend on it; private libraries are scoped to their own project.
+(package
+ (name primal_common)
+ (synopsis "Shared OCaml 5 / Eio foundation for the Primal daemons"))

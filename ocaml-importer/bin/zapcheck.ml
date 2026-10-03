@@ -2,17 +2,17 @@
    confirm the SOCKS5 + TLS + HTTP egress path actually works on a networked host.
 
    Point PG* at a DB that holds metadata + kind-9735 events (e.g. the Julia importer's:
-     PGHOST=192.168.44.7 PGDATABASE=primal1), and set PRIMALSERVER_PROXY to the same SOCKS5 proxy
+     PGHOST=<julia-host> PGDATABASE=primal1), and set PRIMALSERVER_PROXY to the same SOCKS5 proxy
    the Julia importer uses. For each recent zap receipt we take the receipt author as the expected
    LNURL nostrPubkey and the receipt's `p` tag as the zapped user, look up that user's lnurl-pay
    endpoint, fetch it, and check the advertised nostrPubkey matches — exactly Lnurl.verify. *)
 open Eio.Std
-module Pg = Importer.Postgres
-module PGOCaml = Importer.Postgres.PGOCaml
+module Pg = Primal_common.Postgres
+module PGOCaml = Primal_common.Postgres.PGOCaml
 module CS = Importer.Cache_storage
 module Cfg = Importer.Config
 
-let hx = Importer.Hex_util.encode
+let hx = Primal_common.Hex_util.encode
 
 let () =
   let limit = if Array.length Sys.argv > 1 then int_of_string Sys.argv.(1) else 20 in
@@ -38,7 +38,7 @@ let () =
         List.find_map
           (function
             | `List (`String "p" :: `String h :: _) when String.length h = 64 ->
-                Importer.Hex_util.decode_opt h
+                Primal_common.Hex_util.decode_opt h
             | _ -> None)
           ts
     | _ -> None

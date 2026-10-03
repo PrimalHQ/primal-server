@@ -1,7 +1,10 @@
 {
-  # OCaml 5 translation of the Julia Nostr cache *importer* (primal-server/src/cache_storage.jl).
-  # Eio-native only (no Lwt). SQL is statically checked at compile time by the PGOCaml
-  # [%pgsql] ppx, which connects to the reference database described by PG* below.
+  # The ONE OCaml toolchain for every Primal OCaml project in this repo (ocaml-common, ocaml-api,
+  # ocaml-importer, ocaml-fetcher, ocaml-jobs) and for the private ocaml-ext in the parent repo.
+  # OCaml 5 / Eio only (no Lwt). SQL is statically checked at compile time by the PGOCaml
+  # [%pgsql] ppx against the live database named by PG* below.
+  #
+  # Use it from any project directory:  nix develop "path:<repo>/ocaml-common" -c dune build @all
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
@@ -14,9 +17,9 @@
         # C libraries the OCaml bindings link against.
         cLibs = [
           pkgs.secp256k1 # libsecp256k1; our own C stubs bind schnorrsig verify (BIP340)
+          pkgs.zlib # camlzip (zlib EVENTS frames in the API)
         ];
-        # Libraries used by the importer. Eio-native; no lwt.
-        importerLibs = [
+        ocamlLibs = [
           ocamlPkgs.eio
           ocamlPkgs.eio_main
           ocamlPkgs.eio_posix
@@ -29,7 +32,7 @@
           ocamlPkgs.uuidm
           ocamlPkgs.digestif
           ocamlPkgs.saturn
-          # TLS / crypto stack for LNURL-over-SOCKS5 (zapper verification).
+          # TLS / crypto stack (LNURL over SOCKS5, outbound relay WebSockets, S3/CDN APIs).
           ocamlPkgs.tls
           ocamlPkgs.tls-eio
           ocamlPkgs.x509
@@ -38,14 +41,23 @@
           ocamlPkgs.mirage-crypto-rng
           ocamlPkgs.ptime
           ocamlPkgs.domain-name
-          # Pure-Eio DNS for LNURL hosts (lib/dns_eio.ml): getaddrinfo blocks a systhread that
-          # Eio cannot cancel, so it escapes the request timeout. Upstream dropped its Eio
-          # transport (dns-client-eio); we ship our own over dns-client.
+          # Pure-Eio DNS (lib/net/dns_eio.ml): getaddrinfo blocks a systhread that Eio cannot
+          # cancel, so it escapes request timeouts.
           ocamlPkgs.dns
           ocamlPkgs.dns-client
           ocamlPkgs.ipaddr
           ocamlPkgs.cstruct
           ocamlPkgs.mtime
+          # HTTP/1.1 + WebSocket server stack (ocaml-api), as used by the tsunami kernel.
+          ocamlPkgs.httpun
+          ocamlPkgs.httpun-eio
+          ocamlPkgs.httpun-ws
+          ocamlPkgs.gluten
+          ocamlPkgs.gluten-eio
+          # Misc.
+          ocamlPkgs.base64
+          ocamlPkgs.xmlm
+          ocamlPkgs.camlzip
         ];
       in {
         devShells.default = pkgs.mkShell {
@@ -54,36 +66,36 @@
             ocamlPkgs.dune_3
             ocamlPkgs.findlib
             ocamlPkgs.ocaml-lsp
+            ocamlPkgs.ocamlformat
             ocamlPkgs.alcotest
             pkgs.postgresql_16
-          ] ++ importerLibs ++ cLibs;
+            pkgs.jq
+          ] ++ ocamlLibs ++ cLibs;
 
-          # Live database (primal1) used directly for compile-time [%pgsql] schema checking
-          # and at runtime. The standalone reference DB (primal_importer_ref), created from the
-          # live schema with sql/refdb-setup.sh, is only used occasionally for tests.
+          # Live cache database (primal1) used for compile-time [%pgsql] schema checking of
+          # cache-DB queries (and by the dev tools at runtime). Production daemons read their
+          # connections from their JSON config file, not from these.
           PGHOST = "127.0.0.1";
           PGPORT = "54017";
           PGDATABASE = "primal1";
           PGUSER = "pr";
 
-          # Membership DB (Julia :membership) — filterlist, human_override, and the notification-gate
-          # tables app_settings / notification_settings. Runtime only (mem_dbh); [%pgsql] still checks
-          # against primal1 via PG* above. Pointing mem_dbh here activates the serving-layer
-          # notification gates (app_settings present) so notifications match the Julia importer.
-          PGMEMBERSHIPHOST = "192.168.11.7";
+          # Membership DB (Julia :membership). Used at runtime by the dev tools; membership-table
+          # queries are compile-time checked against the local schema-only clone
+          # primal_membership_ref (sql/membership-refdb-setup.sh) via per-directory dune env.
+          PGMEMBERSHIPHOST = "<membership-db-host>";
           PGMEMBERSHIPPORT = "5432";
           PGMEMBERSHIPDATABASE = "primal";
           PGMEMBERSHIPUSER = "primal";
         };
 
         packages.default = ocamlPkgs.buildDunePackage {
-          pname = "primal_importer";
+          pname = "primal_common";
           version = "0.1.0";
           src = ./.;
-          buildInputs = importerLibs ++ cLibs;
+          buildInputs = ocamlLibs ++ cLibs;
           # NOTE: the package build also needs PG* pointing at a reachable DB carrying the
-          # importer schema (the live primal1 DB by default), because [%pgsql] type-checks at
-          # compile time.
+          # schema, because [%pgsql] type-checks at compile time.
         };
       });
 }

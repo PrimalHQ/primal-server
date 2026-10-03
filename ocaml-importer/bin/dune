@@ -1,5 +1,15 @@
 (executables
  (names main dbcheck importcheck scorecheck compare phase8check zapcheck zapbackfill lnurlprobe)
- (libraries importer eio eio.unix eio_main yojson mirage-crypto-rng.unix ca-certs)
+ (flags
+  (:standard -open Primal_common))
+ (libraries
+  primal_common
+  importer
+  eio
+  eio.unix
+  eio_main
+  yojson
+  mirage-crypto-rng.unix
+  ca-certs)
  (preprocess
   (pps pgocaml_ppx)))

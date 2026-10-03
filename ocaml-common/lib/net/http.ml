@@ -81,23 +81,38 @@ let extract_body (raw : string) : string =
 
 type conn = [ Eio.Flow.two_way_ty | Eio.Resource.close_ty ] r
 
-(* Phases are recorded via Stats so a wedged request shows WHERE it is stuck (dns / connect /
+(* Phases are recorded via Phases so a wedged request shows WHERE it is stuck (dns / connect /
    socks / tls / read) in the per-second stuck-slot report and the watchdog dump. *)
 let two_way_of_proxy ~sw ~net ~clock ~proxy ~host ~port : conn =
   match proxy with
   | Some (ph, pp) ->
-      Stats.phase "https:dns";
+      Phases.phase "https:dns";
       let addr = resolve ~net ~clock ~sw ~host:ph ~port:pp in
-      Stats.phase "https:connect";
+      Phases.phase "https:connect";
       let f = Eio.Net.connect ~sw net addr in
-      Stats.phase "https:socks";
+      Phases.phase "https:socks";
       Socks5.connect (f :> _ Eio.Flow.two_way) ~dest_host:host ~dest_port:port;
       (f :> conn)
   | None ->
-      Stats.phase "https:dns";
+      Phases.phase "https:dns";
       let addr = resolve ~net ~clock ~sw ~host ~port in
-      Stats.phase "https:connect";
+      Phases.phase "https:connect";
       (Eio.Net.connect ~sw net addr :> conn)
+
+(* Wrap a connected TCP flow in a TLS client session for [host] (SNI + system CA bundle).
+   Requires Mirage_crypto_rng_unix.use_default () once per domain before the first call. Shared
+   with Ws_client for wss://. *)
+let tls_wrap ~(host : string) (tcp : [> Eio.Flow.two_way_ty ] r) : Eio.Flow.two_way_ty r =
+  let host_dn = Domain_name.host_exn (Domain_name.of_string_exn host) in
+  let authenticator =
+    match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m
+  in
+  let cfg =
+    match Tls.Config.client ~authenticator ~peer_name:host_dn () with
+    | Ok c -> c
+    | Error (`Msg m) -> failwith m
+  in
+  (Tls_eio.client_of_flow cfg ~host:host_dn tcp :> Eio.Flow.two_way_ty r)
 
 (* GET an https URL, returning the response body (best-effort), or None on any failure /
    timeout. [proxy] is an optional SOCKS5 (host, port).
@@ -106,7 +121,7 @@ let two_way_of_proxy ~sw ~net ~clock ~proxy ~host ~port : conn =
    and response read — not just the body read. A wedged LNURL endpoint once hung every worker
    forever in the TLS handshake because only the read was bounded. One caveat remains:
    getaddrinfo runs in a systhread that Eio cannot interrupt mid-call, so a truly hung resolver
-   still blocks past the deadline (the stall watchdog in Stats.report_loop is the backstop). *)
+   still blocks past the deadline (a stall watchdog is the backstop). *)
 let https_get ~net ~clock ?proxy ?(timeout = 10.0) (u : url) : string option =
   if u.scheme <> "https" then None
   else
@@ -115,24 +130,15 @@ let https_get ~net ~clock ?proxy ?(timeout = 10.0) (u : url) : string option =
       let result =
         Eio.Time.with_timeout clock timeout (fun () ->
             let tcp = two_way_of_proxy ~sw ~net ~clock ~proxy ~host:u.host ~port:u.port in
-            let host_dn = Domain_name.(host_exn (of_string_exn u.host)) in
-            let authenticator =
-              match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m
-            in
-            let cfg =
-              match Tls.Config.client ~authenticator ~peer_name:host_dn () with
-              | Ok c -> c
-              | Error (`Msg m) -> failwith m
-            in
-            Stats.phase "https:tls";
-            let tls = Tls_eio.client_of_flow cfg ~host:host_dn tcp in
+            Phases.phase "https:tls";
+            let tls = tls_wrap ~host:u.host tcp in
             let req =
               Printf.sprintf
                 "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: primal-importer\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
                 u.path u.host
             in
             Eio.Flow.copy_string req (tls :> _ Eio.Flow.sink);
-            Stats.phase "https:read";
+            Phases.phase "https:read";
             let r = Eio.Buf_read.of_flow (tls :> _ Eio.Flow.source) ~max_size:(8 * 1024 * 1024) in
             Ok (Eio.Buf_read.take_all r))
       in

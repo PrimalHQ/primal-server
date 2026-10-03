@@ -12,12 +12,12 @@
 
 open Eio.Std
 module CS = Importer.Cache_storage
-module N = Importer.Nostr
-module Pg = Importer.Postgres
+module N = Primal_common.Nostr
+module Pg = Primal_common.Postgres
 module Cfg = Importer.Config
 module SD = Importer.Spam_detection
 module FC = Importer.Firehose_client
-module WP = Importer.Worker_pool
+module WP = Primal_common.Worker_pool
 
 let usage () =
   Printf.eprintf "usage: %s <config.json>   run the importer with settings from the JSON config file\n%!"
@@ -63,11 +63,11 @@ let () =
   SD.add_spamlist_processor sd (fun est spamlist ->
       SD.SS.iter
         (fun pk ->
-          Importer.Filterlist.block_pubkey_spam ~mem_dbh:est.CS.mem_dbh pk
+          Primal_common.Filterlist.block_pubkey_spam ~mem_dbh:est.CS.mem_dbh pk
             ~comment:"spam-detector: clustered spam pubkey")
         spamlist);
   SD.add_spamevent_processor sd (fun est e ->
-      Importer.Filterlist.block_event_spam ~mem_dbh:est.CS.mem_dbh e.N.id
+      Primal_common.Filterlist.block_event_spam ~mem_dbh:est.CS.mem_dbh e.N.id
         ~comment:"spam-detector: clustered spam event");
   SD.add_spamevent_processor sd (fun est e -> Importer.Cache_storage_ext.store_spam_content_hash est e);
 
@@ -133,7 +133,7 @@ let () =
             match job.WP.payload with
             | WP.Msg msg ->
                 Importer.Stats.phase "spam-check";
-                let now = float_of_int (Importer.Utils.current_time ()) in
+                let now = float_of_int (Primal_common.Utils.current_time ()) in
                 ignore (SD.on_message sd ~est msg now);
                 Importer.Stats.phase "import";
                 CS.import_msg_into_storage est msg
@@ -267,7 +267,7 @@ let () =
             ~sender_bin:cfg.push_notification_sender_bin ~period:cfg.push_notifications_period ());
       (fun () ->
         if cfg.pushgateway_enabled then
-          Importer.Pushgateway.run ~net ~clock ~stats ~host:cfg.pushgateway_host
+          Importer.Pushgateway_run.run ~net ~clock ~stats ~host:cfg.pushgateway_host
             ~port:cfg.pushgateway_port ~job:cfg.pushgateway_job
             ~stats_file:cfg.pushgateway_stats_file ~interval:cfg.pushgateway_interval ());
       (fun () ->

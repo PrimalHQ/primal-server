@@ -1,9 +1,12 @@
 (library
  (name importer)
  ; warnings 33/26/27 are triggered by pgocaml_ppx-generated code for inline [%pgsql].
+ ; -open Primal_common: the generic modules (Postgres, Nostr, Http, Filterlist, Worker_pool, ...)
+ ; moved to ocaml-common in Phase 0 and are referenced unqualified here.
  (flags
-  (:standard -w -33-26-27))
+  (:standard -w -33-26-27 -open Primal_common))
  (libraries
+  primal_common
   unix
   eio
   eio.unix
@@ -28,10 +31,5 @@
   cstruct
   mtime
   mtime.clock.os)
- (foreign_stubs
-  (language c)
-  (names secp256k1_stubs))
- (c_library_flags
-  (-lsecp256k1))
  (preprocess
   (pps pgocaml_ppx ppx_yojson_conv)))

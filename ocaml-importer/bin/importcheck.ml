@@ -1,9 +1,9 @@
 (* End-to-end check: import event JSON (one per line) into the cache DB and report counts.
    Usage: importcheck [path-to-events.jsonl] *)
 open Eio.Std
-module Pg = Importer.Postgres
+module Pg = Primal_common.Postgres
 module CS = Importer.Cache_storage
-module N = Importer.Nostr
+module N = Primal_common.Nostr
 
 let read_lines path =
   let ic = open_in path in

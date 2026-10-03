@@ -1,0 +1,42 @@
+# primal_common
+
+Shared OCaml 5 / Eio foundation for every Primal daemon in this repo (`ocaml-importer`, and the
+`ocaml-api`, `ocaml-fetcher`, `ocaml-jobs` projects of `ocaml-plan.md`) and for the private
+`ocaml-ext` in the parent repo. Library name `primal_common`; modules are flat (`Postgres`,
+`Nostr`, `Http`, …) regardless of subdirectory. No Lwt anywhere.
+
+## Layout (`lib/`)
+
+| Dir | Modules | Notes |
+|---|---|---|
+| `core/` | `Hex_util`, `Str_util`, `Utils` | |
+| `nostr/` | `Nostr` (event, tags, NIP-01 id, BIP340 verify), `Bech32` (bech32, lud06, NIP-19), `Secp256k1` (+ C stub on libsecp256k1 `schnorrsig_verify`) | |
+| `pg/` | `Postgres` (Eio adapter for PGOCaml, `[%pgsql]` target, bounded lazy pool), `Pg_types` (enum mappings), `Pg_listen` (raw-protocol `LISTEN`) | one connection = one fiber at a time; connections are domain-bound |
+| `pg_cache/` | `Filterlist` | `[%pgsql]`-checked against the cache DB (`primal1`) |
+| `net/` | `Http` (HTTPS GET, TLS, SOCKS5, pure-Eio DNS), `Ws_client` (RFC 6455 client), `Dns_eio`, `Socks5`, `Pushgateway` (POST + stats.json helpers) | |
+| `runtime/` | `Worker_pool` (bounded cross-domain queue → N domains), `Phases` (fiber phase slots), `Procinfo` (RSS, formatting) | |
+| `notifications/` | `Notifications` (type codes, arities) | |
+
+## Build
+
+Everything in the repo's dune workspace (root `dune-workspace` next to `ocaml-common/`) builds
+from this project's flake:
+
+```sh
+C=$(git rev-parse --show-toplevel)/ocaml-common
+nix develop "path:$C" -c dune build @all      # from any project dir; _build is at the repo root
+nix develop "path:$C" -c dune test            # alcotest, pure logic only
+```
+
+The dev shell exports `PG*` → `primal1` for the `[%pgsql]` ppx. Membership-table queries are checked
+against the local clone `primal_membership_ref` (`sql/membership-refdb-setup.sh`) via a per-directory
+dune `(env ...)`. `sql/migrate.sh` applies versioned migrations (`sql/migrations/README.md`).
+
+## Conventions
+
+- Every SQL statement goes through `[%pgsql]`; `Postgres.query` (raw) only for tables the ppx
+  cannot see, with a comment saying why.
+- Cancellation hygiene: re-raise `Eio.Cancel.Cancelled` before any catch-all handler.
+- Connect under a scoped switch (see `Postgres.connect`): a failed connect on a long-lived switch
+  leaks an fd.
+- Config is a JSON file per daemon, every key required; secrets are file paths.

@@ -1,0 +1,40 @@
+(include_subdirs unqualified)
+
+; Shared foundation for every Primal OCaml daemon (importer, api, fetcher, jobs). Modules are
+; flat (Postgres, Nostr, Http, ...) regardless of the subdirectory they live in. Consumers add
+; `-open Primal_common` to their flags so moved-from-importer code keeps compiling unchanged.
+; warnings 33/26/27 are triggered by pgocaml_ppx-generated code for inline [%pgsql].
+(library
+ (name primal_common)
+ (public_name primal_common)
+ (flags
+  (:standard -w -33-26-27))
+ (libraries
+  unix
+  eio
+  eio.unix
+  eio_main
+  yojson
+  hex
+  digestif.c
+  pgocaml
+  saturn
+  tls
+  tls-eio
+  ca-certs
+  domain-name
+  mirage-crypto-rng
+  dns
+  dns-client
+  dns-client.resolvconf
+  ipaddr
+  cstruct
+  mtime
+  mtime.clock.os)
+ (foreign_stubs
+  (language c)
+  (names secp256k1_stubs))
+ (c_library_flags
+  (-lsecp256k1))
+ (preprocess
+  (pps pgocaml_ppx)))

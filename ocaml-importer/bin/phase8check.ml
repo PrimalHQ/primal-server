@@ -1,11 +1,11 @@
 (* Focused checks for the Phase-8 additions: filterlist write(membership)->read(local) roundtrip,
    and the scheduled-hooks runner firing expire_hashtag_score_cb. Uses one DB for both roles. *)
 open Eio.Std
-module Pg = Importer.Postgres
+module Pg = Primal_common.Postgres
 module CS = Importer.Cache_storage
-module FL = Importer.Filterlist
-module N = Importer.Nostr
-module PGOCaml = Importer.Postgres.PGOCaml
+module FL = Primal_common.Filterlist
+module N = Primal_common.Nostr
+module PGOCaml = Primal_common.Postgres.PGOCaml
 
 let b32 c = String.make 32 c
 
@@ -30,7 +30,7 @@ let () =
   let ht = "phase8tag" in
   ignore [%pgsql dbh "delete from hashtags_1_1e5c72161a where hashtag = $ht"];
   ignore [%pgsql dbh "insert into hashtags_1_1e5c72161a (hashtag, score) values ($ht, 5)"];
-  let past = Int64.of_int (Importer.Utils.current_time () - 10) in
+  let past = Int64.of_int (Primal_common.Utils.current_time () - 10) in
   let funcall = {|["expire_hashtag_score_cb","phase8tag",2]|} in
   ignore [%pgsql dbh "insert into scheduled_hooks (execute_at, funcall) values ($past, $funcall)"];
   ignore (CS.run_scheduled_hooks est : int);
@@ -45,10 +45,10 @@ let () =
     { est with CS.cfg = { CS.default_config with verification_enabled = false; import_reporting = true; reporting_whitelist = [ reporter ] } }
   in
   let report : N.t =
-    { id = rid; pubkey = reporter; created_at = Importer.Utils.current_time (); kind = N.kind_reporting;
+    { id = rid; pubkey = reporter; created_at = Primal_common.Utils.current_time (); kind = N.kind_reporting;
       tags =
-        [ [ `String "p"; `String (Importer.Hex_util.encode tpk); `String "spam" ];
-          [ `String "e"; `String (Importer.Hex_util.encode teid); `String "impersonation" ] ];
+        [ [ `String "p"; `String (Primal_common.Hex_util.encode tpk); `String "spam" ];
+          [ `String "e"; `String (Primal_common.Hex_util.encode teid); `String "impersonation" ] ];
       content = "report"; sig_ = b32 '\x00' }
   in
   ignore (CS.import_event rep_est report);

@@ -36,10 +36,10 @@
    Note: the inline SQL targets primal1's version-hashed table names, so point this only at
    primal1 (or a clone with the same schema). *)
 open Eio.Std
-module Pg = Importer.Postgres
-module PGOCaml = Importer.Postgres.PGOCaml
+module Pg = Primal_common.Postgres
+module PGOCaml = Primal_common.Postgres.PGOCaml
 module CS = Importer.Cache_storage
-module N = Importer.Nostr
+module N = Primal_common.Nostr
 module Cfg = Importer.Config
 
 let usage () =
@@ -90,8 +90,8 @@ let () =
       | None -> false
       | Some u -> (
           let url =
-            Printf.sprintf "https://%s:%d%s" u.Importer.Http.host u.Importer.Http.port
-              u.Importer.Http.path
+            Printf.sprintf "https://%s:%d%s" u.Primal_common.Http.host u.Primal_common.Http.port
+              u.Primal_common.Http.path
           in
           let advertised =
             match Hashtbl.find_opt url_cache url with
@@ -164,7 +164,7 @@ let () =
                 (* Backtrace too: a PGOCaml error only carries the server message, so without
                    the raising frame there is no way to tell which of the dozen statements in
                    the apply path produced it. *)
-                Printf.eprintf "zapbackfill: %s: %s\n%s%!" (Importer.Hex_util.encode id)
+                Printf.eprintf "zapbackfill: %s: %s\n%s%!" (Primal_common.Hex_util.encode id)
                   (Printexc.to_string exn) (Printexc.get_backtrace ()));
             if !total mod 100 = 0 then
               Printf.printf "zapbackfill: %d/%d done (%d replayed, %d already applied, %d fetches)\n%!"

@@ -143,13 +143,13 @@ let membership_conninfo () =
   }
 
 (* Remote DB for verification (bin/compare.ml): the Julia importer's Postgres. Defaults to the
-   local port/credentials with only the host differing (default 192.168.44.7), but each field can
+   local port/credentials with only the host differing (default <julia-host>), but each field can
    be overridden independently with COMPARE_* since the Julia box often uses a different database
    name (e.g. primal1) than the local reference DB. *)
 let remote_conninfo () =
   let c = cache_conninfo () in
   {
-    host = Option.value (getenv_opt "COMPARE_HOST") ~default:"192.168.44.7";
+    host = Option.value (getenv_opt "COMPARE_HOST") ~default:"<julia-host>";
     port = (match getenv_opt "COMPARE_PORT" with Some p -> int_of_string p | None -> c.port);
     user = Option.value (getenv_opt "COMPARE_USER") ~default:c.user;
     database = Option.value (getenv_opt "COMPARE_DATABASE") ~default:c.database;
@@ -200,20 +200,48 @@ let is_connection_error : exn -> bool = function
 
 (* {1 Bounded connection pool} (exclusive lease per in-flight query; per domain).
 
-   Eio.Stream acts as a bounded blocking queue of idle connections: [take] suspends the
-   fiber until one is free, giving us the exclusive-lease semantics from the plan. *)
-type pool = { conns : dbh Eio.Stream.t }
+   Eio.Stream as a blocking queue of slots. A slot is [Some conn] (an idle connection) or [None]
+   (connect lazily / reconnect after a failed mid-use connection). The slot count is invariant, so
+   the pool can neither shrink nor deadlock while the server is down — takers just see connect
+   errors until it returns. Semantics from the tsunami kernel's lib/pg.ml. *)
+type pool = { conns : dbh option Eio.Stream.t; ci : conninfo }
 
 let make_pool ~size (ci : conninfo) : pool =
   let conns = Eio.Stream.create size in
   for _ = 1 to size do
-    Eio.Stream.add conns (connect ci)
+    Eio.Stream.add conns None
   done;
-  { conns }
+  { conns; ci }
 
 let use (p : pool) (f : dbh -> 'a) : 'a =
-  let dbh = Eio.Stream.take p.conns in
-  Fun.protect ~finally:(fun () -> Eio.Stream.add p.conns dbh) (fun () -> f dbh)
+  let dbh =
+    match Eio.Stream.take p.conns with
+    | Some d -> d
+    | None -> (
+        match connect p.ci with
+        | d -> d
+        | exception e ->
+            Eio.Stream.add p.conns None;
+            raise e)
+  in
+  match f dbh with
+  | v ->
+      Eio.Stream.add p.conns (Some dbh);
+      v
+  | exception (PGOCaml.PostgreSQL_Error _ as e) ->
+      (* Server-reported statement error: the protocol re-synced, the connection is reusable. *)
+      Eio.Stream.add p.conns (Some dbh);
+      raise e
+  | exception e ->
+      (* Anything else — cancellation mid-query, socket failure — can leave the wire poisoned
+         while session state (advisory locks) is still held. Never recycle such a connection:
+         close it so the server releases its locks, and leave an empty slot for the next taker to
+         refill. Cancel.protect because this cleanup must perform IO inside a possibly-cancelled
+         fiber. *)
+      Eio.Cancel.protect (fun () ->
+          (try close dbh with _ -> ());
+          Eio.Stream.add p.conns None);
+      raise e
 
 (* Low-level ping that exercises the Eio THREAD adapter without the [%pgsql] ppx (so it
    does not depend on the compile-time reference schema). *)
