@@ -45,7 +45,16 @@ explore_*, user_followers, mutual_follows, parametrized_replaceable_*, search_fi
 is_hidden_by_content_moderation, user_of_ln_address, nostr_stats/network_stats, client_config,
 import_events, get_highlights, find_reposts, invoices_to_zap_receipts, events_nip46,
 update_push_notification_token*) — Phase 4 writes those from the Julia code.
-Runs as a shadow on port 9006 next to the production ws-connector on 9001.
+**Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
+ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
+stopped. This host's 9001 is the endpoint used by dev.primal.net (about two thousand connections in
+five days, one at a time), not one of the public cache hosts of `deploy.sh` (<production-host>, <production-host>, <production-host>), so
+it is the low-risk first host of the plan's one-week soak (until 2026-10-11). `cutover-9001.sh` is
+the script that was run; its header has the rollback (restore the config backup, roll back to 9006,
+relaunch ws-connector with its original command line). Soak check: `primalctl replay ... --a
+ws://127.0.0.1:8817 --b ws://127.0.0.1:9001` (Julia direct vs primal-api). Known gap: primal-api
+does not read `/tmp/wsconn_blocked`, the flag `deploy.sh` sets while it restarts Julia; proxied
+funcalls fail for that window, native ones keep working.
 
 ## Build / run
 
