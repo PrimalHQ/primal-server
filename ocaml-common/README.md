@@ -10,7 +10,8 @@ Shared OCaml 5 / Eio foundation for every Primal daemon in this repo (`ocaml-imp
 | Dir | Modules | Notes |
 |---|---|---|
 | `core/` | `Hex_util`, `Str_util`, `Utils` | |
-| `nostr/` | `Nostr` (event, tags, NIP-01 id, BIP340 verify), `Bech32` (bech32, lud06, NIP-19), `Secp256k1` (+ C stub on libsecp256k1 `schnorrsig_verify`) | |
+| `nostr/` | `Nostr` (event, tags, NIP-01 id, BIP340 verify, `create` = sign with a secret key), `Bech32` (bech32, lud06, NIP-19 decode, `encode_naddr`), `Secp256k1` (+ C stubs on libsecp256k1 `schnorrsig_verify`, `schnorrsig_sign32`, x-only pubkey) | signing creates a context per call (rare: DVM job requests, service events) |
+| `moderation/` | `Cmr` (content-moderation rule compiler + cmr_* import, Julia app.jl:358/488) | parameterized by the cache/membership connections and an event lookup; used by the importer (list changes) and the API (`set_app_settings`, `search_filterlist`) |
 | `pg/` | `Postgres` (Eio adapter for PGOCaml, `[%pgsql]` target, bounded lazy pool), `Pg_types` (enum mappings), `Pg_listen` (raw-protocol `LISTEN`) | one connection = one fiber at a time; connections are domain-bound |
 | `pg_cache/` | `Filterlist` | `[%pgsql]`-checked against the cache DB (`primal1`) |
 | `net/` | `Http` (HTTPS GET, TLS, SOCKS5, pure-Eio DNS), `Ws_client` (RFC 6455 client), `Dns_eio`, `Socks5`, `Pushgateway` (POST + stats.json helpers) | |

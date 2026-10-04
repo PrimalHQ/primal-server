@@ -144,9 +144,17 @@ Also native: `update_push_notification_token(_for_nip46)` (membership token tabl
 `import_events` (the importer's import listener over `import_events_line_server`, plus the
 `human_override` upsert) and `import_poll_vote_event`. Verified with a throwaway key against the
 reference: identical settings read-back, cmr/notification/token rows as Julia writes them, identical
-import status. Still proxied: `dvm_feed` (runs the DVM request over relays),
-`broadcast_events`/`broadcast_reply` (outbound relay connections), the uploads (Phase 5/8), and
-the membership funcalls of `ext/App.jl` (private repo, Phase 9).
+import status. **Phase 4g (2026-10-04):** the relay-facing funcalls. `broadcast_events` and `broadcast_reply`
+publish through `Relay_broadcast` with Julia's semantics (every relay concurrently, the answer as
+soon as one relay accepts or after 15 s, the replies received so far; `relay_proxy` is Julia's
+SOCKS proxy). `dvm_feed` serves non-personalized feeds from the DVM checker's `dvm_feeds` cache and
+otherwise runs the NIP-90 request itself: a kind-5300 job request signed with
+`dvm_requester_seckey` (BIP340 signing now lives in `Primal_common.Nostr.create`), published on
+`dvm_relays` plus the relay the handler event came from, the first kind-6300 result (or 7000
+error) referencing it within `timeout` seconds; the mega-feed `{"dvm_pubkey","dvm_id"}` spec routes
+there. Verified against the reference: identical broadcast status, identical cached DVM feeds
+through the mega spec, a live personalized feed answered in 12 s. Still proxied: the uploads
+(Phase 5/8) and the membership funcalls of `ext/App.jl` (private repo, Phase 9).
 
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
@@ -208,6 +216,9 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `import_events_line_server` | `{"host":"127.0.0.1","port":12118}` or `null` | `App.IMPORT_EVENTS_LINE_SERVER`: the importer's import listener; null answers `import_events` with nothing |
 | `algos_user_pubkey` | hex or `null` | `App.ALGOS_USER.pk`: the account whose mute list is the `primal_nsfw` group (`search_filterlist`) |
 | `monitoring_db` | `{"host","port","user","database"}` or `null` | `events_nip46` reads `monitoring_events` there (null: NOTICE error) |
+| `relay_proxy` | `"socks5h://<socks-proxy-host>:1080"` or `null` | SOCKS5 proxy for outbound relay connections (`Main.PROXY`) |
+| `dvm_relays` | `["wss://relay.primal.net", ...]` | `DVMFeedChecker.RELAYS`: where DVM job requests are published |
+| `dvm_requester_seckey` | hex or `null` | `App.DVM_REQUESTER_KEYPAIR`: signs the kind-5300 job requests (null: `dvm_feed` live path answers NOTICE error) |
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
@@ -298,6 +309,10 @@ drain), `lib/admin.ml`, `lib/stats.ml`, `lib/files.ml`, `bin/primal_apid.ml`, `b
   NOTICE error; primal-api uses the real column. `search_filterlist`: the running Julia node omits
   the metadata event that app.jl's source emits next to the allow/block reason; primal-api follows
   the source.
+- `broadcast_events`: Julia's per-request time budget adds a PARTIAL_RESPONSE marker when every relay
+  is unreachable for the full 15 s; primal-api answers the same status without the marker. The
+  running Julia node answers the direct `dvm_feed` funcall with NOTICE error (through the mega-feed
+  spec it works); primal-api serves both.
 - Deliberate deviations from Julia, kept because the OCaml answer is the better one: accounts on
   the csam/impersonation filterlist are hidden by the SQL predicate (Julia's
   `content_moderation_filtering_2` only knows the spam/nsfw groups, so Julia still lists them in

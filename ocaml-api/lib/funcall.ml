@@ -144,6 +144,10 @@ type t =
   | Invoices_to_zap_receipts
   | Import_events
   | Import_poll_vote_event
+  (* Phase 4g *)
+  | Broadcast_events
+  | Broadcast_reply
+  | Dvm_feed
   | Proxied of string
 
 let names : (string * t) list =
@@ -280,6 +284,9 @@ let names : (string * t) list =
     ("invoices_to_zap_receipts", Invoices_to_zap_receipts);
     ("import_events", Import_events);
     ("import_poll_vote_event", Import_poll_vote_event);
+    ("broadcast_events", Broadcast_events);
+    ("broadcast_reply", Broadcast_reply);
+    ("dvm_feed", Dvm_feed);
   ]
 
 let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
@@ -456,6 +463,9 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Invoices_to_zap_receipts -> run Handlers.invoices_to_zap_receipts
   | Import_events -> run Handlers.import_events
   | Import_poll_vote_event -> run Handlers.import_poll_vote_event
+  | Broadcast_events -> run Handlers.broadcast_events
+  | Broadcast_reply -> run Handlers.broadcast_reply
+  | Dvm_feed -> run Handlers.dvm_feed
   | Proxied _ -> Response.Not_handled
 
 (* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)

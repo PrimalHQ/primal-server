@@ -45,6 +45,10 @@ type t = {
   import_events_line_server : (string * int) option; (* App.IMPORT_EVENTS_LINE_SERVER: the importer's import listener *)
   algos_user_pubkey : string option; (* raw; App.ALGOS_USER.pk, whose mute list is the primal_nsfw group *)
   monitoring_db : Postgres.conninfo option; (* events_nip46: the monitoring host's monitoring_events table *)
+  (* Phase 4g *)
+  relay_proxy : (string * int) option; (* SOCKS5 host, port for outbound relay connections (Main.PROXY) *)
+  dvm_relays : string list; (* DVMFeedChecker.RELAYS: where DVM job requests are published *)
+  dvm_requester_seckey : string option; (* raw 32 bytes; App.DVM_REQUESTER_KEYPAIR *)
 }
 
 let field j key =
@@ -117,6 +121,20 @@ let of_json (j : Yojson.Safe.t) : t =
           | Some b when String.length b = 32 -> Some b
           | _ -> raise (Config_error "algos_user_pubkey: expected 64 hex characters")));
     monitoring_db = (match field j "monitoring_db" with `Null -> None | o -> Some (conninfo_of_json o));
+    relay_proxy =
+      (match rstr_opt j "relay_proxy" with
+      | None -> None
+      | Some p -> (
+          let strip pre s = let l = String.length pre in if String.length s >= l && String.sub s 0 l = pre then String.sub s l (String.length s - l) else s in
+          let p = String.trim p |> strip "socks5h://" |> strip "socks5://" in
+          match String.rindex_opt p ':' with
+          | Some i -> ( match int_of_string_opt (String.sub p (i + 1) (String.length p - i - 1)) with Some port -> Some (String.sub p 0 i, port) | None -> raise (Config_error "relay_proxy: expected host:port"))
+          | None -> raise (Config_error "relay_proxy: expected host:port")));
+    dvm_relays = (match field j "dvm_relays" with `List l -> List.map U.to_string l | _ -> raise (Config_error "dvm_relays: expected a list"));
+    dvm_requester_seckey =
+      (match rstr_opt j "dvm_requester_seckey" with
+      | None -> None
+      | Some h -> ( match Hex_util.decode_opt h with Some b when String.length b = 32 -> Some b | _ -> raise (Config_error "dvm_requester_seckey: expected 64 hex characters")));
   }
 
 let of_json_file (path : string) : t =

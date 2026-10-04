@@ -1512,3 +1512,19 @@ let poll_stats_options (c : Db.cache Db.conn) ~event_id : string option =
 let metadata_event_json (c : Db.cache Db.conn) ~pubkey : string option =
   let dbh = Db.raw c in
   match [%pgsql dbh "select get_event_jsonb(md.value)::text from meta_data md where md.key = $pubkey"] with Some j :: _ -> Some j | _ -> None
+
+(* {1 Phase 4g} *)
+
+let event_relay_url_one (c : Db.cache Db.conn) ~event_id : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select relay_url from event_relay where event_id = $event_id limit 1"] with Some u :: _ -> Some u | _ -> None
+
+(* app.jl dvm_feed: the DVM checker's fresh results (updated_at is naive local time) *)
+let dvm_feed_results (c : Db.cache Db.conn) ~pubkey : string option =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "select results::text from dvm_feeds where pubkey = $pubkey and updated_at >= now()::timestamp - interval '15 minutes' and ok and results is not null limit 1"]
+  with
+  | Some r :: _ -> Some r
+  | _ -> None

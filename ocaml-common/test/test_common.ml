@@ -116,11 +116,20 @@ let test_procinfo () =
   Alcotest.(check string) "bytes M" "2M" (Procinfo.fmt_bytes (2 * 1048576));
   Alcotest.(check bool) "rss > 0" true (Procinfo.read_rss_bytes () > 0)
 
+let test_schnorr_sign () =
+  let seckey = String.init 32 (fun i -> Char.chr ((i * 37 + 11) land 0xff)) in
+  let e = Nostr.create ~seckey ~created_at:1_700_000_000 ~kind:1 ~tags:[ [ `String "t"; `String "x" ] ] ~content:"hello" in
+  Alcotest.(check int) "pubkey length" 32 (String.length e.Nostr.pubkey);
+  Alcotest.(check bool) "verifies" true (Nostr.verify e);
+  Alcotest.(check bool) "tampered content fails" false (Nostr.verify { e with Nostr.content = "hello!" });
+  let e2 = Nostr.create ~seckey ~created_at:1_700_000_000 ~kind:1 ~tags:[ [ `String "t"; `String "x" ] ] ~content:"hello" in
+  Alcotest.(check string) "deterministic id" (Nostr.id_hex e) (Nostr.id_hex e2)
+
 let () =
   Alcotest.run "primal_common"
     [
       ("hex_util", [ Alcotest.test_case "roundtrip" `Quick test_hex ]);
-      ("secp256k1", [ Alcotest.test_case "schnorr verify" `Quick test_schnorr_verify ]);
+      ("secp256k1", [ Alcotest.test_case "schnorr verify" `Quick test_schnorr_verify; Alcotest.test_case "schnorr sign" `Quick test_schnorr_sign ]);
       ( "bech32",
         [
           Alcotest.test_case "lnurl lud06" `Quick test_bech32_lnurl;

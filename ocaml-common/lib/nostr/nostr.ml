@@ -197,3 +197,18 @@ let to_json (e : t) : Yojson.Safe.t =
     ]
 
 let to_string (e : t) : string = Yojson.Safe.to_string (to_json e)
+
+(* {1 Signing} (Julia Nostr.Event(seckey, pubkey, created_at, kind, tags, content)) *)
+
+let random_aux () : string =
+  try Mirage_crypto_rng.generate 32 with _ -> String.init 32 (fun _ -> Char.chr (Random.int 256))
+
+let pubkey_of_seckey (seckey : string) : string =
+  match Secp256k1.pubkey_of_seckey seckey with Some p -> p | None -> invalid_arg "Nostr.pubkey_of_seckey: invalid secret key"
+
+let create ~(seckey : string) ~created_at ~kind ~(tags : tag list) ~(content : string) : t =
+  let pubkey = pubkey_of_seckey seckey in
+  let id = event_id ~pubkey ~created_at ~kind ~tags ~content in
+  match Secp256k1.sign ~seckey ~msg_hash:id ~aux_rand:(random_aux ()) with
+  | Some sig_ -> { id; pubkey; created_at; kind; tags; content; sig_ }
+  | None -> invalid_arg "Nostr.create: signing failed"

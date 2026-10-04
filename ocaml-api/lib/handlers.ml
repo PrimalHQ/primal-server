@@ -61,6 +61,7 @@ let with_membership (ctx : ctx) f = Db.with_membership ~clock:ctx.clock f
 (* Phase 4d: advanced_search is defined after the mega-feed basics that route to it *)
 let advanced_search_ref : (ctx -> Kw.t -> query:string -> Response.outcome) ref = ref (fun _ _ ~query:_ -> Response.Not_handled)
 let adv (ctx : ctx) (kw : Kw.t) ~(query : string) = !advanced_search_ref ctx kw ~query
+let dvm_feed_ref : (ctx -> Kw.t -> Response.outcome) ref = ref (fun _ _ -> Response.Not_handled)
 
 (* {1 Handlers} *)
 
@@ -2169,7 +2170,7 @@ let rec mega_feed_directive ?(depth = 0) (ctx : ctx) (kw : Kw.t) : outcome =
       let merged = Kw.merge kwargs skwa in
       let hours () = Kw.int s "hours" ~default:24 in
       let first_kind = match Kw.member s "kinds" with `List (`Int k :: _) -> Some [ k ] | _ -> None in
-      if Kw.has s "dvm_pubkey" && Kw.has s "dvm_id" then Not_handled
+      if Kw.has s "dvm_pubkey" && Kw.has s "dvm_id" then !dvm_feed_ref ctx (Kw.merge kwargs [ ("dvm_pubkey", Kw.member s "dvm_pubkey"); ("dvm_id", Kw.member s "dvm_id") ])
       else if id = "nostr-reads-feed" then advanced_search_query ctx kwargs ~query:"kind:30023 scope:myfollowsinteractions minwords:100 features:summary"
       else if id = "advsearch" then advanced_search ctx merged
       else if id = "reads-feed" || kind = "reads" then mega_feed_directive_basic ctx kw
@@ -3520,3 +3521,208 @@ let import_poll_vote_event (ctx : ctx) (kw : Kw.t) : outcome =
               Handled { r with messages = r.messages @ [ content_msg Kind.poll_stats (Yojson.Safe.to_string (`Assoc [ (Hex_util.encode pid, Yojson.Safe.from_string options) ])) ] }
           | None -> Handled r))
   | o -> o
+
+(* {1 Phase 4g: relay-facing funcalls} *)
+
+let relay_event_payload (event_json : string) = Printf.sprintf "[\"EVENT\",%s]" event_json
+
+(* app_ext.jl broadcast_event_to_relays_async: every relay concurrently; returns as soon as one relay
+   accepts the event, or after [timeout], with the replies received so far as (url, reply) *)
+let broadcast_to_relays (ctx : ctx) ~(relays : string list) ~(timeout : float) (event_json : string) : (string * string) list =
+  match !net_ref with
+  | None -> []
+  | Some net ->
+      let res = ref [] in
+      let accepted, resolve = Eio.Std.Promise.create () in
+      Eio.Std.Switch.run (fun sw ->
+          List.iter
+            (fun url ->
+              Eio.Std.Fiber.fork_daemon ~sw (fun () ->
+                  let r = Relay_broadcast.send_one ~net ~clock:ctx.clock ?proxy:ctx.cfg.relay_proxy ~timeout ~url (relay_event_payload event_json) in
+                  (match r.Relay_broadcast.reply with Some m -> res := (url, m) :: !res | None -> ());
+                  if Relay_broadcast.accepted r && not (Eio.Std.Promise.is_resolved accepted) then Eio.Std.Promise.resolve resolve ();
+                  `Stop_daemon))
+            relays;
+          Eio.Std.Fiber.first (fun () -> Eio.Std.Promise.await accepted) (fun () -> Eio.Time.sleep ctx.clock timeout));
+      List.rev !res
+
+let broadcast_events_with (ctx : ctx) ~(events : Nostr.t list) ~(relays : string list) : outcome =
+  let res =
+    Eio.Std.Fiber.List.map
+      (fun (e : Nostr.t) ->
+        let responses = broadcast_to_relays ctx ~relays ~timeout:15.0 (Nostr.to_string e) in
+        `Assoc [ ("event_id", `String (Nostr.id_hex e)); ("responses", `List (List.map (fun (u, r) -> `List [ `String u; `String r ]) responses)) ])
+      events
+  in
+  Handled (messages [ content_msg Kind.event_broadcast_responses (Yojson.Safe.to_string (`List res)) ])
+
+(* app_ext.jl broadcast_events *)
+let broadcast_events (ctx : ctx) (kw : Kw.t) : outcome =
+  let events = match Kw.member kw "events" with `List l -> l | _ -> raise (Kw.Invalid "events required") in
+  let relays = match Kw.str_list_opt kw "relays" with Some l -> l | None -> raise (Kw.Invalid "relays required") in
+  let events = List.map (fun j -> try Nostr.of_json j with _ -> raise Julia_err) events in
+  broadcast_events_with ctx ~events ~relays
+
+(* app_ext.jl broadcast_reply: the root/reply targets of a verified note, to the author's relays *)
+let broadcast_reply (ctx : ctx) (kw : Kw.t) : outcome =
+  let e = match Kw.member kw "event" with `Assoc _ as j -> ( try Nostr.of_json j with _ -> raise Julia_err) | _ -> raise (Kw.Invalid "event required") in
+  if not (Nostr.verify e) then julia_error
+  else begin
+    let relays, events =
+      with_cache ctx (fun c ->
+          let relays =
+            match List.rev (relays_of c ~pubkey:e.Nostr.pubkey) with
+            | last :: _ -> (
+                match Yojson.Safe.from_string last with
+                | `Assoc f -> ( match List.assoc_opt "tags" f with Some (`List tags) -> List.filter_map (function `List (_ :: `String u :: _) -> Some u | _ -> None) tags | _ -> [])
+                | _ -> []
+                | exception _ -> [])
+            | [] -> raise Julia_err
+          in
+          let targets =
+            List.filter_map
+              (function
+                | `String "e" :: `String h :: _ :: `String marker :: _ when (marker = "root" || marker = "reply") && String.length h = 64 -> Hex_util.decode_opt h
+                | _ -> None)
+              e.Nostr.tags
+          in
+          let events =
+            List.filter_map
+              (fun eid ->
+                match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ Hex_util.encode eid ]) with
+                | (_, j) :: _ -> ( try Some (Nostr.of_json (Yojson.Safe.from_string j)) with _ -> None)
+                | [] -> None)
+              targets
+          in
+          (List.sort_uniq compare relays, events))
+    in
+    broadcast_events_with ctx ~events ~relays
+  end
+
+(* NIP-90 content discovery: publish the job request on every relay, wait for the 6300 result (or a
+   7000 error) that references it, bounded by [timeout] *)
+let dvm_request (ctx : ctx) ~(relays : string list) ~(jobreq : Nostr.t) ~(timeout : float) : (string list, string) result =
+  match !net_ref with
+  | None -> Error "no net"
+  | Some net ->
+      let result, resolve = Eio.Std.Promise.create () in
+      let resolve_once v = if not (Eio.Std.Promise.is_resolved result) then Eio.Std.Promise.resolve resolve v in
+      let sub = Printf.sprintf {|["REQ","dvm",{"limit":10,"kinds":[6300,7000],"#e":["%s"]}]|} (Nostr.id_hex jobreq) in
+      let ev = relay_event_payload (Nostr.to_string jobreq) in
+      let deadline = Unix.gettimeofday () +. timeout in
+      Eio.Std.Switch.run (fun sw ->
+          List.iter
+            (fun url ->
+              Eio.Std.Fiber.fork_daemon ~sw (fun () ->
+                  (try
+                     match Relay_broadcast.parse_relay_url url with
+                     | None -> ()
+                     | Some (tls, host, port, path) ->
+                         Eio.Std.Switch.run (fun csw ->
+                             let ws = Ws_client.connect ~tls ?proxy:ctx.cfg.relay_proxy ~sw:csw ~net ~clock:ctx.clock ~host ~port ~path () in
+                             Ws_client.send_text ws sub;
+                             Ws_client.send_text ws ev;
+                             let rec loop () =
+                               let remaining = deadline -. Unix.gettimeofday () in
+                               if remaining > 0. && not (Eio.Std.Promise.is_resolved result) then
+                                 match Ws_client.recv_timeout ws ~timeout:remaining with
+                                 | `Msg m ->
+                                     (match Yojson.Safe.from_string m with
+                                     | `List (`String "EVENT" :: _ :: evj :: _) -> (
+                                         match Nostr.of_json evj with
+                                         | e when Nostr.verify e ->
+                                             if e.Nostr.kind = 6300 then begin
+                                               match Yojson.Safe.from_string e.Nostr.content with
+                                               | `List l -> resolve_once (Ok (List.filter_map (function `List (`String "e" :: `String h :: _) -> Some h | _ -> None) l))
+                                               | _ -> ()
+                                               | exception _ -> ()
+                                             end
+                                             else if e.Nostr.kind = 7000 then
+                                               List.iter
+                                                 (function
+                                                   | `String "status" :: `String "error" :: rest -> resolve_once (Error (match rest with `String m :: _ -> m | _ -> ""))
+                                                   | _ -> ())
+                                                 e.Nostr.tags
+                                         | _ -> ()
+                                         | exception _ -> ())
+                                     | _ -> ()
+                                     | exception _ -> ());
+                                     loop ()
+                                 | `Closed | `Timeout -> ()
+                             in
+                             loop ();
+                             Ws_client.close ws)
+                   with
+                  | Eio.Cancel.Cancelled _ as ex -> raise ex
+                  | exn -> Printf.printf "%s [primal-api] dvm_feed: relay %s: %s\n%!" (Procinfo.timestamp ()) url (Printexc.to_string exn));
+                  `Stop_daemon))
+            relays;
+          Eio.Std.Fiber.first (fun () -> ignore (Eio.Std.Promise.await result)) (fun () -> Eio.Time.sleep ctx.clock timeout));
+      if Eio.Std.Promise.is_resolved result then Eio.Std.Promise.await result else Error "timeout"
+
+(* app.jl dvm_feed: the DVM checker's cached results for non-personalized feeds, else a live NIP-90
+   request signed with the requester key; the posts in created_at order through the in-memory
+   response path plus RANGE *)
+let dvm_feed (ctx : ctx) (kw : Kw.t) : outcome =
+  let dvm_pubkey = Kw.hex32_exn kw "dvm_pubkey" and dvm_id = Kw.str_exn kw "dvm_id" in
+  let dvm_kind = Kw.int kw "dvm_kind" ~default:31990 and user_pubkey = user_pubkey_opt kw in
+  let timeout = float_of_int (Kw.int kw "timeout" ~default:10) in
+  let limit = Kw.int kw "limit" ~default:20 and offset = Kw.int kw "offset" ~default:0 in
+  let usecache = Kw.bool kw "usecache" ~default:true in
+  let response (c : Db.cache Db.conn) (eids : string list) : outcome =
+    let posts =
+      List.filter_map
+        (fun h ->
+          match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ h ]) with
+          | (_, j) :: _ -> (
+              match Yojson.Safe.from_string j with
+              | `Assoc f -> ( match List.assoc_opt "created_at" f with Some (`Int t) -> Some (h, Int64.of_int t) | _ -> None)
+              | _ -> None)
+          | [] -> None)
+        eids
+    in
+    let posts = List.stable_sort (fun (_, a) (_, b) -> compare b a) posts |> List.filteri (fun i _ -> i >= offset) |> List.filteri (fun i _ -> i < limit) in
+    let msgs = if posts = [] then [] else rmfp c ~user_pubkey (List.map fst posts) in
+    Handled (messages (msgs @ [ range_msg ~order_by:"created_at" posts ]))
+  in
+  let info =
+    with_cache ctx (fun c ->
+        match Queries.parametrized_event_id_one c ~pubkey:dvm_pubkey ~kind:dvm_kind ~identifier:dvm_id with
+        | None -> None
+        | Some eid_hex -> (
+            match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid_hex ]) with
+            | (_, j) :: _ -> Some (j, Queries.event_relay_url_one c ~event_id:(Hex_util.decode_exn eid_hex))
+            | [] -> None))
+  in
+  match info with
+  | None -> Handled empty
+  | Some (einfo_json, relay_url) -> (
+      let personalized =
+        match Yojson.Safe.from_string einfo_json with
+        | `Assoc f -> (
+            match List.assoc_opt "content" f with
+            | Some (`String c) -> ( match Yojson.Safe.from_string c with `Assoc d -> List.assoc_opt "personalized" d = Some (`Bool true) | _ -> false | exception _ -> raise Julia_err)
+            | _ -> false)
+        | _ -> false
+      in
+      let cached = if usecache && not personalized then with_cache ctx (fun c -> Queries.dvm_feed_results c ~pubkey:dvm_pubkey) else None in
+      match cached with
+      | Some results -> (
+          match Yojson.Safe.from_string results with
+          | `List l -> with_cache ctx (fun c -> response c (List.filter_map (function `String h -> Some h | _ -> None) l))
+          | _ -> raise Julia_err)
+      | None -> (
+          let seckey = match ctx.cfg.dvm_requester_seckey with Some s -> s | None -> raise Julia_err in
+          let relays = List.sort_uniq compare (ctx.cfg.dvm_relays @ Option.to_list relay_url) in
+          let user_hex = Option.map Hex_util.encode user_pubkey in
+          if personalized && user_hex = None then raise Julia_err;
+          let tags =
+            [ [ `String "p"; `String (Hex_util.encode dvm_pubkey) ]; [ `String "alt"; `String "NIP90 Content Discovery Request" ]; `String "relays" :: List.map (fun r -> `String r) relays ]
+            @ if personalized then [ [ `String "param"; `String "max_results"; `String "100" ]; [ `String "param"; `String "user"; `String (Option.get user_hex) ] ] else []
+          in
+          let jobreq = Nostr.create ~seckey ~created_at:(now ()) ~kind:5300 ~tags ~content:"" in
+          match dvm_request ctx ~relays ~jobreq ~timeout with
+          | Ok eids -> with_cache ctx (fun c -> response c eids)
+          | Error _ -> julia_error))
+
+let () = dvm_feed_ref := dvm_feed
