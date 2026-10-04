@@ -67,10 +67,14 @@ let cache_set (dbh : Postgres.dbh) ~(key : string) ~(value_json : string) : unit
 (* explore_topics_: the hashtags of the last day among authors above the humaness threshold *)
 let explore_topics (dbh : Postgres.dbh) ~created_after : string =
   let created_after = Int64.of_int created_after in
+  (* the threshold is fetched once and passed as a parameter, as Julia passes TrustRank.humaness_threshold[]:
+     inline, humaness_threshold_trustrank() (a table-reading SQL function, not inlinable) runs its
+     top-50000 sort once per joined row and holds the table's share lock for many minutes *)
+  let threshold = match [%pgsql dbh "select humaness_threshold_trustrank()"] with Some t :: _ -> t | _ -> 0.0 in
   let rows =
     [%pgsql dbh
       "select eh.hashtag, count(1) as cnt from event_hashtags eh, events es, pubkey_trustrank tr \
-       where eh.created_at >= $created_after and eh.event_id = es.id and es.pubkey = tr.pubkey and tr.rank > humaness_threshold_trustrank() \
+       where eh.created_at >= $created_after and eh.event_id = es.id and es.pubkey = tr.pubkey and tr.rank > $threshold \
          and not (eh.hashtag = any (array['nsfw', 'sexpervertsyndicate']::varchar[])) \
        group by eh.hashtag order by cnt desc limit 200"]
   in
@@ -139,9 +143,10 @@ let run_once ~(cfg : Config.t) ~(api_cfg : Primal_api.Config.t) ~net ~clock ~pro
       | Eio.Cancel.Cancelled _ as e -> raise e
       | exn -> log "gaming report: %s" (Printexc.to_string exn))
   | _ -> ());
+  (* explore_topics scans a day of event_hashtags: its own connection, no statement timeout (the API pool's 15 s wraps the whole call) *)
   (try
-     H.with_cache ctx (fun c ->
-         let dbh = Primal_api_db.Db.raw c in
+     let dbh = Postgres.connect ~statement_timeout_ms:0 ~application_name:"primal-jobs-analytics" cfg.cache_db in
+     Fun.protect ~finally:(fun () -> try Postgres.close dbh with _ -> ()) (fun () ->
          cache_set dbh ~key:("precalculated_analytics_explore_topics" ^ cfg.analytics_key_suffix) ~value_json:(explore_topics dbh ~created_after:(Utils.current_time () - (24 * 3600))))
    with
   | Eio.Cancel.Cancelled _ as e -> raise e
