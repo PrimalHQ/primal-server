@@ -84,7 +84,9 @@ let media_variants_pn (ctx : ctx) (n : node) : Pgj.t =
               variants := (size, animated, murl) :: !variants
           | _ -> (
               Pushgateway.mkdir_p ctx.cfg.tmp_dir;
-              let outfn = Printf.sprintf "%s/%s%s" ctx.cfg.tmp_dir h_orig orig_ext in
+              (* unique per variant and run: two nodes for the same original ran concurrently and
+                 removed each other's output when the name was just <h_orig><ext> *)
+              let outfn = Printf.sprintf "%s/%s-%s-%b-%d-%s%s" ctx.cfg.tmp_dir h_orig size animated (Unix.getpid ()) (S.rand_hex 4) orig_ext in
               let cmd = Printf.sprintf "`nice ionice -c3 ffmpeg -y -i -%s%s %s`" (if single_frame then " -frames:v 1 -update 1" else "") (if filters <> [] then Printf.sprintf " -vf \"%s\"" (String.concat "," filters) else "") outfn in
               elog ctx n [ ("v", v); ("cmd", `String cmd); ("outfn", `String outfn); ("logfile", `String (outfn ^ ".log")) ];
               match T.ffmpeg_resize_to_file ctx ~input:orig_data ~filters ~single_frame ~outfn with
@@ -265,7 +267,7 @@ let media_variant_fast_pn (ctx : ctx) (n : node) : Pgj.t =
       let size = "large" and animated = false in
       let k_res : S.key = [ ("url", `String url); ("type", `String "resized"); ("size", `String size); ("animated", `Bool animated) ] in
       Pushgateway.mkdir_p ctx.cfg.tmp_dir;
-      let outfn = Printf.sprintf "%s/%s%s" ctx.cfg.tmp_dir (S.key_h k_res) (T.mimetype_ext mimetype) in
+      let outfn = Printf.sprintf "%s/%s-%d-%s%s" ctx.cfg.tmp_dir (S.key_h k_res) (Unix.getpid ()) (S.rand_hex 4) (T.mimetype_ext mimetype) in
       match T.ffmpeg_resize_to_file ctx ~input:data ~filters:(Option.to_list (T.build_scale_filter size)) ~single_frame:true ~outfn with
       | exception Node_error m -> log "fast_pn ffmpeg resize failed: %s" m; `Null
       | _ ->

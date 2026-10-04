@@ -48,6 +48,23 @@ Log: `$PRIMAL_VAR_DIR/ocaml-jobs.log`.
 | `execute_funcs` | the funcs this executor claims (null = the default list) |
 | `log` | per-node log lines |
 
+## Cutover state on <media-host>, the media host (2026-10-04)
+
+The OCaml tree on <media-host> is the git worktree `<config-dir>/primal-server-ocaml5`
+(branch fetched from <stage-host> over ssh into `refs/remotes/<stage-host>/ocaml5`); it builds with
+`PRIMAL_BUILD_PGHOST=<stage-host>` because the `[%pgsql]` checks need <stage-host>'s schema. The unit
+`primal-ocaml-jobs` there runs `roles: ["media"]` with `execute_funcs` = the Rust scheduler's list
+(`import_media_fast_pn`, `import_media_fast_pn_2`, `import_media_pn`, `import_preview_pn`,
+`import_media_hls_pn`, `import_text_event_pn`), `MemoryMax=30G`. Rust `primal-media` is stopped: the
+interactive zsh that looped `timeout 1800 systemd-run ... primal-media run-processing-graph-scheduler`
+is SIGSTOPped (`kill -CONT` it and it restarts the Rust scheduler — the rollback). Julia node 18's
+`ProcessingGraphExecutionScheduler` keeps `import_upload_3`, `block_media` and `purge_media_`: its
+`import_upload_3` runs the private CSAM/NSFW analysis inline, which the public build only has a hook
+for (`Hooks.after_import_upload`, filled in Phase 9). Node ids: `media_tool check-ids` on <media-host> showed
+every Julia/blossom-created node matching the Julia-style hash and every Rust-created node the
+sorted-key hash. First hour: all claimed queues at 0 pending; failures are download errors (403/404/
+timeouts) as before. `<tmp>/cache/procgraph` is shared with the blossom server.
+
 ## Cutover state on <stage-host> (2026-10-04)
 
 Julia node 18 no longer runs: the DAG runner (`DAGRunner.stop()`), the DVM feed checker, the
