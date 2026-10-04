@@ -4,6 +4,7 @@
    once the whole exposed set is native. *)
 
 type t =
+  (* Phase 3a: ws-connector parity *)
   | Thread_view
   | Multi_kind_thread_view
   | Scored
@@ -20,53 +21,119 @@ type t =
   | Live_events_from_follows
   | Find_live_events
   | Events
+  (* Phase 3b: the Julia-era catalogue *)
+  | User_profile
+  | User_profile_followed_by
+  | Contact_list
+  | Is_user_following
+  | Mutelist
+  | Mutelists
+  | Allowlist
+  | Replaceable_event
+  | Get_user_relays
+  | Get_user_relays_2
+  | Creator_paid_tiers
+  | Poll_votes
+  | Nip19_decode
+  | Event_zaps_by_satszapped
+  | Long_form_content_feed
+  | Get_reads_topics
+  | Get_reads_feeds
+  | Get_featured_authors
+  | Get_home_feeds
+  | Get_recommended_blossom_servers
+  | Get_default_app_subsettings
+  | Get_app_subsettings
+  | Set_app_subsettings
+  | Get_default_relays
+  | Get_media_metadata
+  | Note_mentions_count
+  | User_profile_scored_content
+  | User_search
+  | Feed_directive
+  | Get_recommended_users
+  | Get_suggested_users
+  | Membership_media_management_stats
   | Proxied of string
 
-let of_string = function
-  | "thread_view" -> Thread_view
-  | "multi_kind_thread_view" -> Multi_kind_thread_view
-  | "scored" -> Scored
-  | "get_default_app_settings" -> Get_default_app_settings
-  | "get_app_releases" -> Get_app_releases
-  | "get_bookmarks" -> Get_bookmarks
-  | "user_infos" -> User_infos
-  | "server_name" -> Server_name
-  | "get_notifications_seen" -> Get_notifications_seen
-  | "feed" -> Feed
-  | "mega_feed_directive" -> Mega_feed_directive
-  | "multi_kind_mega_feed_directive" -> Multi_kind_mega_feed_directive
-  | "live_feed" -> Live_feed
-  | "live_events_from_follows" -> Live_events_from_follows
-  | "find_live_events" -> Find_live_events
-  | "events" -> Events
-  | s -> Proxied s
+let names : (string * t) list =
+  [
+    ("thread_view", Thread_view);
+    ("multi_kind_thread_view", Multi_kind_thread_view);
+    ("scored", Scored);
+    ("get_default_app_settings", Get_default_app_settings);
+    ("get_app_releases", Get_app_releases);
+    ("get_bookmarks", Get_bookmarks);
+    ("user_infos", User_infos);
+    ("server_name", Server_name);
+    ("get_notifications_seen", Get_notifications_seen);
+    ("feed", Feed);
+    ("mega_feed_directive", Mega_feed_directive);
+    ("multi_kind_mega_feed_directive", Multi_kind_mega_feed_directive);
+    ("live_feed", Live_feed);
+    ("live_events_from_follows", Live_events_from_follows);
+    ("find_live_events", Find_live_events);
+    ("events", Events);
+    ("user_profile", User_profile);
+    ("user_profile_followed_by", User_profile_followed_by);
+    ("contact_list", Contact_list);
+    ("is_user_following", Is_user_following);
+    ("mutelist", Mutelist);
+    ("mutelists", Mutelists);
+    ("allowlist", Allowlist);
+    ("replaceable_event", Replaceable_event);
+    ("get_user_relays", Get_user_relays);
+    ("get_user_relays_2", Get_user_relays_2);
+    ("creator_paid_tiers", Creator_paid_tiers);
+    ("poll_votes", Poll_votes);
+    ("nip19_decode", Nip19_decode);
+    ("event_zaps_by_satszapped", Event_zaps_by_satszapped);
+    ("long_form_content_feed", Long_form_content_feed);
+    ("get_reads_topics", Get_reads_topics);
+    ("get_reads_feeds", Get_reads_feeds);
+    ("get_featured_authors", Get_featured_authors);
+    ("get_home_feeds", Get_home_feeds);
+    ("get_recommended_blossom_servers", Get_recommended_blossom_servers);
+    ("get_default_app_subsettings", Get_default_app_subsettings);
+    ("get_app_subsettings", Get_app_subsettings);
+    ("set_app_subsettings", Set_app_subsettings);
+    ("get_default_relays", Get_default_relays);
+    ("get_media_metadata", Get_media_metadata);
+    ("note_mentions_count", Note_mentions_count);
+    ("user_profile_scored_content", User_profile_scored_content);
+    ("user_search", User_search);
+    ("feed_directive", Feed_directive);
+    ("get_recommended_users", Get_recommended_users);
+    ("get_suggested_users", Get_suggested_users);
+    ("membership_media_management_stats", Membership_media_management_stats);
+  ]
 
-let to_string = function
-  | Thread_view -> "thread_view"
-  | Multi_kind_thread_view -> "multi_kind_thread_view"
-  | Scored -> "scored"
-  | Get_default_app_settings -> "get_default_app_settings"
-  | Get_app_releases -> "get_app_releases"
-  | Get_bookmarks -> "get_bookmarks"
-  | User_infos -> "user_infos"
-  | Server_name -> "server_name"
-  | Get_notifications_seen -> "get_notifications_seen"
-  | Feed -> "feed"
-  | Mega_feed_directive -> "mega_feed_directive"
-  | Multi_kind_mega_feed_directive -> "multi_kind_mega_feed_directive"
-  | Live_feed -> "live_feed"
-  | Live_events_from_follows -> "live_events_from_follows"
-  | Find_live_events -> "find_live_events"
-  | Events -> "events"
+let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
+
+let to_string (f : t) : string =
+  match f with
   | Proxied s -> s
+  | f -> ( match List.find_opt (fun (_, g) -> g = f) names with Some (n, _) -> n | None -> assert false)
+
+let native_names () : string list = List.map fst names
 
 let log fmt = Printf.ksprintf (fun s -> Printf.printf "%s [dispatch] %s\n%!" (Procinfo.timestamp ()) s) fmt
 
 (* Run one funcall. Handler exceptions (malformed kwargs, DB errors, pool timeouts) become
-   [Not_handled], as ws-handlers' error responses did: the upstream answers instead. *)
+   [Not_handled], as ws-handlers' error responses did: the upstream answers instead.
+   [moderate]: apply Julia's content_moderation_filtering_2 to the answer (the Phase 3b funcalls;
+   the 3a ones are those Julia exempts because their SQL functions take the viewer's pubkey). *)
 let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
-  let run h =
-    try h ctx kw with
+  let run ?(moderate = true) h =
+    try
+      match h ctx kw with
+      | Response.Handled r when moderate ->
+          let user_pubkey = Kw.hex32_opt kw "user_pubkey" in
+          let author_exempt = Moderation.author_exempt kw in
+          Response.Handled
+            { r with messages = Moderation.filter ~clock:ctx.clock ~funcall:(to_string f) ~user_pubkey ~author_exempt r.messages }
+      | o -> o
+    with
     | Eio.Cancel.Cancelled _ as e -> raise e
     | Kw.Invalid msg ->
         log "%s sub_id=%s: %s (not handled)" (to_string f) ctx.subid msg;
@@ -82,20 +149,52 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
         Response.Not_handled
   in
   match f with
-  | Thread_view -> run Handlers.thread_view
-  | Multi_kind_thread_view -> run Handlers.multi_kind_thread_view
-  | Scored -> run Handlers.scored
-  | Get_default_app_settings -> run Handlers.get_default_app_settings
-  | Get_app_releases -> run Handlers.get_app_releases
-  | Get_bookmarks -> run Handlers.get_bookmarks
-  | User_infos -> run Handlers.user_infos
-  | Server_name -> run Handlers.server_name
-  | Get_notifications_seen -> run Handlers.get_notifications_seen
-  | Feed -> run Handlers.feed
-  | Mega_feed_directive -> run Handlers.mega_feed_directive
-  | Multi_kind_mega_feed_directive -> run Handlers.multi_kind_mega_feed_directive
-  | Live_feed -> run Handlers.live_feed
-  | Live_events_from_follows -> run Handlers.live_events_from_follows
-  | Find_live_events -> run Handlers.find_live_events
-  | Events -> run Handlers.events
+  | Thread_view -> run ~moderate:false Handlers.thread_view
+  | Multi_kind_thread_view -> run ~moderate:false Handlers.multi_kind_thread_view
+  | Scored -> run ~moderate:false Handlers.scored
+  | Get_default_app_settings -> run ~moderate:false Handlers.get_default_app_settings
+  | Get_app_releases -> run ~moderate:false Handlers.get_app_releases
+  | Get_bookmarks -> run ~moderate:false Handlers.get_bookmarks
+  | User_infos -> run ~moderate:false Handlers.user_infos
+  | Server_name -> run ~moderate:false Handlers.server_name
+  | Get_notifications_seen -> run ~moderate:false Handlers.get_notifications_seen
+  | Feed -> run ~moderate:false Handlers.feed
+  | Mega_feed_directive -> run ~moderate:false Handlers.mega_feed_directive
+  | Multi_kind_mega_feed_directive -> run ~moderate:false Handlers.multi_kind_mega_feed_directive
+  | Live_feed -> run ~moderate:false Handlers.live_feed
+  | Live_events_from_follows -> run ~moderate:false Handlers.live_events_from_follows
+  | Find_live_events -> run ~moderate:false Handlers.find_live_events
+  | Events -> run ~moderate:false Handlers.events
+  | User_profile -> run Handlers.user_profile
+  | User_profile_followed_by -> run Handlers.user_profile_followed_by
+  | Contact_list -> run Handlers.contact_list
+  | Is_user_following -> run Handlers.is_user_following
+  | Mutelist -> run Handlers.mutelist
+  | Mutelists -> run Handlers.mutelists
+  | Allowlist -> run Handlers.allowlist
+  | Replaceable_event -> run Handlers.replaceable_event
+  | Get_user_relays -> run Handlers.get_user_relays
+  | Get_user_relays_2 -> run Handlers.get_user_relays_2
+  | Creator_paid_tiers -> run Handlers.creator_paid_tiers
+  | Poll_votes -> run Handlers.poll_votes
+  | Nip19_decode -> run Handlers.nip19_decode
+  | Event_zaps_by_satszapped -> run Handlers.event_zaps_by_satszapped
+  | Long_form_content_feed -> run ~moderate:false Handlers.long_form_content_feed_funcall
+  | Get_reads_topics -> run Handlers.get_reads_topics
+  | Get_reads_feeds -> run Handlers.get_reads_feeds
+  | Get_featured_authors -> run Handlers.get_featured_authors
+  | Get_home_feeds -> run Handlers.get_home_feeds
+  | Get_recommended_blossom_servers -> run Handlers.get_recommended_blossom_servers
+  | Get_default_app_subsettings -> run Handlers.get_default_app_subsettings
+  | Get_app_subsettings -> run Handlers.get_app_subsettings
+  | Set_app_subsettings -> run Handlers.set_app_subsettings
+  | Get_default_relays -> run Handlers.get_default_relays
+  | Get_media_metadata -> run Handlers.get_media_metadata
+  | Note_mentions_count -> run Handlers.note_mentions_count
+  | User_profile_scored_content -> run Handlers.user_profile_scored_content
+  | User_search -> run Handlers.user_search
+  | Feed_directive -> run ~moderate:false Handlers.feed_directive
+  | Get_recommended_users -> run Handlers.get_recommended_users
+  | Get_suggested_users -> run Handlers.get_suggested_users
+  | Membership_media_management_stats -> run Handlers.membership_media_management_stats
   | Proxied _ -> Response.Not_handled

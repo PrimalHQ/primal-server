@@ -141,11 +141,14 @@ let get_notifications_seen (ctx : ctx) (kw : Kw.t) : outcome =
                (`Assoc [ ("kind", `Int Kind.notifications_seen_until); ("content", `String (Int64.to_string t)) ]);
            ])
 
-let feed (ctx : ctx) (kw : Kw.t) : outcome =
+let rec feed (ctx : ctx) (kw : Kw.t) : outcome = feed_with ~user_pubkey:(user_pubkey_or_primal ctx kw) ctx kw
+
+(* [user_pubkey] as resolved by the caller: ws-connector's primal default for `feed`, Julia's
+   castmaybe (absent -> null) for feed_directive *)
+and feed_with ~(user_pubkey : string option) (ctx : ctx) (kw : Kw.t) : outcome =
   let limit = Kw.int kw "limit" ~default:20 and since = Kw.int kw "since" ~default:0 in
   let until = Kw.int kw "until" ~default:(now ()) and offset = Kw.int kw "offset" ~default:0 in
   let pubkey = Kw.hex_any_opt kw "pubkey" |> Option.get in
-  let user_pubkey = user_pubkey_or_primal ctx kw in
   let notes = Kw.str kw "notes" ~default:"follows" in
   let include_replies = if Kw.bool kw "include_replies" ~default:false then 1 else 0 in
   let kinds = Option.value (Kw.int_list_opt kw "kinds") ~default:[ 1; 6 ] in
@@ -302,3 +305,807 @@ let events (ctx : ctx) (kw : Kw.t) : outcome =
                (with_cache ctx (fun c ->
                     Queries.enrich_events c ~event_ids_json ~user_pubkey ~apply_humaness_check:true ~orderby:"created_at")))
     | _ -> Not_handled
+
+(* {1 Phase 3b: the Julia-era funcalls} — ported from app.jl / app_ext.jl. Argument handling follows
+   Julia: a missing required kwarg or an invalid id raises (-> Not_handled, the upstream answers with
+   Julia's own NOTICE). Every error Julia raises itself reaches the client as NOTICE "error"
+   (CacheServerHandlers: the TaskFailedException is not unwrapped), so that is what [julia_error] is. *)
+
+let () = Random.self_init ()
+let julia_error : outcome = Notice "error"
+
+(* Julia castmaybe(user_pubkey, PubKeyId): absent -> none; present but invalid -> error *)
+let user_pubkey_opt (kw : Kw.t) : string option =
+  match Kw.member kw "user_pubkey" with
+  | `Null -> None
+  | `String _ -> ( match Kw.hex32_opt kw "user_pubkey" with Some p -> Some p | None -> raise (Kw.Invalid "invalid user_pubkey"))
+  | _ -> raise (Kw.Invalid "invalid user_pubkey")
+
+let hex32_list_exn (kw : Kw.t) name : string list =
+  match Kw.member kw name with
+  | `List l ->
+      List.map
+        (function
+          | `String s when String.length s = 64 -> (
+              match Hex_util.decode_opt s with Some b -> b | None -> raise (Kw.Invalid ("invalid " ^ name)))
+          | _ -> raise (Kw.Invalid ("invalid " ^ name)))
+        l
+  | _ -> raise (Kw.Invalid ("invalid " ^ name))
+
+(* Julia NamedTuple (; kind, content) order *)
+let content_msg kind (content : string) : string =
+  Yojson.Safe.to_string (`Assoc [ ("kind", `Int kind); ("content", `String content) ])
+
+(* Julia JSON.json(try JSON.parse(read(file)) catch _; default end) *)
+let file_json_content (path : string) ~(default : string) : string =
+  match Files.read_opt path with
+  | None -> default
+  | Some s -> ( try Yojson.Safe.to_string (Yojson.Safe.from_string s) with _ -> default)
+
+let cm_file (ctx : ctx) name = Filename.concat ctx.cfg.content_moderation_root name
+
+(* Julia parse_event_from_user: a signed event supplied by the client *)
+let event_from_user (kw : Kw.t) : (Nostr.t, string) result =
+  match Kw.member kw "event_from_user" with
+  | `Assoc _ as j -> (
+      match Nostr.of_json j with
+      | exception _ -> raise (Kw.Invalid "invalid event_from_user")
+      | e ->
+          if e.Nostr.created_at >= now () + 300 then Error "event from the future"
+          else if not (Nostr.verify e) then Error "verification failed"
+          else Ok e)
+  | _ -> raise (Kw.Invalid "event_from_user required")
+
+let i64json (v : int64) : Yojson.Safe.t = `Int (Int64.to_int v)
+
+(* kind USER_SCORES / USER_FOLLOWER_COUNTS: {hex: followers_count}; [always] = emit even when empty *)
+let counts_msg ?(always = false) kind (counts : (string * int64) list) : string list =
+  if counts = [] && not always then []
+  else [ content_msg kind (Yojson.Safe.to_string (`Assoc (List.map (fun (k, v) -> (k, i64json v)) counts))) ]
+
+(* Julia primal_verified_names(est, pubkeys) = SQL primal_verified_names + user_blossom_servers *)
+let verified_names (c : Db.cache Db.conn) (hexes : string list) : string list =
+  if hexes = [] then []
+  else
+    let pubkeys_json = Queries.hexes_json hexes in
+    Queries.primal_verified_names c ~pubkeys_json @ Queries.user_blossom_servers c ~pubkeys_json
+
+let follower_counts (c : Db.cache Db.conn) (hexes : string list) : (string * int64) list =
+  if hexes = [] then [] else Queries.follower_counts c ~pubkeys_json:(Queries.hexes_json hexes)
+
+(* Julia's in-memory event_media_response omits "mt" when a resource has no variants; the SQL
+   event_media_response emits "mt": null. Strip it where Julia answers from memory. *)
+let strip_null_mt (m : string) : string =
+  match Yojson.Safe.from_string m with
+  | `Assoc f when List.assoc_opt "kind" f = Some (`Int Kind.media_metadata) -> (
+      match List.assoc_opt "content" f with
+      | Some (`String content) -> (
+          match Yojson.Safe.from_string content with
+          | `Assoc cf -> (
+              match List.assoc_opt "resources" cf with
+              | Some (`List rs) ->
+                  let rs =
+                    List.map
+                      (function `Assoc r -> `Assoc (List.filter (fun (k, v) -> not (k = "mt" && v = `Null)) r) | r -> r)
+                      rs
+                  in
+                  let cf = List.map (fun (k, v) -> if k = "resources" then (k, `List rs) else (k, v)) cf in
+                  Yojson.Safe.to_string
+                    (`Assoc (List.map (fun (k, v) -> if k = "content" then (k, `String (Yojson.Safe.to_string (`Assoc cf))) else (k, v)) f))
+              | _ -> m)
+          | _ -> m
+          | exception _ -> m)
+      | _ -> m)
+  | _ -> m
+  | exception _ -> m
+
+(* metadata event + ext_event_response(md) (media, preview) per pubkey, in the order given.
+   Returns the pubkeys that had a metadata event. *)
+let user_cards (c : Db.cache Db.conn) (hexes : string list) : string list * string list =
+  if hexes = [] then ([], [])
+  else begin
+    let pubkeys_json = Queries.hexes_json hexes in
+    let mds = Queries.metadata_events c ~pubkeys_json in
+    let extras = Queries.metadata_extras c ~pubkeys_json in
+    let found = ref [] and msgs = ref [] in
+    List.iter
+      (fun h ->
+        match List.assoc_opt h mds with
+        | Some md ->
+            found := h :: !found;
+            msgs := md :: !msgs;
+            List.iter (fun (k, e) -> if k = h then msgs := strip_null_mt e :: !msgs) extras
+        | None -> ())
+      hexes;
+    (List.rev !found, List.rev !msgs)
+  end
+
+let kind_and_pubkey (m : string) : (int option * string option) =
+  match Yojson.Safe.from_string m with
+  | `Assoc f ->
+      ( (match List.assoc_opt "kind" f with Some (`Int k) -> Some k | _ -> None),
+        match List.assoc_opt "pubkey" f with Some (`String p) -> Some p | _ -> None )
+  | _ -> (None, None)
+  | exception _ -> (None, None)
+
+(* {2 users} *)
+
+(* Julia sort(collect(Set(tags))): tags as string lists, lexicographic *)
+let normalize_relays_msg (s : string) : string =
+  match Yojson.Safe.from_string s with
+  | `Assoc f -> (
+      match (List.assoc_opt "kind" f, List.assoc_opt "pubkey" f, List.assoc_opt "tags" f) with
+      | Some kind, Some pk, Some (`List tags) ->
+          let tags = List.sort_uniq compare tags in
+          Yojson.Safe.to_string (`Assoc [ ("kind", kind); ("pubkey", pk); ("tags", `List tags) ])
+      | _ -> s)
+  | _ -> s
+  | exception _ -> s
+
+let relays_of (c : Db.cache Db.conn) ~pubkey : string list = Queries.get_user_relays c ~pubkey |> List.map normalize_relays_msg
+
+let user_profile (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let user_pubkey = user_pubkey_opt kw in
+  with_cache ctx (fun c ->
+      if Queries.is_user_blocked c ~pubkey then Handled empty
+      else begin
+        let pk_hex = Hex_util.encode pubkey in
+        let pk_json = Queries.hexes_json [ pk_hex ] in
+        (* content_moderation_filtering_2 appends search_filterlist for a hidden profile: not native yet *)
+        let hidden =
+          match user_pubkey with
+          | Some _ -> Queries.hidden_pubkeys c ~user_pubkey ~scope:"content" ~pubkeys_json:pk_json ~author_exempt:None <> []
+          | None -> false
+        in
+        if hidden then Not_handled
+        else begin
+          let md = Queries.metadata_event c ~pubkey in
+          let n = Queries.user_profile_counts c ~pubkey in
+          let relay_count =
+            match List.rev (relays_of c ~pubkey) with
+            | last :: _ -> (
+                match Yojson.Safe.from_string last with
+                | `Assoc f -> (
+                    match List.assoc_opt "tags" f with
+                    | Some (`List tags) ->
+                        List.filter_map (function `List (_ :: url :: _) -> Some url | _ -> None) tags
+                        |> List.sort_uniq compare |> List.length
+                    | _ -> 0)
+                | _ -> 0
+                | exception _ -> 0)
+            | [] -> 0
+          in
+          let stats =
+            content_msg Kind.user_profile
+              (Yojson.Safe.to_string
+                 (`Assoc
+                   [
+                     ("pubkey", `String pk_hex);
+                     ("follows_count", i64json n.follows_count);
+                     ("followers_count", i64json n.followers_count);
+                     ("note_count", i64json n.note_count);
+                     ("long_form_note_count", i64json n.long_form_note_count);
+                     ("reply_count", i64json n.reply_count);
+                     ("time_joined", match n.time_joined with Some t -> i64json t | None -> `Null);
+                     ("relay_count", `Int relay_count);
+                     ("total_zap_count", i64json n.total_zap_count);
+                     ("total_satszapped", i64json n.total_satszapped);
+                     ("media_count", i64json n.media_count);
+                     ("content_zap_count", i64json n.content_zap_count);
+                   ]))
+          in
+          let media =
+            match md with
+            | Some m -> (
+                match Yojson.Safe.from_string m with
+                | `Assoc f -> (
+                    match List.assoc_opt "id" f with
+                    | Some (`String id) -> (
+                        match Hex_util.decode_opt id with
+                        | Some event_id -> List.map strip_null_mt (Queries.event_media_response c ~event_id)
+                        | None -> [])
+                    | _ -> [])
+                | _ -> []
+                | exception _ -> [])
+            | None -> []
+          in
+          let live = Queries.user_live_events c ~pubkeys_json:pk_json in
+          Handled (messages (Option.to_list md @ [ stats ] @ media @ verified_names c [ pk_hex ] @ live))
+        end
+      end)
+
+let user_profile_followed_by (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and user_pubkey = Kw.hex32_exn kw "user_pubkey" in
+  let limit = min 20 (Kw.int kw "limit" ~default:10) in
+  with_cache ctx (fun c ->
+      let hexes = Queries.user_profile_followed_by_pubkeys c ~pubkey ~user_pubkey ~limit |> List.map Hex_util.encode in
+      let found, cards = user_cards c hexes in
+      Handled (messages (cards @ counts_msg Kind.user_scores (follower_counts c found) @ verified_names c found)))
+
+(* app.jl contact_list: the list event + user_infos(follows) from memory. The SQL contact_list
+   builds the same answer through the SQL user_infos; the three places where Julia's in-memory
+   user_infos_1 differs are patched here: USER_SCORES counts every pubkey with a metadata event
+   (zeros included), USER_FOLLOWER_COUNTS counts every followed pubkey, media has no "mt": null. *)
+let contact_list (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let extended_response = Kw.bool kw "extended_response" ~default:true in
+  with_cache ctx (fun c ->
+      let msgs = Queries.contact_list c ~pubkey ~extended_response in
+      if not extended_response then Handled (messages msgs)
+      else begin
+        let follows =
+          match msgs with
+          | first :: _ -> (
+              match Yojson.Safe.from_string first with
+              | `Assoc f -> (
+                  match List.assoc_opt "tags" f with
+                  | Some (`List tags) ->
+                      List.filter_map
+                        (function
+                          | `List (`String "p" :: `String pk :: _) when String.length pk = 64 && Hex_util.decode_opt pk <> None ->
+                              Some (String.lowercase_ascii pk)
+                          | _ -> None)
+                        tags
+                      |> List.filteri (fun i _ -> i < 5000)
+                  | _ -> [])
+              | _ -> []
+              | exception _ -> [])
+          | [] -> []
+        in
+        let found = List.filter_map (fun m -> match kind_and_pubkey m with Some 0, Some pk -> Some (String.lowercase_ascii pk) | _ -> None) msgs in
+        let keep m = match kind_and_pubkey m with Some k, _ when k = Kind.user_scores || k = Kind.user_follower_counts -> false | _ -> true in
+        let msgs = List.filter keep msgs |> List.map strip_null_mt in
+        Handled
+          (messages
+             (msgs @ counts_msg Kind.user_scores (follower_counts c (List.sort_uniq compare found))
+             @ counts_msg ~always:true Kind.user_follower_counts (follower_counts c (List.sort_uniq compare follows))))
+      end)
+
+let is_user_following (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and user_pubkey = Kw.hex32_exn kw "user_pubkey" in
+  Handled (messages (with_cache ctx (fun c -> Queries.is_user_following c ~pubkey ~user_pubkey)))
+
+(* app.jl response_messages_for_list *)
+let list_funcall (tables : Queries.list_table list) (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let extended_response = Kw.bool kw "extended_response" ~default:true in
+  with_cache ctx (fun c ->
+      let events = List.filter_map (fun table -> Queries.list_event c ~table ~pubkey) tables in
+      if not extended_response then Handled (messages events)
+      else begin
+        (* p tags with exactly two fields, first occurrence order *)
+        let pks =
+          List.concat_map
+            (fun e ->
+              match Yojson.Safe.from_string e with
+              | `Assoc f -> (
+                  match List.assoc_opt "tags" f with
+                  | Some (`List tags) ->
+                      List.filter_map
+                        (function
+                          | `List [ `String "p"; `String pk ] when String.length pk = 64 && Hex_util.decode_opt pk <> None ->
+                              Some (String.lowercase_ascii pk)
+                          | _ -> None)
+                        tags
+                  | _ -> [])
+              | _ -> []
+              | exception _ -> [])
+            events
+          |> List.fold_left (fun acc pk -> if List.mem pk acc then acc else pk :: acc) []
+          |> List.rev
+        in
+        let found, cards = user_cards c pks in
+        (* Julia: mds, user_scores, then ext_user_infos (media/preview), then names *)
+        let mds = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> true | _ -> false) cards in
+        let rest = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> false | _ -> true) cards in
+        Handled (messages (events @ mds @ counts_msg Kind.user_scores (follower_counts c found) @ rest @ verified_names c found))
+      end)
+
+let mutelist = list_funcall [ Queries.Mute_list; Queries.Mute_list_2 ]
+let mutelists = list_funcall [ Queries.Mute_lists ]
+let allowlist = list_funcall [ Queries.Allow_list ]
+
+let replaceable_event (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and kind = Kw.int_exn kw "kind" in
+  Handled (messages (with_cache ctx (fun c -> Queries.replaceable_event c ~pubkey ~kind)))
+
+let get_user_relays (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  Handled (messages (with_cache ctx (fun c -> relays_of c ~pubkey)))
+
+let get_user_relays_2 (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkeys = hex32_list_exn kw "pubkeys" in
+  Handled (messages (with_cache ctx (fun c -> List.concat_map (fun pubkey -> relays_of c ~pubkey) pubkeys)))
+
+let creator_paid_tiers (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  Handled (messages (with_cache ctx (fun c -> Queries.creator_paid_tiers c ~pubkey)))
+
+(* {2 events} *)
+
+let poll_votes (ctx : ctx) (kw : Kw.t) : outcome =
+  let event_id = Kw.hex32_exn kw "event_id" in
+  let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+  let limit = Kw.int kw "limit" ~default:20 and offset = Kw.int kw "offset" ~default:0 in
+  let user_pubkey = user_pubkey_opt kw in
+  let apply_humaness_check = Kw.bool kw "apply_humaness_check" ~default:true in
+  let option = Kw.str_opt kw "option" in
+  Handled
+    (messages
+       (with_cache ctx (fun c ->
+            Queries.poll_votes c ~event_id ~since ~until ~limit ~offset ~user_pubkey ~apply_humaness_check ~option)))
+
+(* app.jl range(): the RANGE message closing a paged answer *)
+let range_msg ~(order_by : string) (items : (string * int64) list) : string =
+  let content =
+    match items with
+    | [] -> `Assoc [ ("order_by", `String order_by); ("elements", `List []) ]
+    | (_, first) :: _ ->
+        let _, last = List.nth items (List.length items - 1) in
+        let since = min first last and until = max first last in
+        let elements = List.stable_sort (fun (_, a) (_, b) -> compare b a) items |> List.map (fun (id, _) -> `String id) in
+        `Assoc [ ("since", i64json since); ("until", i64json until); ("order_by", `String order_by); ("elements", `List elements) ]
+  in
+  content_msg Kind.range (Yojson.Safe.to_string content)
+
+(* app.jl event_zaps_by_satszapped + response_messages_for_zaps (event_id form) *)
+let event_zaps_by_satszapped (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    match Kw.hex32_opt kw "event_id" with
+    | None -> Not_handled (* the (pubkey, identifier) article forms stay with Julia *)
+    | Some event_id ->
+        let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:100_000_000_000 in
+        let offset = Kw.int kw "offset" ~default:0 in
+        let _user_pubkey = user_pubkey_opt kw in
+        with_cache ctx (fun c ->
+            let zaps = Queries.og_zap_receipts_by_event c ~event_id ~since ~until ~limit ~offset in
+            let hex = Hex_util.encode in
+            let ids = List.concat_map (fun (z : Queries.zap_row) -> hex z.zap_receipt_id :: Option.to_list (Option.map hex z.zr_event_id)) zaps in
+            let evs = if ids = [] then [] else Queries.events_by_ids c ~event_ids_json:(Queries.hexes_json ids) in
+            let md_pks =
+              List.concat_map (fun (z : Queries.zap_row) -> List.filter_map (Option.map hex) [ z.sender; z.receiver ]) zaps
+              |> List.fold_left (fun acc pk -> if List.mem pk acc then acc else pk :: acc) []
+              |> List.rev
+            in
+            let per_zap =
+              List.concat_map
+                (fun (z : Queries.zap_row) ->
+                  let opt_hex = function Some b -> `String (hex b) | None -> `Null in
+                  Option.to_list (List.assoc_opt (hex z.zap_receipt_id) evs)
+                  @ (match z.zr_event_id with Some e -> Option.to_list (List.assoc_opt (hex e) evs) | None -> [])
+                  @ [
+                      content_msg Kind.zap_event
+                        (Yojson.Safe.to_string
+                           (`Assoc
+                             [
+                               ("event_id", opt_hex z.zr_event_id);
+                               ("created_at", i64json z.zr_created_at);
+                               ("sender", opt_hex z.sender);
+                               ("receiver", opt_hex z.receiver);
+                               ("amount_sats", i64json z.amount_sats);
+                               ("zap_receipt_id", `String (hex z.zap_receipt_id));
+                             ]));
+                    ])
+                zaps
+            in
+            let found, cards = user_cards c md_pks in
+            let mds = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> true | _ -> false) cards in
+            let rest = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> false | _ -> true) cards in
+            (* Julia: OrderedSet over everything, then range *)
+            let all = per_zap @ mds @ counts_msg Kind.user_scores (follower_counts c found) @ verified_names c found @ rest in
+            let dedup = List.fold_left (fun acc m -> if List.mem m acc then acc else m :: acc) [] all |> List.rev in
+            Handled
+              (messages (dedup @ [ range_msg ~order_by:"amount_sats" (List.map (fun (z : Queries.zap_row) -> (hex z.zap_receipt_id, z.amount_sats)) zaps) ])))
+
+(* app.jl long_form_content_feed as a direct funcall (Julia: usepgfuncs + apply_humaness_check) *)
+let long_form_content_feed_funcall (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+    let offset = Kw.int kw "offset" ~default:0 in
+    let pubkey = match Kw.member kw "pubkey" with `Null -> None | _ -> Some (Kw.hex32_exn kw "pubkey") in
+    let user_pubkey = user_pubkey_opt kw in
+    let notes = Some (Kw.str kw "notes" ~default:"follows") in
+    let topic = Kw.str_opt kw "topic" and curation = Kw.str_opt kw "curation" in
+    let minwords = Kw.int kw "minwords" ~default:0 in
+    Handled
+      (messages
+         (with_cache ctx (fun c ->
+              Queries.long_form_content_feed c ~pubkey ~notes ~topic ~curation ~minwords ~limit ~since ~until ~offset
+                ~user_pubkey ~apply_humaness_check:true)))
+
+(* events without extended_response (app.jl events): ids, or the stored events oldest first *)
+let events_plain (ctx : ctx) (kw : Kw.t) : outcome =
+  let ids = match Kw.member kw "event_ids" with `Null -> [] | _ -> hex32_list_exn kw "event_ids" in
+  let limit = Kw.int kw "limit" ~default:20 and since = Kw.int kw "since" ~default:0 in
+  let until = Kw.int kw "until" ~default:(now ()) and offset = Kw.int kw "offset" ~default:0 in
+  let idsonly = Kw.bool kw "idsonly" ~default:false in
+  with_cache ctx (fun c ->
+      let hexes =
+        if ids = [] then Queries.event_ids_between c ~since ~until ~limit ~offset else List.map Hex_util.encode ids
+      in
+      if idsonly then
+        Handled
+          (messages
+             [ Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.event_ids); ("ids", `List (List.map (fun h -> `String h) hexes)) ]) ])
+      else if hexes = [] then Handled empty
+      else Handled (messages (Queries.events_plain c ~event_ids_json:(Queries.hexes_json hexes))))
+
+let events (ctx : ctx) (kw : Kw.t) : outcome =
+  if Kw.bool kw "extended_response" ~default:false then events ctx kw else events_plain ctx kw
+
+let user_profile_scored_content (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let limit = min 100 (Kw.int kw "limit" ~default:5) in
+  let _user_pubkey = user_pubkey_opt kw in
+  with_cache ctx (fun c ->
+      let posts = Queries.user_scored_posts c ~pubkey ~limit |> List.sort_uniq compare in
+      Handled (messages (posts @ Option.to_list (Queries.metadata_event c ~pubkey))))
+
+(* app_ext.jl note_mentions: response_messages_for_posts over the mentioning events *)
+let note_mentions (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:100 and offset = Kw.int kw "offset" ~default:0 in
+  if limit > 1000 then julia_error
+  else
+    let user_pubkey = user_pubkey_opt kw in
+    let enrich c hexes =
+      let hexes = List.sort_uniq compare hexes in
+      if hexes = [] then []
+      else Queries.enrich_events c ~event_ids_json:(Queries.hexes_json hexes) ~user_pubkey ~apply_humaness_check:false ~orderby:"created_at"
+    in
+    match (Kw.member kw "event_id", Kw.member kw "pubkey", Kw.member kw "identifier") with
+    | `String _, _, _ ->
+        let event_id = Kw.hex32_exn kw "event_id" in
+        Handled (messages (with_cache ctx (fun c -> enrich c (Queries.note_mentions_event_ids c ~event_id ~limit ~offset))))
+    | `Null, `String _, `String identifier ->
+        let pubkey = Kw.hex32_exn kw "pubkey" in
+        Handled
+          (messages
+             (with_cache ctx (fun c -> enrich c (Queries.note_mentions_of_article_event_ids c ~pubkey ~identifier ~limit ~offset))))
+    | `Null, _, _ -> Handled empty
+    | _ -> raise (Kw.Invalid "invalid event_id")
+
+let note_mentions_count (ctx : ctx) (kw : Kw.t) : outcome =
+  let event_id = Kw.hex32_exn kw "event_id" in
+  let count = with_cache ctx (fun c -> Queries.note_mentions_count c ~event_id) in
+  Handled
+    (messages
+       [
+         content_msg Kind.note_mentions_count
+           (Yojson.Safe.to_string (`Assoc [ ("event_id", `String (Hex_util.encode event_id)); ("count", i64json count) ]));
+       ])
+
+(* {2 search} (app_ext.jl user_search) *)
+
+let user_search (ctx : ctx) (kw : Kw.t) : outcome =
+  let query = Kw.str_exn kw "query" in
+  let limit = min 100 (Kw.int kw "limit" ~default:10) in
+  let pubkey = match Kw.member kw "pubkey" with `Null -> None | _ -> Some (Kw.hex32_exn kw "pubkey") in
+  let contains_lolicon =
+    let n = String.length query and m = String.length "lolicon" in
+    let rec go i = i + m <= n && (String.sub query i m = "lolicon" || go (i + 1)) in
+    go 0
+  in
+  if contains_lolicon || String.length query < 1 then Handled empty
+  else
+    with_cache ctx (fun c ->
+        let q = query ^ ":*" in
+        let users : (string * int64) list option =
+          match Bech32.nip19_decode query with
+          | Some (Bech32.Npub pk) -> (
+              match Queries.follower_count c ~pubkey:pk with
+              | Some cnt -> Some [ (Hex_util.encode pk, cnt) ]
+              | None -> None (* Julia: KeyError *))
+          | _ -> (
+              match pubkey with
+              | None -> Some (Queries.user_search_query c ~q ~limit)
+              | Some follower -> Some (Queries.user_search_follows c ~follower ~q))
+        in
+        match users with
+        | None -> julia_error
+        | Some users ->
+            (* Julia: Dict keeps one entry per pubkey; sort by followers desc; first limit *)
+            let dedup = List.fold_left (fun acc (k, v) -> if List.mem_assoc k acc then acc else (k, v) :: acc) [] users |> List.rev in
+            let sorted = List.stable_sort (fun (_, a) (_, b) -> compare b a) dedup in
+            let top = List.filteri (fun i _ -> i < limit) sorted in
+            let found, cards = user_cards c (List.map fst top) in
+            let mds = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> true | _ -> false) cards in
+            let rest = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> false | _ -> true) cards in
+            let counts = follower_counts c found in
+            let names = verified_names c found in
+            let live = if dedup = [] then [] else Queries.user_live_events c ~pubkeys_json:(Queries.hexes_json (List.map fst dedup)) in
+            (* Julia: mds, ext_user_infos (media/preview), user_scores, names, follower counts, names, live *)
+            Handled
+              (messages
+                 (mds @ rest @ counts_msg Kind.user_scores counts @ names
+                 @ counts_msg ~always:true Kind.user_follower_counts counts
+                 @ names @ live)))
+
+(* app_ext.jl feed_directive_: the pubkey forms route to feed; search/explore forms stay with Julia *)
+let feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
+  let directive = Kw.str_exn kw "directive" in
+  let kwa = Kw.remove kw "directive" in
+  let user_pubkey = user_pubkey_opt kw in
+  let with_pk pk extra = feed_with ~user_pubkey ctx (Kw.merge (Kw.set kwa "pubkey" (`String pk)) extra) in
+  let is_pk pk = String.length pk = 64 && Hex_util.decode_opt pk <> None in
+  if is_pk directive then with_pk directive []
+  else
+    match String.split_on_char ';' directive with
+    | [ "authored"; pk ] when is_pk pk -> with_pk pk [ ("notes", `String "authored") ]
+    | [ "authoredreplies"; pk ] when is_pk pk -> with_pk pk [ ("notes", `String "replies") ]
+    | [ "withreplies"; pk ] when is_pk pk -> with_pk pk [ ("include_replies", `Bool true) ]
+    | _ -> Not_handled
+
+(* {2 content-moderation repo files} *)
+
+let get_reads_topics (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages [ content_msg Kind.reads_topics (file_json_content (cm_file ctx "reads-topics.json") ~default:"{}") ])
+
+let get_reads_feeds (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages [ content_msg Kind.reads_feeds (file_json_content (cm_file ctx "reads-feeds.json") ~default:"{}") ])
+
+let get_featured_authors (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages [ content_msg Kind.featured_authors (file_json_content (cm_file ctx "featured-authors.json") ~default:"{}") ])
+
+let get_home_feeds (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages [ content_msg Kind.home_feeds (file_json_content (cm_file ctx "home-feeds.json") ~default:"{}") ])
+
+let get_recommended_blossom_servers (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled
+    (messages
+       [ content_msg Kind.recommended_blossom_servers (file_json_content (cm_file ctx "recommended-blossom-servers.json") ~default:"null") ])
+
+let default_app_subsettings (ctx : ctx) (subkey : string) : outcome =
+  match subkey with
+  | "user-home-feeds" -> Handled (messages [ content_msg Kind.app_subsettings (file_json_content (cm_file ctx "home-feeds.json") ~default:"{}") ])
+  | "user-reads-feeds" -> Handled (messages [ content_msg Kind.app_subsettings (file_json_content (cm_file ctx "reads-feeds.json") ~default:"{}") ])
+  | _ -> julia_error (* Julia: error("invalid subkey") *)
+
+let get_default_app_subsettings (ctx : ctx) (kw : Kw.t) : outcome = default_app_subsettings ctx (Kw.str_exn kw "subkey")
+
+(* app_ext.jl get_recommended_users: recommended-users.json [[pubkey, name], ...] *)
+let get_recommended_users (ctx : ctx) (_ : Kw.t) : outcome =
+  match Files.read_opt (cm_file ctx "recommended-users.json") with
+  | None -> Handled empty
+  | Some s ->
+      let hexes =
+        match Yojson.Safe.from_string s with
+        | `List items -> List.filter_map (function `List (`String pk :: _) when String.length pk = 64 -> Some pk | _ -> None) items
+        | _ -> []
+        | exception _ -> raise (Kw.Invalid "recommended-users.json")
+      in
+      with_cache ctx (fun c ->
+          let hexes = Queries.pubkeys_with_metadata c ~pubkeys_json:(Queries.hexes_json hexes) |> List.sort_uniq compare in
+          if hexes = [] then Handled empty
+          else
+            let pubkeys_json = Queries.hexes_json hexes in
+            Handled (messages (Queries.user_infos c ~pubkeys_json @ counts_msg Kind.user_scores (follower_counts c hexes))))
+
+(* app_ext.jl get_suggested_users: suggested-accounts.json [[group, [[pubkey|npub, name], ...]], ...] *)
+let get_suggested_users (ctx : ctx) (_ : Kw.t) : outcome =
+  match Files.read_opt (cm_file ctx "suggested-accounts.json") with
+  | None -> Handled empty
+  | Some s ->
+      let groups =
+        match Yojson.Safe.from_string s with
+        | `List gs ->
+            List.map
+              (function
+                | `List [ `String group; `List users ] ->
+                    let members =
+                      List.map
+                        (function
+                          | `List [ `String pk; `String name ] ->
+                              let pk =
+                                if String.length pk >= 4 && String.sub pk 0 4 = "npub" then
+                                  match Bech32.nip19_decode pk with
+                                  | Some (Bech32.Npub raw) -> Hex_util.encode raw
+                                  | _ -> raise (Kw.Invalid "suggested-accounts.json")
+                                else pk
+                              in
+                              (pk, name)
+                          | _ -> raise (Kw.Invalid "suggested-accounts.json"))
+                        users
+                    in
+                    (group, members)
+                | _ -> raise (Kw.Invalid "suggested-accounts.json"))
+              gs
+        | _ -> raise (Kw.Invalid "suggested-accounts.json")
+        | exception Yojson.Json_error _ -> raise (Kw.Invalid "suggested-accounts.json")
+      in
+      let content =
+        `List
+          (List.map
+             (fun (group, members) ->
+               `Assoc
+                 [
+                   ("group", `String group);
+                   ("members", `List (List.map (fun (pk, name) -> `Assoc [ ("pubkey", `String pk); ("name", `String name) ]) members));
+                 ])
+             groups)
+      in
+      let hexes = List.concat_map (fun (_, members) -> List.map fst members) groups in
+      with_cache ctx (fun c ->
+          let found, mds = if hexes = [] then ([], []) else List.split (Queries.metadata_events c ~pubkeys_json:(Queries.hexes_json hexes)) in
+          let found = List.sort_uniq compare found in
+          Handled
+            (messages
+               ((content_msg Kind.suggested_users (Yojson.Safe.to_string content) :: List.sort_uniq compare mds)
+               @ counts_msg Kind.user_scores (follower_counts c found))))
+
+(* {2 misc} *)
+
+(* app_ext.jl get_default_relays: primal + one well-known + four random recently-seen relays *)
+let get_default_relays (ctx : ctx) (_ : Kw.t) : outcome =
+  let mined = with_cache ctx (fun c -> Queries.mined_relays c) |> List.sort_uniq compare in
+  if List.length mined < 4 then julia_error (* Julia: @assert *)
+  else begin
+    let arr = Array.of_list mined in
+    let picked = ref [] in
+    while List.length !picked < 4 do
+      let r = arr.(Random.int (Array.length arr)) in
+      if not (List.mem r !picked) then picked := !picked @ [ r ]
+    done;
+    let known = [| "wss://relay.damus.io"; "wss://nos.lol"; "wss://relay.nostr.band"; "wss://relayable.org" |] in
+    let relays = "wss://relay.primal.net" :: known.(Random.int 4) :: !picked in
+    Handled (messages [ content_msg Kind.default_relays (Yojson.Safe.to_string (`List (List.map (fun r -> `String r) relays))) ])
+  end
+
+(* app_ext.jl get_media_metadata *)
+let get_media_metadata (ctx : ctx) (kw : Kw.t) : outcome =
+  let urls = match Kw.str_list_opt kw "urls" with Some l -> l | None -> raise (Kw.Invalid "urls required") in
+  let eid = Kw.member kw "eid" in
+  with_cache ctx (fun c ->
+      let thumbnails = ref [] in
+      let root_mt = ref None (* Julia declares it outside the url loop: it carries over *) in
+      let resources =
+        List.map
+          (fun url ->
+            let variants = Queries.media_url_variants c ~url in
+            let vs =
+              List.map
+                (fun (v : Queries.media_variant) ->
+                  root_mt := Some v.mimetype;
+                  let s = match v.size with Some s when String.length s > 0 -> `String (String.make 1 s.[0]) | Some _ -> `String "" | None -> `Null in
+                  `Assoc
+                    [
+                      ("s", s);
+                      ("a", match v.animated with Some a -> i64json a | None -> `Null);
+                      ("w", match v.width with Some w -> i64json w | None -> `Null);
+                      ("h", match v.height with Some h -> i64json h | None -> `Null);
+                      ("mt", match v.mimetype with Some m -> `String m | None -> `Null);
+                      ("dur", match v.duration with Some d -> `Float d | None -> `Null);
+                      ("media_url", match v.media_url with Some m -> `String m | None -> `Null);
+                    ])
+                variants
+            in
+            (* Julia: thumbnails[url] = thumbnail_url for every row, so the last row wins *)
+            (match List.rev (Queries.video_thumbnails c ~url) with t :: _ -> thumbnails := (url, `String t) :: !thumbnails | [] -> ());
+            `Assoc
+              ([ ("url", `String url); ("variants", `List vs) ]
+              @ match !root_mt with Some (Some mt) -> [ ("mt", `String mt) ] | Some None -> [ ("mt", `Null) ] | None -> []))
+          urls
+      in
+      let res =
+        (if resources = [] then [] else [ ("resources", `List resources) ])
+        @ if !thumbnails = [] then [] else [ ("thumbnails", `Assoc (List.rev !thumbnails)) ]
+      in
+      let res = if res <> [] && eid <> `Null then res @ [ ("event_id", eid) ] else res in
+      if res = [] then Handled empty else Handled (messages [ content_msg Kind.media_metadata (Yojson.Safe.to_string (`Assoc res)) ]))
+
+(* app.jl nip19_decode: Julia's ser() shape, {id: [...]} per id; None = Julia would throw *)
+let nip19_ser (id : string) : Yojson.Safe.t option =
+  let hexs b = `String (Hex_util.encode b) in
+  let starts p = String.length id >= String.length p && String.sub id 0 (String.length p) = p in
+  let decode prefix =
+    match Bech32.bech32_decode id with
+    | Some (hrp, d5) when hrp = prefix -> Bech32.to_bytes d5
+    | _ -> None
+  in
+  let simple prefix tyname =
+    match decode prefix with Some b when String.length b = 32 -> Some (`List [ `List [ `String tyname; hexs b ] ]) | _ -> None
+  in
+  if starts "npub" then simple "npub" "PubKeyId"
+  else if starts "note" then simple "note" "EventId"
+  else if starts "nsec" then ( match decode "nsec" with Some b when String.length b = 32 -> Some (`List [ hexs b ]) | _ -> None)
+  else
+    match List.find_opt starts [ "nprofile"; "nevent"; "nrelay"; "naddr" ] with
+    | None -> Some (`List [ `Null ])
+    | Some prefix -> (
+        match decode prefix with
+        | None -> None
+        | Some raw -> (
+            let n = String.length raw in
+            let exception Bad in
+            let u32 v =
+              if String.length v < 4 then raise Bad
+              else (Char.code v.[0] lsl 24) lor (Char.code v.[1] lsl 16) lor (Char.code v.[2] lsl 8) lor Char.code v.[3]
+            in
+            let id32 tyname v = if String.length v = 32 then `List [ `String tyname; hexs v ] else raise Bad in
+            let rec loop i acc =
+              if i >= n then List.rev acc
+              else if i + 1 >= n then raise Bad
+              else begin
+                let t = Char.code raw.[i] and l = Char.code raw.[i + 1] in
+                if i + 2 + l > n then raise Bad;
+                let v = String.sub raw (i + 2) l in
+                let item =
+                  match t with
+                  | 0 -> (
+                      `String "Special"
+                      :: match prefix with "nprofile" -> [ id32 "PubKeyId" v ] | "nevent" -> [ id32 "EventId" v ] | _ -> [ `String v ])
+                  | 1 -> [ `String "Relay"; `String v ]
+                  | 2 -> [ `String "Author"; (if prefix = "naddr" || prefix = "nevent" then id32 "PubKeyId" v else `Null) ]
+                  | 3 -> [ `String "Kind"; (if prefix = "naddr" || prefix = "nevent" then `Int (u32 v) else `Null) ]
+                  | _ -> raise Bad
+                in
+                loop (i + 2 + l) (List.rev_append item acc)
+              end
+            in
+            try Some (`List (loop 0 [])) with Bad -> None))
+
+let nip19_decode (_ : ctx) (kw : Kw.t) : outcome =
+  let ids = match Kw.str_list_opt kw "ids" with Some l -> l | None -> raise (Kw.Invalid "ids required") in
+  match List.map (fun id -> match nip19_ser id with Some v -> (id, v) | None -> raise Exit) ids with
+  | pairs -> Handled (messages [ content_msg Kind.nip19_decode_result (Yojson.Safe.to_string (`Assoc pairs)) ])
+  | exception Exit -> julia_error
+
+(* {2 membership} *)
+
+let settings_subkey (e : Nostr.t) : (string * Yojson.Safe.t) option =
+  if e.Nostr.kind <> Kind.app_settings then None (* Julia: error("invalid event kind") *)
+  else
+    match Yojson.Safe.from_string e.Nostr.content with
+    | `Assoc d as j -> ( match List.assoc_opt "subkey" d with Some (`String k) -> Some (k, j) | _ -> None)
+    | _ -> None
+    | exception _ -> None
+
+let get_app_subsettings (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e -> (
+      match settings_subkey e with
+      | None -> julia_error
+      | Some (subkey, _) -> (
+          match with_membership ctx (fun c -> Queries_mem.app_subsettings c ~pubkey:e.Nostr.pubkey ~subkey) with
+          | Some settings -> Handled (messages [ content_msg Kind.app_subsettings settings ])
+          | None -> default_app_subsettings ctx subkey))
+
+let set_app_subsettings (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e -> (
+      match settings_subkey e with
+      | Some (subkey, `Assoc d) -> (
+          match List.assoc_opt "settings" d with
+          | None -> julia_error
+          | Some settings ->
+              with_membership ctx (fun c ->
+                  Queries_mem.set_app_subsettings c ~pubkey:e.Nostr.pubkey ~subkey ~updated_at:(now ())
+                    ~settings_json:(Yojson.Safe.to_string settings));
+              Handled empty)
+      | _ -> julia_error)
+
+let membership_media_management_stats (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e ->
+      with_membership ctx (fun c ->
+          let stats = Queries_mem.media_management_stats c ~pubkey:e.Nostr.pubkey in
+          let sum t = List.fold_left (fun acc (ty, _, size) -> if ty = t then Int64.add acc size else acc) 0L stats in
+          let video = sum "video" and image = sum "image" and other = sum "other" in
+          match Queries_mem.max_storage c ~pubkey:e.Nostr.pubkey with
+          | None -> julia_error
+          | Some max_storage ->
+              let free = Int64.(sub max_storage (add image (add video other))) in
+              Handled
+                (messages
+                   [
+                     content_msg Kind.membership_media_management_stats
+                       (Yojson.Safe.to_string
+                          (`Assoc [ ("video", i64json video); ("image", i64json image); ("other", i64json other); ("free", i64json free) ]));
+                   ]))
