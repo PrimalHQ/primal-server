@@ -190,3 +190,12 @@ let nip19_decode (s : string) : nip19 option =
                   Some (Naddr { kind = u32be k; author; identifier = ident })
               | _ -> None)
           | _ -> None))
+
+(* NIP-19 TLV encoding (Julia Bech32.nip19_encode_naddr): 0 = identifier, 2 = author, 3 = kind (u32 be) *)
+let encode_tlv (items : (int * string) list) : string =
+  String.concat "" (List.map (fun (t, v) -> Printf.sprintf "%c%c%s" (Char.chr t) (Char.chr (String.length v land 0xff)) v) items)
+
+let encode_naddr ~(kind : int) ~(author : string) ~(identifier : string) : string =
+  let k = Bytes.create 4 in
+  Bytes.set_int32_be k 0 (Int32.of_int kind);
+  nip19_encode ~hrp:"naddr" (encode_tlv [ (0, identifier); (2, author); (3, Bytes.to_string k) ])

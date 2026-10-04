@@ -122,11 +122,21 @@ photos/short_videos/media `latest` feeds) plus `important-notes-i-might-have-mis
 `muted-threads` and the non-notes `wide-net-notes` feed. Against the reference: `advanced_search`
 1000/1000 identical, `mega_feed_directive` 97.3 % — the rest are Julia's nine-second budget
 running out under the replay's load (identical when replayed alone).
-Still proxied: `search` (Julia forwards it over HTTP to another node), `set_app_settings`
-(compiles moderation rules — importer territory), `get_filterlist` (Julia's in-process sets), `nostr_stats` (its `dyn` table does not
-exist here), `get_recommended_reads` (random + naddr encoding), `trending_images(_4h)`, the DVM
-feeds, `import_events`/`broadcast_*`/nip46/uploads, and the membership funcalls of `ext/App.jl`
-(private repo, Phase 9).
+**Phase 4e (2026-10-04):** the remaining readers are native: `search` (Julia forwards it over
+HTTP to another node's `/api`; `search_api_url` names it), `explore_media`, `get_advanced_feeds`,
+`get_filterlist` (the four curated lists of the membership `lists` table, the other Julia
+in-process sets are empty on the API nodes), `get_recommended_reads` (three random articles of the
+Nostr-Gems curation, `Bech32.encode_naddr`), `trending_images(_4h)` (hashtag whitelist, media of
+the trending notes ordered by score × followers/posts), `get_dvm_feeds`, `get_featured_dvm_feeds`
+and `dvm_feed_info` (the `response_messages_for_dvm_feeds` port: handler event, user infos, names,
+likes/sats, the viewer's follows' and own actions, feed metadata; `primal_dvm_pubkeys` marks
+Primal's own DVMs), and `nostr_stats` (NOTICE error, as Julia answers without its `daily_stats`
+table). `top_article` now raises like Julia when the author has no article.
+Still proxied: `set_app_settings` (compiles moderation rules — importer territory), `search_filterlist` (needs Julia's per-viewer `compile_content_moderation_rules`), `dvm_feed`
+(runs the DVM request over relays), `import_events`/`import_poll_vote_event`/
+`invoices_to_zap_receipts` (importer writes), `broadcast_events`/`broadcast_reply` (outbound
+relay connections), nip46, uploads, `update_push_notification_token*`, and the membership
+funcalls of `ext/App.jl` (private repo, Phase 9).
 
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
@@ -183,6 +193,8 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `network_stats_url` | `"http://127.0.0.1:14018/api"` or `null` | `App.NETWORK_STATS_URL`: where `net_stats` pushes are fetched from (the importer node's HTTP `/api`) |
 | `netstats_period_s` | `2.0` | `1 / CacheServerHandlers.NETSTATS_RATE` |
 | `trending_blocked_domains` | `["bchnostr.com"]` | `App.TRENDING_BLOCKED_DOMAINS`: nip05 domains hidden from trending/explore |
+| `search_api_url` | `"http://<search-host>:14017/api"` or `null` | `App.search` forwards the call to this HTTP `/api` (null: NOTICE error) |
+| `primal_dvm_pubkeys` | `[]` | hex pubkeys of Primal's own DVMs (`DVMServiceProvider.keypairs`): `is_primal` in DVM feed metadata |
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
@@ -265,6 +277,9 @@ drain), `lib/admin.ml`, `lib/stats.ml`, `lib/files.ml`, `bin/primal_apid.ml`, `b
   global trending top 300 of the last 24 hours; Julia recomputes them in its precalculation job,
   primal-api caches them for ten minutes (`Handlers.trending_24h_scores`). `Advsearch.run` sets
   `statement_timeout` per window on the pooled connection and restores 30 s afterwards.
+- `follow_lists` in Julia appends the media responses as `select * from event_media_response(id)`
+  rows, which serialise as `{"event_media_response": {...}}` (no `kind`); primal-api emits the
+  proper media response message, so a replay shows every follow_lists answer as different.
 - Deliberate deviations from Julia, kept because the OCaml answer is the better one: accounts on
   the csam/impersonation filterlist are hidden by the SQL predicate (Julia's
   `content_moderation_filtering_2` only knows the spam/nsfw groups, so Julia still lists them in

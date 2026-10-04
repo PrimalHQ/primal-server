@@ -38,6 +38,9 @@ type t = {
   network_stats_url : string option; (* App.NETWORK_STATS_URL: the importer's HTTP /api answering network_stats *)
   netstats_period_s : float; (* 1 / CacheServerHandlers.NETSTATS_RATE *)
   trending_blocked_domains : string list; (* App.TRENDING_BLOCKED_DOMAINS: nip05 domains hidden from trending *)
+  (* Phase 4e *)
+  search_api_url : string option; (* App.search forwards to another node's HTTP /api *)
+  primal_dvm_pubkeys : string list; (* hex; DVMServiceProvider.keypairs pubkeys (is_primal in DVM feed metadata) *)
 }
 
 let field j key =
@@ -92,6 +95,11 @@ let of_json (j : Yojson.Safe.t) : t =
     network_stats_url = rstr_opt j "network_stats_url";
     netstats_period_s = rfloat j "netstats_period_s";
     trending_blocked_domains = (match field j "trending_blocked_domains" with `List l -> List.map U.to_string l | _ -> raise (Config_error "trending_blocked_domains: expected a list"));
+    search_api_url = rstr_opt j "search_api_url";
+    primal_dvm_pubkeys =
+      (match field j "primal_dvm_pubkeys" with
+      | `List l -> List.map (fun v -> String.lowercase_ascii (U.to_string v)) l
+      | _ -> raise (Config_error "primal_dvm_pubkeys: expected a list"));
   }
 
 let of_json_file (path : string) : t =

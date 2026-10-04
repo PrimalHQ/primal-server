@@ -126,3 +126,8 @@ let report (c : Db.membership Db.conn) ~pubkey ~typ ~id ~now : unit =
 let is_paying (c : Db.membership Db.conn) ~pubkey : bool =
   let dbh = Db.raw c in
   match [%pgsql dbh "select 1 from memberships where pubkey = $pubkey and tier != 'free' limit 1"] with [] -> false | _ -> true
+
+(* app_ext.jl get_list: the curated spam/nsfw allow/block lists Julia loads into Filterlist *)
+let list_pubkeys (c : Db.membership Db.conn) ~(list : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select encode(pubkey, 'hex') from lists where list = $list"] |> List.filter_map Fun.id

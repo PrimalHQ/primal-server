@@ -1408,3 +1408,80 @@ let wide_net_notes (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset :
        and bt1.id = bt2.id and bt2.tag = 'e' and bt2.arg1 = es.id and es.created_at >= $since and es.created_at <= $until \
      order by es.created_at desc limit $limit offset $offset"]
   |> List.filter_map (function Some id, Some t -> Some (Hex_util.encode id, t) | _ -> None)
+
+(* {1 Phase 4e} *)
+
+(* app.jl get_dvm_feeds / get_featured_dvm_feeds: NIP-89 handler events of content-discovery DVMs
+   whose feed was fetched successfully in the last hour (dvm_feeds.updated_at is naive local time) *)
+let dvm_feed_eids (c : Db.cache Db.conn) ~(featured : bool) ~(kind : string option) : string list =
+  let dbh = Db.raw c in
+  (if featured then
+     [%pgsql dbh
+       "select distinct encode(pre.event_id, 'hex') from parametrized_replaceable_events pre, event_tags et, dvm_feeds df, events es \
+        where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' \
+          and df.pubkey = pre.pubkey and df.updated_at >= now()::timestamp - interval '1 hour' and df.ok \
+          and (case when $?kind::text is null then true else df.kind = $?kind end) and es.id = pre.event_id"]
+   else
+     [%pgsql dbh
+       "select distinct encode(pre.event_id, 'hex') from parametrized_replaceable_events pre, event_tags et, dvm_feeds df \
+        where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' \
+          and df.pubkey = pre.pubkey and df.updated_at >= now()::timestamp - interval '1 hour' and df.ok"])
+  |> List.filter_map Fun.id
+
+let dvm_likes (c : Db.cache Db.conn) ~pubkey ~(identifier : string) : int64 =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select count(1) from a_tags where kind = 7 and ref_kind = 31990 and ref_pubkey = $pubkey and ref_identifier = $identifier"] with
+  | Some n :: _ -> n
+  | _ -> 0L
+
+let dvm_satszapped (c : Db.cache Db.conn) ~pubkey : int64 =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select coalesce(sum(satszapped), 0)::int8 from zap_receipts where receiver = $pubkey"] with Some n :: _ -> n | _ -> 0L
+
+let dvm_feed_kinds (c : Db.cache Db.conn) ~pubkey ~(identifier : string) : string option list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select df.kind from dvm_feeds df where df.pubkey = $pubkey and df.identifier = $identifier"] |> List.map Option.some
+
+(* app.jl get_dvm_feed_follows_actions: the viewer's follows who replied to, reacted to or zapped the DVM feed *)
+let dvm_follows_actions_pks (c : Db.cache Db.conn) ~dvm_kind ~dvm_pubkey ~(dvm_id : string) ~user_pubkey ~limit : string list =
+  let dbh = Db.raw c in
+  let dvm_kind = i64 dvm_kind and limit = i64 limit in
+  [%pgsql dbh
+    "select encode(pks.pubkey, 'hex') from \
+       ((select es.pubkey from a_tags at, event es \
+         where at.ref_kind = $dvm_kind and at.ref_pubkey = $dvm_pubkey and at.ref_identifier = $dvm_id and (at.kind = 1 or at.kind = 7) and es.id = at.eid) \
+        union \
+        (select zr.sender as pubkey from a_tags at, zap_receipts zr \
+         where at.ref_kind = $dvm_kind and at.ref_pubkey = $dvm_pubkey and at.ref_identifier = $dvm_id and at.kind = 9735 and at.eid = zr.eid)) pks, \
+       pubkey_followers pf, pubkey_followers_cnt pfc \
+     where pf.pubkey = pks.pubkey and $user_pubkey = pf.follower_pubkey and pks.pubkey = pfc.key \
+     group by pks.pubkey order by max(pfc.value) desc limit $limit"]
+  |> List.filter_map Fun.id
+
+let dvm_user_action_kinds (c : Db.cache Db.conn) ~dvm_kind ~dvm_pubkey ~(dvm_id : string) ~user_pubkey : int64 list =
+  let dbh = Db.raw c in
+  let dvm_kind = i64 dvm_kind in
+  [%pgsql dbh
+    "select at.kind from a_tags at, event es \
+     where at.ref_kind = $dvm_kind and at.ref_pubkey = $dvm_pubkey and at.ref_identifier = $dvm_id and at.eid = es.id and es.pubkey = $user_pubkey"]
+  |> List.filter_map Fun.id
+
+let dvm_user_zapped (c : Db.cache Db.conn) ~dvm_kind ~dvm_pubkey ~(dvm_id : string) ~user_pubkey : bool =
+  let dbh = Db.raw c in
+  let dvm_kind = i64 dvm_kind in
+  match
+    [%pgsql dbh
+      "select 1 from a_tags at, zap_receipts zr \
+       where at.ref_kind = $dvm_kind and at.ref_pubkey = $dvm_pubkey and at.ref_identifier = $dvm_id and at.kind = 9735 and at.eid = zr.eid and zr.sender = $user_pubkey limit 1"]
+  with
+  | [] -> false
+  | _ -> true
+
+(* app_ext.jl trending_images *)
+let pubkey_events_count (c : Db.cache Db.conn) ~pubkey : int64 =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select count(1) from pubkey_events where pubkey = $pubkey"] with Some n :: _ -> n | _ -> 0L
+
+let score24h_of (c : Db.cache Db.conn) ~event_id : int64 option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select score24h from event_stats where event_id = $event_id"] with v :: _ -> v | [] -> None

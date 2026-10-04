@@ -122,6 +122,18 @@ type t =
   | Advanced_search
   | Advanced_feed
   | Parse_advanced_search_query
+  (* Phase 4e *)
+  | Search
+  | Explore_media
+  | Get_advanced_feeds
+  | Nostr_stats
+  | Get_filterlist
+  | Get_recommended_reads
+  | Trending_images
+  | Trending_images_4h
+  | Get_dvm_feeds
+  | Get_featured_dvm_feeds
+  | Dvm_feed_info
   | Proxied of string
 
 let names : (string * t) list =
@@ -238,6 +250,17 @@ let names : (string * t) list =
     ("advanced_search", Advanced_search);
     ("advanced_feed", Advanced_feed);
     ("parse_advanced_search_query", Parse_advanced_search_query);
+    ("search", Search);
+    ("explore_media", Explore_media);
+    ("get_advanced_feeds", Get_advanced_feeds);
+    ("nostr_stats", Nostr_stats);
+    ("get_filterlist", Get_filterlist);
+    ("get_recommended_reads", Get_recommended_reads);
+    ("trending_images", Trending_images);
+    ("trending_images_4h", Trending_images_4h);
+    ("get_dvm_feeds", Get_dvm_feeds);
+    ("get_featured_dvm_feeds", Get_featured_dvm_feeds);
+    ("dvm_feed_info", Dvm_feed_info);
   ]
 
 let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
@@ -393,6 +416,17 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Advanced_search -> run Handlers.advanced_search
   | Advanced_feed -> run Handlers.advanced_feed
   | Parse_advanced_search_query -> run Handlers.parse_advanced_search_query
+  | Search -> run Handlers.search
+  | Explore_media -> run Handlers.explore_media
+  | Get_advanced_feeds -> run Handlers.get_advanced_feeds
+  | Nostr_stats -> run Handlers.nostr_stats
+  | Get_filterlist -> run Handlers.get_filterlist
+  | Get_recommended_reads -> run Handlers.get_recommended_reads
+  | Trending_images -> run Handlers.trending_images
+  | Trending_images_4h -> run Handlers.trending_images_4h
+  | Get_dvm_feeds -> run Handlers.get_dvm_feeds
+  | Get_featured_dvm_feeds -> run Handlers.get_featured_dvm_feeds
+  | Dvm_feed_info -> run Handlers.dvm_feed_info
   | Proxied _ -> Response.Not_handled
 
 (* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)
