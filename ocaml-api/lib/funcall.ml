@@ -118,6 +118,10 @@ type t =
   | Feed_directive_2
   | Enrich_feed_events
   | Note_mentions
+  (* Phase 4d *)
+  | Advanced_search
+  | Advanced_feed
+  | Parse_advanced_search_query
   | Proxied of string
 
 let names : (string * t) list =
@@ -231,6 +235,9 @@ let names : (string * t) list =
     ("feed_directive_2", Feed_directive_2);
     ("enrich_feed_events", Enrich_feed_events);
     ("note_mentions", Note_mentions);
+    ("advanced_search", Advanced_search);
+    ("advanced_feed", Advanced_feed);
+    ("parse_advanced_search_query", Parse_advanced_search_query);
   ]
 
 let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
@@ -383,6 +390,9 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Feed_directive_2 -> run ~moderate:false Handlers.feed_directive_2
   | Enrich_feed_events -> run Handlers.enrich_feed_events
   | Note_mentions -> run Handlers.note_mentions
+  | Advanced_search -> run Handlers.advanced_search
+  | Advanced_feed -> run Handlers.advanced_feed
+  | Parse_advanced_search_query -> run Handlers.parse_advanced_search_query
   | Proxied _ -> Response.Not_handled
 
 (* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)

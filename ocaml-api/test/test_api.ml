@@ -79,7 +79,7 @@ let test_funcall_catalogue () =
   let names = native_names () in
   List.iter (fun n -> Alcotest.(check string) n n (to_string (of_string n))) names;
   Alcotest.(check bool) "no duplicates" true (List.length (List.sort_uniq compare names) = List.length names);
-  match of_string "advanced_search" with Proxied _ -> () | _ -> Alcotest.fail "advanced_search is still proxied"
+  match of_string "set_app_settings" with Proxied _ -> () | _ -> Alcotest.fail "set_app_settings is still proxied"
 
 let test_nip19 () =
   let j = Yojson.Safe.to_string in
@@ -181,6 +181,33 @@ let test_mega_ids () =
   Alcotest.(check bool) "julia_exposed has explore_people" true (List.mem "explore_people" H.julia_exposed);
   Alcotest.(check bool) "julia_exposed has no bogus" false (List.mem "video-reels" H.julia_exposed)
 
+let test_advsearch () =
+  let module A = Primal_api.Advsearch in
+  let now = 1_700_000_000 in
+  let has s sub = try ignore (Str.search_forward (Str.regexp_string sub) s 0); true with Not_found -> false in
+  Alcotest.(check int) "words" 2 (List.length (A.ops (A.parse ~now "hello world")));
+  (match A.parse ~now "kind:30023 scope:myfollowsinteractions minwords:100 features:summary" with
+  | A.And [ A.Kind 30023; A.Scope "myfollowsinteractions"; A.MinWords 100; A.Features [ "summary" ] ] -> ()
+  | _ -> Alcotest.fail "reads query");
+  (match A.parse ~now "kind:20 OR kind:34236" with A.Or [ A.Kind 20; A.Kind 34236 ] -> () | _ -> Alcotest.fail "or");
+  (match A.parse ~now "\"exact phrase\" -spam #nostr since:yesterday" with
+  | A.And [ A.Phrase "exact phrase"; A.NotWord "spam"; A.HashTag "nostr"; A.Since t ] when t = now - 86400 -> ()
+  | _ -> Alcotest.fail "mixed");
+  (match A.parse ~now "from:532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb orderby:score" with
+  | A.And [ A.From (A.From_pk pk); A.OrderBy "score" ] when Hex_util.encode pk = "532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb" -> ()
+  | _ -> Alcotest.fail "from hex");
+  (match A.parse ~now "(bitcoin OR lightning) -\"shit coin\" :) ?" with
+  | A.And [ A.Or [ A.Word "bitcoin"; A.Word "lightning" ]; A.NotPhrase "shit coin"; A.Emoticon ":)"; A.Question ] -> ()
+  | _ -> Alcotest.fail "parens");
+  Alcotest.(check bool) "parse error" true (match A.parse ~now "scope:" with exception A.Parse_error _ -> true | _ -> false);
+  let sql = A.to_sql ~user_pubkey:(String.make 32 '\000') (A.parse ~now "bitcoin minlikes:3") ~since:0 ~until:now ~kinds:[] in
+  Alcotest.(check bool) "event_stats joined" true (has sql.A.text "event_stats.likes >= ");
+  Alcotest.(check bool) "default kinds" true (has sql.A.text "advsearch.kind IN (");
+  Alcotest.(check string) "orderkey" "created_at" sql.A.orderby_key;
+  Alcotest.(check int) "params" 9 (List.length sql.A.params);
+  Alcotest.(check string) "urls quoted" "x \"https://a.b/c?d=1\" y" (A.quote_urls "x https://a.b/c?d=1 y");
+  Alcotest.(check string) "nostr prefix" "from:npub1abc note1xyz" (A.strip_nostr_prefix "from:nostr:npub1abc nostr:note1xyz")
+
 let test_p_tags () =
   let e = {|{"id":"ab","tags":[["p","532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb"],["p","2895c330c23f383196c0ef988de6da83b83b4583ed5f9c1edb0a559cecd1f900","wss://r"],["e","zz"]]}|} in
   Alcotest.(check int) "all p tags" 2 (List.length (H.p_tag_pubkeys e));
@@ -206,6 +233,7 @@ let () =
           Alcotest.test_case "f32 string" `Quick test_f32;
           Alcotest.test_case "mega ids" `Quick test_mega_ids;
           Alcotest.test_case "p tags" `Quick test_p_tags;
+          Alcotest.test_case "advsearch" `Quick test_advsearch;
           Alcotest.test_case "wants_zlib" `Quick test_wants_zlib;
         ] );
       ( "handlers",

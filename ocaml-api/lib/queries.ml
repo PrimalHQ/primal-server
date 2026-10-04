@@ -882,6 +882,15 @@ let enrich_posts (c : Db.cache Db.conn) ~(posts_json : string) ~user_pubkey ~app
        $?user_pubkey, $apply_humaness_check, 'created_at') f(e) where e is not null"]
   |> List.filter_map Fun.id
 
+(* advanced_search: enrich_feed_events over (event hex, orderkey) pairs with Julia's orderby name *)
+let enrich_posts_ordered (c : Db.cache Db.conn) ~(posts_json : string) ~user_pubkey ~apply_humaness_check ~(orderby : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select distinct e::text from enrich_feed_events( \
+       array(select row(decode(p->>0, 'hex'), (p->>1)::int8)::post from jsonb_array_elements($posts_json::jsonb) x(p)), \
+       $?user_pubkey, $apply_humaness_check, $orderby) f(e) where e is not null"]
+  |> List.filter_map Fun.id
+
 (* app_ext.jl scored_users: best score24h per author since [since] *)
 let scored_users (c : Db.cache Db.conn) ~since ~limit : (string * int64) list =
   let dbh = Db.raw c in
@@ -1363,3 +1372,39 @@ let parametrized_event_id_one (c : Db.cache Db.conn) ~pubkey ~kind ~(identifier 
   with
   | Some e :: _ -> Some e
   | _ -> None
+
+(* {1 Phase 4d} *)
+
+(* app.jl important_notes_i_might_have_missed_feed: reposts by follows in the last 24 h *)
+let important_notes (c : Db.cache Db.conn) ~user_pubkey ~reposted_after ~since ~until ~limit ~offset : (string * int64) list =
+  let dbh = Db.raw c in
+  let reposted_after = i64 reposted_after and since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select encode(es.id, 'hex'), es.created_at from events es, basic_tags bt, pubkey_followers pf \
+     where pf.follower_pubkey = $user_pubkey and pf.pubkey = bt.pubkey and bt.kind = 6 and bt.created_at >= $reposted_after \
+       and bt.tag = 'e' and bt.id = es.id and es.created_at >= $since and es.created_at <= $until \
+     order by es.created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some id, Some t -> Some (id, t) | _ -> None)
+
+(* app.jl muted_threads_feed: the e-tagged events of the user's mute list *)
+let muted_threads (c : Db.cache Db.conn) ~user_pubkey ~since ~until ~limit ~offset : (string * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select encode(es.id, 'hex'), es.created_at from replaceable_events re, basic_tags bt, events es \
+     where re.pubkey = $user_pubkey and re.kind = 10000 and re.event_id = bt.id and bt.tag = 'e' and bt.arg1 = es.id \
+       and es.created_at >= $since and es.created_at <= $until \
+     order by es.created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some id, Some t -> Some (id, t) | _ -> None)
+
+(* app_ext.jl wide_net_notes_feed: events e-tagged by notes/reposts/reactions/zaps of the follows *)
+let wide_net_notes (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset : (string * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select es.id, es.created_at from pubkey_followers pf, basic_tags bt1, basic_tags bt2, events es \
+     where pf.follower_pubkey = $pubkey \
+       and (bt1.kind = 1 or bt1.kind = 6 or bt1.kind = 7 or bt1.kind = 9735) and bt1.pubkey = pf.pubkey \
+       and bt1.id = bt2.id and bt2.tag = 'e' and bt2.arg1 = es.id and es.created_at >= $since and es.created_at <= $until \
+     order by es.created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some id, Some t -> Some (Hex_util.encode id, t) | _ -> None)

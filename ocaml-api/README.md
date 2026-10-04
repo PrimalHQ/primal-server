@@ -100,9 +100,30 @@ deep via e/a tags and nostr: mentions, metadata, viewer actions, verified names)
 `get_directmsg_contacts` and `note_mentions` 85 % (the csam deviation and viewers whose compiled
 rules differ from Julia's defaults), `explore_zaps` low on this host only because the Julia node's
 `TrustRank.humaness_threshold` is 0.0 (it never loaded trust ranks) where we apply the real one.
-Still proxied: `search`/`advanced_search`/`advanced_feed`/`parse_advanced_search_query` and the
-mega-feed specs built on them (Phase 4d), `set_app_settings` (compiles moderation rules — importer
-territory), `get_filterlist` (Julia's in-process sets), `nostr_stats` (its `dyn` table does not
+**Phase 4d (2026-10-04):** advanced search is native (`Advsearch`): a parser equivalent to
+dag.jl's PEG grammar (words, phrases, hashtags and their negations, since/until with the relative
+names, from:/to:/@ with hex, npub, nprofile, naddr follow lists and verified names, kind:,
+repliestokind:, post:root, note/nevent/naddr, filter:, url:, orientation:, min/maxduration:,
+emoticons and ?, category:, min/maxinteractions:, scope:, min/maxwords:, maxchars:,
+minlongreplies:, lang:, features:, ref:, zappedby:, orderby:, the min/max stats fields with
+minscore:/maxscore: as percentiles of the 24-hour trending scores, mintrustrank:, pas:, OR and
+parentheses), the `to_sql` builder (the same tables, CTEs and conditions, dynamic SQL run through
+`Postgres.query` with text parameters), and `fetch_results`' windowed execution — one-hour windows
+walking back from `until`, widened fourfold while empty, a nine-second budget, partial results on
+a statement timeout — read through a no-scroll cursor exactly as Julia does: with a plain LIMIT the
+planner bitmap-scans the whole `created_at` range of a wide window (six minutes for a rare word
+over two years), with the cursor it starts from the GIN index (four seconds). Native on top of it:
+`advanced_search` (default viewer = the primal account, the `!contentmoderationdemofeed:` canned
+feeds, the pas:1 cap for non-members), `advanced_feed`, `parse_advanced_search_query`, and every
+mega-feed id that Julia routes to a search query (`advsearch`, `nostr-reads-feed`, reads
+`follows`/`myfollowsinteractions`, `video-reels`, `wide-net-notes`, `strange-but-popular`,
+`engaging-discussions`, `only-tweets`, `bookmarked-by-follows`, `explore-media`, the
+photos/short_videos/media `latest` feeds) plus `important-notes-i-might-have-missed`,
+`muted-threads` and the non-notes `wide-net-notes` feed. Against the reference: `advanced_search`
+1000/1000 identical, `mega_feed_directive` 97.3 % — the rest are Julia's nine-second budget
+running out under the replay's load (identical when replayed alone).
+Still proxied: `search` (Julia forwards it over HTTP to another node), `set_app_settings`
+(compiles moderation rules — importer territory), `get_filterlist` (Julia's in-process sets), `nostr_stats` (its `dyn` table does not
 exist here), `get_recommended_reads` (random + naddr encoding), `trending_images(_4h)`, the DVM
 feeds, `import_events`/`broadcast_*`/nip46/uploads, and the membership funcalls of `ext/App.jl`
 (private repo, Phase 9).
@@ -240,6 +261,10 @@ drain), `lib/admin.ml`, `lib/stats.ml`, `lib/files.ml`, `bin/primal_apid.ml`, `b
   uses the SQL predicate when compiled rules exist, hides nothing when the settings switch
   moderation off, and applies Julia's default rules (spam in content+trending, nsfw in trending,
   the viewer's follows exempt from spam) otherwise and for requests without a viewer.
+- Advanced search's `minscore:`/`maxscore:` percentiles index the sorted `score24h` values of the
+  global trending top 300 of the last 24 hours; Julia recomputes them in its precalculation job,
+  primal-api caches them for ten minutes (`Handlers.trending_24h_scores`). `Advsearch.run` sets
+  `statement_timeout` per window on the pooled connection and restores 30 s afterwards.
 - Deliberate deviations from Julia, kept because the OCaml answer is the better one: accounts on
   the csam/impersonation filterlist are hidden by the SQL predicate (Julia's
   `content_moderation_filtering_2` only knows the spam/nsfw groups, so Julia still lists them in

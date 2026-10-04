@@ -119,3 +119,10 @@ let report (c : Db.membership Db.conn) ~pubkey ~typ ~id ~now : unit =
   let dbh = Db.raw c in
   let typ = Int64.of_int typ and now = Int64.of_int now in
   ignore [%pgsql dbh "insert into reported (pubkey, type, id, created_at) values ($pubkey, $typ, $id, $now) on conflict do nothing"]
+
+(* {1 Phase 4d} *)
+
+(* dag.jl search: a paying member (tier != 'free') is exempt from the pas:1 limit cap *)
+let is_paying (c : Db.membership Db.conn) ~pubkey : bool =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select 1 from memberships where pubkey = $pubkey and tier != 'free' limit 1"] with [] -> false | _ -> true
