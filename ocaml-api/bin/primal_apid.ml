@@ -41,6 +41,7 @@ let () =
   in
   let live = Api.Live_events.create () in
   let bc = Api.Broadcasts.create () in
+  Api.Handlers.net_ref := Some net;
   Api.Wsconnvars.open_request_log cfg.request_log;
   let init_domain_db () =
     Db.init ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~cache_size:cfg.cache_pool_size
@@ -81,7 +82,9 @@ let () =
         Postgres.set_env ~net ~sw:dsw;
         init_domain_db ();
         let sock = Listen.import ~sw:dsw public_fd in
-        Http_server.serve_on ~sw:dsw ~clock ~stop public_svc sock)
+        Http_server.serve_on ~sw:dsw ~clock ~stop public_svc sock;
+        (* leave the SO_REUSEPORT group now: the connection fibers keep dsw (and so the dup) alive *)
+        Eio.Net.close sock)
   in
   let main_domain () =
     Switch.run @@ fun msw ->
@@ -104,15 +107,22 @@ let () =
         `Stop_daemon);
     Lifecycle.serving lifecycle;
     Fiber.both
-      (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock)
+      (fun () ->
+        Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock;
+        Eio.Net.close sock)
       (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop admin_svc admin_sock)
   in
   (* Drain controller: runs CONCURRENTLY with the accept loops (their switches keep the connection
      fibers alive, so waiting for Fiber.all below would wait for every client to leave on its own).
-     On stop: listeners close (serve_on returns), idle WebSockets go now, active ones after the
-     grace period, everything by the hard deadline; then the process exits. *)
+     On stop: the listening socket is closed in every domain (serve_on returns, the dup and the
+     bound fd are closed, so the kernel stops routing new connections here), idle WebSockets go
+     now, active ones after the grace period, everything by the hard deadline; then the process
+     exits. *)
   Fiber.fork_daemon ~sw (fun () ->
       Promise.await stop;
+      (* the bound fd itself: with every domain's dup closed the socket leaves the kernel's
+         SO_REUSEPORT group and new connections only reach the new generation *)
+      (try Unix.close public_fd with _ -> ());
       log "draining: %d connections, %d http inflight" (Api.Conn.count ()) (Http_server.inflight_connections ());
       let idle = Api.Conn.close_idle ~older_than:30.0 () in
       if idle > 0 then log "closed %d idle connections" idle;

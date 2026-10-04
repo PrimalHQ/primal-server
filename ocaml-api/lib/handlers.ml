@@ -198,7 +198,7 @@ let parse_spec (kw : Kw.t) : [ `Spec of Yojson.Safe.t * Kw.t | `Invalid | `Missi
       | _ -> `Invalid
       | exception _ -> `Invalid)
 
-let mega_feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
+let mega_feed_directive_basic (ctx : ctx) (kw : Kw.t) : outcome =
   match parse_spec kw with
   | `Missing -> Not_handled
   | `Invalid -> Notice "invalid spec format"
@@ -234,13 +234,13 @@ let mega_feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
       end
       else Not_handled
 
-let multi_kind_mega_feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
+let multi_kind_mega_feed_directive_basic (ctx : ctx) (kw : Kw.t) : outcome =
   match parse_spec kw with
   | `Missing -> Not_handled
   | `Invalid -> Notice "invalid spec format"
   | `Spec (s, kwargs) ->
       let kinds = match Kw.member kwargs "kinds" with `Null -> Kw.member s "kinds" | k -> k in
-      if kinds = `Null then mega_feed_directive ctx kw
+      if kinds = `Null then mega_feed_directive_basic ctx kw
       else begin
         let id = Kw.str s "id" ~default:"" in
         let spec_fields = Kw.fields (Kw.remove (Kw.remove s "id") "kind") in
@@ -1304,3 +1304,501 @@ let rebroadcasting_status (_ : ctx) (kw : Kw.t) : outcome =
 
 (* broadcast_notification has no caller any more (the importer moved out of the API node): EOSE only *)
 let notifications (_ : ctx) (_ : Kw.t) : outcome = Handled empty
+
+(* {1 Phase 4b: explore / trending} (app_ext.jl scored_content and friends) *)
+
+(* set by Funcall at start-up: run a funcall by name (mega_feed_directive routes spec ids to
+   exposed functions); Not_handled for everything that is not native *)
+let dispatch_by_name : (ctx -> string -> Kw.t -> outcome) ref = ref (fun _ _ _ -> Not_handled)
+
+let f32 (x : float) : float = Int32.float_of_bits (Int32.bits_of_float x)
+
+(* Julia's shortest round-trip text of a Float32 (JSON.json of a Float32 value) *)
+let f32_string (x : float) : string =
+  let x = f32 x in
+  if Float.is_nan x then "NaN"
+  else if Float.is_integer x && Float.abs x < 1e7 then Printf.sprintf "%.1f" x
+  else begin
+    let rec go p =
+      let s = Printf.sprintf "%.*g" p x in
+      if p >= 9 || f32 (float_of_string s) = x then s else go (p + 1)
+    in
+    let s = go 1 in
+    if String.contains s '.' || String.contains s 'e' || String.contains s 'n' then s else s ^ ".0"
+  end
+
+type scored_args = {
+  timeframe : string;
+  scope_pubkeys : string list; (* hex; [] = global *)
+  limit : int;
+  limit2 : int option;
+  created_after : int;
+  since : int option;
+  until : int option;
+  offset : int;
+  group_by_pubkey : bool;
+  user_pubkey : string option;
+  kinds : int list option;
+  gm_mode : string option;
+  pg : bool; (* usepgfuncs: enrich_feed_events; else Julia's in-memory path + range *)
+  humaness : bool;
+}
+
+module SS = Set.Make (String)
+
+(* app_ext.jl scored_content *)
+let scored_content (ctx : ctx) (a : scored_args) : string list option =
+  let limit = min 50 a.limit in
+  let limit = match a.limit2 with Some l -> l | None -> limit in
+  let created_after = if a.timeframe <> "popular" then max (now () - (7 * 24 * 3600)) a.created_after else a.created_after in
+  let since = Option.map (fun s -> max (max 1 s) created_after) a.since in
+  let since = match since with Some 0 -> None | s -> s in
+  if limit > 1000 then None
+  else begin
+    let field =
+      match a.timeframe with
+      | "latest" -> Queries.Created_at
+      | "popular" | "trending" -> Queries.Score
+      | "mostzapped" -> Queries.Satszapped
+      | t -> raise (Kw.Invalid ("unknown timeframe: " ^ t))
+    in
+    let kinds_json = Option.map (fun l -> Yojson.Safe.to_string (`List (List.map (fun k -> `Int k) l))) a.kinds in
+    let hex = Hex_util.encode in
+    with_cache ctx (fun c ->
+        let domains_json = Yojson.Safe.to_string (`List (List.map (fun d -> `String d) ctx.cfg.trending_blocked_domains)) in
+        let rec loop n =
+          let rows =
+            if a.scope_pubkeys = [] then
+              if a.group_by_pubkey then
+                Queries.scored_global_grouped c ~field ~created_after ~user_pubkey:a.user_pubkey ~n ~offset:a.offset ~gm_mode:a.gm_mode ~kinds_json
+              else if a.kinds <> None && a.timeframe = "latest" then
+                Queries.latest_global_kinds c ~created_after ~kinds_json:(Option.get kinds_json) ~n ~offset:a.offset
+              else Queries.scored_global c ~field ~created_after ~since ~until:a.until ~user_pubkey:a.user_pubkey ~n ~offset:a.offset ~kinds_json
+            else
+              Queries.scored_by_pubkeys c ~field ~created_after ~since ~until:a.until ~pubkeys_json:(Queries.hexes_json a.scope_pubkeys) ~n
+                ~offset:a.offset
+          in
+          (* Julia: one event per author in the global branch (pkseen) *)
+          let rows =
+            if a.scope_pubkeys = [] then
+              List.rev (fst (List.fold_left (fun (acc, seen) (r : Queries.scored_row) -> if SS.mem r.s_pubkey seen then (acc, seen) else (r :: acc, SS.add r.s_pubkey seen)) ([], SS.empty) rows))
+            else rows
+          in
+          let posts_json =
+            Yojson.Safe.to_string (`List (List.map (fun (r : Queries.scored_row) -> `List [ `String (hex r.s_event_id); `String (hex r.s_pubkey) ]) rows))
+          in
+          let pass = if rows = [] then SS.empty else SS.of_list (Queries.scored_pass c ~posts_json ~domains_json) in
+          let filtered = List.filter (fun (r : Queries.scored_row) -> SS.mem (hex r.s_event_id) pass) rows in
+          if List.length rows < n || List.length filtered >= limit || n * 2 > 1000 then filtered else loop (n * 2)
+        in
+        let filtered = loop limit in
+        let posts = List.stable_sort (fun (x : Queries.scored_row) y -> compare y.s_value x.s_value) filtered |> List.filteri (fun i _ -> i < limit) in
+        let posts_json =
+          Yojson.Safe.to_string (`List (List.map (fun (r : Queries.scored_row) -> `List [ `String (hex r.s_event_id); `Int (Int64.to_int r.s_value) ]) posts))
+        in
+        if a.pg then Some (if posts = [] then [] else Queries.enrich_posts c ~posts_json ~user_pubkey:a.user_pubkey ~apply_humaness_check:a.humaness)
+        else begin
+          let msgs = if posts = [] then [] else Queries.enrich_posts c ~posts_json ~user_pubkey:a.user_pubkey ~apply_humaness_check:false in
+          let msgs = List.filter (fun m -> match kind_and_pubkey m with Some k, _ when k = Kind.range -> false | _ -> true) msgs in
+          Some (msgs @ [ range_msg ~order_by:(Queries.scored_field_name field) (List.map (fun (r : Queries.scored_row) -> (hex r.s_event_id, r.s_value)) posts) ])
+        end)
+  end
+
+(* app_ext.jl explore: the scope picks the pubkeys *)
+let explore_scope (ctx : ctx) ~(scope : string) ~(user_pubkey : string option) : string list option =
+  match (scope, user_pubkey) with
+  | "global", _ -> Some []
+  | ("network" | "tribe" | "follows"), None -> None
+  | "network", Some _ -> Some []
+  | "tribe", Some u ->
+      Some
+        (with_cache ctx (fun c ->
+             List.sort_uniq compare (List.map fst (Queries.follows_with_counts c ~pubkey:u) @ Queries.followers_hex c ~pubkey:u)))
+  | "follows", Some u -> Some (with_cache ctx (fun c -> List.map fst (Queries.follows_with_counts c ~pubkey:u)))
+  | _ -> None
+
+let scored_args_of_kw (kw : Kw.t) ~timeframe ~scope_pubkeys ~pg ~humaness : scored_args =
+  {
+    timeframe;
+    scope_pubkeys;
+    limit = Kw.int kw "limit" ~default:20;
+    limit2 = Kw.int_opt kw "limit2";
+    created_after = Kw.int kw "created_after" ~default:0;
+    since = Kw.int_opt kw "since";
+    until = Kw.int_opt kw "until";
+    offset = Kw.int kw "offset" ~default:0;
+    group_by_pubkey = Kw.bool kw "group_by_pubkey" ~default:false;
+    user_pubkey = user_pubkey_opt kw;
+    kinds = Kw.int_list_opt kw "kinds";
+    gm_mode = Kw.str_opt kw "gm_mode";
+    pg;
+    humaness;
+  }
+
+let explore_outcome (ctx : ctx) (kw : Kw.t) (a : scored_args) : outcome =
+  match explore_scope ctx ~scope:(Kw.str kw "scope" ~default:"global") ~user_pubkey:a.user_pubkey with
+  | None -> Handled empty
+  | Some pks -> ( match scored_content ctx { a with scope_pubkeys = pks } with Some msgs -> Handled (messages msgs) | None -> julia_error)
+
+(* explore is in app_funcalls_with_pgfuncs: usepgfuncs + apply_humaness_check *)
+let explore (ctx : ctx) (kw : Kw.t) : outcome =
+  let timeframe = Kw.str_exn kw "timeframe" in
+  ignore (Kw.str_exn kw "scope");
+  explore_outcome ctx kw (scored_args_of_kw kw ~timeframe ~scope_pubkeys:[] ~pg:true ~humaness:true)
+
+(* explore_global_trending(hours) / explore_global_mostzapped(hours): limit 100, grouped by author,
+   Julia's in-memory path (these two are not in app_funcalls_with_pgfuncs) *)
+let explore_global ~timeframe ~hours ?(pg = false) ?(humaness = false) (ctx : ctx) (kw : Kw.t) : outcome =
+  let a = scored_args_of_kw kw ~timeframe ~scope_pubkeys:[] ~pg ~humaness in
+  let a = { a with limit = 100; created_after = now () - (hours * 3600); group_by_pubkey = true } in
+  match scored_content ctx a with Some msgs -> Handled (messages msgs) | None -> julia_error
+
+let explore_global_trending_24h = explore_global ~timeframe:"trending" ~hours:24
+let explore_global_mostzapped_4h = explore_global ~timeframe:"mostzapped" ~hours:4
+
+(* app_ext.jl scored_users *)
+let scored_users_with (ctx : ctx) ~limit ~since ~user_pubkey : outcome =
+  ignore user_pubkey;
+  if limit > 1000 || since < now () - (7 * 24 * 3600) then julia_error
+  else
+    with_cache ctx (fun c ->
+        let rows = Queries.scored_users c ~since ~limit in
+        let domains_json = Yojson.Safe.to_string (`List (List.map (fun d -> `String d) ctx.cfg.trending_blocked_domains)) in
+        let pass = if rows = [] then SS.empty else SS.of_list (Queries.scored_users_pass c ~pubkeys_json:(Queries.hexes_json (List.map fst rows)) ~domains_json) in
+        let pubkeys = List.filter (fun (pk, _) -> SS.mem pk pass) rows |> List.stable_sort (fun (_, a) (_, b) -> compare b a) |> List.filteri (fun i _ -> i < limit) in
+        let _, cards = user_cards c (List.map fst pubkeys) in
+        let scores = content_msg Kind.user_scores (Yojson.Safe.to_string (`Assoc (List.map (fun (pk, v) -> (pk, i64json v)) pubkeys))) in
+        Handled (messages (cards @ [ scores ])))
+
+let scored_users (ctx : ctx) (kw : Kw.t) : outcome =
+  scored_users_with ctx ~limit:(Kw.int kw "limit" ~default:20) ~since:(Kw.int kw "since" ~default:0) ~user_pubkey:(user_pubkey_opt kw)
+
+let scored_users_24h (ctx : ctx) (kw : Kw.t) : outcome =
+  scored_users_with ctx ~limit:(6 * 4) ~since:(now () - (24 * 3600)) ~user_pubkey:(user_pubkey_opt kw)
+
+(* {2 trending hashtags} (app_ext.jl trending_hashtags, @cached) *)
+
+(* hashtag-whitelist.txt: "https://primal.net/search/%23<tag> <n>" lines until a "-----" line *)
+let hashtag_whitelist (ctx : ctx) : string list =
+  match Files.read_opt (cm_file ctx "hashtag-whitelist.txt") with
+  | None -> []
+  | Some s ->
+      let rec go acc = function
+        | [] -> List.rev acc
+        | l :: rest ->
+            if String.length l >= 5 && String.sub l 0 5 = "-----" then List.rev acc
+            else
+              match String.split_on_char ' ' (String.trim l) |> List.filter (fun w -> w <> "") with
+              | w :: _ when String.length w > 29 -> go (String.sub w 29 (String.length w - 29) :: acc) rest
+              | _ -> go acc rest
+      in
+      go [] (String.split_on_char '\n' s)
+
+let trending_hashtags_compute (ctx : ctx) ~(created_after : int) : string =
+  let whitelist = hashtag_whitelist ctx in
+  let rows = if whitelist = [] then [] else with_cache ctx (fun c -> Queries.hashtag_rows c ~since:created_after ~whitelist_json:(Queries.hexes_json whitelist)) in
+  (* Accumulator{String, Float32}: Float32(acc + followers / nposts), in created_at order *)
+  let acc : (string, float) Hashtbl.t = Hashtbl.create 1024 in
+  let order = ref [] in
+  List.iter
+    (fun (ht, followers, nposts) ->
+      let user_score = Int64.to_float followers /. Int64.to_float nposts in
+      match Hashtbl.find_opt acc ht with
+      | Some v -> Hashtbl.replace acc ht (f32 (v +. user_score))
+      | None -> order := ht :: !order; Hashtbl.replace acc ht (f32 user_score))
+    rows;
+  let res = List.rev_map (fun ht -> (ht, Hashtbl.find acc ht)) !order |> List.stable_sort (fun (_, a) (_, b) -> compare b a) in
+  let items = List.map (fun (ht, v) -> Printf.sprintf "[%s,%s]" (Yojson.Safe.to_string (`String ht)) (f32_string v)) res in
+  content_msg Kind.hashtags ("[" ^ String.concat "," items ^ "]")
+
+(* @cached <period> f: computed on first use, kept for the period *)
+let cached : (string, float * string) Hashtbl.t = Hashtbl.create 8
+let cached_lock = Mutex.create ()
+
+let with_ttl (key : string) ~(ttl : float) (compute : unit -> string) : string =
+  let now_f = Unix.gettimeofday () in
+  Mutex.lock cached_lock;
+  let hit = match Hashtbl.find_opt cached key with Some (exp, v) when exp > now_f -> Some v | _ -> None in
+  Mutex.unlock cached_lock;
+  match hit with
+  | Some v -> v
+  | None ->
+      let v = compute () in
+      Mutex.lock cached_lock;
+      Hashtbl.replace cached key (now_f +. ttl, v);
+      Mutex.unlock cached_lock;
+      v
+
+let trending_hashtags (ctx : ctx) (kw : Kw.t) : outcome =
+  let created_after = Kw.int kw "created_after" ~default:(now () - (7 * 24 * 3600)) in
+  Handled (messages [ trending_hashtags_compute ctx ~created_after ])
+
+let trending_hashtags_4h (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages [ with_ttl "trending_hashtags_4h" ~ttl:600. (fun () -> trending_hashtags_compute ctx ~created_after:(now () - (4 * 3600))) ])
+
+(* Julia: "!! 7d->2d" *)
+let trending_hashtags_7d (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages [ with_ttl "trending_hashtags_7d" ~ttl:14400. (fun () -> trending_hashtags_compute ctx ~created_after:(now () - (2 * 24 * 3600))) ])
+
+(* {2 explore_zaps / explore_people / explore_topics / explore_legend_counts} *)
+
+(* app.jl response_messages_for_zaps(zaps; order_by=:amount_sats): shared with event_zaps_by_satszapped *)
+let zap_messages (c : Db.cache Db.conn) (zaps : Queries.zap_row list) : string list =
+  let hex = Hex_util.encode in
+  let ids = List.concat_map (fun (z : Queries.zap_row) -> hex z.zap_receipt_id :: Option.to_list (Option.map hex z.zr_event_id)) zaps in
+  let evs = if ids = [] then [] else Queries.events_by_ids c ~event_ids_json:(Queries.hexes_json ids) in
+  let md_pks =
+    List.concat_map (fun (z : Queries.zap_row) -> List.filter_map (Option.map hex) [ z.sender; z.receiver ]) zaps
+    |> List.fold_left (fun acc pk -> if List.mem pk acc then acc else pk :: acc) []
+    |> List.rev
+  in
+  let per_zap =
+    List.concat_map
+      (fun (z : Queries.zap_row) ->
+        let opt_hex = function Some b -> `String (hex b) | None -> `Null in
+        Option.to_list (List.assoc_opt (hex z.zap_receipt_id) evs)
+        @ (match z.zr_event_id with Some e -> Option.to_list (List.assoc_opt (hex e) evs) | None -> [])
+        @ [
+            content_msg Kind.zap_event
+              (Yojson.Safe.to_string
+                 (`Assoc
+                   [
+                     ("event_id", opt_hex z.zr_event_id);
+                     ("created_at", i64json z.zr_created_at);
+                     ("sender", opt_hex z.sender);
+                     ("receiver", opt_hex z.receiver);
+                     ("amount_sats", i64json z.amount_sats);
+                     ("zap_receipt_id", `String (hex z.zap_receipt_id));
+                   ]));
+          ])
+      zaps
+  in
+  let found, cards = user_cards c md_pks in
+  let mds = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> true | _ -> false) cards in
+  let rest = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> false | _ -> true) cards in
+  let all = per_zap @ mds @ counts_msg Kind.user_scores (follower_counts c found) @ verified_names c found @ rest in
+  let dedup = List.fold_left (fun acc m -> if List.mem m acc then acc else m :: acc) [] all |> List.rev in
+  dedup @ [ range_msg ~order_by:"amount_sats" (List.map (fun (z : Queries.zap_row) -> (hex z.zap_receipt_id, z.amount_sats)) zaps) ]
+
+let explore_zaps (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    let limit = min 50 limit in
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:100_000_000_000 in
+    let offset = Kw.int kw "offset" ~default:0 in
+    let created_after = Kw.int kw "created_after" ~default:(now () - (24 * 3600)) in
+    let user_pubkey = user_pubkey_opt kw in
+    with_cache ctx (fun c ->
+        let zaps = Queries.explore_zaps c ~since ~until ~created_after ~limit ~offset in
+        let zmsgs = zap_messages c zaps in
+        let eids = List.filter_map (fun (z : Queries.zap_row) -> Option.map Hex_util.encode z.zr_event_id) zaps |> List.sort_uniq compare in
+        let posts = if eids = [] then [] else Queries.enrich_events c ~event_ids_json:(Queries.hexes_json eids) ~user_pubkey ~apply_humaness_check:false ~orderby:"created_at" in
+        let all = List.fold_left (fun acc m -> if List.mem m acc then acc else m :: acc) [] (zmsgs @ posts) |> List.rev in
+        Handled (messages all))
+
+let primal_pubkey_hex = "532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb"
+
+let explore_people (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = min 50 (Kw.int kw "limit" ~default:20) in
+  let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:1_000_000_000 in
+  let offset = Kw.int kw "offset" ~default:0 in
+  let user_pubkey = match user_pubkey_opt kw with Some u -> u | None -> Hex_util.decode_exn primal_pubkey_hex in
+  with_cache ctx (fun c ->
+      let rows = Queries.explore_people c ~user_pubkey ~since ~until ~limit ~offset in
+      let hexes = List.map (fun (r : Queries.people_row) -> Hex_util.encode r.p_pubkey) rows in
+      let increases =
+        content_msg Kind.user_follower_count_increases
+          ("{"
+          ^ String.concat ","
+              (List.map2
+                 (fun (r : Queries.people_row) h ->
+                   Printf.sprintf "%s:{\"increase\":%Ld,\"ratio\":%s,\"count\":%Ld}" (Yojson.Safe.to_string (`String h)) r.p_increase (f32_string r.p_ratio) r.p_cnt)
+                 rows hexes)
+          ^ "}")
+      in
+      (* Julia user_infos from memory: mds, user_scores (found), follower counts (all), names, media *)
+      let found, cards = user_cards c hexes in
+      let mds = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> true | _ -> false) cards in
+      let rest = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> false | _ -> true) cards in
+      let infos =
+        mds @ counts_msg Kind.user_scores (follower_counts c found)
+        @ counts_msg ~always:true Kind.user_follower_counts (follower_counts c hexes)
+        @ verified_names c hexes @ rest
+      in
+      let range = if rows = [] then [] else [ range_msg ~order_by:"increase" (List.map2 (fun (r : Queries.people_row) h -> (h, r.p_increase)) rows hexes) ] in
+      Handled (messages ((increases :: infos) @ range)))
+
+let explore_topics (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages (with_cache ctx (fun c -> Queries.cache_messages c ~key:"precalculated_analytics_explore_topics")))
+
+(* est.commons.stats[:users] of app_ext.jl explore_legend_counts is the network_stats "users" *)
+let network_stats_users (ctx : ctx) ~net : int option =
+  match ctx.cfg.network_stats_url with
+  | None -> None
+  | Some url -> (
+      match Http.parse_url url with
+      | None -> None
+      | Some u -> (
+          match
+            Http.plain_request ~net ~clock:ctx.clock ~timeout:5.0 ~meth:"GET" ~body:{|["network_stats",{}]|} ~host:u.Http.host ~port:u.Http.port
+              ~path:u.Http.path ()
+          with
+          | 200, body -> (
+              match Yojson.Safe.from_string body with
+              | `List [ _; `String content ] -> (
+                  match Yojson.Safe.from_string content with
+                  | `Assoc f -> ( match List.assoc_opt "users" f with Some (`Int n) -> Some n | _ -> None)
+                  | _ -> None)
+              | _ -> None)
+          | _ -> None
+          | exception _ -> None))
+
+let net_ref : Eio_unix.Net.t option ref = ref None
+
+let explore_legend_counts (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let follows, inner, outer = with_cache ctx (fun c -> Queries.legend_counts c ~pubkey) in
+  (* est.commons.stats[:users]: the importer's network_stats "users" (the API node's own counter
+     only counts what that node imported) *)
+  let all_users = match !net_ref with Some net -> network_stats_users ctx ~net | None -> None in
+  Handled
+    (messages
+       [
+         Yojson.Safe.to_string
+           (`Assoc
+             [
+               ("kind", `Int Kind.explore_legend_counts);
+               ("pubkey", `String (Hex_util.encode pubkey));
+               ( "content",
+                 `String
+                   (Yojson.Safe.to_string
+                      (`Assoc
+                        [
+                          ("your_follows", i64json follows);
+                          ("your_inner_network", i64json inner);
+                          ("your_outer_network", i64json outer);
+                          ("all_users", match all_users with Some n -> `Int n | None -> `Null);
+                        ])) );
+             ]);
+       ])
+
+(* {2 mega_feed_directive, the rest of app.jl's spec ids} *)
+
+(* App.exposed_functions of the Julia node (2026-10-04): a spec id naming one of these is a call *)
+let julia_exposed =
+  [ "advanced_feed"; "advanced_search"; "allowlist"; "articles_stats"; "broadcast_events"; "broadcast_reply"; "check_filterlist";
+    "client_config"; "contact_list"; "creator_paid_tiers"; "drafts"; "dvm_feed_info"; "enrich_feed_events"; "event_actions";
+    "event_zaps_by_satszapped"; "events"; "events_nip46"; "explore"; "explore_global_mostzapped_4h"; "explore_global_trending_24h";
+    "explore_legend_counts"; "explore_media"; "explore_people"; "explore_topics"; "explore_zaps"; "feed"; "feed_2"; "feed_directive";
+    "feed_directive_2"; "find_reposts"; "follow_list"; "follow_lists"; "get_advanced_feeds"; "get_app_releases"; "get_app_settings";
+    "get_app_settings_2"; "get_app_subsettings"; "get_bookmarks"; "get_default_app_settings"; "get_default_app_subsettings";
+    "get_default_relays"; "get_directmsg_contacts"; "get_directmsgs"; "get_dvm_feeds"; "get_featured_authors"; "get_featured_dvm_feeds";
+    "get_filterlist"; "get_highlights"; "get_home_feeds"; "get_media_metadata"; "get_notifications"; "get_notifications_seen";
+    "get_queued_events_for_nip46"; "get_reads_feeds"; "get_reads_topics"; "get_recommended_blossom_servers"; "get_recommended_reads";
+    "get_recommended_users"; "get_suggested_users"; "get_suggested_users_2"; "get_user_relays"; "get_user_relays_2"; "import_events";
+    "import_poll_vote_event"; "invoices_to_zap_receipts"; "is_hidden_by_content_moderation"; "is_user_following"; "long_form_content_feed";
+    "long_form_content_thread_view"; "mega_feed_directive"; "membership_content_backup"; "membership_content_rebroadcast_cancel";
+    "membership_content_rebroadcast_start"; "membership_content_rebroadcast_status"; "membership_content_stats";
+    "membership_legends_leaderboard"; "membership_media_management_delete"; "membership_media_management_stats";
+    "membership_media_management_uploads"; "membership_premium_leaderboard"; "membership_recover_contact_list";
+    "membership_recovery_contact_lists"; "multi_kind_mega_feed_directive"; "multi_kind_thread_view"; "mutelist"; "mutelists";
+    "mutual_follows"; "network_stats"; "nip19_decode"; "nostr_stats"; "note_mentions"; "note_mentions_count";
+    "parameterized_replaceable_list"; "parametrized_replaceable_event"; "parametrized_replaceable_events"; "parse_advanced_search_query";
+    "poll_votes"; "relays"; "replaceable_event"; "report_note"; "report_user"; "reset_directmsg_count"; "reset_directmsg_counts";
+    "scored"; "scored_users"; "scored_users_24h"; "search"; "search_filterlist"; "server_name"; "set_app_settings"; "set_app_subsettings";
+    "set_last_time_user_was_online"; "set_notifications_seen"; "thread_view"; "top_article"; "trending_hashtags"; "trending_hashtags_4h";
+    "trending_hashtags_7d"; "trending_images"; "trending_images_4h"; "trusted_users"; "update_push_notification_token";
+    "update_push_notification_token_for_nip46"; "upload"; "upload_cancel"; "upload_chunk"; "upload_complete"; "user_followers";
+    "user_infos"; "user_of_ln_address"; "user_profile"; "user_profile_followed_by"; "user_profile_scored_content";
+    "user_profile_scored_media_thumbnails"; "user_search"; "user_zaps"; "user_zaps_by_satszapped"; "user_zaps_sent"; "zaps_feed" ]
+
+(* the explore specs reach scored_content with usepgfuncs + apply_humaness_check (mega_feed_directive
+   is in app_funcalls_with_pgfuncs) *)
+let mega_explore (ctx : ctx) (kwargs : Kw.t) ~timeframe ~created_after ?(grouped = false) ?(limit = None) ?kinds () : outcome =
+  let a = scored_args_of_kw kwargs ~timeframe ~scope_pubkeys:[] ~pg:true ~humaness:true in
+  let a = { a with created_after; kinds = (match kinds with Some k -> Some k | None -> a.kinds) } in
+  let a = if grouped then { a with group_by_pubkey = true; limit = Option.value limit ~default:100 } else a in
+  match scored_content ctx a with Some msgs -> Handled (messages msgs) | None -> julia_error
+
+let rec mega_feed_directive ?(depth = 0) (ctx : ctx) (kw : Kw.t) : outcome =
+  match parse_spec kw with
+  | `Missing -> Not_handled
+  | `Invalid -> Notice "invalid spec format"
+  | `Spec (s, kwargs) -> (
+      let sg k = Kw.str s k ~default:"" in
+      let id = sg "id" and kind = sg "kind" in
+      let skwa = Kw.fields (Kw.remove (Kw.remove s "id") "kind") in
+      let merged = Kw.merge kwargs skwa in
+      let hours () = Kw.int s "hours" ~default:24 in
+      let first_kind = match Kw.member s "kinds" with `List (`Int k :: _) -> Some [ k ] | _ -> None in
+      if Kw.has s "dvm_pubkey" && Kw.has s "dvm_id" then Not_handled
+      else if id = "nostr-reads-feed" || id = "advsearch" then Not_handled
+      else if id = "reads-feed" || kind = "reads" then mega_feed_directive_basic ctx kw
+      else if kind = "notes" then begin
+        match id with
+        | "latest" | "feed" -> mega_feed_directive_basic ctx kw
+        | "global-trending" -> mega_explore ctx kwargs ~timeframe:"trending" ~created_after:(now () - (hours () * 3600)) ()
+        | "all-notes" -> mega_explore ctx kwargs ~timeframe:"latest" ~created_after:0 ()
+        | "most-zapped" -> mega_explore ctx kwargs ~timeframe:"mostzapped" ~created_after:(now () - (hours () * 3600)) ~grouped:true ()
+        | "video-reels" | "wide-net-notes" | "strange-but-popular" | "engaging-discussions" | "only-tweets" | "bookmarked-by-follows"
+        | "important-notes-i-might-have-missed" | "search" | "muted-threads" ->
+            Not_handled
+        | _ -> Handled empty
+      end
+      else
+        match id with
+        | "explore-media" | "wide-net-notes" -> Not_handled
+        | "explore-zaps" -> explore_zaps ctx merged
+        | "hall-of-fame-notes" -> mega_explore ctx kwargs ~timeframe:"trending" ~created_after:0 ()
+        | "only-tweets" | "bookmarked-notes" | "important-notes-i-might-have-missed" -> Handled empty
+        | _ when List.mem id julia_exposed -> !dispatch_by_name ctx id merged
+        | _ when first_kind <> None -> (
+            let one_kind = Kw.member s "kinds" |> function `List (k :: _) -> `List [ k ] | v -> v in
+            match id with
+            | "latest" ->
+                let user = match Kw.member kwargs "user_pubkey" with `Null -> raise (Kw.Invalid "user_pubkey argument required") | v -> v in
+                feed ctx (Kw.set (Kw.set kwargs "pubkey" user) "kinds" one_kind)
+            | "global-trending" -> mega_explore ctx kwargs ~timeframe:"trending" ~created_after:(now () - (hours () * 3600)) ?kinds:first_kind ()
+            | "all-notes" -> mega_explore ctx kwargs ~timeframe:"latest" ~created_after:0 ?kinds:first_kind ()
+            | "most-zapped" -> mega_explore ctx kwargs ~timeframe:"mostzapped" ~created_after:(now () - (hours () * 3600)) ~grouped:true ?kinds:first_kind ()
+            | "feed" -> feed ctx (Kw.set (Kw.merge kwargs skwa) "kinds" one_kind)
+            | _ -> Handled empty)
+        | _ -> (
+            (* advanced-feeds.json: {"id", "specification"} entries *)
+            match Files.read_opt (cm_file ctx "advanced-feeds.json") with
+            | Some txt when depth < 2 -> (
+                match Yojson.Safe.from_string txt with
+                | `List feeds -> (
+                    let spec =
+                      List.find_map
+                        (function
+                          | `Assoc f when List.assoc_opt "id" f = Some (`String id) -> (
+                              match List.assoc_opt "specification" f with Some (`String sp) -> Some sp | _ -> None)
+                          | _ -> None)
+                        feeds
+                    in
+                    match spec with
+                    | Some sp -> mega_feed_directive ~depth:(depth + 1) ctx (Kw.set kwargs "spec" (`String sp))
+                    | None -> Handled empty)
+                | _ -> Handled empty
+                | exception _ -> Handled empty)
+            | _ -> Handled empty))
+
+let multi_kind_mega_feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
+  match parse_spec kw with
+  | `Missing -> Not_handled
+  | `Invalid -> Notice "invalid spec format"
+  | `Spec (s, kwargs) -> (
+      let kinds = match Kw.member kwargs "kinds" with `Null -> Kw.member s "kinds" | k -> k in
+      let id = Kw.str s "id" ~default:"" and kind = Kw.str s "kind" ~default:"" in
+      match kinds with
+      | `List (_ :: _) -> (
+          let kinds_l = match kinds with `List l -> List.filter_map (function `Int k -> Some k | _ -> None) l | _ -> [] in
+          match id with
+          | "latest" when List.mem kind [ "photos"; "short_videos"; "media" ] -> Not_handled (* advanced_search *)
+          | "global-trending" -> mega_explore ctx kwargs ~timeframe:"trending" ~created_after:(now () - (Kw.int s "hours" ~default:24 * 3600)) ~kinds:kinds_l ()
+          | "all-notes" -> mega_explore ctx kwargs ~timeframe:"latest" ~created_after:0 ~kinds:kinds_l ()
+          | "most-zapped" -> mega_explore ctx kwargs ~timeframe:"mostzapped" ~created_after:(now () - (Kw.int s "hours" ~default:24 * 3600)) ~grouped:true ~kinds:kinds_l ()
+          | _ -> multi_kind_mega_feed_directive_basic ctx kw)
+      | _ -> mega_feed_directive ctx kw)

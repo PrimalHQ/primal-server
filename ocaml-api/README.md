@@ -61,9 +61,32 @@ since/idsonly subscriptions had no producer left in Julia either. Compared with 
 ws-connector on 9007: push subscriptions identical in shape and cadence; `get_notifications`
 identical except the RANGE message, whose since/until Julia sets to the current second.
 
+**Phase 4b (2026-10-04):** the explore family is native: `explore` (app_ext.jl `scored_content` —
+global/network/tribe/follows scopes, latest/popular/trending/mostzapped, grouped-by-author and
+kinds variants, the retry loop that doubles the candidate window, Julia's post filter as one
+statement over the filterlist, deleted events, the trending-blocked nip05 domains
+(`trending_blocked_domains`) and the followers ≥ 5 rule), `explore_global_trending_24h`,
+`explore_global_mostzapped_4h`, `scored_users(_24h)`, `trending_hashtags(_4h/_7d)` (whitelist
+file, Float32 accumulation and Julia's shortest Float32 text, cached 600 s / 14400 s like
+`@cached`), `explore_zaps`, `explore_people`, `explore_topics` (the precalculated cache row),
+`explore_legend_counts`, and the explore ids of `mega_feed_directive` /
+`multi_kind_mega_feed_directive` (`global-trending`, `all-notes`, `most-zapped`,
+`hall-of-fame-notes`, `explore-zaps`, spec ids naming exposed functions, the `kinds` form and the
+`advanced-feeds.json` fallback; advsearch/dvm/video specs stay proxied, and `latest` with kind
+photos/short_videos/media no longer falls into `feed`). Against the reference ws-connector:
+`explore`, `explore_people`, `explore_topics`, `scored_users_24h`, `mega_feed_directive`,
+`trending_hashtags_7d` identical; `explore_zaps` differs only in which borderline sender passes
+the humaness threshold (Julia keeps the value computed at start-up, we read the current one);
+`explore_legend_counts` differs on purpose in `all_users` (Julia reports its own node's import
+counter — 2 on this host — where we report the importer's network_stats users) and in
+`your_outer_network` for 30 % of accounts (Julia walks contact lists capped at 5000 per follow,
+we count `pubkey_followers`). `trending_images(_4h)` is still proxied.
+
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
-stopped. This host's 9001 is the endpoint used by dev.primal.net (about two thousand connections in
+stopped (its tmux pane ran a relaunch loop: the first stop was followed by a silent respawn that
+shared 9001 with primal-api for 48 minutes; the loop was interrupted at 10:32 — check
+`ss -ltnp | grep :9001` after every change). This host's 9001 is the endpoint used by dev.primal.net (about two thousand connections in
 five days, one at a time), not one of the public cache hosts of `deploy.sh` (<production-host>, <production-host>, <production-host>), so
 it is the low-risk first host of the plan's one-week soak (until 2026-10-11). `cutover-9001.sh` is
 the script that was run; its header has the rollback (restore the config backup, roll back to 9006,
@@ -113,6 +136,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `wsconnvars_poll_s` | `1.0` | poll period of the `wsconnvars` table (idle timeout, logging knobs) |
 | `network_stats_url` | `"http://127.0.0.1:14018/api"` or `null` | `App.NETWORK_STATS_URL`: where `net_stats` pushes are fetched from (the importer node's HTTP `/api`) |
 | `netstats_period_s` | `2.0` | `1 / CacheServerHandlers.NETSTATS_RATE` |
+| `trending_blocked_domains` | `["bchnostr.com"]` | `App.TRENDING_BLOCKED_DOMAINS`: nip05 domains hidden from trending/explore |
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
@@ -125,8 +149,10 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 
 Build → start a NEW generation as transient unit `primal-ocaml-api-<timestamp>` next to the running
 one (SO_REUSEPORT: both hold the ports, the kernel balances new connections) → poll `/status` until
-the new pid reports `serving` → `SIGUSR1` the old generation(s), which stop accepting, finish
-in-flight requests, close idle WebSockets, close the rest after `drain_grace_s` and exit → SIGKILL
+the new pid reports `serving` → `SIGUSR1` the old generation(s), which close their listening
+socket in every domain at once (the kernel then routes every new connection to the new
+generation; before 2026-10-04 the socket stayed open through the grace period and the old
+binary kept serving a share of new connections), finish in-flight requests, close idle WebSockets, close the rest after `drain_grace_s` and exit → SIGKILL
 stragglers after `drain_grace_s + drain_ws_max_s`. A broken build or a new generation that does not
 become ready leaves the old one untouched. Logs append to `$PRIMAL_VAR_DIR/ocaml-api.log`;
 `PRIMAL_EXE` / `PRIMAL_API_CONFIG` override the binary and config (used by the private `ocaml-ext`

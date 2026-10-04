@@ -167,6 +167,20 @@ let test_filter_funcall () =
   | `Call (Primal_api.Funcall.Events, kw) -> Alcotest.(check bool) "idsonly" true (Kw.bool kw "idsonly" ~default:false)
   | _ -> Alcotest.fail "since/until"
 
+(* {1 Phase 4b} *)
+
+let test_f32 () =
+  Alcotest.(check string) "integer" "0.0" (H.f32_string 0.0);
+  Alcotest.(check string) "one third as Float32" "0.33333334" (H.f32_string (1.0 /. 3.0));
+  Alcotest.(check string) "ratio" "1.5" (H.f32_string 1.5);
+  Alcotest.(check string) "0.1 as Float32" "0.1" (H.f32_string 0.1)
+
+let test_mega_ids () =
+  let open Primal_api.Funcall in
+  List.iter (fun n -> Alcotest.(check string) n n (to_string (of_string n))) [ "explore"; "explore_zaps"; "trending_hashtags_7d" ];
+  Alcotest.(check bool) "julia_exposed has explore_people" true (List.mem "explore_people" H.julia_exposed);
+  Alcotest.(check bool) "julia_exposed has no bogus" false (List.mem "video-reels" H.julia_exposed)
+
 let () =
   Alcotest.run "primal_api"
     [
@@ -184,6 +198,8 @@ let () =
           Alcotest.test_case "notif json" `Quick test_notif_json;
           Alcotest.test_case "broadcast msgs" `Quick test_broadcast_msgs;
           Alcotest.test_case "filter funcall" `Quick test_filter_funcall;
+          Alcotest.test_case "f32 string" `Quick test_f32;
+          Alcotest.test_case "mega ids" `Quick test_mega_ids;
           Alcotest.test_case "wants_zlib" `Quick test_wants_zlib;
         ] );
       ( "handlers",

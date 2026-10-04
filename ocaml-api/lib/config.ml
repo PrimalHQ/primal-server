@@ -37,6 +37,7 @@ type t = {
   (* Phase 4a: push subscriptions *)
   network_stats_url : string option; (* App.NETWORK_STATS_URL: the importer's HTTP /api answering network_stats *)
   netstats_period_s : float; (* 1 / CacheServerHandlers.NETSTATS_RATE *)
+  trending_blocked_domains : string list; (* App.TRENDING_BLOCKED_DOMAINS: nip05 domains hidden from trending *)
 }
 
 let field j key =
@@ -90,6 +91,7 @@ let of_json (j : Yojson.Safe.t) : t =
     wsconnvars_poll_s = rfloat j "wsconnvars_poll_s";
     network_stats_url = rstr_opt j "network_stats_url";
     netstats_period_s = rfloat j "netstats_period_s";
+    trending_blocked_domains = (match field j "trending_blocked_domains" with `List l -> List.map U.to_string l | _ -> raise (Config_error "trending_blocked_domains: expected a list"));
   }
 
 let of_json_file (path : string) : t =

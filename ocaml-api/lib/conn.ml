@@ -121,10 +121,11 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
       match filter_funcall raw with
       | `Call (f, kwargs) -> dispatch_and_respond ~subid ~fc:("filter:" ^ Funcall.to_string f) f kwargs
       | `Reject n ->
-          (* Julia: NOTICE without EOSE, then close(ws) *)
+          (* Julia: NOTICE without EOSE, then close(ws); let the notice reach the wire first *)
           c.session.ws_send_text (Protocol.notice subid n);
           Stats.incr stats.sent;
           Stats.incr stats.handled;
+          Eio.Time.sleep clock 0.1;
           request_close c;
           true
       | `None -> false)

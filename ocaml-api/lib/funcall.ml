@@ -64,6 +64,19 @@ type t =
   | Net_stats
   | Rebroadcasting_status
   | Notifications
+  (* Phase 4b *)
+  | Explore
+  | Explore_global_trending_24h
+  | Explore_global_mostzapped_4h
+  | Scored_users
+  | Scored_users_24h
+  | Trending_hashtags
+  | Trending_hashtags_4h
+  | Trending_hashtags_7d
+  | Explore_zaps
+  | Explore_people
+  | Explore_topics
+  | Explore_legend_counts
   | Proxied of string
 
 let names : (string * t) list =
@@ -125,6 +138,18 @@ let names : (string * t) list =
     ("net_stats", Net_stats);
     ("rebroadcasting_status", Rebroadcasting_status);
     ("notifications", Notifications);
+    ("explore", Explore);
+    ("explore_global_trending_24h", Explore_global_trending_24h);
+    ("explore_global_mostzapped_4h", Explore_global_mostzapped_4h);
+    ("scored_users", Scored_users);
+    ("scored_users_24h", Scored_users_24h);
+    ("trending_hashtags", Trending_hashtags);
+    ("trending_hashtags_4h", Trending_hashtags_4h);
+    ("trending_hashtags_7d", Trending_hashtags_7d);
+    ("explore_zaps", Explore_zaps);
+    ("explore_people", Explore_people);
+    ("explore_topics", Explore_topics);
+    ("explore_legend_counts", Explore_legend_counts);
   ]
 
 let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
@@ -225,4 +250,19 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Net_stats -> run ~moderate:false Handlers.net_stats
   | Rebroadcasting_status -> run ~moderate:false Handlers.rebroadcasting_status
   | Notifications -> run ~moderate:false Handlers.notifications
+  | Explore -> run ~moderate:false Handlers.explore
+  | Explore_global_trending_24h -> run Handlers.explore_global_trending_24h
+  | Explore_global_mostzapped_4h -> run Handlers.explore_global_mostzapped_4h
+  | Scored_users -> run Handlers.scored_users
+  | Scored_users_24h -> run Handlers.scored_users_24h
+  | Trending_hashtags -> run Handlers.trending_hashtags
+  | Trending_hashtags_4h -> run Handlers.trending_hashtags_4h
+  | Trending_hashtags_7d -> run Handlers.trending_hashtags_7d
+  | Explore_zaps -> run Handlers.explore_zaps
+  | Explore_people -> run Handlers.explore_people
+  | Explore_topics -> run Handlers.explore_topics
+  | Explore_legend_counts -> run Handlers.explore_legend_counts
   | Proxied _ -> Response.Not_handled
+
+(* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)
+let () = Handlers.dispatch_by_name := fun ctx name kw -> match of_string name with Proxied _ -> Response.Not_handled | f -> dispatch ctx f kw

@@ -694,3 +694,290 @@ let directmsg_counts (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string *
     "select encode(receiver, 'hex'), cnt from pubkey_directmsgs_cnt \
      where receiver = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) and sender is null"]
   |> List.filter_map (function Some k, Some v -> Some (k, v) | _ -> None)
+
+(* {1 Phase 4b: explore / scored content} (app_ext.jl scored_content, scored_users, the explore funcalls) *)
+
+type scored_field = Created_at | Score | Satszapped (* latest | popular,trending | mostzapped *)
+
+let scored_field_name = function Created_at -> "created_at" | Score -> "score" | Satszapped -> "satszapped"
+
+type scored_row = { s_pubkey : string; s_event_id : string; s_value : int64 }
+
+let scored_rows l = List.filter_map (function Some pk, Some eid, Some v -> Some { s_pubkey = pk; s_event_id = eid; s_value = v } | _ -> None) l
+
+
+(* group_by_pubkey (explore_global_trending / mostzapped): the best event per author among the
+   top authors, with Julia's trending hiding inside the grouping *)
+let scored_global_grouped (c : Db.cache Db.conn) ~(field : scored_field) ~created_after ~user_pubkey ~n ~offset ~gm_mode ~kinds_json : scored_row list =
+  let dbh = Db.raw c in
+  let created_after = i64 created_after and n = i64 n and offset = i64 offset in
+  scored_rows
+    (match field with
+    | Created_at ->
+        [%pgsql dbh
+          "with a as (select es.author_pubkey, max(es.created_at) as maxfield from event_stats es \
+             where es.created_at > 0 and $created_after <= es.created_at and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
+               and not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
+       and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+             group by es.author_pubkey order by maxfield desc limit $n offset $offset) \
+           select a.author_pubkey, es.event_id, es.created_at from a, event_stats es \
+           where a.author_pubkey = es.author_pubkey and a.maxfield = es.created_at and es.created_at > 0 and $created_after <= es.created_at \
+             and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) and ($?gm_mode::text is null \
+       or ($?gm_mode::text = 'gmonly' and exists (select 1 from events eg where eg.id = es.event_id and (eg.content ilike '%gm%' or eg.content ilike '%good morning%'))) \
+       or ($?gm_mode::text = 'nogm' and not exists (select 1 from events eg where eg.id = es.event_id and (eg.content ilike '%gm%' or eg.content ilike '%good morning%'))))"]
+    | Score ->
+        [%pgsql dbh
+          "with a as (select es.author_pubkey, max(es.score) as maxfield from event_stats es \
+             where es.score > 0 and $created_after <= es.created_at and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
+               and not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
+       and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+             group by es.author_pubkey order by maxfield desc limit $n offset $offset) \
+           select a.author_pubkey, es.event_id, es.score from a, event_stats es \
+           where a.author_pubkey = es.author_pubkey and a.maxfield = es.score and es.score > 0 and $created_after <= es.created_at \
+             and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) and ($?gm_mode::text is null \
+       or ($?gm_mode::text = 'gmonly' and exists (select 1 from events eg where eg.id = es.event_id and (eg.content ilike '%gm%' or eg.content ilike '%good morning%'))) \
+       or ($?gm_mode::text = 'nogm' and not exists (select 1 from events eg where eg.id = es.event_id and (eg.content ilike '%gm%' or eg.content ilike '%good morning%'))))"]
+    | Satszapped ->
+        [%pgsql dbh
+          "with a as (select es.author_pubkey, max(es.satszapped) as maxfield from event_stats es \
+             where es.satszapped > 0 and $created_after <= es.created_at and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
+               and not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
+       and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+             group by es.author_pubkey order by maxfield desc limit $n offset $offset) \
+           select a.author_pubkey, es.event_id, es.satszapped from a, event_stats es \
+           where a.author_pubkey = es.author_pubkey and a.maxfield = es.satszapped and es.satszapped > 0 and $created_after <= es.created_at \
+             and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) and ($?gm_mode::text is null \
+       or ($?gm_mode::text = 'gmonly' and exists (select 1 from events eg where eg.id = es.event_id and (eg.content ilike '%gm%' or eg.content ilike '%good morning%'))) \
+       or ($?gm_mode::text = 'nogm' and not exists (select 1 from events eg where eg.id = es.event_id and (eg.content ilike '%gm%' or eg.content ilike '%good morning%'))))"]
+    )
+
+
+(* the ungrouped global query: the top (n + offset) * 10 candidates by the field, then Julia's
+   trending hiding, then the page *)
+let scored_global (c : Db.cache Db.conn) ~(field : scored_field) ~created_after ~since ~until ~user_pubkey ~n ~offset ~kinds_json : scored_row list =
+  let dbh = Db.raw c in
+  let created_after = i64 created_after and n = i64 n and offset = i64 offset in
+  let candidates = Int64.mul (Int64.add n offset) 10L in
+  let since = Option.map i64 since and until = Option.map i64 until in
+  scored_rows
+    (match field with
+    | Created_at ->
+        [%pgsql dbh
+          "with top_candidates as materialized ( \
+             select es.author_pubkey, es.event_id, es.created_at from event_stats es \
+             where es.created_at > 0 and $created_after <= es.created_at \
+               and ($?since::int8 is null or $?since::int8 <= es.created_at) and ($?until::int8 is null or $?until::int8 >= es.created_at) \
+               and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
+             order by es.created_at desc limit $candidates) \
+           select es.author_pubkey, es.event_id, es.created_at from top_candidates es \
+           where not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
+       and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+           order by es.created_at desc limit $n offset $offset"]
+    | Score ->
+        [%pgsql dbh
+          "with top_candidates as materialized ( \
+             select es.author_pubkey, es.event_id, es.score from event_stats es \
+             where es.score > 0 and $created_after <= es.created_at \
+               and ($?since::int8 is null or $?since::int8 <= es.score) and ($?until::int8 is null or $?until::int8 >= es.score) \
+               and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
+             order by es.score desc limit $candidates) \
+           select es.author_pubkey, es.event_id, es.score from top_candidates es \
+           where not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
+       and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+           order by es.score desc limit $n offset $offset"]
+    | Satszapped ->
+        [%pgsql dbh
+          "with top_candidates as materialized ( \
+             select es.author_pubkey, es.event_id, es.satszapped from event_stats es \
+             where es.satszapped > 0 and $created_after <= es.created_at \
+               and ($?since::int8 is null or $?since::int8 <= es.satszapped) and ($?until::int8 is null or $?until::int8 >= es.satszapped) \
+               and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
+             order by es.satszapped desc limit $candidates) \
+           select es.author_pubkey, es.event_id, es.satszapped from top_candidates es \
+           where not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
+       and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+           order by es.satszapped desc limit $n offset $offset"]
+    )
+
+
+(* timeframe latest with kinds: straight from the event table *)
+let latest_global_kinds (c : Db.cache Db.conn) ~created_after ~(kinds_json : string) ~n ~offset : scored_row list =
+  let dbh = Db.raw c in
+  let created_after = i64 created_after and n = i64 n and offset = i64 offset in
+  [%pgsql dbh
+    "select e.pubkey, e.id, e.created_at from event e \
+     where e.kind = any(array(select (jsonb_array_elements_text($kinds_json::jsonb))::int8)) and $created_after <= e.created_at \
+     order by e.created_at desc limit $n offset $offset"]
+  |> List.map (fun (pk, eid, v) -> { s_pubkey = pk; s_event_id = eid; s_value = v })
+
+(* scope tribe/follows: the page of each author's events by the field *)
+let scored_by_pubkeys (c : Db.cache Db.conn) ~(field : scored_field) ~created_after ~since ~until ~(pubkeys_json : string) ~n ~offset : scored_row list =
+  let dbh = Db.raw c in
+  let created_after = i64 created_after and lo = Int64.add (i64 offset) 1L and hi = i64 (offset + n) in
+  let since = Option.map i64 since and until = Option.map i64 until in
+  scored_rows
+    (match field with
+    | Created_at ->
+        [%pgsql dbh
+          "select author_pubkey, event_id, created_at from ( \
+             select es.author_pubkey, es.event_id, es.created_at, row_number() over (partition by es.author_pubkey order by es.created_at desc) as rn \
+             from event_stats es \
+             where es.author_pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) \
+               and $created_after <= es.created_at \
+               and ($?since::int8 is null or $?since::int8 <= es.created_at) and ($?until::int8 is null or $?until::int8 >= es.created_at)) t \
+           where rn >= $lo and rn <= $hi"]
+    | Score ->
+        [%pgsql dbh
+          "select author_pubkey, event_id, score from ( \
+             select es.author_pubkey, es.event_id, es.score, row_number() over (partition by es.author_pubkey order by es.score desc) as rn \
+             from event_stats es \
+             where es.author_pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) \
+               and $created_after <= es.created_at \
+               and ($?since::int8 is null or $?since::int8 <= es.score) and ($?until::int8 is null or $?until::int8 >= es.score)) t \
+           where rn >= $lo and rn <= $hi"]
+    | Satszapped ->
+        [%pgsql dbh
+          "select author_pubkey, event_id, satszapped from ( \
+             select es.author_pubkey, es.event_id, es.satszapped, row_number() over (partition by es.author_pubkey order by es.satszapped desc) as rn \
+             from event_stats es \
+             where es.author_pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) \
+               and $created_after <= es.created_at \
+               and ($?since::int8 is null or $?since::int8 <= es.satszapped) and ($?until::int8 is null or $?until::int8 >= es.satszapped)) t \
+           where rn >= $lo and rn <= $hi"]
+    )
+
+
+(* Julia's in-memory post filter of scored_content, table-driven: Filterlist.access_pubkey_unblocked
+   (filterlist rows with blocked = false), import_pubkey_blocked (spam/csam/impersonation),
+   analytics_pubkey_blocked / analytics_event_blocked (grp trending), deleted events, the
+   trending-blocked nip05 domains (App.TRENDING_BLOCKED_DOMAINS) and followers >= 5. Takes
+   [[event hex, pubkey hex], ...] and returns the event ids that pass. *)
+let scored_pass (c : Db.cache Db.conn) ~(posts_json : string) ~(domains_json : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select p->>0 from jsonb_array_elements($posts_json::jsonb) x(p) \
+     where exists (select 1 from filterlist fl where fl.target = decode(p->>1, 'hex') and fl.target_type = 'pubkey' and not fl.blocked) \
+        or (not exists (select 1 from filterlist fl where fl.target = decode(p->>1, 'hex') and fl.target_type = 'pubkey' and fl.blocked and fl.grp in ('spam', 'csam', 'impersonation', 'trending')) \
+            and not exists (select 1 from filterlist fl where fl.target = decode(p->>0, 'hex') and fl.target_type = 'event' and fl.blocked and fl.grp = 'trending') \
+            and not exists (select 1 from deleted_events de where de.event_id = decode(p->>0, 'hex')) \
+            and not exists (select 1 from meta_data md, events e, jsonb_array_elements_text($domains_json::jsonb) d \
+                            where md.key = decode(p->>1, 'hex') and e.id = md.value \
+                              and (lower(substring(e.content from '\"nip05\"\\s*:\\s*\"[^\"@]*@([^\"]+)\"')) = d::text \
+                                   or lower(substring(e.content from '\"nip05\"\\s*:\\s*\"[^\"@]*@([^\"]+)\"')) like '%.' || d::text)) \
+            and coalesce((select pfc.value from pubkey_followers_cnt pfc where pfc.key = decode(p->>1, 'hex')), 0) >= 5)"]
+  |> List.filter_map Fun.id
+
+(* enrich_feed_events over (event hex, value) pairs; the value plays created_at in the SQL *)
+let enrich_posts (c : Db.cache Db.conn) ~(posts_json : string) ~user_pubkey ~apply_humaness_check : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select distinct e::text from enrich_feed_events( \
+       array(select row(decode(p->>0, 'hex'), (p->>1)::int8)::post from jsonb_array_elements($posts_json::jsonb) x(p)), \
+       $?user_pubkey, $apply_humaness_check, 'created_at') f(e) where e is not null"]
+  |> List.filter_map Fun.id
+
+(* app_ext.jl scored_users: best score24h per author since [since] *)
+let scored_users (c : Db.cache Db.conn) ~since ~limit : (string * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since and limit = i64 limit in
+  [%pgsql dbh
+    "select encode(author_pubkey, 'hex'), max(score24h) as maxscore from event_stats where $since <= created_at \
+     group by author_pubkey order by maxscore desc limit $limit"]
+  |> List.filter_map (function Some pk, Some v -> Some (pk, v) | _ -> None)
+
+(* scored_users' filter: unblocked, or not analytics-blocked, not domain-hidden and followers >= 5 *)
+let scored_users_pass (c : Db.cache Db.conn) ~(pubkeys_json : string) ~(domains_json : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select a::text from jsonb_array_elements_text($pubkeys_json::jsonb) x(a) \
+     where exists (select 1 from filterlist fl where fl.target = decode(a::text, 'hex') and fl.target_type = 'pubkey' and not fl.blocked) \
+        or (not exists (select 1 from filterlist fl where fl.target = decode(a::text, 'hex') and fl.target_type = 'pubkey' and fl.blocked and fl.grp = 'trending') \
+            and not exists (select 1 from meta_data md, events e, jsonb_array_elements_text($domains_json::jsonb) d \
+                            where md.key = decode(a::text, 'hex') and e.id = md.value \
+                              and (lower(substring(e.content from '\"nip05\"\\s*:\\s*\"[^\"@]*@([^\"]+)\"')) = d::text \
+                                   or lower(substring(e.content from '\"nip05\"\\s*:\\s*\"[^\"@]*@([^\"]+)\"')) like '%.' || d::text)) \
+            and coalesce((select pfc.value from pubkey_followers_cnt pfc where pfc.key = decode(a::text, 'hex')), 0) >= 5)"]
+  |> List.filter_map Fun.id
+
+(* Julia followers(est, pubkey): up to 10000 followers *)
+let followers_hex (c : Db.cache Db.conn) ~pubkey : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select encode(follower_pubkey, 'hex') from pubkey_followers where pubkey = $pubkey limit 10000"] |> List.filter_map Fun.id
+
+(* app_ext.jl trending_hashtags: (hashtag, author followers, author post count) in created_at order,
+   for the whitelisted hashtags since [since] *)
+let hashtag_rows (c : Db.cache Db.conn) ~since ~(whitelist_json : string) : (string * int64 * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since in
+  [%pgsql dbh
+    "with h as (select eh.event_id, eh.hashtag, eh.created_at, eh.rowid from event_hashtags eh \
+                where eh.created_at >= $since and eh.hashtag = any(array(select jsonb_array_elements_text($whitelist_json::jsonb)))), \
+          he as (select h.hashtag, h.created_at, h.rowid, ev.pubkey from h join events ev on ev.id = h.event_id), \
+          st as (select a.pubkey, (select count(1) from pubkey_events pe where pe.pubkey = a.pubkey) as nposts, \
+                        coalesce((select pfc.value from pubkey_followers_cnt pfc where pfc.key = a.pubkey), 0) as followers \
+                 from (select distinct pubkey from he) a) \
+     select he.hashtag, st.followers, st.nposts from he join st on st.pubkey = he.pubkey order by he.created_at asc, he.rowid asc"]
+  |> List.filter_map (function Some h, Some f, Some n -> Some (h, f, n) | _ -> None)
+
+(* app.jl explore_zaps *)
+(* Main.TrustRank.humaness_threshold[]: the rank of the 50000th best pubkey (dag.jl) *)
+let humaness_threshold (c : Db.cache Db.conn) : float =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select humaness_threshold_trustrank()"] with Some t :: _ -> t | _ -> 0.0
+
+let explore_zaps (c : Db.cache Db.conn) ~since ~until ~created_after ~limit ~offset : zap_row list =
+  let dbh = Db.raw c in
+  let threshold = humaness_threshold c in
+  let since = i64 since and until = i64 until and created_after = i64 created_after and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats \
+     from og_zap_receipts zr, pubkey_trustrank tr, events es \
+     where zr.amount_sats >= $since and zr.amount_sats <= $until and zr.created_at >= $created_after \
+       and zr.sender = tr.pubkey and tr.rank >= $threshold \
+       and zr.event_id = es.id and es.kind = any ('{1, 30023}'::int8[]) \
+     order by zr.amount_sats desc, zr.event_id asc limit $limit offset $offset"]
+  |> List.filter_map (fun (zid, ca, eid, s, r, a) ->
+         match (zid, ca, a) with
+         | Some zap_receipt_id, Some zr_created_at, Some amount_sats ->
+             Some { zap_receipt_id; zr_created_at; zr_event_id = eid; sender = s; receiver = r; amount_sats }
+         | _ -> None)
+
+type people_row = { p_pubkey : string; p_cnt : int64; p_increase : int64; p_ratio : float }
+
+(* app.jl explore_people: follower-count increases outside the viewer's follows *)
+let explore_people (c : Db.cache Db.conn) ~user_pubkey ~since ~until ~limit ~offset : people_row list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select dfi.pubkey, dfi.cnt, dfi.increase, dfi.ratio from daily_followers_cnt_increases dfi \
+     where dfi.increase >= $since and dfi.increase <= $until \
+       and not exists (select 1 from pubkey_followers pf1 where pf1.follower_pubkey = $user_pubkey and pf1.pubkey = dfi.pubkey) \
+       and user_has_bio(dfi.pubkey) \
+     order by dfi.increase desc, dfi.pubkey asc limit $limit offset $offset"]
+  |> List.map (fun (p_pubkey, p_cnt, p_increase, p_ratio) -> { p_pubkey; p_cnt; p_increase; p_ratio })
+
+(* est.dyn[:cache][key]: a JSON array of messages *)
+let cache_messages (c : Db.cache Db.conn) ~(key : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select jsonb_array_elements(value)::text from cache where key = $key"] |> List.filter_map Fun.id
+
+(* app_ext.jl explore_legend_counts: follows (the contact list, i.e. pubkey_followers rows of the
+   follower), inner network = follows + up to 10000 followers, outer network = follows + their follows *)
+let legend_counts (c : Db.cache Db.conn) ~pubkey : int64 * int64 * int64 =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "with f as (select pubkey from pubkey_followers where follower_pubkey = $pubkey), \
+            fl as (select follower_pubkey as pubkey from pubkey_followers where pubkey = $pubkey limit 10000) \
+       select (select count(*) from f), \
+              (select count(distinct pubkey) from (select pubkey from f union all select pubkey from fl) x), \
+              (select count(distinct pf2.pubkey) from (select pubkey from f union all select pf2.pubkey from f join pubkey_followers pf2 on pf2.follower_pubkey = f.pubkey) pf2)"]
+  with
+  | (Some a, Some b, Some d) :: _ -> (a, b, d)
+  | _ -> (0L, 0L, 0L)
