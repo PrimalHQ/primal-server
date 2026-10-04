@@ -1,0 +1,8 @@
+; The relay fetcher (ocaml-plan.md §8): fetching.jl + firehose_server.jl + the deduplicated
+; message archive of DeduplicatedEventStorage, as one daemon.
+(library
+ (name primal_fetcher)
+ (public_name primal_fetcher)
+ (flags
+  (:standard -w -33-26-27 -open Primal_common))
+ (libraries primal_common unix str threads.posix eio eio.unix yojson))

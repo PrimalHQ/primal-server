@@ -41,3 +41,11 @@ dune `(env ...)`. `sql/migrate.sh` applies versioned migrations (`sql/migrations
 - Connect under a scoped switch (see `Postgres.connect`): a failed connect on a long-lived switch
   leaks an fd.
 - Config is a JSON file per daemon, every key required; secrets are file paths.
+
+### Notes added with the fetcher (Phase 7)
+
+- `Http.tls_wrap` parses the system CA bundle once per process (`Http.authenticator`, forced by
+  `Http.init_tls ()` at daemon start); `Ca_certs.authenticator ()` per connection was most of a
+  wss connect's cost.
+- `Ws_client` replaces its `Buf_read` with a fresh 4 KB one after a frame over 64 KB when nothing
+  is buffered (`shrink`): a long-lived relay connection otherwise keeps its largest frame's buffer.

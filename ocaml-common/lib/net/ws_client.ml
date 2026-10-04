@@ -12,7 +12,7 @@
 
 type t = {
   flow : Eio.Flow.two_way_ty Eio.Std.r;
-  reader : Eio.Buf_read.t;
+  mutable reader : Eio.Buf_read.t; (* replaced by a fresh small one after a large frame, see [shrink] *)
   clock : float Eio.Time.clock_ty Eio.Std.r;
   mutable closed : bool;
   resp_headers : (string * string) list; (* the 101 response's headers, lowercased names *)
@@ -150,6 +150,15 @@ let read_frame (t : t) : int * bool * string =
   in
   (opcode, fin, payload)
 
+(* A Buf_read grows to the largest frame ever seen and never shrinks; with thousands of long-lived
+   relay connections (the fetcher) that is most of the process. When nothing is buffered after a
+   frame over 64 KB, the reader is replaced by a fresh 4 KB one over the same flow. *)
+let shrink_threshold = 64 * 1024
+
+let shrink (t : t) (last_len : int) : unit =
+  if last_len > shrink_threshold && Eio.Buf_read.buffered_bytes t.reader = 0 then
+    t.reader <- Eio.Buf_read.of_flow ~max_size:(64 * 1024 * 1024) (t.flow :> Eio.Flow.source_ty Eio.Std.r)
+
 (* Receive the next complete message (text or binary; continuation frames assembled, pings
    answered). `Closed on close frame / EOF. *)
 let rec recv_frame (t : t) : [ `Text of string | `Binary of string | `Closed ] =
@@ -188,8 +197,8 @@ let rec recv_frame (t : t) : [ `Text of string | `Binary of string | `Closed ] =
     | 0x9, _, payload ->
         send_frame t ~opcode:0xa payload;
         recv_frame t
-    | 0x1, fin, payload -> `Text (assemble 0x1 payload fin)
-    | 0x2, fin, payload -> `Binary (assemble 0x2 payload fin)
+    | 0x1, fin, payload -> let m = assemble 0x1 payload fin in shrink t (String.length m); `Text m
+    | 0x2, fin, payload -> let m = assemble 0x2 payload fin in shrink t (String.length m); `Binary m
     | _ -> recv_frame t (* pong / unknown: ignore *)
 
 (* Receive the next complete TEXT message, skipping binary ones. *)

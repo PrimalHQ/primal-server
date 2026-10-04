@@ -102,11 +102,24 @@ let two_way_of_proxy ~sw ~net ~clock ~proxy ~host ~port : conn =
 (* Wrap a connected TCP flow in a TLS client session for [host] (SNI + system CA bundle).
    Requires Mirage_crypto_rng_unix.use_default () once per domain before the first call. Shared
    with Ws_client for wss://. *)
+(* The system CA bundle is parsed once per process (Ca_certs.authenticator reads and decodes it
+   on every call — far too slow for the fetcher's thousands of connections); [init_tls] forces it
+   on the main domain before other domains start. *)
+let authenticator_cache : X509.Authenticator.t option Atomic.t = Atomic.make None
+
+let authenticator () : X509.Authenticator.t =
+  match Atomic.get authenticator_cache with
+  | Some a -> a
+  | None ->
+      let a = match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m in
+      Atomic.set authenticator_cache (Some a);
+      a
+
+let init_tls () : unit = let (_ : X509.Authenticator.t) = authenticator () in ()
+
 let tls_wrap ~(host : string) (tcp : [> Eio.Flow.two_way_ty ] r) : Eio.Flow.two_way_ty r =
   let host_dn = Domain_name.host_exn (Domain_name.of_string_exn host) in
-  let authenticator =
-    match Ca_certs.authenticator () with Ok a -> a | Error (`Msg m) -> failwith m
-  in
+  let authenticator = authenticator () in
   let cfg =
     match Tls.Config.client ~authenticator ~peer_name:host_dn () with
     | Ok c -> c

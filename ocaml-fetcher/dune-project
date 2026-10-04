@@ -1,0 +1,5 @@
+(lang dune 3.0)
+(name primal_fetcher)
+(package
+ (name primal_fetcher)
+ (synopsis "Primal relay fetcher daemon (firehose) — OCaml 5 / Eio"))
