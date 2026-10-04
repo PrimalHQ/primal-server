@@ -4,16 +4,17 @@ exception Config_error of string
 
 module U = Yojson.Safe.Util
 
-type role = Dvm_checker | Pg_listener | Trustrank | Analytics
+type role = Dvm_checker | Pg_listener | Trustrank | Analytics | Dag
 
 let role_of_string = function
   | "dvm_checker" -> Dvm_checker
   | "pg_listener" -> Pg_listener
   | "trustrank" -> Trustrank
   | "analytics" -> Analytics
+  | "dag" -> Dag
   | s -> raise (Config_error ("roles: unknown role " ^ s))
 
-let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics"
+let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics" | Dag -> "dag"
 
 type t = {
   roles : role list;
@@ -46,6 +47,14 @@ type t = {
   analytics_key_suffix : string; (* "" = the live cache keys; "_ocaml" = shadow keys *)
   ollama_host : string option; (* App.OLLAMA_HOST; null disables gaming detection *)
   gaming_report_command : string list option; (* App.GAMING_REPORT_COMMAND argv; the report is its stdin *)
+  (* dag (dag_runner.jl) *)
+  dag_period_s : float; (* RUN_PERIOD 5 *)
+  dag_tasks : int; (* PROCESS_SEGMENTS_TASKS 8 *)
+  dag_dry_run : bool; (* roll every segment back, write no coverage *)
+  dag_since : int; (* initial since; Julia: 2023-01-01 *)
+  dag_poll_votes_enabled : bool; (* DAG.POLL_VOTE_IMPORT_ENABLED *)
+  dag_log : bool;
+  dag_dry_run_window_s : int; (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
 }
 
 let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")
@@ -99,6 +108,13 @@ let of_json (j : Yojson.Safe.t) : t =
     analytics_key_suffix = rstr j "analytics_key_suffix";
     ollama_host = rstr_opt j "ollama_host";
     gaming_report_command = (match field j "gaming_report_command" with `Null -> None | `List l -> Some (List.map U.to_string l) | _ -> raise (Config_error "gaming_report_command: expected a list or null"));
+    dag_period_s = rfloat j "dag_period_s";
+    dag_tasks = rint j "dag_tasks";
+    dag_dry_run = rbool j "dag_dry_run";
+    dag_since = rint j "dag_since";
+    dag_poll_votes_enabled = rbool j "dag_poll_votes_enabled";
+    dag_log = rbool j "dag_log";
+    dag_dry_run_window_s = rint j "dag_dry_run_window_s";
   }
 
 let of_json_file (path : string) : t =

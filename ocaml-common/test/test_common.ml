@@ -144,6 +144,19 @@ let test_s3_presign () =
   let signature = Digestif.SHA256.(to_hex (hmac_string ~key:(S3.signing_key ~secret:p.S3.secret_key ~date ~region:"us-east-1" ~service:"s3") sts)) in
   Alcotest.(check string) "aws documented signature" "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404" signature
 
+let test_langid () =
+  let det s = match Langid.detect s with Some (c, p) -> (c, p) | None -> ("", 0.0) in
+  let c, p = det "This is a reasonably long English sentence about the weather and the sea, written for a test." in
+  Alcotest.(check string) "english" "eng" c;
+  Alcotest.(check bool) "english confident" true (p > 0.5);
+  let c, _ = det "Это довольно длинное предложение на русском языке о погоде и море, написанное для теста." in
+  Alcotest.(check string) "russian" "rus" c;
+  let c, p = det "これは日本語の文章です。天気と海についての長めの文です。" in
+  Alcotest.(check string) "japanese" "jpn" c;
+  Alcotest.(check bool) "japanese confidence" true (p >= 0.5);
+  Alcotest.(check bool) "empty" true (Langid.detect "" = None);
+  Alcotest.(check bool) "digits only" true (Langid.detect "12345 67890 !!!" = None)
+
 let () =
   Alcotest.run "primal_common"
     [
@@ -161,6 +174,7 @@ let () =
         ] );
       ("relay_broadcast", [ Alcotest.test_case "parse url" `Quick test_relay_url ]);
       ("s3", [ Alcotest.test_case "sigv4 presign" `Quick test_s3_presign ]);
+      ("langid", [ Alcotest.test_case "detect" `Quick test_langid ]);
       ("phases", [ Alcotest.test_case "slots" `Quick test_phases ]);
       ("procinfo", [ Alcotest.test_case "formatting" `Quick test_procinfo ]);
     ]
