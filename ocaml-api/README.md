@@ -132,11 +132,21 @@ and `dvm_feed_info` (the `response_messages_for_dvm_feeds` port: handler event, 
 likes/sats, the viewer's follows' and own actions, feed metadata; `primal_dvm_pubkeys` marks
 Primal's own DVMs), and `nostr_stats` (NOTICE error, as Julia answers without its `daily_stats`
 table). `top_article` now raises like Julia when the author has no article.
-Still proxied: `set_app_settings` (compiles moderation rules — importer territory), `search_filterlist` (needs Julia's per-viewer `compile_content_moderation_rules`), `dvm_feed`
-(runs the DVM request over relays), `import_events`/`import_poll_vote_event`/
-`invoices_to_zap_receipts` (importer writes), `broadcast_events`/`broadcast_reply` (outbound
-relay connections), nip46, uploads, `update_push_notification_token*`, and the membership
-funcalls of `ext/App.jl` (private repo, Phase 9).
+**Phase 4f (2026-10-04):** the settings write and the remaining non-media writes. The
+content-moderation rule compiler moved from the importer into `Primal_common.Cmr` (parameterized
+by the cache/membership connections and an event lookup; the importer keeps thin wrappers), so
+`set_app_settings` is native (carry-over of stored keys the new event lacks, the `app_settings`
+upsert, `notification_settings`, the cmr_* re-import — Julia compares the compiled rules by
+identity and therefore always re-imports) and so is `search_filterlist` (allow list, muted-by
+parent, the spam list, the algos user's mute list as the nsfw group via `algos_user_pubkey`).
+Also native: `update_push_notification_token(_for_nip46)` (membership token tables),
+`get_queued_events_for_nip46`, `events_nip46` (`monitoring_db`), `invoices_to_zap_receipts`,
+`import_events` (the importer's import listener over `import_events_line_server`, plus the
+`human_override` upsert) and `import_poll_vote_event`. Verified with a throwaway key against the
+reference: identical settings read-back, cmr/notification/token rows as Julia writes them, identical
+import status. Still proxied: `dvm_feed` (runs the DVM request over relays),
+`broadcast_events`/`broadcast_reply` (outbound relay connections), the uploads (Phase 5/8), and
+the membership funcalls of `ext/App.jl` (private repo, Phase 9).
 
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
@@ -195,6 +205,9 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `trending_blocked_domains` | `["bchnostr.com"]` | `App.TRENDING_BLOCKED_DOMAINS`: nip05 domains hidden from trending/explore |
 | `search_api_url` | `"http://<search-host>:14017/api"` or `null` | `App.search` forwards the call to this HTTP `/api` (null: NOTICE error) |
 | `primal_dvm_pubkeys` | `[]` | hex pubkeys of Primal's own DVMs (`DVMServiceProvider.keypairs`): `is_primal` in DVM feed metadata |
+| `import_events_line_server` | `{"host":"127.0.0.1","port":12118}` or `null` | `App.IMPORT_EVENTS_LINE_SERVER`: the importer's import listener; null answers `import_events` with nothing |
+| `algos_user_pubkey` | hex or `null` | `App.ALGOS_USER.pk`: the account whose mute list is the `primal_nsfw` group (`search_filterlist`) |
+| `monitoring_db` | `{"host","port","user","database"}` or `null` | `events_nip46` reads `monitoring_events` there (null: NOTICE error) |
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
@@ -280,6 +293,11 @@ drain), `lib/admin.ml`, `lib/stats.ml`, `lib/files.ml`, `bin/primal_apid.ml`, `b
 - `follow_lists` in Julia appends the media responses as `select * from event_media_response(id)`
   rows, which serialise as `{"event_media_response": {...}}` (no `kind`); primal-api emits the
   proper media response message, so a replay shows every follow_lists answer as different.
+- `get_queued_events_for_nip46`: Julia queries a `remote_signer_pubkey` column that the production
+  `monitoring_request_queue` table does not have (it is `service_pubkey`), so Julia always answers
+  NOTICE error; primal-api uses the real column. `search_filterlist`: the running Julia node omits
+  the metadata event that app.jl's source emits next to the allow/block reason; primal-api follows
+  the source.
 - Deliberate deviations from Julia, kept because the OCaml answer is the better one: accounts on
   the csam/impersonation filterlist are hidden by the SQL predicate (Julia's
   `content_moderation_filtering_2` only knows the spam/nsfw groups, so Julia still lists them in
