@@ -1,11 +1,11 @@
 (* One client WebSocket connection of the cache API, in the ws-connector shape (connection.rs /
-   router.rs): a paired upstream WebSocket to the Julia CacheServer is opened per client; frames
-   the native dispatcher does not handle are forwarded verbatim and every upstream frame is relayed
-   back verbatim; an idle timer closes both sides. Phase 2 handles `set_primal_protocol` and
-   `server_name` natively; the funcall registry of §5.2 plugs in here in Phase 3.
+   router.rs): a paired upstream WebSocket to the Julia CacheServer is opened per client; requests
+   the native dispatcher (Funcall) does not handle are forwarded verbatim and every upstream frame is
+   relayed back verbatim; an idle timer closes both sides.
 
    Exactly like ws-connector, `set_primal_protocol` is NOT forwarded: the zlib flag only applies to
-   natively answered requests, and proxied responses arrive in whatever form the upstream sends. *)
+   natively answered requests, and proxied responses arrive in whatever form the upstream sends.
+   Live-event subscriptions registered by native handlers are dropped on CLOSE and on disconnect. *)
 
 open Eio.Std
 
@@ -18,6 +18,7 @@ type t = {
   mutable last_msg : float;
   mutable backend : Ws_client.t option;
   mutable closing : bool;
+  mutable inflight : int; (* natively handled requests being computed right now *)
   opened_at : float;
 }
 
@@ -31,21 +32,17 @@ let with_registry f =
   Fun.protect ~finally:(fun () -> Mutex.unlock registry_lock) f
 
 let count () = with_registry (fun () -> Hashtbl.length registry)
-
-(* Ask a connection to close (from any domain): flag it; its own idle/reader fibers notice within
-   a tick and close both sockets. *)
 let request_close (c : t) = c.closing <- true
 
 let close_idle ~(older_than : float) () : int =
   let now = Unix.gettimeofday () in
   with_registry (fun () ->
-      Hashtbl.fold (fun _ c n -> if now -. c.last_msg >= older_than then (request_close c; n + 1) else n) registry 0)
+      Hashtbl.fold (fun _ c n -> if now -. c.last_msg >= older_than && c.inflight = 0 then (request_close c; n + 1) else n) registry 0)
 
-let close_all () : int =
-  with_registry (fun () -> Hashtbl.fold (fun _ c n -> request_close c; n + 1) registry 0)
+let close_all () : int = with_registry (fun () -> Hashtbl.fold (fun _ c n -> request_close c; n + 1) registry 0)
 
-(* Send a natively produced response: messages (JSON texts) + notices + EOSE, in ws-connector's
-   framing (binary zlib EVENTS when the client asked for compression). *)
+(* Send a natively produced response in ws-connector's framing: messages + notices + EOSE
+   (binary zlib EVENTS when the client asked for compression). *)
 let respond (c : t) (stats : Stats.t) ~subid ?(notices = []) (msgs : string list) : unit =
   if c.use_zlib then begin
     c.session.ws_send_binary (Protocol.events_zlib subid msgs);
@@ -57,8 +54,9 @@ let respond (c : t) (stats : Stats.t) ~subid ?(notices = []) (msgs : string list
   c.session.ws_send_text (Protocol.eose subid);
   Stats.incr stats.sent
 
-(* Native dispatch. Returns true when handled (nothing is forwarded). *)
-let handle_native (cfg : Config.t) (stats : Stats.t) (c : t) (p : Protocol.incoming) : bool =
+(* Native dispatch of one REQ. Returns true when handled (nothing is forwarded). *)
+let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (c : t)
+    (p : Protocol.incoming) : bool =
   match p with
   | Protocol.Req { subid; funcall = Some "set_primal_protocol"; kwargs; _ } ->
       if Protocol.wants_zlib kwargs then c.use_zlib <- true;
@@ -66,16 +64,34 @@ let handle_native (cfg : Config.t) (stats : Stats.t) (c : t) (p : Protocol.incom
       Stats.incr stats.sent;
       Stats.incr stats.handled;
       true
-  | Protocol.Req { subid; funcall = Some "server_name"; _ } ->
-      respond c stats ~subid [ Yojson.Safe.to_string (`Assoc [ ("content", `String cfg.servername) ]) ];
-      Stats.incr stats.handled;
-      true
+  | Protocol.Req { subid; funcall = Some fc; kwargs; _ } -> (
+      match Funcall.of_string fc with
+      | Funcall.Proxied _ -> false
+      | f ->
+          let ctx = { Handlers.cfg; clock; conn_id = c.id; subid } in
+          let t0 = Unix.gettimeofday () in
+          c.inflight <- c.inflight + 1;
+          let outcome = Fun.protect ~finally:(fun () -> c.inflight <- c.inflight - 1) (fun () -> Funcall.dispatch ctx f kwargs) in
+          let elapsed = Unix.gettimeofday () -. t0 in
+          (match outcome with
+          | Response.Handled r ->
+              respond c stats ~subid r.messages;
+              List.iter (Live_events.register live ~conn_id:c.id ~subid ~send:c.session.ws_send_text) r.registrations;
+              Stats.incr stats.handled;
+              Wsconnvars.log_request ~funcall:fc ~kwargs ~conn_id:c.id ~subid ~elapsed_s:elapsed;
+              if cfg.log_handled then log "handled: %s sub_id=%s %.0fms" fc subid (elapsed *. 1000.)
+          | Response.Notice n ->
+              respond c stats ~subid ~notices:[ n ] [];
+              Stats.incr stats.handled;
+              Wsconnvars.log_request ~funcall:fc ~kwargs ~conn_id:c.id ~subid ~elapsed_s:elapsed
+          | Response.Not_handled -> ());
+          match outcome with Response.Not_handled -> false | _ -> true)
   | _ -> false
 
-let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (session : Http_server.ws_session) : unit =
+let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (session : Http_server.ws_session) : unit =
   let id = Atomic.fetch_and_add next_id 1 in
   let c =
-    { id; session; use_zlib = false; last_msg = Unix.gettimeofday (); backend = None; closing = false;
+    { id; session; use_zlib = false; last_msg = Unix.gettimeofday (); backend = None; closing = false; inflight = 0;
       opened_at = Unix.gettimeofday () }
   in
   with_registry (fun () -> Hashtbl.replace registry id c);
@@ -85,6 +101,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (session : Http_server.ws
   Fun.protect
     ~finally:(fun () ->
       with_registry (fun () -> Hashtbl.remove registry id);
+      Live_events.unregister_conn live ~conn_id:id;
       Stats.decr stats.connections;
       (match c.backend with Some b -> (try Ws_client.close b with _ -> ()) | None -> ());
       try session.ws_close () with _ -> ())
@@ -120,11 +137,19 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (session : Http_server.ws
                 touch ();
                 Stats.incr stats.recv;
                 let p = Protocol.parse s in
-                let handled = try handle_native cfg stats c p with e -> Stats.incr stats.errors; log "native handler: %s" (Printexc.to_string e); false in
+                (match p with Protocol.Close subid -> Live_events.unregister_sub live ~conn_id:c.id ~subid | _ -> ());
+                let handled =
+                  try handle_native ~clock cfg stats live c p
+                  with
+                  | Eio.Cancel.Cancelled _ as e -> raise e
+                  | e ->
+                      Stats.incr stats.errors;
+                      log "native handler: %s" (Printexc.to_string e);
+                      false
+                in
                 (match p with
-                | Protocol.Req { funcall = Some fc; subid; _ } ->
-                    if handled && cfg.log_handled then log "handled: %s sub_id=%s" fc subid
-                    else if (not handled) && cfg.log_not_handled then log "not handled: %s sub_id=%s" fc subid
+                | Protocol.Req { funcall = Some fc; subid; _ } when (not handled) && cfg.log_not_handled ->
+                    log "not handled: %s sub_id=%s" fc subid
                 | _ -> ());
                 if not handled then begin
                   Ws_client.send_text backend s;
@@ -155,14 +180,15 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (session : Http_server.ws
         in
         loop ()
       in
-      (* ws-connector: every 3 s, close when idle for >= (0.95..1.0) * idle_timeout. *)
+      (* ws-connector: every 3 s, close when idle for >= (0.95..1.0) * idle_timeout (the timeout
+         itself comes from wsconnvars, re-read each tick). *)
       let idle_loop () =
         let rfactor = 0.95 +. Random.float 0.05 in
-        let limit = rfactor *. cfg.idle_connection_timeout_s in
         let rec loop () =
           Eio.Time.sleep clock 3.0;
           if c.closing || session.ws_is_closed () then ()
           else
+            let limit = rfactor *. Wsconnvars.idle_connection_timeout_s () in
             let dt = Unix.gettimeofday () -. c.last_msg in
             if dt >= limit then begin
               Stats.incr stats.idle_closed;
@@ -176,5 +202,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (session : Http_server.ws
        with
        | Eio.Cancel.Cancelled _ as e -> raise e
        | End_of_file -> ()
-       | exn -> Stats.incr stats.errors; log "connection %d: %s" c.id (Printexc.to_string exn));
+       | exn ->
+           Stats.incr stats.errors;
+           log "connection %d: %s" c.id (Printexc.to_string exn));
       c.closing <- true)

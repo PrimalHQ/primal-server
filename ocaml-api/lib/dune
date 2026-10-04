@@ -1,20 +1,26 @@
 (library
  (name primal_api)
  (public_name primal_api)
+ ; warnings 33/26/27 come from pgocaml_ppx-generated code for inline [%pgsql].
  (flags
-  (:standard -open Primal_common))
+  (:standard -w -33-26-27 -open Primal_common -open Primal_api_db -open Primal_api_membership))
  (libraries
   primal_common
+  primal_api_db
+  primal_api_membership
   unix
   eio
   eio.unix
   eio_main
   yojson
   digestif.c
+  pgocaml
   httpun
   httpun-eio
   httpun-ws
   gluten
   gluten-eio
   bigstringaf
-  camlzip))
+  camlzip)
+ (preprocess
+  (pps pgocaml_ppx)))

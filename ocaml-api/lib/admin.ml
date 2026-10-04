@@ -4,7 +4,7 @@
 
 open Http_server
 
-let service ~(lifecycle : Lifecycle.t) ~(stats : Stats.t) ~(cfg : Config.t) : Http_server.service =
+let service ~(lifecycle : Lifecycle.t) ~(stats : Stats.t) ~(cfg : Config.t) ~(live : Live_events.t) : Http_server.service =
   let status_json () =
     `Assoc
       [
@@ -15,6 +15,9 @@ let service ~(lifecycle : Lifecycle.t) ~(stats : Stats.t) ~(cfg : Config.t) : Ht
         ("public_ws_port", `Int cfg.public_ws_port);
         ("upstream", `String cfg.upstream_julia_ws);
         ("connections", `Int (Conn.count ()));
+        ( "live_subscriptions",
+          let a, f, c = Live_events.stats live in
+          `Assoc [ ("addresses", `Int a); ("follows_users", `Int f); ("connections", `Int c) ] );
         ("inflight_http", `Int (Http_server.inflight_connections ()));
         ("rss_bytes", `Int (Procinfo.read_rss_bytes ()));
       ]

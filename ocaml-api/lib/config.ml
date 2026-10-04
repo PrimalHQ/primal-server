@@ -24,6 +24,16 @@ type t = {
   status_interval_s : float; (* status line period (0 = off) *)
   log_handled : bool;
   log_not_handled : bool;
+  (* Phase 3: native funcalls *)
+  cache_db : Postgres.conninfo; (* 127.0.0.1:54017/primal1 *)
+  membership_db : Postgres.conninfo; (* <membership-db-host>:5432/primal *)
+  cache_pool_size : int; (* per domain; ws-handlers used 16 process-wide *)
+  membership_pool_size : int;
+  content_moderation_root : string; (* default-settings.json, app-releases.json, ... *)
+  primal_pubkey : string; (* raw 32 bytes; the default user_pubkey (ws-connector constant) *)
+  request_log : string option; (* ws-connector --log-request JSONL path *)
+  live_events_enabled : bool; (* poll + LISTEN primal_events distribution *)
+  wsconnvars_poll_s : float;
 }
 
 let field j key =
@@ -38,6 +48,10 @@ let rstr j key = U.to_string (field j key)
 let rint j key = U.to_int (field j key)
 let rbool j key = U.to_bool (field j key)
 let rfloat j key = U.to_number (field j key)
+let rstr_opt j key = match field j key with `Null -> None | v -> Some (U.to_string v)
+
+let conninfo_of_json (j : Yojson.Safe.t) : Postgres.conninfo =
+  { Postgres.host = rstr j "host"; port = rint j "port"; user = rstr j "user"; database = rstr j "database" }
 
 let of_json (j : Yojson.Safe.t) : t =
   {
@@ -58,6 +72,19 @@ let of_json (j : Yojson.Safe.t) : t =
     status_interval_s = rfloat j "status_interval_s";
     log_handled = rbool j "log_handled";
     log_not_handled = rbool j "log_not_handled";
+    cache_db = conninfo_of_json (field j "cache_db");
+    membership_db = conninfo_of_json (field j "membership_db");
+    cache_pool_size = rint j "cache_pool_size";
+    membership_pool_size = rint j "membership_pool_size";
+    content_moderation_root = rstr j "content_moderation_root";
+    primal_pubkey =
+      (let h = rstr j "primal_pubkey" in
+       match Hex_util.decode_opt h with
+       | Some b when String.length b = 32 -> b
+       | _ -> raise (Config_error "primal_pubkey: expected 64 hex characters"));
+    request_log = rstr_opt j "request_log";
+    live_events_enabled = rbool j "live_events_enabled";
+    wsconnvars_poll_s = rfloat j "wsconnvars_poll_s";
   }
 
 let of_json_file (path : string) : t =

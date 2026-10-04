@@ -11,6 +11,7 @@ type t = {
   backend_frames : int Atomic.t; (* upstream frames relayed to clients *)
   backend_failures : int Atomic.t; (* upstream connects that failed *)
   idle_closed : int Atomic.t;
+  live_events : int Atomic.t; (* events run through the live-event distributor *)
   errors : int Atomic.t;
 }
 
@@ -18,7 +19,8 @@ let create () =
   {
     connections = Atomic.make 0; accepted = Atomic.make 0; recv = Atomic.make 0; sent = Atomic.make 0;
     handled = Atomic.make 0; proxied = Atomic.make 0; backend_frames = Atomic.make 0;
-    backend_failures = Atomic.make 0; idle_closed = Atomic.make 0; errors = Atomic.make 0;
+    backend_failures = Atomic.make 0; idle_closed = Atomic.make 0; live_events = Atomic.make 0;
+    errors = Atomic.make 0;
   }
 
 let incr = Atomic.incr
@@ -38,6 +40,7 @@ let metrics_text ?(extra = []) (t : t) : string =
   m "primal_api_backend_frames_total" "counter" (get t.backend_frames);
   m "primal_api_backend_failures_total" "counter" (get t.backend_failures);
   m "primal_api_idle_closed_total" "counter" (get t.idle_closed);
+  m "primal_api_live_events_total" "counter" (get t.live_events);
   m "primal_api_errors_total" "counter" (get t.errors);
   m "primal_api_rss_bytes" "gauge" (Procinfo.read_rss_bytes ());
   List.iter (fun (name, typ, v) -> m name typ v) extra;

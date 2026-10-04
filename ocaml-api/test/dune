@@ -2,4 +2,4 @@
  (name test_api)
  (flags
   (:standard -open Primal_common))
- (libraries primal_common primal_api alcotest yojson))
+ (libraries primal_common primal_api_db primal_api alcotest yojson))

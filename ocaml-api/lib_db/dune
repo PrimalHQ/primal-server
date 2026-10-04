@@ -1,0 +1,8 @@
+; Per-domain pools with phantom-tagged handles; its own library so both the cache-DB queries
+; (lib/) and the membership-DB queries (lib_membership/, checked against another database) use it.
+(library
+ (name primal_api_db)
+ (public_name primal_api.db)
+ (flags
+  (:standard -open Primal_common))
+ (libraries primal_common eio pgocaml))
