@@ -156,6 +156,25 @@ there. Verified against the reference: identical broadcast status, identical cac
 through the mega spec, a live personalized feed answered in 12 s. Still proxied: the uploads
 (Phase 5/8) and the membership funcalls of `ext/App.jl` (private repo, Phase 9).
 
+**Phase 5 (2026-10-04):** the HTTP services (ocaml-plan.md §5.5), as shadow listeners next to the
+Julia node's: `Internal_http` on `internal_http_port` (14000+N) is InternalServices route for
+route — `/collect_metadata`, `/.well-known/nostr.json` (Julia's two-space JSON, `Jsonfmt`),
+`/media-upload`, `/media-cache`, `/link-preview` (link-preview.py in OCaml over `Http.request`;
+disabled like Julia's while `download_proxies` is empty), `/url-shortening` and `/url-lookup/*`
+(membership `short_urls`), `/spam`, `/api` (the funcall dispatcher with `subid` "http"; proxied
+names and `server_name` go to `upstream_julia_http`), `/api/suggestions(_2)`, the well-known
+static files, and the catch-all preview_handler (index.html per Host from `index_dirs` with the
+OpenGraph/twitter metas of profiles, notes, articles, live events and the static pages). Every
+route's status, headers and body were compared with the Julia node's: identical except where
+noted below. `Moderation_http` on `moderation_http_port` (24000+N): `/purge-media` (purge_media_
+step for step — media_block record, local roots moved into cdn-hidden/, `S3` providers backed up
+to bucket2 and deleted, Cloudflare cache purge, the media_storage/media_uploads/short_urls rows
+marked) and `/pre-sign-urls`; `Primal_common.S3` is a SigV4 client (check, delete, copy, upload,
+get, pre-signed GET; the AWS documentation vector is a unit test). `Blossom_http` on
+`blossom_http_port` (21000+N): BUD-01/02/04 reads, `/list/<pubkey>`, HEAD /upload with the
+kind-24242 authorization check, and DELETE through purge_media; PUT answers 500 "uploads not
+available" until the media phase lands the upload importer (missing at HEAD, §10.2).
+
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
 stopped (its tmux pane ran a relaunch loop: the first stop was followed by a silent respawn that
@@ -219,6 +238,18 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `relay_proxy` | `"socks5h://<socks-proxy-host>:1080"` or `null` | SOCKS5 proxy for outbound relay connections (`Main.PROXY`) |
 | `dvm_relays` | `["wss://relay.primal.net", ...]` | `DVMFeedChecker.RELAYS`: where DVM job requests are published |
 | `dvm_requester_seckey` | hex or `null` | `App.DVM_REQUESTER_KEYPAIR`: signs the kind-5300 job requests (null: `dvm_feed` live path answers NOTICE error) |
+| `internal_http_port` | `14096` (14017 at cutover) | InternalServices router (14000+N) |
+| `moderation_http_port` | `24096` (24017 at cutover) | `/purge-media`, `/pre-sign-urls` (24000+N) |
+| `blossom_http_port` | `21096` (21017 at cutover) | Blossom (21000+N) |
+| `upstream_julia_http` | `"http://127.0.0.1:14017/api"` or `null` | HTTP `/api` forwards funcalls that are still proxied (and `server_name`) there |
+| `index_dirs` | `{"primal.net": "/var/www/dev.primal.net", ...}` | Host -> directory of the web app's index.html (preview_handler); other hosts answer 404 |
+| `url_shortening_root_url` | `"https://m.primal.net"` | `InternalServices.URL_SHORTENING_ROOT_URL` |
+| `download_proxies` | `[]` | `Media.DOWNLOAD_PROXIES` for `/link-preview` (`"null"` = direct); empty disables previews, as in Julia |
+| `s3_providers` | `[{"name","endpoint","region","bucket","bucket2","access_key","secret_key","domain"}]` | `Main.S3_CONFIGS` |
+| `cloudflare` | `{"zone_id","api_key"}` or `null` | cache purge of the cloudflare providers' domains |
+| `media_paths` | `[{"type":"local","label","root"} \| {"type":"s3","provider","label"}]` | the roots a purge walks (`Media.MEDIA_PATHS(_2)`); `label` is the media_storage provider name |
+| `blossom_base_url` | `"https://blossom.primal.net"` | `Blossom.BASE_URL` |
+| `blossom_local_roots` | `[]` | local roots uploads are served from when no storage row exists |
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
@@ -313,6 +344,13 @@ drain), `lib/admin.ml`, `lib/stats.ml`, `lib/files.ml`, `bin/primal_apid.ml`, `b
   is unreachable for the full 15 s; primal-api answers the same status without the marker. The
   running Julia node answers the direct `dvm_feed` funcall with NOTICE error (through the mega-feed
   spec it works); primal-api serves both.
+- HTTP services vs the Julia node: the index.html is rewritten textually, so the page has no XML
+  prolog and keeps the original markup (Julia serialised through libxml2); the meta elements are
+  identical. An unknown Host answers 404 (Julia: 500 KeyError). `/.well-known/assetlinks.json`
+  is served from the content-moderation root (the Julia API node has a relative path there and
+  answers 500). `/spam` lists Julia's in-process sets, whose order is hash order; `/api`
+  `server_name` is forwarded because Julia answers `{server, node}` there and ws-connector's name
+  on the WebSocket. `broadcast_events` over HTTP has no PARTIAL_RESPONSE marker.
 - Deliberate deviations from Julia, kept because the OCaml answer is the better one: accounts on
   the csam/impersonation filterlist are hidden by the SQL predicate (Julia's
   `content_moderation_filtering_2` only knows the spam/nsfw groups, so Julia still lists them in

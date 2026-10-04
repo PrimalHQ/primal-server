@@ -1586,3 +1586,43 @@ let media_storage_url_by_hash (c : Db.cache Db.conn) ~(h : string) : string opti
   with
   | u :: _ -> Some u
   | [] -> None
+
+(* {1 Phase 5b: purge_media_} *)
+
+let media_storage_set_block (c : Db.cache Db.conn) ~(storage_provider : string) ~(h : string) ~(block : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update media_storage set media_block_id = $block::uuid where storage_provider = $storage_provider and h = $h"]
+
+let media_storage_urls_by_sha256 (c : Db.cache Db.conn) ~sha256 : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select media_url from media_storage where sha256 = $sha256"]
+
+let media_storage_set_block_by_sha256 (c : Db.cache Db.conn) ~sha256 ~(block : string) ~(cache_only : bool) : unit =
+  let dbh = Db.raw c in
+  if cache_only then ignore [%pgsql dbh "update media_storage set media_block_id = $block::uuid where sha256 = $sha256 and media_url like '%/cache/%'"]
+  else ignore [%pgsql dbh "update media_storage set media_block_id = $block::uuid where sha256 = $sha256"]
+
+let media_cache_urls_by_orig_sha256 (c : Db.cache Db.conn) ~sha256 : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select media_url from media where orig_sha256 = $sha256 and media_url like '%/cache/%'"] |> List.filter_map Fun.id
+
+let media_urls_for_url (c : Db.cache Db.conn) ~(url : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select media_url from media where url = $url"] |> List.filter_map Fun.id
+
+let video_thumbnails_for_video (c : Db.cache Db.conn) ~(video_url : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select thumbnail_url from video_thumbnails where video_url = $video_url"] |> List.filter_map Fun.id
+
+(* {1 Phase 5c: Blossom} *)
+
+(* find_upload: the preferred storage of an upload by its hash, unblocked *)
+let media_storage_by_hash_full (c : Db.cache Db.conn) ~(h : string) : (string * string * int64 * string) option =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "select ms.media_url, ms.content_type, ms.size, ms.storage_provider from media_storage ms, media_storage_priority msp \
+       where ms.h = $h and ms.media_block_id is null and msp.storage_provider = ms.storage_provider order by msp.priority limit 1"]
+  with
+  | (url, ct, size, sp) :: _ -> Some (url, ct, size, sp)
+  | [] -> None

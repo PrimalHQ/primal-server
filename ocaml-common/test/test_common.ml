@@ -125,6 +125,25 @@ let test_schnorr_sign () =
   let e2 = Nostr.create ~seckey ~created_at:1_700_000_000 ~kind:1 ~tags:[ [ `String "t"; `String "x" ] ] ~content:"hello" in
   Alcotest.(check string) "deterministic id" (Nostr.id_hex e) (Nostr.id_hex e2)
 
+let test_s3_presign () =
+  let p = { S3.name = "aws"; endpoint = "https://s3.amazonaws.com"; region = "us-east-1"; bucket = "examplebucket"; bucket2 = None; access_key = "AKIAIOSFODNN7EXAMPLE"; secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; domain = None } in
+  (* 2013-05-24T00:00:00Z; the documented example uses virtual-hosted addressing, so the signature
+     below is computed for the host/path we send and checked for shape and determinism *)
+  let now = 1369353600.0 in
+  let url = S3.presign_get ~expires:86400 ~now p ~bucket:"examplebucket" ~key:"test.txt" in
+  Alcotest.(check bool) "path style" true (String.starts_with ~prefix:"https://s3.amazonaws.com/examplebucket/test.txt?" url);
+  Alcotest.(check bool) "has signature" true (Str_util.find_substring url "&X-Amz-Signature=" <> None);
+  Alcotest.(check string) "deterministic" url (S3.presign_get ~expires:86400 ~now p ~bucket:"examplebucket" ~key:"test.txt");
+  (* the documented vector itself: virtual-hosted host and key path *)
+  let date, amz_date = S3.amz_dates now in
+  Alcotest.(check string) "amz date" "20130524T000000Z" amz_date;
+  let scope = date ^ "/us-east-1/s3/aws4_request" in
+  let query = [ ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"); ("X-Amz-Credential", p.S3.access_key ^ "/" ^ scope); ("X-Amz-Date", amz_date); ("X-Amz-Expires", "86400"); ("X-Amz-SignedHeaders", "host") ] in
+  let canonical_request = String.concat "\n" [ "GET"; "/test.txt"; S3.canonical_query query; "host:examplebucket.s3.amazonaws.com\n"; "host"; "UNSIGNED-PAYLOAD" ] in
+  let sts = S3.string_to_sign ~amz_date ~scope ~canonical_request in
+  let signature = Digestif.SHA256.(to_hex (hmac_string ~key:(S3.signing_key ~secret:p.S3.secret_key ~date ~region:"us-east-1" ~service:"s3") sts)) in
+  Alcotest.(check string) "aws documented signature" "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404" signature
+
 let () =
   Alcotest.run "primal_common"
     [
@@ -141,6 +160,7 @@ let () =
           Alcotest.test_case "json roundtrip" `Quick test_event_json_roundtrip;
         ] );
       ("relay_broadcast", [ Alcotest.test_case "parse url" `Quick test_relay_url ]);
+      ("s3", [ Alcotest.test_case "sigv4 presign" `Quick test_s3_presign ]);
       ("phases", [ Alcotest.test_case "slots" `Quick test_phases ]);
       ("procinfo", [ Alcotest.test_case "formatting" `Quick test_procinfo ]);
     ]

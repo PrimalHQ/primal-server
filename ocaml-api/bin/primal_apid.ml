@@ -71,8 +71,12 @@ let () =
   let admin_fd = Listen.bind ~host:cfg.admin_host ~port:cfg.admin_port () in
   let internal_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.internal_http_port () in
   let internal_svc = Api.Internal_http.service ~cfg ~clock in
-  log "listening: ws %s:%d (%d domains), internal http :%d, admin %s:%d" cfg.public_ws_host cfg.public_ws_port
-    cfg.num_domains cfg.internal_http_port cfg.admin_host cfg.admin_port;
+  let moderation_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.moderation_http_port () in
+  let moderation_svc = Api.Moderation_http.service ~cfg ~clock in
+  let blossom_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.blossom_http_port () in
+  let blossom_svc = Api.Blossom_http.service ~cfg ~clock in
+  log "listening: ws %s:%d (%d domains), internal http :%d, moderation http :%d, blossom :%d, admin %s:%d" cfg.public_ws_host cfg.public_ws_port
+    cfg.num_domains cfg.internal_http_port cfg.moderation_http_port cfg.blossom_http_port cfg.admin_host cfg.admin_port;
   let admin_svc = Api.Admin.service ~lifecycle ~stats ~cfg ~live ~bc in
 
   (* Worker domains: each imports the shared listening fd and runs its own accept loop. *)
@@ -96,6 +100,8 @@ let () =
     let sock = Listen.import ~sw:msw public_fd in
     let admin_sock = Listen.import ~sw:msw admin_fd in
     let isock = Listen.import ~sw:msw internal_fd in
+    let modsock = Listen.import ~sw:msw moderation_fd in
+    let blsock = Listen.import ~sw:msw blossom_fd in
     Fiber.fork_daemon ~sw:msw (fun () ->
         Api.Wsconnvars.run ~clock ~period:cfg.wsconnvars_poll_s ~default_idle_s:cfg.idle_connection_timeout_s;
         `Stop_daemon);
@@ -114,6 +120,8 @@ let () =
       [
         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock; Eio.Net.close sock);
         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop internal_svc isock; Eio.Net.close isock);
+        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop moderation_svc modsock; Eio.Net.close modsock);
+        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop blossom_svc blsock; Eio.Net.close blsock);
         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop admin_svc admin_sock);
       ]
   in
@@ -129,6 +137,8 @@ let () =
          SO_REUSEPORT group and new connections only reach the new generation *)
       (try Unix.close public_fd with _ -> ());
       (try Unix.close internal_fd with _ -> ());
+      (try Unix.close moderation_fd with _ -> ());
+      (try Unix.close blossom_fd with _ -> ());
       log "draining: %d connections, %d http inflight" (Api.Conn.count ()) (Http_server.inflight_connections ());
       let idle = Api.Conn.close_idle ~older_than:30.0 () in
       if idle > 0 then log "closed %d idle connections" idle;

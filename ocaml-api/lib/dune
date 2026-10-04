@@ -22,6 +22,8 @@
   gluten
   gluten-eio
   bigstringaf
-  camlzip)
+  camlzip
+  uuidm
+  base64)
  (preprocess
   (pps pgocaml_ppx)))

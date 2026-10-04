@@ -15,6 +15,7 @@ type meth = [ `GET | `POST | `PUT | `PATCH | `DELETE ]
 
 type req = {
   meth : meth;
+  raw_meth : string; (* the method as sent: HEAD is routed as `GET, handlers that care read this *)
   path : string; (* without query string *)
   params : (string * string) list; (* named path params *)
   query : (string * string) list;
@@ -440,7 +441,7 @@ let dispatch (svc : service) ~sw ~clock ~(peer : string) (gr : Httpun.Reqd.t Glu
           | Ok body ->
               Fiber.fork ~sw (fun () ->
                   let resp =
-                    try r.handler { meth = m; path = p.p_path; params; query = p.p_query; headers = p.p_headers; body; peer }
+                    try r.handler { meth = m; raw_meth = p.p_raw_meth; path = p.p_path; params; query = p.p_query; headers = p.p_headers; body; peer }
                     with
                     | Eio.Cancel.Cancelled _ as e -> raise e
                     | Failure msg -> error_body svc.error_style ~message:("internal error: " ^ msg) 500

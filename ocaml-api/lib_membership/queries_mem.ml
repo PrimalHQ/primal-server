@@ -208,3 +208,62 @@ let short_url_insert (c : Db.membership Db.conn) ~idx ~(url : string) ~(path : s
 let short_url_target (c : Db.membership Db.conn) ~(path : string) : string option =
   let dbh = Db.raw c in
   match [%pgsql dbh "select url from short_urls where path = $path and media_block_id is null limit 1"] with u :: _ -> Some u | [] -> None
+
+(* {1 Phase 5b: purge_media_} *)
+
+let media_block_insert (c : Db.membership Db.conn) ~(id : string) ~(d : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "insert into media_block (id, t, d) values ($id::uuid, now(), $d::jsonb)"]
+
+let media_block_update (c : Db.membership Db.conn) ~(id : string) ~(d : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update media_block set d = $d::jsonb where id = $id::uuid"]
+
+let media_uploads_set_block (c : Db.membership Db.conn) ~sha256 ~pubkey ~(block : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update media_uploads set media_block_id = $block::uuid where sha256 = $sha256 and pubkey = $pubkey"]
+
+let media_uploads_set_block_all (c : Db.membership Db.conn) ~sha256 ~(block : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update media_uploads set media_block_id = $block::uuid where sha256 = $sha256"]
+
+let media_uploads_set_block_by_path (c : Db.membership Db.conn) ~pubkey ~(path : string) ~(block : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update media_uploads set media_block_id = $block::uuid where pubkey = $pubkey and path = $path"]
+
+let media_uploads_count (c : Db.membership Db.conn) ~sha256 ~(pubkey : string option) : int64 =
+  let dbh = Db.raw c in
+  let r = match pubkey with
+    | Some pubkey -> [%pgsql dbh "select count(1) from media_uploads where sha256 = $sha256 and pubkey = $pubkey"]
+    | None -> [%pgsql dbh "select count(1) from media_uploads where sha256 = $sha256"]
+  in
+  match r with Some n :: _ -> n | _ -> 0L
+
+let media_uploads_paths (c : Db.membership Db.conn) ~sha256 ~(pubkey : string option) : string list =
+  let dbh = Db.raw c in
+  match pubkey with
+  | Some pubkey -> [%pgsql dbh "select path from media_uploads where sha256 = $sha256 and pubkey = $pubkey group by path"]
+  | None -> [%pgsql dbh "select path from media_uploads where sha256 = $sha256"]
+
+let short_urls_by_path_ext (c : Db.membership Db.conn) ~(path : string) ~(ext : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select url from short_urls where path = $path and ext = $ext"]
+
+let short_urls_set_block (c : Db.membership Db.conn) ~(path : string) ~(ext : string) ~(block : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update short_urls set media_block_id = $block::uuid where path = $path and ext = $ext"]
+
+(* {1 Phase 5c: Blossom} *)
+
+type upload = { up_mimetype : string; up_created_at : int64; up_path : string; up_size : int64; up_sha256 : string option; up_pubkey : string }
+
+let blossom_uploads_by_pubkey (c : Db.membership Db.conn) ~pubkey : upload list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select mimetype, created_at, path, size, sha256 from media_uploads where pubkey = $pubkey"]
+  |> List.map (fun (up_mimetype, up_created_at, up_path, up_size, up_sha256) -> { up_mimetype; up_created_at; up_path; up_size; up_sha256; up_pubkey = pubkey })
+
+let blossom_upload_by_sha256 (c : Db.membership Db.conn) ~sha256 : upload option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select mimetype, created_at, path, size, pubkey from media_uploads where sha256 = $sha256 and media_block_id is null limit 1"] with
+  | (up_mimetype, up_created_at, up_path, up_size, up_pubkey) :: _ -> Some { up_mimetype; up_created_at; up_path; up_size; up_sha256 = Some sha256; up_pubkey }
+  | [] -> None

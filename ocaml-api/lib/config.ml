@@ -6,6 +6,12 @@ exception Config_error of string
 
 module U = Yojson.Safe.Util
 
+(* Phase 5b: where media files live (Media.MEDIA_PATHS / MEDIA_PATHS_2 entries); [label] is the
+   media_storage.storage_provider the entry stands for *)
+type media_path = Local of { label : string; root : string } | S3_path of { label : string; provider : string }
+
+let media_path_label = function Local { label; _ } -> label | S3_path { label; _ } -> label
+
 type t = {
   servername : string; (* ws-connector --servername; answered by server_name *)
   public_ws_host : string;
@@ -56,6 +62,14 @@ type t = {
   index_dirs : (string * string) list; (* Host -> directory holding index.html (preview_handler) *)
   url_shortening_root_url : string; (* InternalServices.URL_SHORTENING_ROOT_URL *)
   download_proxies : string list; (* Media.DOWNLOAD_PROXIES ("null" = direct); empty = link previews disabled, as in Julia *)
+  (* Phase 5b: media moderation *)
+  s3_providers : S3.provider list; (* Main.S3_CONFIGS *)
+  cloudflare : (string * string) option; (* zone id, API key: cache purge of the cloudflare providers' domains *)
+  media_paths : media_path list; (* local roots and S3 providers a purge walks *)
+  (* Phase 5c: Blossom *)
+  blossom_http_port : int; (* 21000+N *)
+  blossom_base_url : string; (* Blossom.BASE_URL *)
+  blossom_local_roots : string list; (* Media.MEDIA_PATHS[UPLOADS_DIR] local roots: uploads served from disk *)
 }
 
 let field j key =
@@ -148,6 +162,30 @@ let of_json (j : Yojson.Safe.t) : t =
     index_dirs = (match field j "index_dirs" with `Assoc l -> List.map (fun (h, d) -> (h, U.to_string d)) l | _ -> raise (Config_error "index_dirs: expected an object"));
     url_shortening_root_url = rstr j "url_shortening_root_url";
     download_proxies = (match field j "download_proxies" with `List l -> List.map U.to_string l | _ -> raise (Config_error "download_proxies: expected a list"));
+    s3_providers =
+      (match field j "s3_providers" with
+      | `List l ->
+          List.map
+            (fun o ->
+              let str k = U.to_string (field o k) and opt k = match field o k with `Null -> None | v -> Some (U.to_string v) in
+              { S3.name = str "name"; endpoint = str "endpoint"; region = str "region"; bucket = str "bucket"; bucket2 = opt "bucket2"; access_key = str "access_key"; secret_key = str "secret_key"; domain = opt "domain" })
+            l
+      | _ -> raise (Config_error "s3_providers: expected a list"));
+    cloudflare = (match field j "cloudflare" with `Null -> None | o -> Some (U.to_string (field o "zone_id"), U.to_string (field o "api_key")));
+    media_paths =
+      (match field j "media_paths" with
+      | `List l ->
+          List.map
+            (fun o ->
+              match U.to_string (field o "type") with
+              | "local" -> Local { label = (match field o "label" with `Null -> "local" | v -> U.to_string v); root = U.to_string (field o "root") }
+              | "s3" -> let provider = U.to_string (field o "provider") in S3_path { label = (match field o "label" with `Null -> provider | v -> U.to_string v); provider }
+              | t -> raise (Config_error ("media_paths: unknown type " ^ t)))
+            l
+      | _ -> raise (Config_error "media_paths: expected a list"));
+    blossom_http_port = rint j "blossom_http_port";
+    blossom_base_url = rstr j "blossom_base_url";
+    blossom_local_roots = (match field j "blossom_local_roots" with `List l -> List.map U.to_string l | _ -> raise (Config_error "blossom_local_roots: expected a list"));
   }
 
 let of_json_file (path : string) : t =
