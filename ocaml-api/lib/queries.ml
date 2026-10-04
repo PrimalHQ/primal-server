@@ -1485,3 +1485,30 @@ let pubkey_events_count (c : Db.cache Db.conn) ~pubkey : int64 =
 let score24h_of (c : Db.cache Db.conn) ~event_id : int64 option =
   let dbh = Db.raw c in
   match [%pgsql dbh "select score24h from event_stats where event_id = $event_id"] with v :: _ -> v | [] -> None
+
+(* {1 Phase 4f} *)
+
+(* DB.add_human_override: a user who posts through Primal is human *)
+let human_override_upsert (c : Db.cache Db.conn) ~pubkey ~(source : string) : unit =
+  let dbh = Db.raw c in
+  ignore
+    [%pgsql dbh
+      "insert into human_override (pubkey, is_human, added_at, source) values ($pubkey, true, now(), $source) \
+       on conflict (pubkey) do update set is_human = true, source = $source"]
+
+(* app.jl invoices_to_zap_receipts: invoice -> zap receipt event JSON *)
+let invoices_zap_receipts (c : Db.cache Db.conn) ~(invoices_json : string) : (string * string) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select zri.invoice, get_event_jsonb(zri.zap_receipt_eid)::text from zap_receipt_invoices zri \
+     where zri.invoice = any (array(select jsonb_array_elements_text($invoices_json::jsonb))::varchar[])"]
+  |> List.filter_map (function i, Some e -> Some (i, e) | _ -> None)
+
+let poll_stats_options (c : Db.cache Db.conn) ~event_id : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select options::text from poll_stats where event_id = $event_id"] with Some o :: _ -> Some o | _ -> None
+
+(* est.events[est.meta_data[pubkey]] *)
+let metadata_event_json (c : Db.cache Db.conn) ~pubkey : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select get_event_jsonb(md.value)::text from meta_data md where md.key = $pubkey"] with Some j :: _ -> Some j | _ -> None

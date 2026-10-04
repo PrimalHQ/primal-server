@@ -131,3 +131,52 @@ let is_paying (c : Db.membership Db.conn) ~pubkey : bool =
 let list_pubkeys (c : Db.membership Db.conn) ~(list : string) : string list =
   let dbh = Db.raw c in
   [%pgsql dbh "select encode(pubkey, 'hex') from lists where list = $list"] |> List.filter_map Fun.id
+
+(* {1 Phase 4f} *)
+
+(* set_app_settings: est.app_settings[pubkey] = e, then created_at/event_id *)
+let upsert_app_settings (c : Db.membership Db.conn) ~pubkey ~(value : string) ~created_at ~event_id : unit =
+  let dbh = Db.raw c in
+  let created_at = Int64.of_int created_at in
+  ignore
+    [%pgsql dbh
+      "insert into app_settings (key, value, created_at, event_id) values ($pubkey, $value, $created_at, $event_id) \
+       on conflict (key) do update set value = excluded.value, created_at = excluded.created_at, event_id = excluded.event_id"]
+
+(* app_ext.jl parse_notification_settings *)
+let set_notification_settings (c : Db.membership Db.conn) ~pubkey (settings : (string * bool) list) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "delete from notification_settings where pubkey = $pubkey"];
+  List.iter (fun (typ, enabled) -> ignore [%pgsql dbh "insert into notification_settings (pubkey, type, enabled) values ($pubkey, $typ, $enabled)"]) settings
+
+(* app.jl update_push_notification_token *)
+let delete_notification_tokens (c : Db.membership Db.conn) ~(platform : string) ~(token : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "delete from notification_tokens where platform = $platform and token = $token"]
+
+let insert_notification_token (c : Db.membership Db.conn) ~(platform : string) ~(token : string) ~pubkey ~(environment : string option) ~(event_json : string) : unit =
+  let dbh = Db.raw c in
+  ignore
+    [%pgsql dbh
+      "insert into notification_tokens (platform, token, pubkey, added_at, environment, event_from_user) values ($platform, $token, $pubkey, now(), $?environment, $event_json::jsonb)"]
+
+(* app.jl update_push_notification_token_for_nip46 *)
+let delete_monitoring_tokens (c : Db.membership Db.conn) ~(platform : string) ~(token : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "delete from monitoring_notification_tokens where platform = $platform and token = $token"]
+
+let insert_monitoring_token (c : Db.membership Db.conn) ~(platform : string) ~(token : string) ~service_pubkey ~(relays_json : string) ~(environment : string option)
+    ~(event_json : string) ~(client_pubkeys_json : string) ~(scope : string) : unit =
+  let dbh = Db.raw c in
+  ignore
+    [%pgsql dbh
+      "insert into monitoring_notification_tokens (platform, token, service_pubkey, relays, added_at, environment, event_from_user, client_pubkeys, scope) \
+       values ($platform, $token, $service_pubkey, $relays_json::jsonb, now(), $?environment, $event_json::jsonb, \
+               array(select decode(x::text, 'hex') from jsonb_array_elements_text($client_pubkeys_json::jsonb) x), $scope)"]
+
+(* app.jl get_queued_events_for_nip46: take the queued requests of a remote signer *)
+let take_queued_nip46_events (c : Db.membership Db.conn) ~service_pubkey : string list =
+  let dbh = Db.raw c in
+  let rows = [%pgsql dbh "select event::text from monitoring_request_queue where service_pubkey = $service_pubkey"] |> List.filter_map Fun.id in
+  ignore [%pgsql dbh "delete from monitoring_request_queue where service_pubkey = $service_pubkey"];
+  rows

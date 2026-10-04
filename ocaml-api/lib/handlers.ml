@@ -349,16 +349,16 @@ let file_json_content (path : string) ~(default : string) : string =
 let cm_file (ctx : ctx) name = Filename.concat ctx.cfg.content_moderation_root name
 
 (* Julia parse_event_from_user: a signed event supplied by the client *)
-let event_from_user (kw : Kw.t) : (Nostr.t, string) result =
-  match Kw.member kw "event_from_user" with
+let event_from_user ?(key = "event_from_user") (kw : Kw.t) : (Nostr.t, string) result =
+  match Kw.member kw key with
   | `Assoc _ as j -> (
       match Nostr.of_json j with
-      | exception _ -> raise (Kw.Invalid "invalid event_from_user")
+      | exception _ -> raise (Kw.Invalid ("invalid " ^ key))
       | e ->
           if e.Nostr.created_at >= now () + 300 then Error "event from the future"
           else if not (Nostr.verify e) then Error "verification failed"
           else Ok e)
-  | _ -> raise (Kw.Invalid "event_from_user required")
+  | _ -> raise (Kw.Invalid (key ^ " required"))
 
 let i64json (v : int64) : Yojson.Safe.t = `Int (Int64.to_int v)
 
@@ -2668,15 +2668,17 @@ let is_hidden_by_content_moderation (ctx : ctx) (kw : Kw.t) : outcome =
 (* {2 settings, misc} *)
 
 (* app_ext.jl app_settings(): a kind-30078 event from the user; accessed_at and the log row *)
-let with_app_settings (ctx : ctx) (kw : Kw.t) (f : Nostr.t -> outcome) : outcome =
-  match event_from_user kw with
+let with_app_settings_key (ctx : ctx) (kw : Kw.t) ~(key : string) (f : Nostr.t -> outcome) : outcome =
+  match event_from_user ~key kw with
   | Error _ -> julia_error
   | Ok e when e.Nostr.kind <> Kind.app_settings -> julia_error
   | Ok e ->
       let r = f e in
-      let event_json = match Kw.member kw "event_from_user" with `Null -> "{}" | v -> Yojson.Safe.to_string v in
+      let event_json = match Kw.member kw key with `Null -> "{}" | v -> Yojson.Safe.to_string v in
       with_membership ctx (fun m -> Queries_mem.touch_app_settings m ~pubkey:e.Nostr.pubkey ~event_json ~now:(now ()));
       r
+
+let with_app_settings (ctx : ctx) (kw : Kw.t) (f : Nostr.t -> outcome) : outcome = with_app_settings_key ctx kw ~key:"event_from_user" f
 
 let get_app_settings_2 (ctx : ctx) (kw : Kw.t) : outcome =
   with_app_settings ctx kw (fun e ->
@@ -3287,3 +3289,234 @@ let dvm_feed_info (ctx : ctx) (kw : Kw.t) : outcome =
   with_cache ctx (fun c ->
       let eids = Option.to_list (Queries.parametrized_event_id_one c ~pubkey ~kind:31990 ~identifier) in
       Handled (messages (dvm_responses ctx c ~eids ~user_pubkey ~primal_feeds:None)))
+
+(* {1 Phase 4f: settings and the remaining writes} *)
+
+exception Julia_err
+
+let cache_get_event (c : Db.cache Db.conn) (eid : string) : Nostr.t option =
+  match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ Hex_util.encode eid ]) with
+  | (_, j) :: _ -> ( try Some (Nostr.of_json (Yojson.Safe.from_string j)) with _ -> None)
+  | [] -> None
+
+let compile_cmr (ctx : ctx) (c : Db.cache Db.conn) (m : Db.membership Db.conn) (pubkey : string) : Cmr.t =
+  Cmr.compile ~dbh:(Db.raw c) ~mem_dbh:(Db.raw m) ~defaults:(Cmr.default_settings (Some (cm_file ctx "default-settings.json"))) ~get_event:(cache_get_event c) pubkey
+
+(* app_ext.jl set_app_settings: keys of the stored settings missing from the new event are carried
+   over; the event is stored; notification settings and the compiled moderation rules follow (Julia
+   compares the compiled rules by identity, so it always re-imports them). *)
+let set_app_settings (ctx : ctx) (kw : Kw.t) : outcome =
+  with_app_settings_key ctx kw ~key:"settings_event" (fun e ->
+      with_cache ctx (fun c ->
+          with_membership ctx (fun m ->
+              let e =
+                match Queries_mem.app_settings_event m ~pubkey:e.Nostr.pubkey with
+                | None -> e
+                | Some stored -> (
+                    let d1 =
+                      match Yojson.Safe.from_string stored with
+                      | `Assoc f -> ( match List.assoc_opt "content" f with Some (`String s) -> Yojson.Safe.from_string s | _ -> `Assoc [])
+                      | _ -> `Assoc []
+                      | exception _ -> `Assoc []
+                    in
+                    match (d1, Yojson.Safe.from_string e.Nostr.content) with
+                    | `Assoc f1, `Assoc f2 ->
+                        let missing = List.filter (fun (k, _) -> not (List.mem_assoc k f2)) f1 in
+                        if missing = [] then e else { e with Nostr.content = Yojson.Safe.to_string (`Assoc (f2 @ missing)) }
+                    | _ -> raise Julia_err
+                    | exception _ -> raise Julia_err)
+              in
+              let event_json = Yojson.Safe.to_string (Nostr.to_json e) in
+              Queries_mem.upsert_app_settings m ~pubkey:e.Nostr.pubkey ~value:event_json ~created_at:e.Nostr.created_at ~event_id:e.Nostr.id;
+              (match Yojson.Safe.from_string e.Nostr.content with
+              | `Assoc f -> (
+                  match List.assoc_opt "notifications" f with
+                  | Some (`Assoc ns) ->
+                      Queries_mem.set_notification_settings m ~pubkey:e.Nostr.pubkey (List.filter_map (fun (k, v) -> match v with `Bool b -> Some (k, b) | _ -> None) ns)
+                  | _ -> ())
+              | _ -> ()
+              | exception _ -> ());
+              (try Cmr.import ~dbh:(Db.raw c) e.Nostr.pubkey (compile_cmr ctx c m e.Nostr.pubkey) with _ -> raise Julia_err);
+              Handled (messages [ event_json ]))))
+
+(* app_ext.jl is_hidden_on_primal_nsfw: on the algos user's mute list and the viewer applies the primal_nsfw group *)
+let is_hidden_on_primal_nsfw (ctx : ctx) (c : Db.cache Db.conn) (cmr : Cmr.t) ~pubkey ~(scope : string) : bool =
+  match ctx.cfg.algos_user_pubkey with
+  | None -> false
+  | Some apk -> (
+      match Cmr.list_event_id ~dbh:(Db.raw c) `Mute_list apk with
+      | None -> false
+      | Some eid ->
+          let pks = match cache_get_event c eid with Some e -> p_tag_pubkeys (Yojson.Safe.to_string (Nostr.to_json e)) | None -> [] in
+          if List.mem (Hex_util.encode pubkey) pks then
+            match List.assoc_opt "primal_nsfw" cmr.Cmr.cmr_groups with Some scopes -> scopes = [] || List.mem scope scopes | None -> false
+          else false)
+
+(* app.jl search_filterlist: why a pubkey is hidden for the viewer *)
+let search_filterlist (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and user_pubkey = Kw.hex32_exn kw "user_pubkey" in
+  with_cache ctx (fun c ->
+      with_membership ctx (fun m ->
+          let cmr = compile_cmr ctx c m user_pubkey in
+          let reason j = content_msg Kind.filtering_reason (Yojson.Safe.to_string j) in
+          let md pk = match Queries.metadata_event_json c ~pubkey:pk with Some j -> j | None -> raise Julia_err in
+          if List.mem pubkey cmr.Cmr.cmr_pubkeys_allowed then
+            Handled (messages [ md user_pubkey; reason (`Assoc [ ("action", `String "allow"); ("pubkey", `String (Hex_util.encode user_pubkey)) ]) ])
+          else
+            match Hashtbl.find_opt cmr.cmr_pubkeys pubkey with
+            | Some (parent, _) -> Handled (messages [ md parent; reason (`Assoc [ ("action", `String "block"); ("pubkey", `String (Hex_util.encode parent)) ]) ])
+            | None -> (
+                let spam_blocked () = List.mem (Hex_util.encode pubkey) (Queries_mem.list_pubkeys m ~list:"spam_block") in
+                let grp =
+                  List.find_map
+                    (fun (grp, _) ->
+                      if grp = "primal_spam" && spam_blocked () then Some grp
+                      else if grp = "primal_nsfw" && (is_hidden_on_primal_nsfw ctx c cmr ~pubkey ~scope:"content" || is_hidden_on_primal_nsfw ctx c cmr ~pubkey ~scope:"trending") then Some grp
+                      else None)
+                    cmr.cmr_groups
+                in
+                match grp with
+                | Some grp -> Handled (messages [ reason (`Assoc [ ("action", `String "block"); ("group", `String grp) ]) ])
+                | None -> Handled empty)))
+
+let mem_transaction (m : Db.membership Db.conn) (f : unit -> unit) : unit = Cmr.in_transaction (Db.raw m) f
+
+(* parse_event_from_user_for_push_notification_token: verified events whose content names [token] *)
+let push_token_events (kw : Kw.t) ~(token : string) : (Nostr.t * Yojson.Safe.t) list =
+  match Kw.member kw "events_from_users" with
+  | `List l ->
+      List.map
+        (fun j ->
+          let e = try Nostr.of_json j with _ -> raise Julia_err in
+          if e.Nostr.created_at >= now () + 300 || not (Nostr.verify e) then raise Julia_err;
+          let d = try Yojson.Safe.from_string e.Nostr.content with _ -> raise Julia_err in
+          (match d with `Assoc f when List.assoc_opt "token" f = Some (`String token) -> () | _ -> raise Julia_err);
+          (e, d))
+        l
+  | _ -> raise (Kw.Invalid "events_from_users required")
+
+let update_push_notification_token (ctx : ctx) (kw : Kw.t) : outcome =
+  let platform = String.lowercase_ascii (Kw.str_exn kw "platform") and token = Kw.str_exn kw "token" in
+  let environment = Kw.str_opt kw "environment" in
+  let tokens = push_token_events kw ~token in
+  with_membership ctx (fun m ->
+      mem_transaction m (fun () ->
+          Queries_mem.delete_notification_tokens m ~platform ~token;
+          List.iter
+            (fun (e, _) -> Queries_mem.insert_notification_token m ~platform ~token ~pubkey:e.Nostr.pubkey ~environment ~event_json:(Yojson.Safe.to_string (Nostr.to_json e)))
+            tokens);
+      Handled empty)
+
+let update_push_notification_token_for_nip46 (ctx : ctx) (kw : Kw.t) : outcome =
+  let platform = String.lowercase_ascii (Kw.str_exn kw "platform") and token = Kw.str_exn kw "token" in
+  let environment = Kw.str_opt kw "environment" and scope = Kw.str kw "scope" ~default:"nip46" in
+  let tokens = push_token_events kw ~token in
+  with_membership ctx (fun m ->
+      mem_transaction m (fun () ->
+          Queries_mem.delete_monitoring_tokens m ~platform ~token;
+          List.iter
+            (fun (e, d) ->
+              let field k = match d with `Assoc f -> ( match List.assoc_opt k f with Some v -> v | None -> raise Julia_err) | _ -> raise Julia_err in
+              let client_pubkeys =
+                match field "clientPubKeys" with
+                | `List l -> List.map (function `String h when String.length h = 64 && Hex_util.decode_opt h <> None -> `String h | _ -> raise Julia_err) l
+                | _ -> raise Julia_err
+              in
+              Queries_mem.insert_monitoring_token m ~platform ~token ~service_pubkey:e.Nostr.pubkey ~relays_json:(Yojson.Safe.to_string (field "relays")) ~environment
+                ~event_json:(Yojson.Safe.to_string (Nostr.to_json e)) ~client_pubkeys_json:(Yojson.Safe.to_string (`List client_pubkeys)) ~scope)
+            tokens);
+      Handled empty)
+
+let get_queued_events_for_nip46 (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user ~key:"event_from_signer" kw with
+  | Error _ -> julia_error
+  | Ok e ->
+      let rows = ref [] in
+      with_membership ctx (fun m -> mem_transaction m (fun () -> rows := Queries_mem.take_queued_nip46_events m ~service_pubkey:e.Nostr.pubkey));
+      Handled (messages !rows)
+
+(* app.jl events_nip46: events of the monitoring host's monitoring_events table *)
+let events_nip46 (ctx : ctx) (kw : Kw.t) : outcome =
+  let event_ids = hex32_list_exn kw "event_ids" in
+  match ctx.cfg.monitoring_db with
+  | None -> julia_error
+  | Some ci ->
+      let dbh = try Postgres.connect ~application_name:"primal-api" ci with _ -> raise Julia_err in
+      Fun.protect
+        ~finally:(fun () -> try Postgres.close dbh with _ -> ())
+        (fun () ->
+          let query sql params = try Postgres.query dbh sql params with _ -> raise Julia_err in
+          let unhex s = if String.length s > 2 && String.sub s 0 2 = "\\x" then String.sub s 2 (String.length s - 2) else s in
+          let msgs =
+            List.map
+              (fun eid ->
+                match query "select id, pubkey, created_at, kind, tags::text, content, sig from monitoring_events where id = decode($1, 'hex')" [ Some (Hex_util.encode eid) ] with
+                | [ Some id; Some pubkey; Some created_at; Some kind; Some tags; Some content; Some sg ] :: _ ->
+                    Yojson.Safe.to_string
+                      (`Assoc
+                        [ ("id", `String (unhex id)); ("pubkey", `String (unhex pubkey)); ("created_at", `Int (int_of_string created_at)); ("kind", `Int (int_of_string kind));
+                          ("tags", Yojson.Safe.from_string tags); ("content", `String content); ("sig", `String (unhex sg)) ])
+                | _ -> raise Julia_err)
+              event_ids
+          in
+          Handled (messages msgs))
+
+let invoices_to_zap_receipts (ctx : ctx) (kw : Kw.t) : outcome =
+  let invoices = match Kw.str_list_opt kw "invoices" with Some l -> l | None -> raise (Kw.Invalid "invoices required") in
+  with_cache ctx (fun c ->
+      let rows = Queries.invoices_zap_receipts c ~invoices_json:(Yojson.Safe.to_string (`List (List.map (fun i -> `String i) invoices))) in
+      let content = `Assoc (List.map (fun (i, e) -> (i, Yojson.Safe.from_string e)) rows) in
+      Handled (messages [ content_msg Kind.invoices_to_zap_receipts (Yojson.Safe.to_string content) ]))
+
+(* App.import_events_via_line_server: ["IMPORT", events] to the importer's import listener *)
+let line_server_import (ctx : ctx) ~(host : string) ~(port : int) (events : Yojson.Safe.t list) : int * int =
+  match !net_ref with
+  | None -> failwith "no net"
+  | Some net ->
+      Eio.Time.with_timeout_exn ctx.clock 60.0 (fun () ->
+          Eio.Std.Switch.run @@ fun sw ->
+          let ip =
+            match host with
+            | "127.0.0.1" | "localhost" -> Eio.Net.Ipaddr.V4.loopback
+            | h -> ( match Ipaddr.of_string h with Ok ip -> Eio.Net.Ipaddr.of_raw (Ipaddr.to_octets ip) | Error (`Msg m) -> failwith m)
+          in
+          let flow = Eio.Net.connect ~sw net (`Tcp (ip, port)) in
+          Eio.Flow.copy_string (Yojson.Safe.to_string (`List [ `String "IMPORT"; `List events ]) ^ "\n") flow;
+          let r = Eio.Buf_read.of_flow ~max_size:(16 * 1024 * 1024) flow in
+          let line = Eio.Buf_read.line r in
+          match Yojson.Safe.from_string line with
+          | `List [ `String "OK"; `Assoc f ] ->
+              let n k = match List.assoc_opt k f with Some (`Int v) -> v | _ -> 0 in
+              (n "imported", n "errors")
+          | _ -> failwith ("import listener: " ^ line))
+
+(* app.jl import_events (the line-server branch; replication is off and the node is not read-only) *)
+let import_events (ctx : ctx) (kw : Kw.t) : outcome =
+  let events = match Kw.member kw "events" with `List l -> l | `Null -> [] | _ -> raise (Kw.Invalid "events") in
+  match ctx.cfg.import_events_line_server with
+  | None -> Handled empty
+  | Some (host, port) ->
+      let parsed = List.map (fun j -> try Nostr.of_json j with _ -> raise Julia_err) events in
+      with_cache ctx (fun c -> List.iter (fun e -> try Queries.human_override_upsert c ~pubkey:e.Nostr.pubkey ~source:"import_events" with _ -> ()) parsed);
+      let imported, errors =
+        try line_server_import ctx ~host ~port events
+        with e ->
+          Printf.printf "%s [primal-api] import_events: line server error: %s\n%!" (Procinfo.timestamp ()) (Printexc.to_string e);
+          (0, List.length events)
+      in
+      Handled (messages [ content_msg Kind.event_import_status (Yojson.Safe.to_string (`Assoc [ ("imported", `Int imported); ("errors", `Int errors) ])) ])
+
+let import_poll_vote_event (ctx : ctx) (kw : Kw.t) : outcome =
+  let ev = match Kw.member kw "event_from_user" with `Assoc _ as j -> j | _ -> raise (Kw.Invalid "event_from_user required") in
+  match import_events ctx (`Assoc [ ("events", `List [ ev ]) ]) with
+  | Handled r -> (
+      let tags = match ev with `Assoc f -> ( match List.assoc_opt "tags" f with Some (`List l) -> l | _ -> []) | _ -> [] in
+      let poll_id = List.find_map (function `List (`String "e" :: `String h :: _) -> Hex_util.decode_opt h | _ -> None) tags in
+      match poll_id with
+      | None -> Handled r
+      | Some pid -> (
+          match with_cache ctx (fun c -> Queries.poll_stats_options c ~event_id:pid) with
+          | Some options ->
+              Handled { r with messages = r.messages @ [ content_msg Kind.poll_stats (Yojson.Safe.to_string (`Assoc [ (Hex_util.encode pid, Yojson.Safe.from_string options) ])) ] }
+          | None -> Handled r))
+  | o -> o

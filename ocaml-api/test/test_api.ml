@@ -79,7 +79,7 @@ let test_funcall_catalogue () =
   let names = native_names () in
   List.iter (fun n -> Alcotest.(check string) n n (to_string (of_string n))) names;
   Alcotest.(check bool) "no duplicates" true (List.length (List.sort_uniq compare names) = List.length names);
-  match of_string "set_app_settings" with Proxied _ -> () | _ -> Alcotest.fail "set_app_settings is still proxied"
+  match of_string "upload_chunk" with Proxied _ -> () | _ -> Alcotest.fail "upload_chunk is still proxied"
 
 let test_nip19 () =
   let j = Yojson.Safe.to_string in

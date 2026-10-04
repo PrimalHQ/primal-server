@@ -41,6 +41,10 @@ type t = {
   (* Phase 4e *)
   search_api_url : string option; (* App.search forwards to another node's HTTP /api *)
   primal_dvm_pubkeys : string list; (* hex; DVMServiceProvider.keypairs pubkeys (is_primal in DVM feed metadata) *)
+  (* Phase 4f *)
+  import_events_line_server : (string * int) option; (* App.IMPORT_EVENTS_LINE_SERVER: the importer's import listener *)
+  algos_user_pubkey : string option; (* raw; App.ALGOS_USER.pk, whose mute list is the primal_nsfw group *)
+  monitoring_db : Postgres.conninfo option; (* events_nip46: the monitoring host's monitoring_events table *)
 }
 
 let field j key =
@@ -100,6 +104,19 @@ let of_json (j : Yojson.Safe.t) : t =
       (match field j "primal_dvm_pubkeys" with
       | `List l -> List.map (fun v -> String.lowercase_ascii (U.to_string v)) l
       | _ -> raise (Config_error "primal_dvm_pubkeys: expected a list"));
+    import_events_line_server =
+      (match field j "import_events_line_server" with
+      | `Null -> None
+      | `Assoc _ as o -> Some (U.to_string (field o "host"), U.to_int (field o "port"))
+      | _ -> raise (Config_error "import_events_line_server: expected {host, port} or null"));
+    algos_user_pubkey =
+      (match rstr_opt j "algos_user_pubkey" with
+      | None -> None
+      | Some h -> (
+          match Hex_util.decode_opt h with
+          | Some b when String.length b = 32 -> Some b
+          | _ -> raise (Config_error "algos_user_pubkey: expected 64 hex characters")));
+    monitoring_db = (match field j "monitoring_db" with `Null -> None | o -> Some (conninfo_of_json o));
   }
 
 let of_json_file (path : string) : t =

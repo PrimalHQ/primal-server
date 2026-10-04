@@ -134,6 +134,16 @@ type t =
   | Get_dvm_feeds
   | Get_featured_dvm_feeds
   | Dvm_feed_info
+  (* Phase 4f *)
+  | Set_app_settings
+  | Search_filterlist
+  | Update_push_notification_token
+  | Update_push_notification_token_for_nip46
+  | Get_queued_events_for_nip46
+  | Events_nip46
+  | Invoices_to_zap_receipts
+  | Import_events
+  | Import_poll_vote_event
   | Proxied of string
 
 let names : (string * t) list =
@@ -261,6 +271,15 @@ let names : (string * t) list =
     ("get_dvm_feeds", Get_dvm_feeds);
     ("get_featured_dvm_feeds", Get_featured_dvm_feeds);
     ("dvm_feed_info", Dvm_feed_info);
+    ("set_app_settings", Set_app_settings);
+    ("search_filterlist", Search_filterlist);
+    ("update_push_notification_token", Update_push_notification_token);
+    ("update_push_notification_token_for_nip46", Update_push_notification_token_for_nip46);
+    ("get_queued_events_for_nip46", Get_queued_events_for_nip46);
+    ("events_nip46", Events_nip46);
+    ("invoices_to_zap_receipts", Invoices_to_zap_receipts);
+    ("import_events", Import_events);
+    ("import_poll_vote_event", Import_poll_vote_event);
   ]
 
 let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
@@ -293,6 +312,7 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
     | Kw.Invalid msg ->
         log "%s sub_id=%s: %s (not handled)" (to_string f) ctx.subid msg;
         Response.Not_handled
+    | Handlers.Julia_err -> Response.Notice "error"
     | Invalid_argument _ | Not_found ->
         log "%s sub_id=%s: invalid argument (not handled)" (to_string f) ctx.subid;
         Response.Not_handled
@@ -427,6 +447,15 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Get_dvm_feeds -> run Handlers.get_dvm_feeds
   | Get_featured_dvm_feeds -> run Handlers.get_featured_dvm_feeds
   | Dvm_feed_info -> run Handlers.dvm_feed_info
+  | Set_app_settings -> run Handlers.set_app_settings
+  | Search_filterlist -> run Handlers.search_filterlist
+  | Update_push_notification_token -> run Handlers.update_push_notification_token
+  | Update_push_notification_token_for_nip46 -> run Handlers.update_push_notification_token_for_nip46
+  | Get_queued_events_for_nip46 -> run Handlers.get_queued_events_for_nip46
+  | Events_nip46 -> run Handlers.events_nip46
+  | Invoices_to_zap_receipts -> run Handlers.invoices_to_zap_receipts
+  | Import_events -> run Handlers.import_events
+  | Import_poll_vote_event -> run Handlers.import_poll_vote_event
   | Proxied _ -> Response.Not_handled
 
 (* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)
