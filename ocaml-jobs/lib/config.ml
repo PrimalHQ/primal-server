@@ -54,7 +54,8 @@ type t = {
   dag_since : int; (* initial since; Julia: 2023-01-01 *)
   dag_poll_votes_enabled : bool; (* DAG.POLL_VOTE_IMPORT_ENABLED *)
   dag_log : bool;
-  dag_dry_run_window_s : int; (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
+  dag_dry_run_window_s : int;
+  pushgateway : (string * int * string) option; (* host, port, job: dag_runner_duration / dag_runner_all_ok as PushGatewayExporter did *) (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
 }
 
 let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")
@@ -115,6 +116,7 @@ let of_json (j : Yojson.Safe.t) : t =
     dag_poll_votes_enabled = rbool j "dag_poll_votes_enabled";
     dag_log = rbool j "dag_log";
     dag_dry_run_window_s = rint j "dag_dry_run_window_s";
+    pushgateway = (match field j "pushgateway" with `Null -> None | o -> Some (rstr o "host", rint o "port", rstr o "job"));
   }
 
 let of_json_file (path : string) : t =

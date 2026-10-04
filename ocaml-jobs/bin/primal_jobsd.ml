@@ -31,7 +31,7 @@ let () =
           | J.Config.Pg_listener -> J.Pg_listener.run ~cfg ~net ~clock ~stop
           | J.Config.Trustrank -> J.Trustrank.run ~cfg ~stop ~clock
           | J.Config.Analytics -> J.Analytics.run ~cfg ~net ~clock ~proc_mgr ~stop
-          | J.Config.Dag -> J.Dag.run ~cfg ~clock ~stop);
+          | J.Config.Dag -> J.Dag.run ~cfg ~net ~clock ~stop);
           `Stop_daemon))
     cfg.roles;
   Lifecycle.serving lifecycle;

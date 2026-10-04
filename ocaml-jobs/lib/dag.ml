@@ -417,7 +417,7 @@ let assert_tables (dbh : Postgres.dbh) : unit =
     (fun t -> match [%pgsql dbh "select 1 from information_schema.tables where table_schema::text = 'public' and table_name::text = $t"] with [] -> failwith ("dag: output table missing: " ^ t) | _ -> ())
     T.all
 
-let run ~(cfg : Config.t) ~clock ~(stop : unit Promise.t) : unit =
+let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
   let pools = { cache = Postgres.make_pool ~size:(cfg.dag_tasks + 2) cfg.cache_db; mem = Postgres.make_pool ~size:(cfg.dag_tasks + 2) cfg.membership_db } in
   with_est pools (fun est ->
       assert_tables est.CS.dbh;
@@ -442,4 +442,10 @@ let run ~(cfg : Config.t) ~clock ~(stop : unit Promise.t) : unit =
         run_pipeline r;
         let ok = Atomic.get r.running in
         if ok && not cfg.dag_dry_run then since := until;
-        log "run %s in %.1fs (window %d .. %d)" (if ok then "ok" else "FAILED") (Unix.gettimeofday () -. t0) r.since until)
+        let dur = Unix.gettimeofday () -. t0 in
+        log "run %s in %.1fs (window %d .. %d)" (if ok then "ok" else "FAILED") dur r.since until;
+        match cfg.pushgateway with
+        | Some (host, port, job) -> (
+            try Pushgateway.set_values ~net ~clock ~timeout:5.0 ~host ~port ~job [ ("dag_runner_duration", "gauge", Printf.sprintf "%.3f" dur); ("dag_runner_all_ok", "gauge", if ok then "1" else "0") ]
+            with Eio.Cancel.Cancelled _ as e -> raise e | exn -> log "pushgateway: %s" (Printexc.to_string exn))
+        | None -> ())

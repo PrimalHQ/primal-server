@@ -47,6 +47,11 @@ let set_many ~net ~clock ?(timeout = 10.0) ~host ~port ~job
   in
   post ~net ~clock ~timeout ~host ~port ~path:("/metrics/job/" ^ job) body
 
+(* Push several metrics whose values are already formatted (floats allowed), one POST. *)
+let set_values ~net ~clock ?(timeout = 10.0) ~host ~port ~job (metrics : (string * string * string) list) : unit =
+  let body = String.concat "" (List.map (fun (k, typ, v) -> Printf.sprintf "# TYPE %s %s\n%s %s\n" k typ k v) metrics) in
+  post ~net ~clock ~timeout ~host ~port ~path:("/metrics/job/" ^ job) body
+
 let rec mkdir_p (d : string) : unit =
   if d <> "/" && d <> "." && not (Sys.file_exists d) then begin
     mkdir_p (Filename.dirname d);
