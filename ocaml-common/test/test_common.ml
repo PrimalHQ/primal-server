@@ -157,9 +157,28 @@ let test_langid () =
   Alcotest.(check bool) "empty" true (Langid.detect "" = None);
   Alcotest.(check bool) "digits only" true (Langid.detect "12345 67890 !!!" = None)
 
+let nip44_padding () =
+  List.iter (fun (n, p) -> Alcotest.(check int) (string_of_int n) p (Nip44.calc_padded_len n))
+    [ (16, 32); (32, 32); (33, 64); (37, 64); (45, 64); (49, 64); (64, 64); (65, 96); (100, 128); (111, 128); (200, 224); (250, 256); (320, 320); (383, 384); (384, 384); (400, 448); (500, 512); (512, 512); (515, 640); (700, 768); (800, 896); (900, 1024); (1020, 1024); (65536, 65536) ]
+
+(* nip44.vectors.json get_conversation_key[0] *)
+let nip44_conversation_key () =
+  let sec1 = Hex_util.decode_exn "315e59ff51cb9209768cf7da80791ddcaae56ac9775eb25b6dee1234bc5d2268" and pub2 = Hex_util.decode_exn "c2f9d9948dc8c7c38321e4b85c8558872eafa0641cd269db76848a6073e69133" in
+  match Nip44.conversation_key ~seckey:sec1 ~pubkey:pub2 with
+  | Some k -> Alcotest.(check string) "conversation key" "3dfef0ce2a4d80a25e7a328accf73448ef67096f65f79588e358d9a0eb9013f1" (Hex_util.encode k)
+  | None -> Alcotest.fail "ecdh failed"
+
+let nip44_roundtrip () =
+  Mirage_crypto_rng_unix.use_default ();
+  let sk1 = String.init 32 (fun i -> Char.chr (i + 1)) and sk2 = String.init 32 (fun i -> Char.chr (100 - i)) in
+  let pk1 = Option.get (Secp256k1.pubkey_of_seckey sk1) and pk2 = Option.get (Secp256k1.pubkey_of_seckey sk2) in
+  let k12 = Option.get (Nip44.conversation_key ~seckey:sk1 ~pubkey:pk2) and k21 = Option.get (Nip44.conversation_key ~seckey:sk2 ~pubkey:pk1) in
+  Alcotest.(check string) "symmetric" (Hex_util.encode k12) (Hex_util.encode k21);
+  List.iter (fun msg -> match Nip44.decrypt ~conversation_key:k21 (Nip44.encrypt ~conversation_key:k12 msg) with Ok m -> Alcotest.(check string) "roundtrip" msg m | Error e -> Alcotest.fail e) [ "a"; "hello, nostr"; String.make 1000 'x'; "{\"kind\":1,\"content\":\"\xc5\xa1\"}" ]
+
 let () =
   Alcotest.run "primal_common"
-    [
+    [ ("nip44", [ Alcotest.test_case "padding" `Quick nip44_padding; Alcotest.test_case "conversation key" `Quick nip44_conversation_key; Alcotest.test_case "roundtrip" `Quick nip44_roundtrip ]);
       ("hex_util", [ Alcotest.test_case "roundtrip" `Quick test_hex ]);
       ("secp256k1", [ Alcotest.test_case "schnorr verify" `Quick test_schnorr_verify; Alcotest.test_case "schnorr sign" `Quick test_schnorr_sign ]);
       ( "bech32",

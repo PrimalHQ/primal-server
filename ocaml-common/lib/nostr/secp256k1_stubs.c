@@ -11,7 +11,9 @@
 #include <secp256k1.h>
 #include <secp256k1_extrakeys.h>
 #include <secp256k1_schnorrsig.h>
+#include <secp256k1_ecdh.h>
 
+#include <string.h>
 #include <caml/mlvalues.h>
 #include <caml/memory.h>
 #include <caml/alloc.h>
@@ -67,6 +69,37 @@ CAMLprim value caml_secp256k1_xonly_pubkey(value vsec) {
   int ok = secp256k1_keypair_create(ctx, &kp, (const unsigned char *)String_val(vsec)) &&
            secp256k1_keypair_xonly_pub(ctx, &xonly, NULL, &kp) &&
            secp256k1_xonly_pubkey_serialize(ctx, out, &xonly);
+  secp256k1_context_destroy(ctx);
+  if (!ok) CAMLreturn(caml_alloc_string(0));
+  res = caml_alloc_initialized_string(32, (const char *)out);
+  CAMLreturn(res);
+}
+
+/* NIP-44 shared secret: the x coordinate of seckey * pubkey (pubkey given x-only, 32 bytes). The
+   hash function passed to secp256k1_ecdh copies x and ignores y. */
+static int ecdh_copy_x(unsigned char *output, const unsigned char *x32, const unsigned char *y32, void *data) {
+  (void)y32; (void)data;
+  memcpy(output, x32, 32);
+  return 1;
+}
+
+CAMLprim value caml_secp256k1_ecdh_x(value vsec, value vpub) {
+  CAMLparam2(vsec, vpub);
+  CAMLlocal1(res);
+  if (caml_string_length(vsec) != 32 || caml_string_length(vpub) != 32) CAMLreturn(caml_alloc_string(0));
+  secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+  secp256k1_xonly_pubkey xonly;
+  secp256k1_pubkey pub;
+  unsigned char out[32];
+  unsigned char ser[33];
+  size_t serlen = 33;
+  int ok = secp256k1_xonly_pubkey_parse(ctx, &xonly, (const unsigned char *)String_val(vpub)) &&
+           secp256k1_xonly_pubkey_serialize(ctx, ser + 1, &xonly);
+  if (ok) {
+    ser[0] = 0x02;
+    ok = secp256k1_ec_pubkey_parse(ctx, &pub, ser, serlen) &&
+         secp256k1_ecdh(ctx, out, &pub, (const unsigned char *)String_val(vsec), ecdh_copy_x, NULL);
+  }
   secp256k1_context_destroy(ctx);
   if (!ok) CAMLreturn(caml_alloc_string(0));
   res = caml_alloc_initialized_string(32, (const char *)out);

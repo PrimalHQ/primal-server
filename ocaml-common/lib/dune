@@ -25,6 +25,8 @@
   ca-certs
   domain-name
   mirage-crypto-rng
+  mirage-crypto
+  base64
   dns
   dns-client
   dns-client.resolvconf

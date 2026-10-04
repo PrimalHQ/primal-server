@@ -22,3 +22,10 @@ let sign ~seckey ~msg_hash ~aux_rand : string option =
 let pubkey_of_seckey (seckey : string) : string option =
   let p = xonly_pubkey seckey in
   if String.length p = 32 then Some p else None
+
+external ecdh_x_raw : string -> string -> string = "caml_secp256k1_ecdh_x"
+
+(* NIP-44 shared secret: x of seckey * pubkey (x-only pubkey, even y assumed) *)
+let ecdh_x ~(seckey : string) ~(pubkey : string) : string option =
+  let s = ecdh_x_raw seckey pubkey in
+  if String.length s = 32 then Some s else None

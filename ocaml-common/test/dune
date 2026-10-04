@@ -1,4 +1,4 @@
 (test
  (name test_common)
- (libraries primal_common alcotest yojson)
+ (libraries primal_common alcotest yojson mirage-crypto-rng.unix)
  (deps events.jsonl))
