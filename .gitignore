@@ -5,3 +5,4 @@ pgurl
 libbech32.so
 pljava/
 logs/
+/ocaml-ext

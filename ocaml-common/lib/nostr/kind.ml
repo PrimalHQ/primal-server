@@ -95,3 +95,17 @@ let live_event_stats = 10000176 (* collides with media_metadata_by_hash *)
 
 (* Live-event moderation poke sent on primal_events (cache_storage.jl send_event_to_ws_connector). *)
 let live_event_moderation_changed = 11_000_001
+
+(* {1 private kinds}
+
+   The private extensions (ocaml-plan.md §11.1 Nostr.Kind.register_private) register their response
+   kinds here at startup; a kind already registered under another name is a startup failure. The
+   public kinds above are not in the table (several of them collide by design). *)
+let private_kinds : (string, int) Hashtbl.t = Hashtbl.create 32
+
+let register_private (name : string) (kind : int) : unit =
+  (match Hashtbl.find_opt private_kinds name with Some k when k <> kind -> failwith (Printf.sprintf "Kind.register_private: %s already registered as %d" name k) | _ -> ());
+  Hashtbl.iter (fun n k -> if k = kind && n <> name then failwith (Printf.sprintf "Kind.register_private: %d already registered as %s" kind n)) private_kinds;
+  Hashtbl.replace private_kinds name kind
+
+let private_kind (name : string) : int option = Hashtbl.find_opt private_kinds name

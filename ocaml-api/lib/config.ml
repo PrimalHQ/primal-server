@@ -13,6 +13,7 @@ type media_path = Local of { label : string; root : string } | S3_path of { labe
 let media_path_label = function Local { label; _ } -> label | S3_path { label; _ } -> label
 
 type t = {
+  ext : Yojson.Safe.t; (* the "ext" object for the private extensions (ocaml-plan.md §11.2); `Null when absent *)
   servername : string; (* ws-connector --servername; answered by server_name *)
   public_ws_host : string;
   public_ws_port : int; (* 9001 in production; a side port while shadowing *)
@@ -91,6 +92,7 @@ let conninfo_of_json (j : Yojson.Safe.t) : Postgres.conninfo =
 
 let of_json (j : Yojson.Safe.t) : t =
   {
+    ext = (match j with `Assoc f -> Option.value (List.assoc_opt "ext" f) ~default:`Null | _ -> `Null);
     servername = rstr j "servername";
     public_ws_host = rstr j "public_ws_host";
     public_ws_port = rint j "public_ws_port";

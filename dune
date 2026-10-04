@@ -1,3 +1,5 @@
 ; Only the OCaml projects are part of the dune workspace; everything else in this repo
 ; (Julia, Rust, SQL dumps) is invisible to dune.
-(dirs ocaml-common ocaml-api ocaml-importer ocaml-fetcher ocaml-jobs)
+; ocaml-ext is the private parent repo's tree (primal-net-server/ocaml-ext), linked in as a
+; symlink where the production binaries are built; absent in a public checkout.
+(dirs ocaml-common ocaml-api ocaml-importer ocaml-fetcher ocaml-jobs ocaml-ext)

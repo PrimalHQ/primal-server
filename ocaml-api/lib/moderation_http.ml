@@ -199,5 +199,5 @@ let service ~(cfg : Config.t) ~clock : Http_server.service =
             Raw (200, api_headers, Yojson.Safe.to_string (`Assoc res))
         | _ -> Raw (404, api_headers, "not found"))
   in
-  let routes = [ { meth = `POST; pattern = []; handler }; { meth = `POST; pattern = [ Rest "path" ]; handler }; { meth = `GET; pattern = [ Rest "path" ]; handler } ] in
+  let routes = Extensions.routes `Moderation @ [ { meth = `POST; pattern = []; handler }; { meth = `POST; pattern = [ Rest "path" ]; handler }; { meth = `GET; pattern = [ Rest "path" ]; handler } ] in
   { (default_service "moderation" routes) with cors = true; max_body = 4 * 1024 * 1024 }

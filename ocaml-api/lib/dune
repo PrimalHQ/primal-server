@@ -24,6 +24,7 @@
   bigstringaf
   camlzip
   uuidm
-  base64)
+  base64
+  mirage-crypto-rng.unix)
  (preprocess
   (pps pgocaml_ppx)))

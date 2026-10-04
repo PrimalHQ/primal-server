@@ -296,7 +296,7 @@ let to_string (f : t) : string =
   | Proxied s -> s
   | f -> ( match List.find_opt (fun (_, g) -> g = f) names with Some (n, _) -> n | None -> assert false)
 
-let native_names () : string list = List.map fst names
+let native_names () : string list = List.map fst names @ Extensions.funcall_names ()
 
 let log fmt = Printf.ksprintf (fun s -> Printf.printf "%s [dispatch] %s\n%!" (Procinfo.timestamp ()) s) fmt
 
@@ -466,7 +466,7 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Broadcast_events -> run Handlers.broadcast_events
   | Broadcast_reply -> run Handlers.broadcast_reply
   | Dvm_feed -> run Handlers.dvm_feed
-  | Proxied _ -> Response.Not_handled
+  | Proxied s -> ( match Extensions.find_funcall s with Some e -> run ~moderate:e.moderate e.handler | None -> Response.Not_handled)
 
 (* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)
-let () = Handlers.dispatch_by_name := fun ctx name kw -> match of_string name with Proxied _ -> Response.Not_handled | f -> dispatch ctx f kw
+let () = Handlers.dispatch_by_name := fun ctx name kw -> match of_string name with Proxied s when not (Extensions.has_funcall s) -> Response.Not_handled | f -> dispatch ctx f kw

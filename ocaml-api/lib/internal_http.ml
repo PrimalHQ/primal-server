@@ -583,4 +583,4 @@ let service ~(cfg : Config.t) ~clock : Http_server.service =
       { meth = `GET; pattern = [ Rest "path" ]; handler = preview };
     ]
   in
-  { (default_service "internal" routes) with cors = true; max_body = 4 * 1024 * 1024 }
+  { (default_service "internal" (routes @ Extensions.routes `Internal)) with cors = true; max_body = 4 * 1024 * 1024 }

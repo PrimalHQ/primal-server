@@ -116,7 +116,7 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
       Stats.incr stats.handled;
       true
   | Protocol.Req { subid; funcall = Some fc; kwargs; _ } -> (
-      match Funcall.of_string fc with Funcall.Proxied _ -> false | f -> dispatch_and_respond ~subid ~fc f kwargs)
+      match Funcall.of_string fc with Funcall.Proxied s when not (Extensions.has_funcall s) -> false | f -> dispatch_and_respond ~subid ~fc f kwargs)
   | Protocol.Req { subid; funcall = None; raw; _ } -> (
       match filter_funcall raw with
       | `Call (f, kwargs) -> dispatch_and_respond ~subid ~fc:("filter:" ^ Funcall.to_string f) f kwargs
