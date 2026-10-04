@@ -69,3 +69,12 @@ let stuck_summary ?(n = 3) ~(min_age : float) () : string =
       ^ String.concat ", "
           (List.map (fun (nm, p, age) -> Printf.sprintf "%s:%s %.0fs" nm p age) shown)
       ^ if extra > 0 then Printf.sprintf " (+%d)" extra else ""
+
+(* All slots as text (newest-registered last), for an admin endpoint. *)
+let report () : string =
+  let now = Unix.gettimeofday () in
+  Atomic.get slots |> List.rev
+  |> List.map (fun s ->
+         let p, since = Atomic.get s.sstate in
+         Printf.sprintf "%-16s %s for %.0fs" s.sname p (now -. since))
+  |> String.concat "\n"

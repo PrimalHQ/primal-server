@@ -1,0 +1,5 @@
+(lang dune 3.0)
+(name primal_api)
+(package
+ (name primal_api)
+ (synopsis "Primal API daemon (WebSocket cache API, HTTP services) — OCaml 5 / Eio"))

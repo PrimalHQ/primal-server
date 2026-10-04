@@ -433,6 +433,19 @@ Private sub-objects live in the same file (§11.2); the public `Config.t` has
 ### 6.2 Optional hardening (later): listening-fd handoff over a unix socket (nginx-style) removes
 the small SYN-loss window when the old listener closes. Not needed for parity with today.
 
+### 6.3 Signal handling in multi-domain daemons (lesson, 2026-10-04)
+
+`Sys.set_signal` + `Eio.Condition.broadcast` (the tsunami single-domain pattern) is not reliable
+with several domains and Eio's systhread pool: the kernel may deliver SIGUSR1 to an idle pool
+thread, and an OCaml handler only runs when that thread next returns to OCaml code, which can be
+minutes later (observed: a drain requested at 01:29:00 was acted on at 01:30:40, after the load
+had gone). `Lifecycle.create` therefore blocks the stop signals in the main thread before any
+domain or thread exists (the mask is inherited), consumes them synchronously in one dedicated
+thread with `Thread.wait_signal`, and a fiber polls the resulting flag every 250 ms. Every daemon
+must create its `Lifecycle` before spawning domains, and the drain controller must be a concurrent
+fiber: the accept loops' switches hold the connection fibers, so code placed after `Fiber.all`
+only runs once every client has left on its own.
+
 ---
 
 ## 7. `ocaml-importer/` completion and control-plane replacement
@@ -848,7 +861,7 @@ Sizes are relative effort. Each phase ends with its parity gate.
 |---|---|---|---|
 | **0** Workspace + `ocaml-common` (**done 2026-10-03**) | dune-workspace, flake, extraction §4.1, tsunami modules imported (ws_client, pg_listen, pool semantics; httpd and the richer http client follow in Phase 2 where they are first needed), membership ref DB script, `migrate.sh`, `primalnode_config*.jl` → `ocaml-common/config/primalnode-snapshot.json` (redacted; per-daemon JSON configs are written when each daemon's `Config.t` exists) | importer rebuilt on ocaml-common and redeployed, parity unchanged; `dune build @all` + `dune test` green | M |
 | **1** Importer completion (**code done 2026-10-03**; cutover flags pending) | §7.1 gaps: `expire_scores` (flag `expire_scores_enabled`), `update_user_search`, `update_content_moderation_rules` + live-event notify, `add_human_override`/`get_trusted_followers_count`, ws-importer writes (live events with proof verification, follow packs, zap invoices, live mute lists); §7.2 import listener (`import_listener_port`, 12118 while Julia node 18 holds 12018) with per-event DAG indexers (`dag_index.ml`) and reply broadcasting (`Relay_broadcast`); Julia `App.IMPORT_EVENTS_LINE_SERVER` switch | `score_expiry` drains; hook decrements match Julia hosts; `import_events` from the Julia API node routed to the listener works | S/M |
-| **2** Server kernel + lifecycle | `Http_server`/`Ws_server` hardening, multi-domain accept, `Lifecycle`, admin, `rebuild-restart-api.sh`, `primalctl req/replay/status`; `primal-api` on 9005 serving `ping`/`server_name`/`set_primal_protocol`, proxying the rest | drain under load test; 10k idle WS; zlib byte-identical | M |
+| **2** Server kernel + lifecycle (**done 2026-10-04**) | `Http_server` (httpun-eio/gluten/httpun-ws; bounded outbound queue, size caps), `Listen` (one SO_REUSEPORT fd shared by N domains), `Lifecycle` (blocked signals + `Thread.wait_signal`, §6.3; concurrent drain controller), admin endpoint, `rebuild-restart-api.sh` (generations as transient units), `primalctl req/status/metrics/drain` (replay follows with Phase 3's parity work); `primal-api` on **9006** (9005 is taken by the ocaml-handlers shadow) answering `server_name`/`set_primal_protocol` natively and proxying the rest to Julia 8817 exactly like ws-connector (`set_primal_protocol` not forwarded, zlib for native answers only) | drain under load verified (20 clients: idle closed at once, active after 30 s grace, clients reconnect to the new generation, old exits); zlib frames inflate to the identical body (byte identity with ws-connector is impossible: flate2 emits stored blocks where zlib compresses; Julia uses zlib) | M |
 | **3** Replace ws-connector | 17 ws-connector funcalls, live events, subscriptions, `wsconnvars`, request log; then the ~110 `ocaml-handlers` funcalls by area; cutover A: `primal-api` on 9001 on one host | replay ≥ 99.5 % per native funcall; one week on one host | L |
 | **4** Julia-heavy funcalls | feed/mega family, explore/trending (+plpgsql), advanced search parser + builder, `get_notifications` budget, outbound relay funcalls, broadcasters, non-`cache` filters, HTTP `/api`, membership funcalls from `ext/App.jl`; `Fallback_proxy` deleted | `proxied_funcalls` empty on shadow; compiler flags any `Proxied` leftover | L |
 | **5** HTTP services | 14000+N, 24000+N, Blossom with reconstructed upload import, S3/CDN clients, link preview | curl golden tests vs Julia; Blossom client suite; identical `media_uploads`/`media_storage` rows | M |

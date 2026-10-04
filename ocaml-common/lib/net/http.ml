@@ -142,7 +142,37 @@ let https_get ~net ~clock ?proxy ?(timeout = 10.0) (u : url) : string option =
             let r = Eio.Buf_read.of_flow (tls :> _ Eio.Flow.source) ~max_size:(8 * 1024 * 1024) in
             Ok (Eio.Buf_read.take_all r))
       in
+      Phases.phase "idle";
       (match result with Ok raw -> Some (extract_body raw) | Error `Timeout -> None)
     with
     | Eio.Cancel.Cancelled _ as e -> raise e
     | _ -> None
+
+
+(* {1 Plain HTTP/1.1 (no TLS) request} — admin endpoints on 127.0.0.1, pushgateway-style internal
+   services. Returns (status, body). Bounded by [timeout] end to end; raises on failure. *)
+let plain_request ~net ~clock ?(timeout = 10.0) ?(meth = "GET") ?(body = "") ~host ~port ~path () :
+    int * string =
+  Switch.run @@ fun sw ->
+  match
+    Eio.Time.with_timeout clock timeout (fun () ->
+        let addr = resolve ~net ~clock ~sw ~host ~port in
+        let flow = Eio.Net.connect ~sw net addr in
+        let req =
+          Printf.sprintf
+            "%s %s HTTP/1.1\r\nHost: %s:%d\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" meth
+            path host port (String.length body) body
+        in
+        Eio.Flow.copy_string req (flow :> _ Eio.Flow.sink);
+        let r = Eio.Buf_read.of_flow (flow :> _ Eio.Flow.source) ~max_size:(64 * 1024 * 1024) in
+        let raw = Eio.Buf_read.take_all r in
+        let status =
+          match String.index_opt raw ' ' with
+          | Some i when String.length raw >= i + 4 -> (
+              match int_of_string_opt (String.sub raw (i + 1) 3) with Some c -> c | None -> 0)
+          | _ -> 0
+        in
+        Ok (status, extract_body raw))
+  with
+  | Ok r -> r
+  | Error `Timeout -> failwith (Printf.sprintf "http: %s %s:%d%s timed out" meth host port path)

@@ -11,6 +11,7 @@
   (:standard -w -33-26-27))
  (libraries
   unix
+  threads.posix
   eio
   eio.unix
   eio_main
@@ -30,7 +31,14 @@
   ipaddr
   cstruct
   mtime
-  mtime.clock.os)
+  mtime.clock.os
+  httpun
+  httpun-eio
+  httpun-ws
+  gluten
+  gluten-eio
+  bigstringaf
+  camlzip)
  (foreign_stubs
   (language c)
   (names secp256k1_stubs))

@@ -90,6 +90,7 @@ let connect ?(headers : (string * string) list = []) ?(tls = false) ?proxy ~sw
       | None -> headers acc
   in
   let resp_headers = headers [] in
+  Phases.phase "idle";
   { flow; reader; clock; closed = false; resp_headers }
 
 (* ------------------------------------------------------------------ frames *)
@@ -118,6 +119,7 @@ let send_frame (t : t) ~(opcode : int) (payload : string) : unit =
   end
 
 let send_text (t : t) (payload : string) : unit = send_frame t ~opcode:0x1 payload
+let send_binary (t : t) (payload : string) : unit = send_frame t ~opcode:0x2 payload
 let read_exact (t : t) (n : int) : string = Eio.Buf_read.take n t.reader
 
 let read_frame (t : t) : int * bool * string =
@@ -148,10 +150,33 @@ let read_frame (t : t) : int * bool * string =
   in
   (opcode, fin, payload)
 
-(* Receive the next complete TEXT message. `Closed on close frame / EOF. *)
-let rec recv (t : t) : [ `Msg of string | `Closed ] =
+(* Receive the next complete message (text or binary; continuation frames assembled, pings
+   answered). `Closed on close frame / EOF. *)
+let rec recv_frame (t : t) : [ `Text of string | `Binary of string | `Closed ] =
   if t.closed then `Closed
   else
+    let assemble first_opcode first_payload fin =
+      if fin then first_payload
+      else begin
+        let buf = Buffer.create (String.length first_payload * 2) in
+        Buffer.add_string buf first_payload;
+        let rec more () =
+          match read_frame t with
+          | 0x0, true, chunk ->
+              Buffer.add_string buf chunk;
+              Buffer.contents buf
+          | 0x0, false, chunk ->
+              Buffer.add_string buf chunk;
+              more ()
+          | 0x9, _, ping ->
+              send_frame t ~opcode:0xa ping;
+              more ()
+          | _ -> more ()
+        in
+        ignore first_opcode;
+        more ()
+      end
+    in
     match read_frame t with
     | exception End_of_file ->
         t.closed <- true;
@@ -162,28 +187,14 @@ let rec recv (t : t) : [ `Msg of string | `Closed ] =
         `Closed
     | 0x9, _, payload ->
         send_frame t ~opcode:0xa payload;
-        recv t
-    | 0x1, fin, payload ->
-        if fin then `Msg payload
-        else begin
-          let buf = Buffer.create (String.length payload * 2) in
-          Buffer.add_string buf payload;
-          let rec more () =
-            match read_frame t with
-            | 0x0, true, chunk ->
-                Buffer.add_string buf chunk;
-                `Msg (Buffer.contents buf)
-            | 0x0, false, chunk ->
-                Buffer.add_string buf chunk;
-                more ()
-            | 0x9, _, ping ->
-                send_frame t ~opcode:0xa ping;
-                more ()
-            | _ -> more ()
-          in
-          more ()
-        end
-    | _ -> recv t (* binary / pong / unknown: ignore *)
+        recv_frame t
+    | 0x1, fin, payload -> `Text (assemble 0x1 payload fin)
+    | 0x2, fin, payload -> `Binary (assemble 0x2 payload fin)
+    | _ -> recv_frame t (* pong / unknown: ignore *)
+
+(* Receive the next complete TEXT message, skipping binary ones. *)
+let rec recv (t : t) : [ `Msg of string | `Closed ] =
+  match recv_frame t with `Text m -> `Msg m | `Binary _ -> recv t | `Closed -> `Closed
 
 let recv_timeout (t : t) ~(timeout : float) : [ `Msg of string | `Closed | `Timeout ] =
   if t.closed then `Closed
