@@ -1,5 +1,6 @@
 (library
  (name importer)
+ (public_name primal_importer)
  ; warnings 33/26/27 are triggered by pgocaml_ppx-generated code for inline [%pgsql].
  ; -open Primal_common: the generic modules (Postgres, Nostr, Http, Filterlist, Worker_pool, ...)
  ; moved to ocaml-common in Phase 0 and are referenced unqualified here.

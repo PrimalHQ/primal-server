@@ -3600,66 +3600,9 @@ let broadcast_reply (ctx : ctx) (kw : Kw.t) : outcome =
     broadcast_events_with ctx ~events ~relays
   end
 
-(* NIP-90 content discovery: publish the job request on every relay, wait for the 6300 result (or a
-   7000 error) that references it, bounded by [timeout] *)
+(* NIP-90 content discovery: Primal_common.Dvm_client *)
 let dvm_request (ctx : ctx) ~(relays : string list) ~(jobreq : Nostr.t) ~(timeout : float) : (string list, string) result =
-  match !net_ref with
-  | None -> Error "no net"
-  | Some net ->
-      let result, resolve = Eio.Std.Promise.create () in
-      let resolve_once v = if not (Eio.Std.Promise.is_resolved result) then Eio.Std.Promise.resolve resolve v in
-      let sub = Printf.sprintf {|["REQ","dvm",{"limit":10,"kinds":[6300,7000],"#e":["%s"]}]|} (Nostr.id_hex jobreq) in
-      let ev = relay_event_payload (Nostr.to_string jobreq) in
-      let deadline = Unix.gettimeofday () +. timeout in
-      Eio.Std.Switch.run (fun sw ->
-          List.iter
-            (fun url ->
-              Eio.Std.Fiber.fork_daemon ~sw (fun () ->
-                  (try
-                     match Relay_broadcast.parse_relay_url url with
-                     | None -> ()
-                     | Some (tls, host, port, path) ->
-                         Eio.Std.Switch.run (fun csw ->
-                             let ws = Ws_client.connect ~tls ?proxy:ctx.cfg.relay_proxy ~sw:csw ~net ~clock:ctx.clock ~host ~port ~path () in
-                             Ws_client.send_text ws sub;
-                             Ws_client.send_text ws ev;
-                             let rec loop () =
-                               let remaining = deadline -. Unix.gettimeofday () in
-                               if remaining > 0. && not (Eio.Std.Promise.is_resolved result) then
-                                 match Ws_client.recv_timeout ws ~timeout:remaining with
-                                 | `Msg m ->
-                                     (match Yojson.Safe.from_string m with
-                                     | `List (`String "EVENT" :: _ :: evj :: _) -> (
-                                         match Nostr.of_json evj with
-                                         | e when Nostr.verify e ->
-                                             if e.Nostr.kind = 6300 then begin
-                                               match Yojson.Safe.from_string e.Nostr.content with
-                                               | `List l -> resolve_once (Ok (List.filter_map (function `List (`String "e" :: `String h :: _) -> Some h | _ -> None) l))
-                                               | _ -> ()
-                                               | exception _ -> ()
-                                             end
-                                             else if e.Nostr.kind = 7000 then
-                                               List.iter
-                                                 (function
-                                                   | `String "status" :: `String "error" :: rest -> resolve_once (Error (match rest with `String m :: _ -> m | _ -> ""))
-                                                   | _ -> ())
-                                                 e.Nostr.tags
-                                         | _ -> ()
-                                         | exception _ -> ())
-                                     | _ -> ()
-                                     | exception _ -> ());
-                                     loop ()
-                                 | `Closed | `Timeout -> ()
-                             in
-                             loop ();
-                             Ws_client.close ws)
-                   with
-                  | Eio.Cancel.Cancelled _ as ex -> raise ex
-                  | exn -> Printf.printf "%s [primal-api] dvm_feed: relay %s: %s\n%!" (Procinfo.timestamp ()) url (Printexc.to_string exn));
-                  `Stop_daemon))
-            relays;
-          Eio.Std.Fiber.first (fun () -> ignore (Eio.Std.Promise.await result)) (fun () -> Eio.Time.sleep ctx.clock timeout));
-      if Eio.Std.Promise.is_resolved result then Eio.Std.Promise.await result else Error "timeout"
+  match !net_ref with None -> Error "no net" | Some net -> Dvm_client.request ~net ~clock:ctx.clock ?proxy:ctx.cfg.relay_proxy ~relays ~jobreq ~timeout ()
 
 (* app.jl dvm_feed: the DVM checker's cached results for non-personalized feeds, else a live NIP-90
    request signed with the requester key; the posts in created_at order through the in-memory
@@ -3715,13 +3658,8 @@ let dvm_feed (ctx : ctx) (kw : Kw.t) : outcome =
       | None -> (
           let seckey = match ctx.cfg.dvm_requester_seckey with Some s -> s | None -> raise Julia_err in
           let relays = List.sort_uniq compare (ctx.cfg.dvm_relays @ Option.to_list relay_url) in
-          let user_hex = Option.map Hex_util.encode user_pubkey in
-          if personalized && user_hex = None then raise Julia_err;
-          let tags =
-            [ [ `String "p"; `String (Hex_util.encode dvm_pubkey) ]; [ `String "alt"; `String "NIP90 Content Discovery Request" ]; `String "relays" :: List.map (fun r -> `String r) relays ]
-            @ if personalized then [ [ `String "param"; `String "max_results"; `String "100" ]; [ `String "param"; `String "user"; `String (Option.get user_hex) ] ] else []
-          in
-          let jobreq = Nostr.create ~seckey ~created_at:(now ()) ~kind:5300 ~tags ~content:"" in
+          if personalized && user_pubkey = None then raise Julia_err;
+          let jobreq = Dvm_client.job_request ~seckey ~dvm_pubkey ~relays ~user:(if personalized then user_pubkey else None) ~now:(now ()) in
           match dvm_request ctx ~relays ~jobreq ~timeout with
           | Ok eids -> with_cache ctx (fun c -> response c eids)
           | Error _ -> julia_error))

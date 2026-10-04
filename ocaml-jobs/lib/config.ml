@@ -1,0 +1,82 @@
+(* primal-jobs configuration: one JSON file, every key required (as the other daemons). *)
+
+exception Config_error of string
+
+module U = Yojson.Safe.Util
+
+type role = Dvm_checker | Pg_listener
+
+let role_of_string = function
+  | "dvm_checker" -> Dvm_checker
+  | "pg_listener" -> Pg_listener
+  | s -> raise (Config_error ("roles: unknown role " ^ s))
+
+let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener"
+
+type t = {
+  roles : role list;
+  admin_host : string;
+  admin_port : int;
+  cache_db : Postgres.conninfo;
+  membership_db : Postgres.conninfo;
+  relay_proxy : (string * int) option; (* SOCKS5 for outbound relay connections (Main.PROXY) *)
+  (* dvm_checker (dvm_feed_checker.jl) *)
+  dvm_relays : string list; (* DVMFeedChecker.RELAYS *)
+  dvm_requester_seckey : string; (* raw 32 bytes; App.DVM_REQUESTER_KEYPAIR *)
+  dvm_requester_pubkey : string; (* raw 32 bytes; DVMFeedChecker.DVM_REQUESTER_PUBKEY (the "user" of personalized feeds) *)
+  dvm_check_period_s : float; (* RUN_PERIOD 600 *)
+  dvm_timeout_s : float; (* TIMEOUT 30 *)
+  dvm_parallel : int; (* asyncmap ntasks 8 *)
+  dvm_randomized_delays : bool;
+  dvm_log : bool;
+  (* pg_listener (cache_storage_pg_listener.jl) *)
+  pg_listener_rate_limit_s : int; (* RATE_LIMIT_PERIOD 3600 *)
+  pg_listener_log : bool;
+}
+
+let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")
+let rstr j k = try U.to_string (field j k) with U.Type_error _ -> raise (Config_error (k ^ ": expected a string"))
+let rstr_opt j k = match field j k with `Null -> None | v -> Some (U.to_string v)
+let rint j k = try U.to_int (field j k) with U.Type_error _ -> raise (Config_error (k ^ ": expected an integer"))
+let rfloat j k = match field j k with `Int i -> float_of_int i | `Float f -> f | _ -> raise (Config_error (k ^ ": expected a number"))
+let rbool j k = try U.to_bool (field j k) with U.Type_error _ -> raise (Config_error (k ^ ": expected a boolean"))
+let rlist j k = match field j k with `List l -> List.map U.to_string l | _ -> raise (Config_error (k ^ ": expected a list"))
+
+let conninfo_of_json (j : Yojson.Safe.t) : Postgres.conninfo =
+  { Postgres.host = rstr j "host"; port = rint j "port"; user = rstr j "user"; database = rstr j "database" }
+
+let hex32 j k = match Hex_util.decode_opt (rstr j k) with Some b when String.length b = 32 -> b | _ -> raise (Config_error (k ^ ": expected 64 hex characters"))
+
+let proxy_of_json j k =
+  match rstr_opt j k with
+  | None -> None
+  | Some p -> (
+      let strip pre s = let l = String.length pre in if String.length s >= l && String.sub s 0 l = pre then String.sub s l (String.length s - l) else s in
+      let p = String.trim p |> strip "socks5h://" |> strip "socks5://" in
+      match String.rindex_opt p ':' with
+      | Some i -> ( match int_of_string_opt (String.sub p (i + 1) (String.length p - i - 1)) with Some port -> Some (String.sub p 0 i, port) | None -> raise (Config_error (k ^ ": expected host:port")))
+      | None -> raise (Config_error (k ^ ": expected host:port")))
+
+let of_json (j : Yojson.Safe.t) : t =
+  {
+    roles = List.map role_of_string (rlist j "roles");
+    admin_host = rstr j "admin_host";
+    admin_port = rint j "admin_port";
+    cache_db = conninfo_of_json (field j "cache_db");
+    membership_db = conninfo_of_json (field j "membership_db");
+    relay_proxy = proxy_of_json j "relay_proxy";
+    dvm_relays = rlist j "dvm_relays";
+    dvm_requester_seckey = hex32 j "dvm_requester_seckey";
+    dvm_requester_pubkey = hex32 j "dvm_requester_pubkey";
+    dvm_check_period_s = rfloat j "dvm_check_period_s";
+    dvm_timeout_s = rfloat j "dvm_timeout_s";
+    dvm_parallel = rint j "dvm_parallel";
+    dvm_randomized_delays = rbool j "dvm_randomized_delays";
+    dvm_log = rbool j "dvm_log";
+    pg_listener_rate_limit_s = rint j "pg_listener_rate_limit_s";
+    pg_listener_log = rbool j "pg_listener_log";
+  }
+
+let of_json_file (path : string) : t =
+  let j = try Yojson.Safe.from_file path with Yojson.Json_error msg -> raise (Config_error (Printf.sprintf "%s: invalid JSON: %s" path msg)) in
+  of_json j

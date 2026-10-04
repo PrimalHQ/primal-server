@@ -1,0 +1,5 @@
+(lang dune 3.0)
+(name primal_jobs)
+(package
+ (name primal_jobs)
+ (synopsis "Primal background jobs daemon — OCaml 5 / Eio"))
