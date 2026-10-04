@@ -86,10 +86,27 @@ rebuild-restart-fetcher.sh   build + stop-then-start as systemd --user unit prim
 - `Ws_client` now shrinks its read buffer after a frame over 64 KB (otherwise each long-lived
   connection kept its largest frame's buffer forever).
 
-## Shadow comparison (<stage-host>, 2026-10-04)
+## Shadow comparison and cutover (<stage-host>, 2026-10-04)
 
-`firehose_tap` on the Julia firehose (9017) and the shadow (9027) for the same 120 s, see the
-plan row in `../ocaml-plan.md` for the final numbers.
+Shadow run (port 9027, own state/archive dirs, `since = now`) next to the Julia fetcher,
+`firehose_tap` on both for the same 180 s:
+
+| | Julia 9017 | OCaml 9027 |
+| --- | --- | --- |
+| lines/s to the firehose | 2330 | 601 |
+| distinct event ids/s | 557 | 601 |
+| relays contributing | 272 | 1613 |
+| ids only on this side | 12127 (a sample: 1–12 h old re-fetches from stale resume points, 453 seen earlier by the shadow) | 20022 |
+| relays connected | ~8000 fds (mostly idle) | 15500 |
+| RSS / CPU | 5.7 GB / ~1 core | 3.5 GB / ~3.5 cores at ~50k relay msgs/s |
+
+Cutover at 20:02: `m1_fetcher.sh` loop and the Julia process stopped, the daemon started on 9017
+with the production state and archive dirs (it resumed from Julia's `latest_timestamp` files; the
+OCaml importer reconnected within a second). `stats.json` continues the Julia totals.
+
+**Rollback:** `systemctl --user stop primal-ocaml-fetcher`, then in the `primal-server` dir
+`PRIMALSERVER_PROXY=socks5h://<socks-proxy-host>:1080 bash ../m1_fetcher.sh` (the proxy variable was in
+the old shell's environment, not in the script); it resumes from the same resume files.
 
 ## Operating
 
