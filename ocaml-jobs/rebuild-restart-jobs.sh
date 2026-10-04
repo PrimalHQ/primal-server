@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Rebuild primal-jobs and restart it as a transient systemd --user service (stop-then-start: the
 # roles are singletons, two generations must not run their loops concurrently).
+#   PRIMAL_EXE          the binary to run (default the public primal_jobsd.exe; the private build is
+#                       $ROOT/_build/default/ocaml-ext/bin/primal_jobsd.exe)
 #   PRIMAL_JOBS_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-jobs-config.json)
 #   PRIMAL_JOBS_MEMMAX  systemd MemoryMax (default 10G; the media role on the media host runs with 30G as primal-media did)
 #   PRIMAL_BUILD_PGHOST host whose DBs the [%pgsql] checks run against (a host whose local schema
@@ -16,7 +18,9 @@ LOG="$PRIMAL_VAR_DIR/ocaml-jobs.log"
 UNIT=primal-ocaml-jobs
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 echo "$(ts) building (dune build @all) ..." >&2
-(cd "$P" && "$NIX" develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
+# from the workspace root: @all in a subdirectory builds only that directory, and PRIMAL_EXE may
+# point at the private ocaml-ext binary
+(cd "$ROOT" && "$NIX" develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
 [[ -x "$EXE" ]] || { echo "ERROR: $EXE not built" >&2; exit 1; }
 [[ -f "$CONFIG" ]] || { echo "ERROR: config file not found: $CONFIG" >&2; exit 1; }
 admin_port="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["admin_port"])' "$CONFIG")"
