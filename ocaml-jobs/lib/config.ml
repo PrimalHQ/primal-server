@@ -125,7 +125,7 @@ let of_json (j : Yojson.Safe.t) : t =
     pushgateway = (match field j "pushgateway" with `Null -> None | o -> Some (rstr o "host", rint o "port", rstr o "job"));
     membership_discovery_url = rstr_opt j "membership_discovery_url";
     ext = (match j with `Assoc f -> Option.value (List.assoc_opt "ext" f) ~default:`Null | _ -> `Null);
-    media = (match field j "media" with `Null -> None | o -> ( try Some (Primal_jobs_media.Media_config.of_json o) with Primal_jobs_media.Media_config.Config_error m -> raise (Config_error m)));
+    media = (match (match j with `Assoc f -> Option.value (List.assoc_opt "media" f) ~default:`Null | _ -> `Null) with `Null -> None | o -> ( try Some (Primal_jobs_media.Media_config.of_json o) with Primal_jobs_media.Media_config.Config_error m -> raise (Config_error m)));
   }
 
 let of_json_file (path : string) : t =
