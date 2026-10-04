@@ -4,14 +4,16 @@ exception Config_error of string
 
 module U = Yojson.Safe.Util
 
-type role = Dvm_checker | Pg_listener
+type role = Dvm_checker | Pg_listener | Trustrank | Analytics
 
 let role_of_string = function
   | "dvm_checker" -> Dvm_checker
   | "pg_listener" -> Pg_listener
+  | "trustrank" -> Trustrank
+  | "analytics" -> Analytics
   | s -> raise (Config_error ("roles: unknown role " ^ s))
 
-let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener"
+let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics"
 
 type t = {
   roles : role list;
@@ -32,6 +34,18 @@ type t = {
   (* pg_listener (cache_storage_pg_listener.jl) *)
   pg_listener_rate_limit_s : int; (* RATE_LIMIT_PERIOD 3600 *)
   pg_listener_log : bool;
+  (* trustrank (trustrank_maker.jl) *)
+  trustrank_period_s : float; (* RUN_PERIOD 3 h *)
+  trustrank_iterations : int; (* 20 *)
+  trustrank_alpha : float; (* 0.85 *)
+  trustrank_target_table : string; (* "pubkey_trustrank" = live swap; anything else = shadow table *)
+  trustrank_run_at_start : bool; (* Julia waits one period first *)
+  (* analytics (App.precalculate_analytics) *)
+  api_config_path : string; (* primal-api-config.json: scored_content runs with the API's settings *)
+  analytics_period_s : float; (* 600 *)
+  analytics_key_suffix : string; (* "" = the live cache keys; "_ocaml" = shadow keys *)
+  ollama_host : string option; (* App.OLLAMA_HOST; null disables gaming detection *)
+  gaming_report_command : string list option; (* App.GAMING_REPORT_COMMAND argv; the report is its stdin *)
 }
 
 let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")
@@ -75,6 +89,16 @@ let of_json (j : Yojson.Safe.t) : t =
     dvm_log = rbool j "dvm_log";
     pg_listener_rate_limit_s = rint j "pg_listener_rate_limit_s";
     pg_listener_log = rbool j "pg_listener_log";
+    trustrank_period_s = rfloat j "trustrank_period_s";
+    trustrank_iterations = rint j "trustrank_iterations";
+    trustrank_alpha = rfloat j "trustrank_alpha";
+    trustrank_target_table = rstr j "trustrank_target_table";
+    trustrank_run_at_start = rbool j "trustrank_run_at_start";
+    api_config_path = rstr j "api_config_path";
+    analytics_period_s = rfloat j "analytics_period_s";
+    analytics_key_suffix = rstr j "analytics_key_suffix";
+    ollama_host = rstr_opt j "ollama_host";
+    gaming_report_command = (match field j "gaming_report_command" with `Null -> None | `List l -> Some (List.map U.to_string l) | _ -> raise (Config_error "gaming_report_command: expected a list or null"));
   }
 
 let of_json_file (path : string) : t =

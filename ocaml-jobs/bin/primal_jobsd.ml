@@ -13,7 +13,7 @@ let () =
   Random.self_init ();
   Eio_main.run @@ fun env ->
   Mirage_crypto_rng_unix.use_default ();
-  let net = Eio.Stdenv.net env and clock = Eio.Stdenv.clock env in
+  let net = Eio.Stdenv.net env and clock = Eio.Stdenv.clock env and proc_mgr = Eio.Stdenv.process_mgr env in
   Switch.run @@ fun sw ->
   Postgres.set_env ~net ~sw;
   let lifecycle = Lifecycle.create ~sw ~clock () in
@@ -28,7 +28,9 @@ let () =
           Phases.register_domain_slot (J.Config.string_of_role role);
           (match role with
           | J.Config.Dvm_checker -> J.Dvm_checker.run ~cfg ~net ~clock ~stop
-          | J.Config.Pg_listener -> J.Pg_listener.run ~cfg ~net ~clock ~stop);
+          | J.Config.Pg_listener -> J.Pg_listener.run ~cfg ~net ~clock ~stop
+          | J.Config.Trustrank -> J.Trustrank.run ~cfg ~stop ~clock
+          | J.Config.Analytics -> J.Analytics.run ~cfg ~net ~clock ~proc_mgr ~stop);
           `Stop_daemon))
     cfg.roles;
   Lifecycle.serving lifecycle;
