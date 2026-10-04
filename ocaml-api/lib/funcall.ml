@@ -77,6 +77,47 @@ type t =
   | Explore_people
   | Explore_topics
   | Explore_legend_counts
+  (* Phase 4c *)
+  | Get_directmsgs
+  | Get_directmsg_contacts
+  | Reset_directmsg_count
+  | Reset_directmsg_counts
+  | Zaps_feed
+  | User_zaps
+  | User_zaps_by_satszapped
+  | User_zaps_sent
+  | Event_actions
+  | User_followers
+  | Mutual_follows
+  | Find_reposts
+  | Follow_list
+  | Follow_lists
+  | Parameterized_replaceable_list
+  | Parametrized_replaceable_event
+  | Parametrized_replaceable_events
+  | Check_filterlist
+  | Is_hidden_by_content_moderation
+  | Get_app_settings
+  | Get_app_settings_2
+  | User_of_ln_address
+  | Set_last_time_user_was_online
+  | Report_user
+  | Report_note
+  | Relays
+  | Trusted_users
+  | Client_config
+  | Network_stats
+  | Articles_stats
+  | Drafts
+  | Top_article
+  | Long_form_content_thread_view
+  | User_profile_scored_media_thumbnails
+  | Get_highlights
+  | Get_suggested_users_2
+  | Feed_2
+  | Feed_directive_2
+  | Enrich_feed_events
+  | Note_mentions
   | Proxied of string
 
 let names : (string * t) list =
@@ -150,6 +191,46 @@ let names : (string * t) list =
     ("explore_people", Explore_people);
     ("explore_topics", Explore_topics);
     ("explore_legend_counts", Explore_legend_counts);
+    ("get_directmsgs", Get_directmsgs);
+    ("get_directmsg_contacts", Get_directmsg_contacts);
+    ("reset_directmsg_count", Reset_directmsg_count);
+    ("reset_directmsg_counts", Reset_directmsg_counts);
+    ("zaps_feed", Zaps_feed);
+    ("user_zaps", User_zaps);
+    ("user_zaps_by_satszapped", User_zaps_by_satszapped);
+    ("user_zaps_sent", User_zaps_sent);
+    ("event_actions", Event_actions);
+    ("user_followers", User_followers);
+    ("mutual_follows", Mutual_follows);
+    ("find_reposts", Find_reposts);
+    ("follow_list", Follow_list);
+    ("follow_lists", Follow_lists);
+    ("parameterized_replaceable_list", Parameterized_replaceable_list);
+    ("parametrized_replaceable_event", Parametrized_replaceable_event);
+    ("parametrized_replaceable_events", Parametrized_replaceable_events);
+    ("check_filterlist", Check_filterlist);
+    ("is_hidden_by_content_moderation", Is_hidden_by_content_moderation);
+    ("get_app_settings", Get_app_settings);
+    ("get_app_settings_2", Get_app_settings_2);
+    ("user_of_ln_address", User_of_ln_address);
+    ("set_last_time_user_was_online", Set_last_time_user_was_online);
+    ("report_user", Report_user);
+    ("report_note", Report_note);
+    ("relays", Relays);
+    ("trusted_users", Trusted_users);
+    ("client_config", Client_config);
+    ("network_stats", Network_stats);
+    ("articles_stats", Articles_stats);
+    ("drafts", Drafts);
+    ("top_article", Top_article);
+    ("long_form_content_thread_view", Long_form_content_thread_view);
+    ("user_profile_scored_media_thumbnails", User_profile_scored_media_thumbnails);
+    ("get_highlights", Get_highlights);
+    ("get_suggested_users_2", Get_suggested_users_2);
+    ("feed_2", Feed_2);
+    ("feed_directive_2", Feed_directive_2);
+    ("enrich_feed_events", Enrich_feed_events);
+    ("note_mentions", Note_mentions);
   ]
 
 let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
@@ -262,6 +343,46 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Explore_people -> run Handlers.explore_people
   | Explore_topics -> run Handlers.explore_topics
   | Explore_legend_counts -> run Handlers.explore_legend_counts
+  | Get_directmsgs -> run Handlers.get_directmsgs
+  | Get_directmsg_contacts -> run Handlers.get_directmsg_contacts
+  | Reset_directmsg_count -> run ~moderate:false Handlers.reset_directmsg_count
+  | Reset_directmsg_counts -> run ~moderate:false Handlers.reset_directmsg_counts
+  | Zaps_feed -> run Handlers.zaps_feed
+  | User_zaps -> run Handlers.user_zaps
+  | User_zaps_by_satszapped -> run Handlers.user_zaps_by_satszapped
+  | User_zaps_sent -> run Handlers.user_zaps_sent
+  | Event_actions -> run Handlers.event_actions
+  | User_followers -> run Handlers.user_followers
+  | Mutual_follows -> run Handlers.mutual_follows
+  | Find_reposts -> run Handlers.find_reposts
+  | Follow_list -> run Handlers.follow_list
+  | Follow_lists -> run Handlers.follow_lists
+  | Parameterized_replaceable_list -> run Handlers.parameterized_replaceable_list
+  | Parametrized_replaceable_event -> run Handlers.parametrized_replaceable_event
+  | Parametrized_replaceable_events -> run Handlers.parametrized_replaceable_events
+  | Check_filterlist -> run ~moderate:false Handlers.check_filterlist
+  | Is_hidden_by_content_moderation -> run ~moderate:false Handlers.is_hidden_by_content_moderation
+  | Get_app_settings -> run ~moderate:false Handlers.get_app_settings
+  | Get_app_settings_2 -> run ~moderate:false Handlers.get_app_settings_2
+  | User_of_ln_address -> run Handlers.user_of_ln_address
+  | Set_last_time_user_was_online -> run ~moderate:false Handlers.set_last_time_user_was_online
+  | Report_user -> run ~moderate:false Handlers.report_user
+  | Report_note -> run ~moderate:false Handlers.report_note
+  | Relays -> run ~moderate:false Handlers.relays
+  | Trusted_users -> run Handlers.trusted_users
+  | Client_config -> run ~moderate:false Handlers.client_config
+  | Network_stats -> run ~moderate:false Handlers.network_stats
+  | Articles_stats -> run ~moderate:false Handlers.articles_stats
+  | Drafts -> run Handlers.drafts
+  | Top_article -> run Handlers.top_article
+  | Long_form_content_thread_view -> run ~moderate:false Handlers.long_form_content_thread_view
+  | User_profile_scored_media_thumbnails -> run Handlers.user_profile_scored_media_thumbnails
+  | Get_highlights -> run Handlers.get_highlights
+  | Get_suggested_users_2 -> run Handlers.get_suggested_users_2
+  | Feed_2 -> run ~moderate:false Handlers.feed_2
+  | Feed_directive_2 -> run ~moderate:false Handlers.feed_directive_2
+  | Enrich_feed_events -> run Handlers.enrich_feed_events
+  | Note_mentions -> run Handlers.note_mentions
   | Proxied _ -> Response.Not_handled
 
 (* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)

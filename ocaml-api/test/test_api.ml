@@ -79,7 +79,7 @@ let test_funcall_catalogue () =
   let names = native_names () in
   List.iter (fun n -> Alcotest.(check string) n n (to_string (of_string n))) names;
   Alcotest.(check bool) "no duplicates" true (List.length (List.sort_uniq compare names) = List.length names);
-  match of_string "get_directmsgs" with Proxied _ -> () | _ -> Alcotest.fail "get_directmsgs is still proxied"
+  match of_string "advanced_search" with Proxied _ -> () | _ -> Alcotest.fail "advanced_search is still proxied"
 
 let test_nip19 () =
   let j = Yojson.Safe.to_string in
@@ -181,6 +181,11 @@ let test_mega_ids () =
   Alcotest.(check bool) "julia_exposed has explore_people" true (List.mem "explore_people" H.julia_exposed);
   Alcotest.(check bool) "julia_exposed has no bogus" false (List.mem "video-reels" H.julia_exposed)
 
+let test_p_tags () =
+  let e = {|{"id":"ab","tags":[["p","532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb"],["p","2895c330c23f383196c0ef988de6da83b83b4583ed5f9c1edb0a559cecd1f900","wss://r"],["e","zz"]]}|} in
+  Alcotest.(check int) "all p tags" 2 (List.length (H.p_tag_pubkeys e));
+  Alcotest.(check int) "exactly two fields" 1 (List.length (H.p_tag_pubkeys ~exactly_two:true e))
+
 let () =
   Alcotest.run "primal_api"
     [
@@ -200,6 +205,7 @@ let () =
           Alcotest.test_case "filter funcall" `Quick test_filter_funcall;
           Alcotest.test_case "f32 string" `Quick test_f32;
           Alcotest.test_case "mega ids" `Quick test_mega_ids;
+          Alcotest.test_case "p tags" `Quick test_p_tags;
           Alcotest.test_case "wants_zlib" `Quick test_wants_zlib;
         ] );
       ( "handlers",

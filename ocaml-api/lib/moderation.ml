@@ -109,6 +109,10 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
                     zap_pairs := (String.lowercase_ascii r, String.lowercase_ascii s) :: !zap_pairs
                 | _ -> ())
             | _ -> ())
+        | None, Some kind when kind = Kind.directmsg_counts -> (
+            match content_json p with
+            | Some (`Assoc d) -> List.iter (fun (k, _) -> if is_hex64 k then scope_pks := SS.add (String.lowercase_ascii k) !scope_pks) d
+            | _ -> ())
         | None, Some kind when kind = Kind.notification -> (
             match content_json p with
             | Some (`Assoc d) ->
@@ -129,7 +133,7 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
               if SS.is_empty !ids then SS.empty
               else SS.of_list (Queries.hidden_events c ~event_ids_json:(Queries.hexes_json (SS.elements !ids)))
             in
-            let hidden_scope = q !scope_pks (scope_name scope) user_pubkey in
+            let hidden_scope = q !scope_pks (if scope = No_scope then "content" else scope_name scope) user_pubkey in
             let hidden_trending = q !trending_pks "trending" user_pubkey in
             (* ZAP_EVENT: hidden for the viewer, or hidden by the receiver's own rules *)
             let hidden_zap_user = match user_pubkey with Some _ -> q zap_senders "content" user_pubkey | None -> SS.empty in
@@ -175,6 +179,13 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
                     Some
                       (Yojson.Safe.to_string
                          (`Assoc [ ("kind", `Int Kind.user_scores); ("content", `String (Yojson.Safe.to_string (`Assoc kept))) ]))
+              | _ -> Some p.text)
+          | _, None, Some kind when kind = Kind.directmsg_counts -> (
+              match content_json p with
+              | Some (`Assoc d) ->
+                  let kept = List.filter (fun (k, _) -> not (is_hex64 k && SS.mem (String.lowercase_ascii k) hidden_scope)) d in
+                  if List.length kept = List.length d then Some p.text
+                  else Some (Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.directmsg_counts); ("content", `String (Yojson.Safe.to_string (`Assoc kept))) ]))
               | _ -> Some p.text)
           | _, None, Some kind when kind = Kind.notification -> (
               match content_json p with

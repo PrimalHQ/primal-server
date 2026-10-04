@@ -82,6 +82,31 @@ counter — 2 on this host — where we report the importer's network_stats user
 `your_outer_network` for 30 % of accounts (Julia walks contact lists capped at 5000 per follow,
 we count `pubkey_followers`). `trending_images(_4h)` is still proxied.
 
+**Phase 4c (2026-10-04):** the long tail of app.jl is native: `get_directmsgs`,
+`get_directmsg_contacts` (+ Julia's DIRECTMSG_COUNTS moderation rule), `reset_directmsg_count(s)`,
+`zaps_feed`, `user_zaps`, `user_zaps_by_satszapped`, `user_zaps_sent`, `event_actions`,
+`user_followers`, `mutual_follows`, `find_reposts`, `follow_list`, `follow_lists`,
+`parameterized_replaceable_list`, `parametrized_replaceable_event(s)`, `check_filterlist`,
+`is_hidden_by_content_moderation`, `get_app_settings(_2)` (membership `app_settings`, the
+accessed_at/log writes and the stored default), `user_of_ln_address`,
+`set_last_time_user_was_online`, `report_user/note`, `relays`, `trusted_users`, `client_config`,
+`network_stats`, `articles_stats`, `drafts`, `top_article`, `long_form_content_thread_view`,
+`user_profile_scored_media_thumbnails`, `get_highlights`, `get_suggested_users_2`, `feed_2`,
+`feed_directive_2`, and — through the port of Julia's in-memory `response_messages_for_posts`
+(`Handlers.Rmfp`: events, stats, media, relays, top-five zaps, referenced events three levels
+deep via e/a tags and nostr: mentions, metadata, viewer actions, verified names) —
+`enrich_feed_events` and `note_mentions`. Against the reference: `event_actions` 100 %,
+`get_highlights`, `mutual_follows`, `user_followers`, `parametrized_replaceable_event` ≥ 95 %,
+`get_directmsg_contacts` and `note_mentions` 85 % (the csam deviation and viewers whose compiled
+rules differ from Julia's defaults), `explore_zaps` low on this host only because the Julia node's
+`TrustRank.humaness_threshold` is 0.0 (it never loaded trust ranks) where we apply the real one.
+Still proxied: `search`/`advanced_search`/`advanced_feed`/`parse_advanced_search_query` and the
+mega-feed specs built on them (Phase 4d), `set_app_settings` (compiles moderation rules — importer
+territory), `get_filterlist` (Julia's in-process sets), `nostr_stats` (its `dyn` table does not
+exist here), `get_recommended_reads` (random + naddr encoding), `trending_images(_4h)`, the DVM
+feeds, `import_events`/`broadcast_*`/nip46/uploads, and the membership funcalls of `ext/App.jl`
+(private repo, Phase 9).
+
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
 stopped (its tmux pane ran a relaunch loop: the first stop was followed by a silent respawn that

@@ -9,6 +9,7 @@
   primal_api_db
   primal_api_membership
   unix
+  str
   eio
   eio.unix
   eio_main

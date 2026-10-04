@@ -784,28 +784,6 @@ let user_profile_scored_content (ctx : ctx) (kw : Kw.t) : outcome =
       Handled (messages (posts @ Option.to_list (Queries.metadata_event c ~pubkey))))
 
 (* app_ext.jl note_mentions: response_messages_for_posts over the mentioning events *)
-let note_mentions (ctx : ctx) (kw : Kw.t) : outcome =
-  let limit = Kw.int kw "limit" ~default:100 and offset = Kw.int kw "offset" ~default:0 in
-  if limit > 1000 then julia_error
-  else
-    let user_pubkey = user_pubkey_opt kw in
-    let enrich c hexes =
-      let hexes = List.sort_uniq compare hexes in
-      if hexes = [] then []
-      else Queries.enrich_events c ~event_ids_json:(Queries.hexes_json hexes) ~user_pubkey ~apply_humaness_check:false ~orderby:"created_at"
-    in
-    match (Kw.member kw "event_id", Kw.member kw "pubkey", Kw.member kw "identifier") with
-    | `String _, _, _ ->
-        let event_id = Kw.hex32_exn kw "event_id" in
-        Handled (messages (with_cache ctx (fun c -> enrich c (Queries.note_mentions_event_ids c ~event_id ~limit ~offset))))
-    | `Null, `String _, `String identifier ->
-        let pubkey = Kw.hex32_exn kw "pubkey" in
-        Handled
-          (messages
-             (with_cache ctx (fun c -> enrich c (Queries.note_mentions_of_article_event_ids c ~pubkey ~identifier ~limit ~offset))))
-    | `Null, _, _ -> Handled empty
-    | _ -> raise (Kw.Invalid "invalid event_id")
-
 let note_mentions_count (ctx : ctx) (kw : Kw.t) : outcome =
   let event_id = Kw.hex32_exn kw "event_id" in
   let count = with_cache ctx (fun c -> Queries.note_mentions_count c ~event_id) in
@@ -1580,6 +1558,206 @@ let zap_messages (c : Db.cache Db.conn) (zaps : Queries.zap_row list) : string l
   let dedup = List.fold_left (fun acc m -> if List.mem m acc then acc else m :: acc) [] all |> List.rev in
   dedup @ [ range_msg ~order_by:"amount_sats" (List.map (fun (z : Queries.zap_row) -> (hex z.zap_receipt_id, z.amount_sats)) zaps) ]
 
+
+(* {2 response_messages_for_posts} (app.jl, the in-memory enrichment Julia uses outside the
+   feed SQL functions): each post, its stats, media/previews, relay, the top five zaps, the
+   events it references (e/a tags and nostr: mentions, three levels deep, wrapped as
+   REFERENCED_EVENT), then metadata of every pubkey met, EVENT_RELAYS, the viewer's actions and
+   the verified names. *)
+
+module Rmfp = struct
+  type acc = {
+    mutable res : string list; (* reversed *)
+    seen : (string, unit) Hashtbl.t;
+    pks : (string, unit) Hashtbl.t;
+    reids : (string, unit) Hashtbl.t;
+    relays : (string, string) Hashtbl.t;
+  }
+
+  let push a m = if not (Hashtbl.mem a.seen m) then begin Hashtbl.replace a.seen m (); a.res <- m :: a.res end
+
+  let re_hashref = Str.regexp {|#\[\([0-9]*\)\]|}
+  let re_mention = Str.regexp {|\(\(note\|npub\|naddr\|nevent\|nprofile\)1[A-Za-z0-9_]+\)|}
+
+  let all_matches re s group =
+    let rec go pos acc = match Str.search_forward re s pos with
+      | _ -> let m = Str.matched_group group s in go (Str.match_end ()) (m :: acc)
+      | exception Not_found -> List.rev acc
+    in
+    go 0 []
+
+  (* Julia length(split(content)): tokens separated by Unicode White_Space *)
+  let words (content : string) =
+    let is_space cp =
+      cp = 0x20 || (cp >= 0x09 && cp <= 0x0d) || cp = 0x85 || cp = 0xa0 || cp = 0x1680 || (cp >= 0x2000 && cp <= 0x200a)
+      || cp = 0x2028 || cp = 0x2029 || cp = 0x202f || cp = 0x205f || cp = 0x3000
+    in
+    let n = String.length content in
+    let count = ref 0 and in_word = ref false and i = ref 0 in
+    while !i < n do
+      let d = String.get_utf_8_uchar content !i in
+      let cp = Uchar.to_int (Uchar.utf_decode_uchar d) in
+      i := !i + Uchar.utf_decode_length d;
+      if is_space cp then in_word := false
+      else if not !in_word then begin in_word := true; incr count end
+    done;
+    !count
+
+  type ev = { id : string; pubkey : string; kind : int; content : string; tags : Yojson.Safe.t list; text : string }
+
+  let parse_ev (text : string) : ev option =
+    match Yojson.Safe.from_string text with
+    | `Assoc f -> (
+        match (List.assoc_opt "id" f, List.assoc_opt "pubkey" f, List.assoc_opt "kind" f, List.assoc_opt "content" f, List.assoc_opt "tags" f) with
+        | Some (`String id), Some (`String pubkey), Some (`Int kind), Some (`String content), Some (`List tags) ->
+            Some { id = String.lowercase_ascii id; pubkey = String.lowercase_ascii pubkey; kind; content; tags; text }
+        | _ -> None)
+    | _ -> None
+    | exception _ -> None
+
+  let tag_fields (t : Yojson.Safe.t) : string list = match t with `List l -> List.filter_map (function `String s -> Some s | _ -> None) l | _ -> []
+
+  (* DB.for_mentiones: the extra (e, p, a) tags a post's content mentions *)
+  let mention_tags (c : Db.cache Db.conn) (e : ev) : string list list =
+    let out = ref [] in
+    let add t = if not (List.mem t !out) then out := t :: !out in
+    let resolve_a kind pk identifier =
+      match Hex_util.decode_opt pk with
+      | Some pubkey when String.length pubkey = 32 -> ( match Queries.parametrized_event_id_one c ~pubkey ~kind ~identifier with Some eid -> add [ "e"; eid ] | None -> ())
+      | _ -> ()
+    in
+    (match e.kind with
+    | 1 | 30023 | 6 ->
+        List.iter
+          (fun n -> match int_of_string_opt n with Some i -> ( match List.nth_opt e.tags i with Some t when List.length (tag_fields t) >= 2 -> add (tag_fields t) | _ -> ()) | None -> ())
+          (all_matches re_hashref e.content 1);
+        List.iter
+          (fun t ->
+            match tag_fields t with
+            | "a" :: v :: _ :: "mention" :: _ -> ( match String.split_on_char ':' v with [ k; pk; id ] -> ( match int_of_string_opt k with Some kind -> resolve_a kind pk id | None -> ()) | _ -> ())
+            | "e" :: _ :: _ :: "mention" :: _ as f -> add f
+            | _ -> ())
+          e.tags;
+        List.iter
+          (fun m ->
+            match Bech32.nip19_decode m with
+            | Some (Bech32.Npub pk) | Some (Bech32.Nprofile pk) -> add [ "p"; Hex_util.encode pk ]
+            | Some (Bech32.Note eid) | Some (Bech32.Nevent eid) -> add [ "e"; Hex_util.encode eid ]
+            | Some (Bech32.Naddr { kind; author; identifier }) -> resolve_a kind (Hex_util.encode author) identifier
+            | None -> ())
+          (all_matches re_mention e.content 1)
+    | _ -> ());
+    List.rev !out
+
+  let event_stats_msg (r : Queries.stats_row) =
+    content_msg Kind.event_stats
+      (Yojson.Safe.to_string
+         (`Assoc
+           [ ("event_id", `String r.st_eid); ("likes", i64json r.likes); ("replies", i64json r.replies); ("mentions", i64json r.mentions);
+             ("reposts", i64json r.reposts); ("zaps", i64json r.zaps); ("satszapped", i64json r.satszapped); ("score", i64json r.score);
+             ("score24h", i64json r.score24h); ("bookmarks", `Int 0) ]))
+
+  let reads_stats_msg eid (likes, zaps, satszapped, replies, reposts) =
+    content_msg Kind.event_stats
+      (Yojson.Safe.to_string
+         (`Assoc
+           [ ("event_id", `String eid); ("likes", i64json likes); ("zaps", i64json zaps); ("satszapped", i64json satszapped); ("replies", i64json replies);
+             ("mentions", `Int 0); ("reposts", i64json reposts); ("score", `Int 0); ("score24h", `Int 0) ]))
+
+  let wrap_referenced (e : ev) =
+    Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.referenced_event); ("pubkey", `String e.pubkey); ("content", `String e.text) ])
+
+  let not_zap_target m = match kind_and_pubkey m with Some k, _ -> not (k = Kind.range || k = 1 || k = 30023) | None, _ -> true
+
+  let rec handle (c : Db.cache Db.conn) (a : acc) ~user_pubkey ~include_top_zaps ~(depth : int) ~(wrap : bool) (eids : string list) : unit =
+    let eids = List.filter (fun e -> String.length e = 64) eids in
+    if eids <> [] then begin
+      let ids_json = Queries.hexes_json eids in
+      let hidden = SS.of_list (Queries.hidden_events c ~event_ids_json:ids_json) in
+      let evs = Queries.events_by_ids c ~event_ids_json:ids_json in
+      let live = List.filter_map (fun eid -> if SS.mem eid hidden then None else Option.bind (List.assoc_opt eid evs) parse_ev) eids in
+      if live <> [] then begin
+        let live_ids = List.map (fun e -> e.id) live in
+        let live_json = Queries.hexes_json live_ids in
+        let stats = Queries.event_stats_rows c ~event_ids_json:live_json in
+        let rstats = Queries.reads_stats_rows c ~event_ids_json:live_json in
+        let extras = Queries.event_extras_rows c ~event_ids_json:live_json in
+        let relays = Queries.event_relays_rows c ~event_ids_json:live_json in
+        let next = ref [] in
+        List.iter
+          (fun (e : ev) ->
+            push a (if wrap then wrap_referenced e else e.text);
+            if e.kind = 30023 then push a (content_msg Kind.long_form_metadata (Yojson.Safe.to_string (`Assoc [ ("event_id", `String e.id); ("words", `Int (words e.content)) ])));
+            (if e.kind = 30023 then (match List.assoc_opt e.id rstats with Some r -> push a (reads_stats_msg e.id r) | None -> ())
+             else match List.find_opt (fun (r : Queries.stats_row) -> r.st_eid = e.id) stats with Some r -> push a (event_stats_msg r) | None -> ());
+            if user_pubkey <> None then Hashtbl.replace a.reids e.id ();
+            Hashtbl.replace a.pks e.pubkey ();
+            List.iter (fun (k, m) -> if k = e.id then push a m) extras;
+            (match List.assoc_opt e.id relays with Some r -> Hashtbl.replace a.relays e.id r | None -> ());
+            if include_top_zaps then begin
+              let zaps = Queries.og_zap_receipts_by_event c ~event_id:(Hex_util.decode_exn e.id) ~since:0 ~until:100_000_000_000 ~limit:5 ~offset:0 in
+              List.iter (push a) (List.filter not_zap_target (zap_messages c zaps));
+              if e.kind = 30023 then
+                match List.find_map (fun t -> match tag_fields t with "d" :: d :: _ -> Some d | _ -> None) e.tags with
+                | Some identifier ->
+                    let zs = Queries.article_zaps_top c ~pubkey:(Hex_util.decode_exn e.pubkey) ~identifier ~limit:5 in
+                    List.iter (push a) (List.filter not_zap_target (zap_messages c zs))
+                | None -> ()
+            end;
+            let tags = List.map tag_fields e.tags @ mention_tags c e in
+            List.iter
+              (function
+                | "e" :: sub :: _ when String.length sub = 64 && Hex_util.decode_opt sub <> None -> next := String.lowercase_ascii sub :: !next
+                | "p" :: pk :: _ when String.length pk = 64 && Hex_util.decode_opt pk <> None -> Hashtbl.replace a.pks (String.lowercase_ascii pk) ()
+                | "a" :: v :: _ -> (
+                    match String.split_on_char ':' v with
+                    | [ k; pk; id ] -> (
+                        match (int_of_string_opt k, Hex_util.decode_opt pk) with
+                        | Some kind, Some pubkey when String.length pubkey = 32 -> (
+                            match Queries.parametrized_event_id_one c ~pubkey ~kind ~identifier:id with Some eid -> next := eid :: !next | None -> ())
+                        | _ -> ())
+                    | _ -> ())
+                | _ -> ())
+              tags)
+          live;
+        if depth > 0 && !next <> [] then handle c a ~user_pubkey ~include_top_zaps ~depth:(depth - 1) ~wrap:true (List.rev !next |> List.sort_uniq compare)
+      end
+    end
+
+  let run (c : Db.cache Db.conn) ?(include_top_zaps = true) ~user_pubkey (eids : string list) : string list =
+    let a = { res = []; seen = Hashtbl.create 256; pks = Hashtbl.create 64; reids = Hashtbl.create 64; relays = Hashtbl.create 64 } in
+    handle c a ~user_pubkey ~include_top_zaps ~depth:2 ~wrap:false (List.map String.lowercase_ascii eids);
+    let pks = Hashtbl.fold (fun k () acc -> k :: acc) a.pks [] |> List.sort_uniq compare in
+    if Hashtbl.length a.relays > 0 then
+      push a (content_msg Kind.event_relays (Yojson.Safe.to_string (`Assoc (Hashtbl.fold (fun k v acc -> (k, `String v) :: acc) a.relays [] |> List.sort compare))));
+    (match user_pubkey with
+    | Some u when Hashtbl.length a.reids > 0 ->
+        let reids = Hashtbl.fold (fun k () acc -> k :: acc) a.reids [] |> List.sort_uniq compare in
+        let ids_json = Queries.hexes_json reids in
+        let acts = Queries.event_actions_rows c ~event_ids_json:ids_json ~user_pubkey:u in
+        let votes = Queries.poll_votes_rows c ~event_ids_json:ids_json ~user_pubkey:u in
+        List.iter
+          (fun reid ->
+            match (List.assoc_opt reid acts, List.assoc_opt reid votes) with
+            | None, None -> ()
+            | act, vote ->
+                let replied, liked, reposted, zapped = Option.value act ~default:(false, false, false, false) in
+                push a
+                  (content_msg Kind.event_actions_count
+                     (Yojson.Safe.to_string
+                        (`Assoc
+                          [ ("event_id", `String reid); ("replied", `Bool replied); ("liked", `Bool liked); ("reposted", `Bool reposted); ("zapped", `Bool zapped);
+                            ("voted_for_option", match vote with Some v -> `String v | None -> `Null) ]))))
+          reids
+    | _ -> ());
+    let _, cards = user_cards c pks in
+    List.iter (push a) cards;
+    List.iter (push a) (verified_names c pks);
+    List.rev a.res
+end
+
+let rmfp = Rmfp.run
+
 let explore_zaps (ctx : ctx) (kw : Kw.t) : outcome =
   let limit = Kw.int kw "limit" ~default:20 in
   if limit > 1000 then julia_error
@@ -1593,7 +1771,7 @@ let explore_zaps (ctx : ctx) (kw : Kw.t) : outcome =
         let zaps = Queries.explore_zaps c ~since ~until ~created_after ~limit ~offset in
         let zmsgs = zap_messages c zaps in
         let eids = List.filter_map (fun (z : Queries.zap_row) -> Option.map Hex_util.encode z.zr_event_id) zaps |> List.sort_uniq compare in
-        let posts = if eids = [] then [] else Queries.enrich_events c ~event_ids_json:(Queries.hexes_json eids) ~user_pubkey ~apply_humaness_check:false ~orderby:"created_at" in
+        let posts = if eids = [] then [] else rmfp c ~user_pubkey eids in
         let all = List.fold_left (fun acc m -> if List.mem m acc then acc else m :: acc) [] (zmsgs @ posts) |> List.rev in
         Handled (messages all))
 
@@ -1802,3 +1980,783 @@ let multi_kind_mega_feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
           | "most-zapped" -> mega_explore ctx kwargs ~timeframe:"mostzapped" ~created_after:(now () - (Kw.int s "hours" ~default:24 * 3600)) ~grouped:true ~kinds:kinds_l ()
           | _ -> multi_kind_mega_feed_directive_basic ctx kw)
       | _ -> mega_feed_directive ctx kw)
+
+(* {1 Phase 4c: the long tail} *)
+
+(* Julia user_infos_1 from memory: metadata events, USER_SCORES of the ones found,
+   USER_FOLLOWER_COUNTS of every pubkey asked, verified names, media and previews *)
+let user_infos_mem (c : Db.cache Db.conn) (hexes : string list) : string list =
+  if hexes = [] then counts_msg ~always:true Kind.user_follower_counts []
+  else
+    let found, cards = user_cards c hexes in
+    let mds = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> true | _ -> false) cards in
+    let rest = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> false | _ -> true) cards in
+    mds @ counts_msg Kind.user_scores (follower_counts c found)
+    @ counts_msg ~always:true Kind.user_follower_counts (follower_counts c hexes)
+    @ verified_names c hexes @ rest
+
+let hex_list_json (hexes : string list) = Queries.hexes_json hexes
+
+(* response_messages_for_zaps with its order and the optional kinds filter *)
+let zap_feed_messages ?kinds ~(order_by : string) (c : Db.cache Db.conn) (zaps : Queries.zap_row list) : string list =
+  let msgs =
+    match order_by with
+    | "amount_sats" -> zap_messages c zaps
+    | _ ->
+        let without_range = List.filter (fun m -> match kind_and_pubkey m with Some k, _ when k = Kind.range -> false | _ -> true) (zap_messages c zaps) in
+        without_range @ [ range_msg ~order_by:"created_at" (List.map (fun (z : Queries.zap_row) -> (Hex_util.encode z.zap_receipt_id, z.zr_created_at)) zaps) ]
+  in
+  match kinds with
+  | None -> msgs
+  | Some ks -> List.filter (fun m -> match kind_and_pubkey m with Some k, _ -> List.mem k ks | None, _ -> false) msgs
+
+let sort_zaps_desc ~(by : Queries.zap_row -> int64) ~limit (zaps : Queries.zap_row list) =
+  List.stable_sort (fun a b -> compare (by b) (by a)) zaps |> List.filteri (fun i _ -> i < limit)
+
+(* {2 direct messages} *)
+
+let get_directmsgs (ctx : ctx) (kw : Kw.t) : outcome =
+  match Kw.member kw "sender" with
+  | `Null -> Handled empty
+  | _ ->
+      let receiver = Kw.hex32_exn kw "receiver" and sender = Kw.hex32_exn kw "sender" in
+      let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+      let limit = Kw.int kw "limit" ~default:20 and offset = Kw.int kw "offset" ~default:0 in
+      with_cache ctx (fun c ->
+          let rows = Queries.directmsgs c ~receiver ~sender ~since ~until ~limit ~offset in
+          let evs = if rows = [] then [] else Queries.events_by_ids c ~event_ids_json:(hex_list_json (List.map fst rows)) in
+          let events = List.filter_map (fun (eid, _) -> List.assoc_opt eid evs) rows in
+          let pks = List.sort_uniq compare [ Hex_util.encode receiver; Hex_util.encode sender ] in
+          let _, cards = user_cards c pks in
+          Handled
+            (messages
+               (events @ cards @ verified_names c pks @ [ range_msg ~order_by:"created_at" (List.filter (fun (eid, _) -> List.mem_assoc eid evs) rows) ])))
+
+(* app.jl get_directmsg_contacts_2 *)
+let get_directmsg_contacts (ctx : ctx) (kw : Kw.t) : outcome =
+  let user = Kw.hex32_exn kw "user_pubkey" in
+  let relation = Kw.str kw "relation" ~default:"any" in
+  if not (List.mem relation [ "any"; "follows"; "other" ]) then julia_error
+  else
+    let limit = min 300 (Kw.int kw "limit" ~default:10000) and offset = Kw.int kw "offset" ~default:0 in
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+    with_cache ctx (fun c ->
+        let rows = Queries.directmsg_contacts_in c ~user ~since ~until @ Queries.directmsg_contacts_out c ~user ~since ~until in
+        let follows = List.map fst (Queries.follows_with_counts c ~pubkey:user) |> SS.of_list in
+        let peers = List.map (fun (r : Queries.dm_contact) -> r.peer) rows |> List.sort_uniq compare in
+        let blocked =
+          if peers = [] then SS.empty
+          else
+            SS.of_list
+              (Queries.hidden_pubkeys_default c ~scope:"content" ~pubkeys_json:(hex_list_json peers) ~author_exempt:None
+              |> List.filter (fun _ -> false))
+        in
+        ignore blocked;
+        let csam = Hashtbl.create 16 in
+        List.iter (fun pk -> if Queries.is_user_blocked c ~pubkey:(Hex_util.decode_exn pk) then Hashtbl.replace csam pk ()) peers;
+        let d : (string, int64 * int64 * string option) Hashtbl.t = Hashtbl.create 64 in
+        let order = ref [] in
+        List.iter
+          (fun (r : Queries.dm_contact) ->
+            if Hashtbl.mem csam r.peer then ()
+            else if relation = "follows" && not (SS.mem r.peer follows) then ()
+            else if relation = "other" && SS.mem r.peer follows then ()
+            else
+              match Hashtbl.find_opt d r.peer with
+              | None ->
+                  order := r.peer :: !order;
+                  Hashtbl.replace d r.peer (r.dm_cnt, r.latest_at, r.latest_event_id)
+              | Some (cnt, at, eid) ->
+                  let at, eid = if at < r.latest_at then (r.latest_at, r.latest_event_id) else (at, eid) in
+                  Hashtbl.replace d r.peer (max cnt r.dm_cnt, at, eid))
+          rows;
+        let items =
+          List.rev_map (fun pk -> let cnt, at, eid = Hashtbl.find d pk in (pk, cnt, at, eid)) !order
+          |> List.stable_sort (fun (_, _, a, _) (_, _, b, _) -> compare b a)
+          |> List.filteri (fun i _ -> i >= offset && i < offset + limit)
+        in
+        let eids = List.filter_map (fun (_, _, _, eid) -> eid) items in
+        let evs = if eids = [] then [] else Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) in
+        let events = List.filter_map (fun (_, _, _, eid) -> Option.bind eid (fun e -> List.assoc_opt e evs)) items in
+        let peer_hexes = List.map (fun (pk, _, _, _) -> pk) items in
+        let _, cards = user_cards c peer_hexes in
+        let counts =
+          content_msg Kind.directmsg_counts
+            (Yojson.Safe.to_string
+               (`Assoc
+                 (List.map
+                    (fun (pk, cnt, at, eid) ->
+                      ( pk,
+                        `Assoc [ ("cnt", i64json cnt); ("latest_at", i64json at); ("latest_event_id", match eid with Some e -> `String e | None -> `Null) ] ))
+                    items)))
+        in
+        Handled
+          (messages
+             ((counts :: events) @ verified_names c peer_hexes @ cards
+             @ [ range_msg ~order_by:"latest_at" (List.map (fun (pk, _, at, _) -> (pk, at)) items) ])))
+
+let reset_directmsg_count (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e ->
+      let sender = match Kw.member kw "sender" with `Null -> None | _ -> Some (Kw.hex32_exn kw "sender") in
+      with_cache ctx (fun c ->
+          match Queries.directmsg_cnt c ~receiver:e.Nostr.pubkey ~sender with
+          | Some by ->
+              Queries.reset_directmsg_count c ~receiver:e.Nostr.pubkey ~sender ~by;
+              Queries.reset_directmsg_count c ~receiver:e.Nostr.pubkey ~sender:None ~by
+          | None -> ());
+      Handled empty
+
+let reset_directmsg_counts (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e ->
+      with_cache ctx (fun c -> Queries.reset_directmsg_counts c ~receiver:e.Nostr.pubkey);
+      Handled empty
+
+(* {2 zaps} *)
+
+let zaps_feed (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    let limit = min 50 limit in
+    let pubkeys = hex32_list_exn kw "pubkeys" in
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+    let offset = Kw.int kw "offset" ~default:0 in
+    let kinds = Kw.int_list_opt kw "kinds" in
+    with_cache ctx (fun c ->
+        let zaps = if pubkeys = [] then [] else Queries.zaps_of_pubkeys c ~pubkeys_json:(Queries.raws_json pubkeys) ~since ~until ~limit ~offset in
+        let zaps = sort_zaps_desc ~by:(fun z -> z.Queries.zr_created_at) ~limit zaps in
+        Handled (messages (zap_feed_messages ?kinds ~order_by:"created_at" c zaps)))
+
+let user_zaps (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    let limit = min 50 limit in
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+    let offset = Kw.int kw "offset" ~default:0 in
+    let kinds = Kw.int_list_opt kw "kinds" in
+    match (Kw.member kw "sender", Kw.member kw "receiver") with
+    | `Null, `Null -> julia_error
+    | `String _, _ ->
+        let sender = Kw.hex32_exn kw "sender" in
+        with_cache ctx (fun c ->
+            let zaps = sort_zaps_desc ~by:(fun z -> z.Queries.zr_created_at) ~limit (Queries.zaps_by_sender c ~sender ~since ~until ~limit ~offset) in
+            Handled (messages (zap_feed_messages ?kinds ~order_by:"created_at" c zaps)))
+    | _ ->
+        let receiver = Kw.hex32_exn kw "receiver" in
+        with_cache ctx (fun c ->
+            let zaps = sort_zaps_desc ~by:(fun z -> z.Queries.zr_created_at) ~limit (Queries.zaps_by_receiver c ~receiver ~since ~until ~limit ~offset) in
+            Handled (messages (zap_feed_messages ?kinds ~order_by:"created_at" c zaps)))
+
+let user_zaps_by_satszapped (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    let receiver = Kw.hex32_exn kw "receiver" in
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:100_000_000_000 in
+    let offset = Kw.int kw "offset" ~default:0 in
+    with_cache ctx (fun c ->
+        let zaps = sort_zaps_desc ~by:(fun z -> z.Queries.amount_sats) ~limit (Queries.zaps_by_receiver_amount c ~receiver ~since ~until ~limit ~offset) in
+        Handled (messages (zap_feed_messages ~order_by:"amount_sats" c zaps)))
+
+let user_zaps_sent (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    let sender = Kw.hex32_exn kw "sender" in
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+    let offset = Kw.int kw "offset" ~default:0 in
+    with_cache ctx (fun c ->
+        let zaps = sort_zaps_desc ~by:(fun z -> z.Queries.zr_created_at) ~limit (Queries.zaps_by_sender c ~sender ~since ~until ~limit ~offset) in
+        Handled (messages (zap_feed_messages ~order_by:"created_at" c zaps)))
+
+(* {2 users and events} *)
+
+let event_actions (ctx : ctx) (kw : Kw.t) : outcome =
+  let kind = Kw.int_exn kw "kind" in
+  let limit = Kw.int kw "limit" ~default:100 and offset = Kw.int kw "offset" ~default:0 in
+  if limit > 1000 then julia_error
+  else
+    with_cache ctx (fun c ->
+        let refs =
+          match (Kw.member kw "event_id", Kw.member kw "pubkey", Kw.member kw "identifier") with
+          | `String _, _, _ -> Queries.event_action_refs c ~event_id:(Kw.hex32_exn kw "event_id") ~kind ~limit ~offset
+          | `Null, `String _, `String identifier -> Queries.event_action_refs_article c ~pubkey:(Kw.hex32_exn kw "pubkey") ~identifier ~kind ~limit ~offset
+          | _ -> []
+        in
+        let eids = List.map fst refs and pks = List.map snd refs |> List.sort_uniq compare in
+        let evs = if eids = [] then [] else Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) in
+        let events = List.filter_map (fun eid -> List.assoc_opt eid evs) eids in
+        Handled (messages (events @ user_infos_mem c pks)))
+
+let user_followers (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let limit = Kw.int kw "limit" ~default:200 in
+  if limit > 1000 then julia_error
+  else
+    with_cache ctx (fun c ->
+        let add acc pk = if List.length acc >= limit || List.mem pk acc then acc else acc @ [ pk ] in
+        let pks = List.fold_left add [] (Queries.user_followers_mutual c ~pubkey) in
+        let pks = if List.length pks < limit then List.fold_left add pks (Queries.user_followers_top c ~pubkey ~limit:(limit - List.length pks)) else pks in
+        Handled (messages (if pks = [] then [] else Queries.user_infos c ~pubkeys_json:(hex_list_json pks))))
+
+let mutual_follows (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and user_pubkey = Kw.hex32_exn kw "user_pubkey" in
+  with_cache ctx (fun c -> Handled (messages (user_infos_mem c (List.sort_uniq compare (Queries.mutual_follows c ~pubkey ~user_pubkey)))))
+
+let find_reposts (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and event_id = Kw.hex32_exn kw "event_id" in
+  Handled (messages (with_cache ctx (fun c -> Queries.reposts_of c ~pubkey ~event_id)))
+
+let p_tag_pubkeys ?(exactly_two = false) (event_json : string) : string list =
+  match Yojson.Safe.from_string event_json with
+  | `Assoc f -> (
+      match List.assoc_opt "tags" f with
+      | Some (`List tags) ->
+          List.filter_map
+            (function
+              | `List (`String "p" :: `String pk :: rest) when (not exactly_two || rest = []) && String.length pk = 64 && Hex_util.decode_opt pk <> None ->
+                  Some (String.lowercase_ascii pk)
+              | _ -> None)
+            tags
+      | _ -> [])
+  | _ -> []
+  | exception _ -> []
+
+let follow_list (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and identifier = Kw.str_exn kw "identifier" in
+  with_cache ctx (fun c ->
+      match Queries.parametrized_event_ids c ~pubkey ~kind:39089 ~identifier with
+      | [] -> julia_error
+      | eid :: _ -> (
+          match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid ]) with
+          | (_, e) :: _ ->
+              let pks = List.sort_uniq compare (p_tag_pubkeys e) in
+              Handled (messages (e :: (if pks = [] then [] else Queries.user_infos c ~pubkeys_json:(hex_list_json pks))))
+          | [] -> julia_error))
+
+(* app.jl follow_lists: the whitelisted packs (explore-follow-packs.json) or recent kind-39089 lists *)
+let follow_lists (ctx : ctx) (kw : Kw.t) : outcome =
+  let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+  let limit = min 20 (Kw.int kw "limit" ~default:5) and offset = Kw.int kw "offset" ~default:0 in
+  with_cache ctx (fun c ->
+      let whitelist =
+        match Files.read_opt (cm_file ctx "explore-follow-packs.json") with
+        | None -> None
+        | Some s -> (
+            match Yojson.Safe.from_string s with
+            | `List entries ->
+                Some
+                  (List.filter_map
+                     (function
+                       | `Assoc f -> (
+                           match List.assoc_opt "follow_pack" f with
+                           | Some (`String np) -> (
+                               match Bech32.nip19_decode np with Some (Bech32.Nevent eid) | Some (Bech32.Note eid) -> Some (Hex_util.encode eid) | _ -> None)
+                           | _ -> None)
+                       | _ -> None)
+                     entries)
+            | _ -> None
+            | exception _ -> None)
+      in
+      let events =
+        match whitelist with
+        | Some eids ->
+            let evs = if eids = [] then [] else Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) in
+            let all = List.filter_map (fun eid -> List.assoc_opt eid evs) eids in
+            let in_range e =
+              match Yojson.Safe.from_string e with
+              | `Assoc f -> ( match List.assoc_opt "created_at" f with Some (`Int t) -> t >= since && t <= until | _ -> false)
+              | _ -> false
+              | exception _ -> false
+            in
+            List.filter in_range all |> List.filteri (fun i _ -> i >= offset && i < offset + limit)
+        | None ->
+            Queries.follow_packs c ~since ~until ~limit ~offset
+            |> List.filter (fun e ->
+                   match Yojson.Safe.from_string e with
+                   | `Assoc f -> ( match List.assoc_opt "tags" f with Some (`List tags) -> List.exists (function `List (`String "image" :: _ :: _) -> true | _ -> false) tags | _ -> false)
+                   | _ -> false
+                   | exception _ -> false)
+      in
+      if events = [] then Handled empty
+      else begin
+        let res = ref [] and pks = ref [] and es = ref [] in
+        List.iter
+          (fun e ->
+            res := e :: !res;
+            (match Yojson.Safe.from_string e with
+            | `Assoc f -> (
+                (match (List.assoc_opt "id" f, List.assoc_opt "created_at" f) with
+                | Some (`String id), Some (`Int t) ->
+                    res := List.rev_append (Queries.event_media_response c ~event_id:(Hex_util.decode_exn id)) !res;
+                    es := (id, Int64.of_int t) :: !es
+                | _ -> ());
+                match List.assoc_opt "pubkey" f with Some (`String pk) -> pks := pk :: !pks | _ -> ())
+            | _ -> ()
+            | exception _ -> ());
+            let followed = p_tag_pubkeys e in
+            if followed <> [] then pks := Queries.most_followed_of c ~pubkeys_json:(hex_list_json followed) ~limit:5 @ !pks)
+          events;
+        let pks = List.sort_uniq compare !pks in
+        Handled (messages (List.rev !res @ Queries.user_infos c ~pubkeys_json:(hex_list_json pks) @ [ range_msg ~order_by:"created_at" (List.rev !es) ]))
+      end)
+
+(* app.jl parametrized_replaceable_events_extended_response *)
+let p_tag_extended (c : Db.cache Db.conn) (events : string list) : string list =
+  let pks = List.concat_map (p_tag_pubkeys ~exactly_two:true) events |> List.sort_uniq compare in
+  if pks = [] then []
+  else
+    let found, cards = user_cards c pks in
+    let mds = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> true | _ -> false) cards in
+    let rest = List.filter (fun m -> match kind_and_pubkey m with Some 0, _ -> false | _ -> true) cards in
+    mds @ counts_msg Kind.user_scores (follower_counts c found) @ rest @ verified_names c found
+
+let parameterized_replaceable_list (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and identifier = Kw.str_exn kw "identifier" in
+  let extended = Kw.bool kw "extended_response" ~default:true in
+  with_cache ctx (fun c ->
+      let eids = Queries.param_list_event_ids c ~pubkey ~identifier in
+      let evs = if eids = [] then [] else Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) in
+      let events = List.filter_map (fun eid -> List.assoc_opt eid evs) eids in
+      Handled (messages (events @ if extended then p_tag_extended c events else [])))
+
+let parametrized_replaceable_event_one (c : Db.cache Db.conn) ~pubkey ~kind ~identifier ~extended ~user_pubkey : string list =
+  let eids = Queries.parametrized_event_ids c ~pubkey ~kind ~identifier in
+  let evs = if eids = [] then [] else Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) in
+  let events = List.filter_map (fun eid -> List.assoc_opt eid evs) eids in
+  let extra =
+    if extended && events <> [] then
+      p_tag_extended c events @ rmfp c ~user_pubkey (List.map fst evs)
+    else []
+  in
+  List.fold_left (fun acc m -> if List.mem m acc then acc else m :: acc) [] (events @ extra) |> List.rev
+
+let parametrized_replaceable_event (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and kind = Kw.int_exn kw "kind" and identifier = Kw.str_exn kw "identifier" in
+  let extended = Kw.bool kw "extended_response" ~default:true in
+  let user_pubkey = user_pubkey_opt kw in
+  with_cache ctx (fun c -> Handled (messages (parametrized_replaceable_event_one c ~pubkey ~kind ~identifier ~extended ~user_pubkey)))
+
+let parametrized_replaceable_events (ctx : ctx) (kw : Kw.t) : outcome =
+  let extended = Kw.bool kw "extended_response" ~default:true in
+  match Kw.member kw "events" with
+  | `List items ->
+      with_cache ctx (fun c ->
+          Handled
+            (messages
+               (List.concat_map
+                  (fun item ->
+                    let pubkey = Kw.hex32_exn item "pubkey" and kind = Kw.int_exn item "kind" and identifier = Kw.str_exn item "identifier" in
+                    parametrized_replaceable_event_one c ~pubkey ~kind ~identifier ~extended ~user_pubkey:None)
+                  items)))
+  | _ -> raise (Kw.Invalid "events required")
+
+(* {2 filterlist} *)
+
+let check_filterlist (ctx : ctx) (kw : Kw.t) : outcome =
+  let pks = hex32_list_exn kw "pubkeys" |> List.map Hex_util.encode |> List.sort_uniq compare in
+  let hidden = if pks = [] then [] else with_cache ctx (fun c -> Queries.filterlist_hidden_pubkeys c ~pubkeys_json:(hex_list_json pks)) in
+  Handled (messages [ content_msg Kind.filterlisted (Yojson.Safe.to_string (`Assoc [ ("pubkeys", `List (List.map (fun p -> `String p) hidden)) ])) ])
+
+(* app.jl is_hidden(est, user, scope, pk): only the trending scope hides (the blocked nip05 domains) *)
+let is_hidden_by_content_moderation (ctx : ctx) (kw : Kw.t) : outcome =
+  let scope = Kw.str kw "scope" ~default:"content" in
+  let pks = match Kw.member kw "pubkeys" with `Null -> [] | _ -> hex32_list_exn kw "pubkeys" |> List.map Hex_util.encode in
+  let eids = match Kw.member kw "event_ids" with `Null -> [] | _ -> hex32_list_exn kw "event_ids" |> List.map Hex_util.encode in
+  let domains_json = Yojson.Safe.to_string (`List (List.map (fun d -> `String d) ctx.cfg.trending_blocked_domains)) in
+  with_cache ctx (fun c ->
+      let authors = if eids = [] then [] else Queries.event_authors c ~event_ids_json:(hex_list_json eids) in
+      let candidates = List.sort_uniq compare (pks @ List.map snd authors) in
+      let hidden =
+        if scope <> "trending" || candidates = [] then SS.empty
+        else SS.of_list (Queries.domain_hidden_pubkeys c ~pubkeys_json:(hex_list_json candidates) ~domains_json)
+      in
+      let content =
+        `Assoc
+          [
+            ("pubkeys", `Assoc (List.map (fun pk -> (pk, `Bool (SS.mem pk hidden))) pks));
+            ("event_ids", `Assoc (List.map (fun eid -> (eid, `Bool (match List.assoc_opt eid authors with Some a -> SS.mem a hidden | None -> false))) eids));
+          ]
+      in
+      Handled (messages [ content_msg Kind.is_hidden_by_content_moderation (Yojson.Safe.to_string content) ]))
+
+(* {2 settings, misc} *)
+
+(* app_ext.jl app_settings(): a kind-30078 event from the user; accessed_at and the log row *)
+let with_app_settings (ctx : ctx) (kw : Kw.t) (f : Nostr.t -> outcome) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e when e.Nostr.kind <> Kind.app_settings -> julia_error
+  | Ok e ->
+      let r = f e in
+      let event_json = match Kw.member kw "event_from_user" with `Null -> "{}" | v -> Yojson.Safe.to_string v in
+      with_membership ctx (fun m -> Queries_mem.touch_app_settings m ~pubkey:e.Nostr.pubkey ~event_json ~now:(now ()));
+      r
+
+let get_app_settings_2 (ctx : ctx) (kw : Kw.t) : outcome =
+  with_app_settings ctx kw (fun e ->
+      match with_membership ctx (fun m -> Queries_mem.app_settings_event m ~pubkey:e.Nostr.pubkey) with
+      | Some v -> Handled (messages [ v ])
+      | None -> Handled empty)
+
+let get_app_settings (ctx : ctx) (kw : Kw.t) : outcome =
+  with_app_settings ctx kw (fun e ->
+      match with_membership ctx (fun m -> Queries_mem.app_settings_event m ~pubkey:e.Nostr.pubkey) with
+      | Some v -> Handled (messages [ v ])
+      | None ->
+          (* the default settings as a zero-signed event, stored as the user's settings *)
+          let client = match List.nth_opt e.Nostr.tags 0 with Some (_ :: `String c :: _) -> c | _ -> raise (Kw.Invalid "client tag") in
+          let content = Files.read (cm_file ctx "default-settings.json") in
+          let zeros n = String.make n '0' in
+          let ev =
+            `Assoc
+              [
+                ("id", `String (zeros 64));
+                ("pubkey", `String (zeros 64));
+                ("created_at", `Int (now ()));
+                ("kind", `Int Kind.primal_settings);
+                ("tags", `List [ `List [ `String "d"; `String client ] ]);
+                ("content", `String content);
+                ("sig", `String (zeros 128));
+              ]
+          in
+          let v = Yojson.Safe.to_string ev in
+          with_membership ctx (fun m -> Queries_mem.insert_app_settings m ~pubkey:e.Nostr.pubkey ~value:v ~event_id:(String.make 32 '\000') ~now:(now ()));
+          Handled (messages [ v ]))
+
+let user_of_ln_address (ctx : ctx) (kw : Kw.t) : outcome =
+  let ln_address = Kw.str_exn kw "ln_address" in
+  with_cache ctx (fun c ->
+      match Queries.ln_address_pubkey c ~ln_address with
+      | None -> Handled empty
+      | Some pk ->
+          let hex = Hex_util.encode pk in
+          Handled (messages (content_msg Kind.user_pubkey (Yojson.Safe.to_string (`Assoc [ ("pubkey", `String hex) ])) :: user_infos_mem c [ hex ])))
+
+let set_last_time_user_was_online (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e -> (
+      match int_of_string_opt (String.trim e.Nostr.content) with
+      | None -> julia_error
+      | Some t ->
+          with_membership ctx (fun m -> Queries_mem.set_last_online m ~pubkey:e.Nostr.pubkey ~online_at:t);
+          Handled empty)
+
+let report_id (ctx : ctx) (kw : Kw.t) ~typ ~id : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e ->
+      with_membership ctx (fun m -> Queries_mem.report m ~pubkey:e.Nostr.pubkey ~typ ~id ~now:(now ()));
+      Handled empty
+
+let report_user (ctx : ctx) (kw : Kw.t) : outcome = report_id ctx kw ~typ:1 ~id:(Kw.hex32_exn kw "pubkey")
+let report_note (ctx : ctx) (kw : Kw.t) : outcome = report_id ctx kw ~typ:2 ~id:(Kw.hex32_exn kw "event_id")
+
+let relays (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  let rows = with_cache ctx (fun c -> Queries.relays_top c ~limit) in
+  Handled (messages [ content_msg Kind.relays (Yojson.Safe.to_string (`Assoc (List.map (fun (u, n) -> (u, i64json n)) rows))) ])
+
+let trusted_users (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = min 10000 (Kw.int kw "limit" ~default:500) in
+  with_cache ctx (fun c ->
+      let rows = Queries.trustrank_top c ~limit in
+      let head = content_msg Kind.trusted_users (Yojson.Safe.to_string (`List (List.map (fun (pk, tr) -> `Assoc [ ("pk", `String pk); ("tr", `Float tr) ]) rows))) in
+      let mds = if rows = [] then [] else List.map snd (Queries.metadata_events c ~pubkeys_json:(hex_list_json (List.map fst rows))) in
+      Handled (messages (head :: mds)))
+
+let client_config (ctx : ctx) (_ : Kw.t) : outcome =
+  Handled (messages [ content_msg Kind.show_primal_support (file_json_content (cm_file ctx "client-config.json") ~default:"null") ])
+
+let network_stats (ctx : ctx) (_ : Kw.t) : outcome =
+  match ctx.cfg.network_stats_url with
+  | None -> Not_handled
+  | Some url -> (
+      match (Http.parse_url url, !net_ref) with
+      | Some u, Some net -> (
+          match
+            Http.plain_request ~net ~clock:ctx.clock ~timeout:5.0 ~meth:"GET" ~body:{|["network_stats",{}]|} ~host:u.Http.host ~port:u.Http.port
+              ~path:u.Http.path ()
+          with
+          | 200, body -> (
+              match Yojson.Safe.from_string body with
+              | `List [ _; content ] -> Handled (messages [ Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.net_stats); ("content", content) ]) ])
+              | _ -> julia_error)
+          | _ -> julia_error)
+      | _ -> Not_handled)
+
+(* {2 articles} *)
+
+let articles_stats (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and kind = Kw.int kw "kind" ~default:30023 in
+  let articles, drafts, satszapped = with_cache ctx (fun c -> Queries.articles_stats c ~pubkey ~kind) in
+  Handled
+    (messages
+       [ content_msg Kind.articles_stats (Yojson.Safe.to_string (`Assoc [ ("articles", i64json articles); ("drafts", i64json drafts); ("satszapped", i64json satszapped) ])) ])
+
+let drafts (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and kind = Kw.int_exn kw "kind" in
+  let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+  let limit = min 100 (Kw.int kw "limit" ~default:20) and offset = Kw.int kw "offset" ~default:0 in
+  Handled (messages (with_cache ctx (fun c -> Queries.drafts c ~pubkey ~kind ~since ~until ~limit ~offset)))
+
+let top_article (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and by = Kw.str_exn kw "by" in
+  with_cache ctx (fun c ->
+      match Queries.top_article_eid c ~pubkey ~by with
+      | None -> Handled empty
+      | Some eid -> (
+          match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid ]) with
+          | [] -> Handled empty
+          | (_, e) :: _ ->
+              let stats =
+                match Queries.reads_stats c ~eid:(Hex_util.decode_exn eid) with
+                | Some (likes, replies, reposts, zaps, satszapped) ->
+                    [
+                      content_msg Kind.event_stats
+                        (Yojson.Safe.to_string
+                           (`Assoc
+                             [
+                               ("event_id", `String eid); ("likes", i64json likes); ("replies", i64json replies); ("mentions", `Int 0);
+                               ("reposts", i64json reposts); ("zaps", i64json zaps); ("satszapped", i64json satszapped); ("score", `Int 0);
+                               ("score24h", `Int 0); ("bookmarks", `Int 0);
+                             ]));
+                    ]
+                | None -> []
+              in
+              Handled (messages (e :: stats))))
+
+(* app.jl long_form_content_thread_view (usepgfuncs; apply_humaness_check forced false) *)
+let long_form_content_thread_view (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" and kind = Kw.int_exn kw "kind" and identifier = Kw.str_exn kw "identifier" in
+  let limit = Kw.int kw "limit" ~default:20 and since = Kw.int kw "since" ~default:0 in
+  let until = Kw.int kw "until" ~default:(now ()) and offset = Kw.int kw "offset" ~default:0 in
+  let user_pubkey = user_pubkey_opt kw in
+  if limit > 1000 then julia_error
+  else
+    with_cache ctx (fun c ->
+        match Queries.parametrized_event_ids c ~pubkey ~kind ~identifier with
+        | [] -> Handled empty
+        | eid :: _ -> (
+            match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid ]) with
+            | [] -> Handled empty
+            | (_, e) :: _ ->
+                if Queries.hidden_events c ~event_ids_json:(hex_list_json [ eid ]) <> [] then Handled empty
+                else begin
+                  let created_at =
+                    match Yojson.Safe.from_string e with `Assoc f -> ( match List.assoc_opt "created_at" f with Some (`Int t) -> t | _ -> 0) | _ -> 0 | exception _ -> 0
+                  in
+                  let parents = Queries.thread_parents c ~event_id:(Hex_util.decode_exn eid) in
+                  let parent_msgs = if parents = [] then [] else rmfp c ~user_pubkey (List.map fst parents) in
+                  let replies = Queries.lfc_replies c ~pubkey ~identifier ~since ~until ~limit ~offset in
+                  (* Julia keeps only replies whose e/a tags are all "root" markers *)
+                  let tags = if replies = [] then [] else Queries.event_tags_of c ~event_ids_json:(hex_list_json (List.map fst replies)) in
+                  let is_direct reid =
+                    match List.assoc_opt reid tags with
+                    | None -> false
+                    | Some t -> (
+                        match Yojson.Safe.from_string t with
+                        | `List tags ->
+                            not
+                              (List.exists
+                                 (function
+                                   | `List (`String ("e" | "a") :: rest) -> ( match List.nth_opt rest 2 with Some (`String "root") -> false | _ -> true)
+                                   | _ -> false)
+                                 tags)
+                        | _ -> false
+                        | exception _ -> false)
+                  in
+                  let replies = List.filter (fun (reid, _) -> is_direct reid) replies in
+                  let posts_json =
+                    Yojson.Safe.to_string
+                      (`List (`List [ `String eid; `Int created_at ] :: List.map (fun (r, t) -> `List [ `String r; `Int (Int64.to_int t) ]) replies))
+                  in
+                  let enriched = Queries.enrich_posts c ~posts_json ~user_pubkey ~apply_humaness_check:false in
+                  (* Julia's OrderedSet does not merge the in-memory objects with the SQL rows, so the
+                     article and its parents appear once from each side *)
+                  let mem = List.fold_left (fun acc m -> if List.mem m acc then acc else m :: acc) [] (e :: parent_msgs) |> List.rev in
+                  Handled (messages (mem @ enriched))
+                end))
+
+let user_profile_scored_media_thumbnails (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let limit = min 100 (Kw.int kw "limit" ~default:5) in
+  let user_pubkey = user_pubkey_opt kw in
+  with_cache ctx (fun c ->
+      let eids = Queries.scored_media_eids c ~pubkey ~limit in
+      Handled (messages (if eids = [] then [] else rmfp c ~user_pubkey eids)))
+
+(* app.jl get_highlights (article form; event_id form raises in Julia) *)
+let get_highlights (ctx : ctx) (kw : Kw.t) : outcome =
+  match Kw.member kw "event_id" with
+  | `Null -> (
+      match (Kw.member kw "pubkey", Kw.member kw "identifier", Kw.member kw "kind") with
+      | `String _, `String identifier, `Int kind ->
+          let pubkey = Kw.hex32_exn kw "pubkey" in
+          let user_pubkey = user_pubkey_opt kw in
+          with_cache ctx (fun c ->
+              let evts = Queries.article_highlights c ~pubkey ~identifier ~kind in
+              let parsed = List.filter_map (fun e -> match Yojson.Safe.from_string e with `Assoc f -> Some (e, f) | _ -> None | exception _ -> None) evts in
+              let fld f k = List.assoc_opt k f in
+              let hs = List.filter_map (fun (e, f) -> match (fld f "kind", fld f "id") with Some (`Int 9802), Some (`String id) -> Some (id, (e, f)) | _ -> None) parsed in
+              let groups : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+              let gorder = ref [] in
+              List.iter
+                (fun (_, f) ->
+                  match (fld f "kind", fld f "id", fld f "tags") with
+                  | Some (`Int 1), Some (`String id), Some (`List tags) ->
+                      List.iter
+                        (function
+                          | `List (`String "q" :: `String qid :: _) -> (
+                              match List.assoc_opt (String.lowercase_ascii qid) hs with
+                              | Some (_, hf) ->
+                                  let key = match fld hf "content" with Some (`String s) -> s | _ -> "" in
+                                  if not (Hashtbl.mem groups key) then gorder := key :: !gorder;
+                                  Hashtbl.replace groups key (Option.value (Hashtbl.find_opt groups key) ~default:[] @ [ id ])
+                              | None -> ())
+                          | _ -> ())
+                        tags
+                  | _ -> ())
+                parsed;
+              let hpks = List.filter_map (fun (_, (_, f)) -> match fld f "pubkey" with Some (`String p) -> Some p | _ -> None) hs |> List.sort_uniq compare in
+              let mds = if hpks = [] then [] else List.map snd (Queries.metadata_events c ~pubkeys_json:(hex_list_json hpks)) in
+              let groups_msg =
+                content_msg Kind.highlight_groups
+                  (Yojson.Safe.to_string (`Assoc (List.rev_map (fun k -> (k, `List (List.map (fun id -> `String id) (Hashtbl.find groups k)))) !gorder)))
+              in
+              let replies =
+                List.concat_map
+                  (fun (id, _) ->
+                    let rs = Queries.event_replies c ~event_id:(Hex_util.decode_exn id) ~since:0 ~until:(now ()) ~limit:100 ~offset:0 in
+                    if rs = [] then [] else rmfp c ~user_pubkey (List.map fst rs))
+                  hs
+              in
+              Handled (messages (List.map (fun (_, (e, _)) -> e) hs @ mds @ [ groups_msg ] @ replies)))
+      | _ -> Handled (messages [ content_msg Kind.highlight_groups "{}" ]))
+  | _ -> julia_error
+
+(* app_ext.jl get_suggested_users_2: suggested-accounts-v2.json *)
+let get_suggested_users_2 (ctx : ctx) (_ : Kw.t) : outcome =
+  match Files.read_opt (cm_file ctx "suggested-accounts-v2.json") with
+  | None -> Handled empty
+  | Some s -> (
+      match Yojson.Safe.from_string s with
+      | `List groups ->
+          let pks = ref [] in
+          let groups' =
+            List.map
+              (function
+                | `Assoc g ->
+                    let people =
+                      match List.assoc_opt "people" g with
+                      | Some (`List ps) ->
+                          `List
+                            (List.map
+                               (function
+                                 | `Assoc u ->
+                                     let pk = match List.assoc_opt "pubkey" u with Some (`String p) -> p | _ -> "" in
+                                     let pk =
+                                       if String.length pk >= 4 && String.sub pk 0 4 = "npub" then
+                                         match Bech32.nip19_decode pk with Some (Bech32.Npub raw) -> Hex_util.encode raw | _ -> pk
+                                       else pk
+                                     in
+                                     pks := pk :: !pks;
+                                     `Assoc (List.map (fun (k, v) -> if k = "pubkey" then (k, `String pk) else (k, v)) u)
+                                 | v -> v)
+                               ps)
+                      | _ -> `List []
+                    in
+                    `Assoc (List.map (fun (k, v) -> if k = "people" then (k, people) else (k, v)) g)
+                | v -> v)
+              groups
+          in
+          with_cache ctx (fun c ->
+              let hexes = List.sort_uniq compare (List.filter (fun p -> String.length p = 64) !pks) in
+              let found, mds = if hexes = [] then ([], []) else List.split (Queries.metadata_events c ~pubkeys_json:(hex_list_json hexes)) in
+              Handled
+                (messages
+                   ((content_msg Kind.suggested_users (Yojson.Safe.to_string (`List groups')) :: List.sort_uniq compare mds)
+                   @ counts_msg Kind.user_scores (follower_counts c (List.sort_uniq compare found)))))
+      | _ -> julia_error
+      | exception _ -> julia_error)
+
+(* {2 feed_2 / feed_directive_2} (app.jl feed_2: usepgfuncs) *)
+
+let feed_2 (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:20 in
+  if limit > 1000 then julia_error
+  else
+    let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+    let offset = Kw.int kw "offset" ~default:0 in
+    let notes = Kw.str kw "notes" ~default:"follows" in
+    let user_pubkey = user_pubkey_opt kw in
+    let kinds = Option.value (Kw.int_list_opt kw "kinds") ~default:[ 1; 6 ] in
+    match Kw.member kw "pubkey" with
+    | `Null -> Handled empty
+    | _ -> (
+        let pubkey = Kw.hex32_exn kw "pubkey" in
+        let include_replies = if Kw.bool kw "include_replies" ~default:false then 1 else 0 in
+        let order = match Kw.str_opt kw "order" with Some o -> o | None -> if Kw.has kw "until" then "desc" else if Kw.has kw "since" then "asc" else "desc" in
+        if not (List.mem order [ "asc"; "desc" ]) then julia_error
+        else
+          with_cache ctx (fun c ->
+              let enrich posts =
+                let posts = List.stable_sort (fun (_, a) (_, b) -> if order = "asc" then compare a b else compare b a) posts |> List.filteri (fun i _ -> i < limit) in
+                let posts_json = Yojson.Safe.to_string (`List (List.map (fun (e, t) -> `List [ `String e; `Int (Int64.to_int t) ]) posts)) in
+                let msgs = if posts = [] then [] else Queries.enrich_posts c ~posts_json ~user_pubkey ~apply_humaness_check:false in
+                Handled (messages (msgs @ [ range_msg ~order_by:"created_at" posts ]))
+              in
+              match notes with
+              | "replies" ->
+                  Handled (messages (Queries.feed_user_authored c ~pubkey ~since ~until ~include_replies:1 ~limit ~offset ~user_pubkey ~apply_humaness_check:false ~kinds))
+              | "authored" ->
+                  if Queries.is_user_blocked c ~pubkey then Handled empty
+                  else Handled (messages (Queries.feed_user_authored c ~pubkey ~since ~until ~include_replies ~limit ~offset ~user_pubkey ~apply_humaness_check:false ~kinds))
+              | "follows" ->
+                  if Queries.has_followers_row c ~pubkey then
+                    Handled (messages (Queries.feed_user_follows c ~pubkey ~since ~until ~include_replies ~limit ~offset ~user_pubkey ~apply_humaness_check:false ~kinds))
+                  else enrich []
+              | "user_media_thumbnails" ->
+                  if Queries.is_user_blocked c ~pubkey then Handled empty else enrich (Queries.media_note_ids c ~pubkey ~since ~until ~limit ~offset)
+              | "bookmarks" -> Not_handled (* the bookmarks walk stays with Julia for now *)
+              | _ -> julia_error))
+
+(* app_ext.jl feed_directive_2 = feed_directive_ with feed_2 *)
+let feed_directive_2 (ctx : ctx) (kw : Kw.t) : outcome =
+  let directive = Kw.str_exn kw "directive" in
+  let kwa = Kw.remove kw "directive" in
+  let with_pk pk extra = feed_2 ctx (Kw.merge (Kw.set kwa "pubkey" (`String pk)) extra) in
+  let is_pk pk = String.length pk = 64 && Hex_util.decode_opt pk <> None in
+  if is_pk directive then with_pk directive []
+  else
+    match String.split_on_char ';' directive with
+    | [ "authored"; pk ] when is_pk pk -> with_pk pk [ ("notes", `String "authored") ]
+    | [ "authoredreplies"; pk ] when is_pk pk -> with_pk pk [ ("notes", `String "replies") ]
+    | [ "withreplies"; pk ] when is_pk pk -> with_pk pk [ ("include_replies", `Bool true) ]
+    | _ -> Not_handled
+
+(* app.jl enrich_feed_events / app_ext.jl note_mentions through response_messages_for_posts *)
+let enrich_feed_events (ctx : ctx) (kw : Kw.t) : outcome =
+  let event_ids = hex32_list_exn kw "event_ids" in
+  let user_pubkey = user_pubkey_opt kw in
+  if event_ids = [] then Handled empty else with_cache ctx (fun c -> Handled (messages (rmfp c ~user_pubkey (List.map Hex_util.encode event_ids))))
+
+let note_mentions (ctx : ctx) (kw : Kw.t) : outcome =
+  let limit = Kw.int kw "limit" ~default:100 and offset = Kw.int kw "offset" ~default:0 in
+  if limit > 1000 then julia_error
+  else
+    let user_pubkey = user_pubkey_opt kw in
+    let answer c hexes = Handled (messages (if hexes = [] then [] else rmfp c ~user_pubkey (List.sort_uniq compare hexes))) in
+    match (Kw.member kw "event_id", Kw.member kw "pubkey", Kw.member kw "identifier") with
+    | `String _, _, _ -> let event_id = Kw.hex32_exn kw "event_id" in with_cache ctx (fun c -> answer c (Queries.note_mentions_event_ids c ~event_id ~limit ~offset))
+    | `Null, `String _, `String identifier ->
+        let pubkey = Kw.hex32_exn kw "pubkey" in
+        with_cache ctx (fun c -> answer c (Queries.note_mentions_of_article_event_ids c ~pubkey ~identifier ~limit ~offset))
+    | `Null, _, _ -> Handled empty
+    | _ -> raise (Kw.Invalid "invalid event_id")

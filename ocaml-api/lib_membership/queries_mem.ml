@@ -85,3 +85,37 @@ let rebroadcast_status (c : Db.membership Db.conn) ~pubkey : rebroadcast option 
   | (started_at, finished_at, event_idx_intermediate, event_count, status, kinds_json) :: _ ->
       Some { started_at; finished_at; event_idx_intermediate; event_count; status; kinds_json }
   | [] -> None
+
+(* {1 Phase 4c} *)
+
+(* est.app_settings[pubkey]: the settings event JSON *)
+let app_settings_event (c : Db.membership Db.conn) ~pubkey : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select value from app_settings where key = $pubkey limit 1"] with Some v :: _ -> Some v | _ -> None
+
+(* get_app_settings stores the synthesized default as the user's settings *)
+let insert_app_settings (c : Db.membership Db.conn) ~pubkey ~(value : string) ~event_id ~now : unit =
+  let dbh = Db.raw c in
+  let now = Int64.of_int now in
+  ignore
+    [%pgsql dbh
+      "insert into app_settings (key, value, accessed_at, created_at, event_id) values ($pubkey, $value, $now, $now, $event_id) on conflict (key) do nothing"]
+
+(* app.jl app_settings(): accessed_at + the log row on every settings call *)
+let touch_app_settings (c : Db.membership Db.conn) ~pubkey ~(event_json : string) ~now : unit =
+  let dbh = Db.raw c in
+  let now = Int64.of_int now in
+  ignore [%pgsql dbh "update app_settings set accessed_at = $now where key = $pubkey"];
+  ignore [%pgsql dbh "insert into app_settings_log (pubkey, event, accessed_at) values ($pubkey, $event_json::json, $now)"]
+
+let set_last_online (c : Db.membership Db.conn) ~pubkey ~online_at : unit =
+  let dbh = Db.raw c in
+  let online_at = Int64.of_int online_at in
+  ignore
+    [%pgsql dbh
+      "insert into user_last_online_time (pubkey, online_at) values ($pubkey, $online_at) on conflict (pubkey) do update set online_at = excluded.online_at"]
+
+let report (c : Db.membership Db.conn) ~pubkey ~typ ~id ~now : unit =
+  let dbh = Db.raw c in
+  let typ = Int64.of_int typ and now = Int64.of_int now in
+  ignore [%pgsql dbh "insert into reported (pubkey, type, id, created_at) values ($pubkey, $typ, $id, $now) on conflict do nothing"]

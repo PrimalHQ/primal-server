@@ -933,13 +933,14 @@ let humaness_threshold (c : Db.cache Db.conn) : float =
 
 let explore_zaps (c : Db.cache Db.conn) ~since ~until ~created_after ~limit ~offset : zap_row list =
   let dbh = Db.raw c in
-  let threshold = humaness_threshold c in
   let since = i64 since and until = i64 until and created_after = i64 created_after and limit = i64 limit and offset = i64 offset in
+  (* the threshold evaluated once (a CTE), not per row *)
   [%pgsql dbh
-    "select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats \
-     from og_zap_receipts zr, pubkey_trustrank tr, events es \
+    "with th as materialized (select humaness_threshold_trustrank() as rank) \
+     select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats \
+     from og_zap_receipts zr, pubkey_trustrank tr, events es, th \
      where zr.amount_sats >= $since and zr.amount_sats <= $until and zr.created_at >= $created_after \
-       and zr.sender = tr.pubkey and tr.rank >= $threshold \
+       and zr.sender = tr.pubkey and tr.rank >= th.rank \
        and zr.event_id = es.id and es.kind = any ('{1, 30023}'::int8[]) \
      order by zr.amount_sats desc, zr.event_id asc limit $limit offset $offset"]
   |> List.filter_map (fun (zid, ca, eid, s, r, a) ->
@@ -981,3 +982,384 @@ let legend_counts (c : Db.cache Db.conn) ~pubkey : int64 * int64 * int64 =
   with
   | (Some a, Some b, Some d) :: _ -> (a, b, d)
   | _ -> (0L, 0L, 0L)
+
+(* {1 Phase 4c: the long tail of app.jl / app_ext.jl} *)
+
+let directmsgs (c : Db.cache Db.conn) ~receiver ~sender ~since ~until ~limit ~offset : (string * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select encode(event_id, 'hex'), created_at from pubkey_directmsgs \
+     where ((receiver = $receiver and sender = $sender) or (receiver = $sender and sender = $receiver)) \
+       and created_at >= $since and created_at <= $until order by created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
+
+type dm_contact = { latest_event_id : string option; latest_at : int64; peer : string; dm_cnt : int64 }
+
+let dm_rows l =
+  List.filter_map
+    (fun (eid, at, peer, cnt) -> match (at, peer) with Some latest_at, Some peer -> Some { latest_event_id = eid; latest_at; peer; dm_cnt = Option.value cnt ~default:0L } | _ -> None)
+    l
+
+(* app.jl get_directmsg_contacts_2: peers that wrote to the user, and peers the user wrote to *)
+let directmsg_contacts_in (c : Db.cache Db.conn) ~user ~since ~until : dm_contact list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until in
+  dm_rows
+    [%pgsql dbh
+      "select encode(latest_event_id, 'hex'), latest_at, encode(sender, 'hex'), cnt from pubkey_directmsgs_cnt \
+       where receiver = $user and sender is not null and latest_at >= $since and latest_at <= $until order by latest_at desc limit 10000"]
+
+let directmsg_contacts_out (c : Db.cache Db.conn) ~user ~since ~until : dm_contact list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until in
+  dm_rows
+    [%pgsql dbh
+      "select encode(latest_event_id, 'hex'), latest_at, encode(receiver, 'hex'), 0::int8 from pubkey_directmsgs_cnt \
+       where sender = $user and latest_at >= $since and latest_at <= $until order by latest_at desc limit 10000"]
+
+let directmsg_cnt (c : Db.cache Db.conn) ~receiver ~sender : int64 option =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "select cnt from pubkey_directmsgs_cnt where receiver = $receiver and (case when $?sender::bytea is null then sender is null else sender = $?sender::bytea end) limit 1"]
+  with
+  | Some v :: _ -> Some v
+  | _ -> None
+
+let reset_directmsg_count (c : Db.cache Db.conn) ~receiver ~sender ~by : unit =
+  let dbh = Db.raw c in
+  ignore
+    [%pgsql dbh
+      "update pubkey_directmsgs_cnt set cnt = greatest(0, cnt - $by) \
+       where receiver = $receiver and (case when $?sender::bytea is null then sender is null else sender = $?sender::bytea end)"]
+
+let reset_directmsg_counts (c : Db.cache Db.conn) ~receiver : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update pubkey_directmsgs_cnt set cnt = 0 where receiver = $receiver"]
+
+let zap_rows l =
+  List.filter_map
+    (fun (zid, ca, eid, s, r, a) ->
+      match (zid, ca, a) with
+      | Some zap_receipt_id, Some zr_created_at, Some amount_sats -> Some { zap_receipt_id; zr_created_at; zr_event_id = eid; sender = s; receiver = r; amount_sats }
+      | _ -> None)
+    l
+
+(* app.jl zaps_feed: per pubkey, zaps sent or received, newest first *)
+let zaps_of_pubkeys (c : Db.cache Db.conn) ~(pubkeys_json : string) ~since ~until ~limit ~offset : zap_row list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  zap_rows
+    [%pgsql dbh
+      "select zr.zap_receipt_id, zr.created_at, zr.event_id, zr.sender, zr.receiver, zr.amount_sats \
+       from jsonb_array_elements_text($pubkeys_json::jsonb) x(a) cross join lateral \
+         (select z.zap_receipt_id, z.created_at, z.event_id, z.sender, z.receiver, z.amount_sats from og_zap_receipts z \
+          where (z.sender = decode(a::text, 'hex') or z.receiver = decode(a::text, 'hex')) and z.created_at >= $since and z.created_at <= $until \
+          order by z.created_at desc limit $limit offset $offset) zr"]
+
+let zaps_by_sender (c : Db.cache Db.conn) ~sender ~since ~until ~limit ~offset : zap_row list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  zap_rows
+    [%pgsql dbh
+      "select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from og_zap_receipts \
+       where sender = $sender and created_at >= $since and created_at <= $until order by created_at desc limit $limit offset $offset"]
+
+let zaps_by_receiver (c : Db.cache Db.conn) ~receiver ~since ~until ~limit ~offset : zap_row list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  zap_rows
+    [%pgsql dbh
+      "select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from og_zap_receipts \
+       where receiver = $receiver and created_at >= $since and created_at <= $until order by created_at desc limit $limit offset $offset"]
+
+let zaps_by_receiver_amount (c : Db.cache Db.conn) ~receiver ~since ~until ~limit ~offset : zap_row list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  zap_rows
+    [%pgsql dbh
+      "select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from og_zap_receipts \
+       where receiver = $receiver and amount_sats >= $since and amount_sats <= $until order by amount_sats desc limit $limit offset $offset"]
+
+(* app.jl event_actions *)
+let event_action_refs (c : Db.cache Db.conn) ~event_id ~kind ~limit ~offset : (string * string) list =
+  let dbh = Db.raw c in
+  let kind = i64 kind and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select encode(ref_event_id, 'hex'), encode(ref_pubkey, 'hex') from event_pubkey_action_refs \
+     where event_id = $event_id and ref_kind = $kind order by ref_created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some e, Some p -> Some (e, p) | _ -> None)
+
+let event_action_refs_article (c : Db.cache Db.conn) ~pubkey ~identifier ~kind ~limit ~offset : (string * string) list =
+  let dbh = Db.raw c in
+  let kind = i64 kind and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select encode(r.ref_event_id, 'hex'), encode(r.ref_pubkey, 'hex') from reads_versions rv, event_pubkey_action_refs r \
+     where rv.pubkey = $pubkey and rv.identifier = $identifier and rv.eid = r.event_id and r.ref_kind = $kind \
+     order by r.ref_created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some e, Some p -> Some (e, p) | _ -> None)
+
+(* app.jl user_followers: mutual followers first, then the most followed *)
+let user_followers_mutual (c : Db.cache Db.conn) ~pubkey : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(pf1.follower_pubkey, 'hex') from pubkey_followers pf1, pubkey_followers pf2 \
+     where pf1.pubkey = $pubkey and pf2.pubkey = pf1.follower_pubkey and pf2.follower_pubkey = $pubkey"]
+  |> List.filter_map Fun.id
+
+let user_followers_top (c : Db.cache Db.conn) ~pubkey ~limit : string list =
+  let dbh = Db.raw c in
+  let limit = i64 limit in
+  [%pgsql dbh
+    "select distinct encode(pf.follower_pubkey, 'hex'), pfc.value from pubkey_followers pf, pubkey_followers_cnt pfc \
+     where pf.pubkey = $pubkey and pf.follower_pubkey = pfc.key order by pfc.value desc limit $limit"]
+  |> List.filter_map (fun (p, _) -> p)
+
+(* app.jl mutual_follows: the viewer's follows that follow [pubkey] *)
+let mutual_follows (c : Db.cache Db.conn) ~pubkey ~user_pubkey : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(pf.pubkey, 'hex') from pubkey_followers pf where pf.follower_pubkey = $user_pubkey \
+       and exists (select 1 from pubkey_followers pf2 where pf2.pubkey = $pubkey and pf2.follower_pubkey = pf.pubkey)"]
+  |> List.filter_map Fun.id
+
+let reposts_of (c : Db.cache Db.conn) ~pubkey ~event_id : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select get_event_jsonb(es.id)::text from basic_tags bt, events es \
+     where bt.tag = 'e' and bt.arg1 = $event_id and bt.id = es.id and es.kind = 6 and bt.pubkey = $pubkey"]
+  |> List.filter_map Fun.id
+
+(* app.jl follow_lists without the whitelist: recent kind-39089 lists by non-spam authors *)
+let follow_packs (c : Db.cache Db.conn) ~since ~until ~limit ~offset : string list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select get_event_jsonb(es.id)::text from parametrized_replaceable_events pre, events es \
+     where pre.kind = 39089 and pre.created_at >= $since and pre.created_at <= $until and pre.event_id = es.id \
+       and not exists (select 1 from filterlist fl where fl.target = pre.pubkey and fl.target_type = 'pubkey' and fl.grp = 'spam' and fl.blocked) \
+     order by pre.created_at desc limit $limit offset $offset"]
+  |> List.filter_map Fun.id
+
+let most_followed_of (c : Db.cache Db.conn) ~(pubkeys_json : string) ~limit : string list =
+  let dbh = Db.raw c in
+  let limit = i64 limit in
+  [%pgsql dbh
+    "select encode(key, 'hex') from pubkey_followers_cnt \
+     where key = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) order by value desc limit $limit"]
+  |> List.filter_map Fun.id
+
+let param_list_event_ids (c : Db.cache Db.conn) ~pubkey ~identifier : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select encode(event_id, 'hex') from parameterized_replaceable_list where pubkey = $pubkey and identifier = $identifier"]
+  |> List.filter_map Fun.id
+
+let ln_address_pubkey (c : Db.cache Db.conn) ~(ln_address : string) : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select pubkey from pubkey_ln_address where ln_address = $ln_address limit 1"] with Some p :: _ -> Some p | _ -> None
+
+let relays_top (c : Db.cache Db.conn) ~limit : (string * int64) list =
+  let dbh = Db.raw c in
+  let limit = i64 limit in
+  [%pgsql dbh "select url, times_referenced from relays order by times_referenced desc limit $limit"]
+
+let trustrank_top (c : Db.cache Db.conn) ~limit : (string * float) list =
+  let dbh = Db.raw c in
+  let limit = i64 limit in
+  [%pgsql dbh "select encode(pubkey, 'hex'), rank from pubkey_trustrank order by rank desc limit $limit"]
+  |> List.filter_map (function Some p, r -> Some (p, r) | _ -> None)
+
+(* app.jl articles_stats *)
+let articles_stats (c : Db.cache Db.conn) ~pubkey ~kind : int64 * int64 * int64 =
+  let dbh = Db.raw c in
+  let kind = string_of_int kind in
+  match
+    [%pgsql dbh
+      "select (select count(1) from reads where pubkey = $pubkey)::int8, \
+              (select count(distinct ts.id) from (select id, jsonb_array_elements(tags) ->> 0 as tag, jsonb_array_elements(tags) ->> 1 as arg from events where pubkey = $pubkey and kind = 31234) ts \
+               where ts.tag = 'k' and ts.arg = $kind)::int8, \
+              (select coalesce(sum(satszapped), 0) from reads where pubkey = $pubkey)::int8"]
+  with
+  | (a, d, s) :: _ -> (Option.value a ~default:0L, Option.value d ~default:0L, Option.value s ~default:0L)
+  | [] -> (0L, 0L, 0L)
+
+let drafts (c : Db.cache Db.conn) ~pubkey ~kind ~since ~until ~limit ~offset : string list =
+  let dbh = Db.raw c in
+  let kind = string_of_int kind and since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "with ts as (select id, jsonb_array_elements(tags) ->> 0 as tag, jsonb_array_elements(tags) ->> 1 as arg from events where pubkey = $pubkey and kind = 31234) \
+     select get_event_jsonb(es.id)::text from ts, events es \
+     where ts.arg = $kind and ts.id = es.id and es.created_at >= $since and es.created_at <= $until \
+     order by es.created_at desc limit $limit offset $offset"]
+  |> List.filter_map Fun.id
+
+let top_article_eid (c : Db.cache Db.conn) ~pubkey ~(by : string) : string option =
+  let dbh = Db.raw c in
+  let r =
+    match by with
+    | "satszapped" -> [%pgsql dbh "select encode(latest_eid, 'hex') from reads where pubkey = $pubkey order by satszapped desc limit 1"]
+    | "interactions" -> [%pgsql dbh "select encode(latest_eid, 'hex') from reads where pubkey = $pubkey order by (likes + zaps + replies + reposts) desc limit 1"]
+    | _ -> []
+  in
+  match r with Some e :: _ -> Some e | _ -> None
+
+(* reads row of an article as Julia's EVENT_STATS content *)
+let reads_stats (c : Db.cache Db.conn) ~eid : (int64 * int64 * int64 * int64 * int64) option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select likes, replies, reposts, zaps, satszapped from reads where latest_eid = $eid limit 1"] with
+  | (l, r, rp, z, s) :: _ -> Some (Option.value l ~default:0L, Option.value r ~default:0L, Option.value rp ~default:0L, Option.value z ~default:0L, Option.value s ~default:0L)
+  | [] -> None
+
+(* app.jl thread_view_parents: the chain of thread parents (event_thread_parents), stored events only *)
+let thread_parents (c : Db.cache Db.conn) ~event_id : (string * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "with recursive p as (select $event_id::bytea as id, 0 as d union all select etp.value, p.d + 1 from p join event_thread_parents etp on etp.key = p.id where p.d < 200) \
+     select encode(e.id, 'hex'), e.created_at from p join events e on e.id = p.id order by e.created_at asc"]
+  |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
+
+let event_replies (c : Db.cache Db.conn) ~event_id ~since ~until ~limit ~offset : (string * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select encode(reply_event_id, 'hex'), reply_created_at from event_replies \
+     where event_id = $event_id and reply_created_at >= $since and reply_created_at <= $until order by reply_created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
+
+(* app.jl long_form_content_replies (before the root-tag filter) *)
+let lfc_replies (c : Db.cache Db.conn) ~pubkey ~identifier ~since ~until ~limit ~offset : (string * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "with a as (select er.reply_event_id as eid, er.reply_created_at as created_at from reads_versions rv, event_replies er \
+                where rv.pubkey = $pubkey and rv.identifier = $identifier and rv.eid = er.event_id and er.reply_created_at >= $since and er.reply_created_at <= $until), \
+          b as (select at.eid, at.created_at from a_tags at \
+                where at.kind = 1 and at.ref_kind = 30023 and at.ref_pubkey = $pubkey and at.ref_identifier = $identifier and at.created_at >= $since and at.created_at <= $until) \
+     select encode(eid, 'hex'), created_at from ((select * from a) union (select * from b)) u order by created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
+
+let event_tags_of (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * string) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(id, 'hex'), tags::text from events where id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+  |> List.filter_map (function Some i, Some t -> Some (i, t) | _ -> None)
+
+let scored_media_eids (c : Db.cache Db.conn) ~pubkey ~limit : string list =
+  let dbh = Db.raw c in
+  let limit = i64 limit in
+  [%pgsql dbh
+    "select encode(es.event_id, 'hex') from event_stats es, event_media em \
+     where es.author_pubkey = $pubkey and es.event_id = em.event_id order by es.score24h desc limit $limit"]
+  |> List.filter_map Fun.id
+
+(* app.jl highlights (article form): kind 1 / 9802 events referencing the article, hidden ones out *)
+let article_highlights (c : Db.cache Db.conn) ~pubkey ~identifier ~kind : string list =
+  let dbh = Db.raw c in
+  let kind = i64 kind in
+  [%pgsql dbh
+    "select get_event_jsonb(e.id)::text from a_tags at, events e \
+     where at.ref_pubkey = $pubkey and at.ref_identifier = $identifier and at.ref_kind = $kind and (at.kind = 1 or at.kind = 9802) and at.eid = e.id \
+       and not exists (select 1 from filterlist fl where fl.target = e.id and fl.target_type = 'event' and fl.blocked) \
+       and not exists (select 1 from deleted_events de where de.event_id = e.id) \
+     order by at.created_at desc"]
+  |> List.filter_map Fun.id
+
+(* the pubkeys of [hexes] whose metadata event's nip05 domain is one of [domains_json] *)
+let domain_hidden_pubkeys (c : Db.cache Db.conn) ~(pubkeys_json : string) ~(domains_json : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select a::text from jsonb_array_elements_text($pubkeys_json::jsonb) x(a) \
+     where exists (select 1 from meta_data md, events e, jsonb_array_elements_text($domains_json::jsonb) d \
+                   where md.key = decode(a::text, 'hex') and e.id = md.value \
+                     and (lower(substring(e.content from '\"nip05\"\\s*:\\s*\"[^\"@]*@([^\"]+)\"')) = d::text \
+                          or lower(substring(e.content from '\"nip05\"\\s*:\\s*\"[^\"@]*@([^\"]+)\"')) like '%.' || d::text))"]
+  |> List.filter_map Fun.id
+
+let media_note_ids (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset : (string * int64) list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  [%pgsql dbh
+    "select distinct encode(es.id, 'hex'), es.created_at from events es, event_media em \
+     where es.pubkey = $pubkey and es.kind = 1 and es.id = em.event_id and es.created_at >= $since and es.created_at <= $until \
+     order by es.created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
+
+(* {1 response_messages_for_posts building blocks} *)
+
+type stats_row = { st_eid : string; likes : int64; replies : int64; mentions : int64; reposts : int64; zaps : int64; satszapped : int64; score : int64; score24h : int64 }
+
+let event_stats_rows (c : Db.cache Db.conn) ~(event_ids_json : string) : stats_row list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(event_id, 'hex'), likes, replies, mentions, reposts, zaps, satszapped, score, score24h from event_stats \
+     where event_id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+  |> List.filter_map (fun (e, l, r, m, rp, z, s, sc, s24) ->
+         match e with
+         | Some st_eid ->
+             let z0 = Option.value ~default:0L in
+             Some { st_eid; likes = z0 l; replies = z0 r; mentions = z0 m; reposts = z0 rp; zaps = z0 z; satszapped = z0 s; score = z0 sc; score24h = z0 s24 }
+         | None -> None)
+
+(* app.jl ext_long_form_event_stats: reads row of the article version *)
+let reads_stats_rows (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * (int64 * int64 * int64 * int64 * int64)) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(latest_eid, 'hex'), likes, zaps, satszapped, replies, reposts from reads \
+     where latest_eid = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+  |> List.filter_map (fun (e, l, z, s, r, rp) ->
+         match e with
+         | Some e -> let z0 = Option.value ~default:0L in Some (e, (z0 l, z0 z, z0 s, z0 r, z0 rp))
+         | None -> None)
+
+let event_relays_rows (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * string) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(er.event_id, 'hex'), coalesce(rum.dest, er.relay_url) from event_relay er left join relay_url_map rum on rum.src = er.relay_url \
+     where er.event_id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+  |> List.filter_map (function Some e, Some r when r <> "" -> Some (e, r) | _ -> None)
+
+(* app.jl event_actions_cnt for many events of one viewer: (hex, replied, liked, reposted, zapped) *)
+let event_actions_rows (c : Db.cache Db.conn) ~(event_ids_json : string) ~user_pubkey : (string * (bool * bool * bool * bool)) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(event_id, 'hex'), replied, liked, reposted, zapped from event_pubkey_actions \
+     where pubkey = $user_pubkey and event_id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+  |> List.filter_map (fun (e, r, l, rp, z) ->
+         match e with
+         | Some e -> let b = function Some v -> v <> 0L | None -> false in Some (e, (b r, b l, b rp, b z))
+         | None -> None)
+
+let poll_votes_rows (c : Db.cache Db.conn) ~(event_ids_json : string) ~user_pubkey : (string * string) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(poll_id, 'hex'), option_id from poll_user_votes \
+     where pubkey = $user_pubkey and poll_id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+  |> List.filter_map (function Some e, Some o -> Some (e, o) | _ -> None)
+
+(* ext_event_response for many events: media then previews, keyed by event hex *)
+let event_extras_rows (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * string) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(x.id, 'hex'), r.e::text from (select decode(a::text, 'hex') as id from jsonb_array_elements_text($event_ids_json::jsonb) x(a)) x, event_media_response(x.id) r(e) \
+     union all \
+     select encode(x.id, 'hex'), r.e::text from (select decode(a::text, 'hex') as id from jsonb_array_elements_text($event_ids_json::jsonb) x(a)) x, event_preview_response(x.id) r(e)"]
+  |> List.filter_map (function Some e, Some m -> Some (e, m) | _ -> None)
+
+(* event_zaps_by_satszapped, article form: zap_receipts of every version of the article *)
+let article_zaps_top (c : Db.cache Db.conn) ~pubkey ~identifier ~limit : zap_row list =
+  let dbh = Db.raw c in
+  let limit = i64 limit in
+  [%pgsql dbh
+    "select zr.eid, zr.created_at, zr.target_eid, zr.sender, zr.receiver, zr.satszapped from reads_versions rv, zap_receipts zr \
+     where rv.pubkey = $pubkey and rv.identifier = $identifier and rv.eid = zr.target_eid order by zr.satszapped desc limit $limit"]
+  |> zap_rows
+
+let parametrized_event_id_one (c : Db.cache Db.conn) ~pubkey ~kind ~(identifier : string) : string option =
+  let dbh = Db.raw c in
+  let kind = i64 kind in
+  match
+    [%pgsql dbh "select encode(event_id, 'hex') from parametrized_replaceable_events where pubkey = $pubkey and kind = $kind and identifier = $identifier limit 1"]
+  with
+  | Some e :: _ -> Some e
+  | _ -> None
