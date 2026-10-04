@@ -59,10 +59,16 @@ let import_one ~sw ~net ~clock ?proxy ~timeout ~reconnect_est ~poll_votes_enable
     (e : Nostr.t) : string =
   try
     CS.add_human_override est ~pubkey:e.pubkey ~is_human:true ~source:"import_events";
+    let t0 = Unix.gettimeofday () in
     let r = CS.import_event est e in
     Dag_index.index_event ~poll_votes_enabled est e;
     broadcast_reply ~sw ~net ~clock ?proxy ~timeout est e;
-    match r with CS.Imported -> "imported" | CS.Duplicate -> "duplicate" | CS.Rejected -> "rejected"
+    let status =
+      match r with CS.Imported -> "imported" | CS.Duplicate -> "duplicate" | CS.Rejected -> "rejected"
+    in
+    log "kind %d %s -> %s (%.0f ms)" e.kind (Nostr.id_hex e) status
+      ((Unix.gettimeofday () -. t0) *. 1000.);
+    status
   with
   | Eio.Cancel.Cancelled _ as ex -> raise ex
   | exn ->
