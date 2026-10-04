@@ -18,12 +18,35 @@ Log: `$PRIMAL_VAR_DIR/ocaml-jobs.log`.
 | `dag` | `dag_runner.jl` + 13 nodes | **native (6d, 2026-10-04), live on <stage-host>**: `Dag` runs the DAG_20240803_1 pipeline every `dag_period_s` over `[since, now]`, splitting each node's window into the imported_at segments `coverages_1_8656fc443b` has not covered (1-day or 90-day steps, `dag_tasks` in parallel, a_tags sequential with 8 parallel workers), every segment in its own transaction, coverage recorded after it. Nodes: basic_tags, zap_receipts, poll_stats, a_tags, reads (5 phases; `Langid` gives lang/lang_prob), pubkey_media_cnt, pubkey_content_zap_cnt, advsearch (30 days), event_mentions, note_length (15 days), note_stats (30 days), update_user_search (3 days); the per-event indexers are the importer's `Dag_index`. `dag_dry_run` rolls every segment back and writes no coverage (`dag_dry_run_window_s` exercises all nodes once over the last N seconds); the hour-long dry run passed before the switch. Metrics `dag_runner_duration`/`dag_runner_all_ok` go to `pushgateway`. |
 | `rebroadcast` | `event_rebroadcasting.jl` | **native (6e, 2026-10-04), off by default**: `Rebroadcast` polls membership `event_rebroadcasting` every second; each started-unfinished row gets its next batch (up to 100 of the user's events since `event_created_at`, `kinds` filtered, replaceable kinds collapsed to the latest — `App.get_user_events`) broadcast to `target_relays` (one connection per relay, 10 events/s, done when every event has an OK or after 30 s), `event_idx_intermediate` on each first accept, `last_batch_status` as Julia's `JSON.json(res, 2)`, the row advances on success and finishes when a batch repeats (same sha256). Julia's `EventRebroadcasting` is not running on <stage-host>'s nodes and its host is not known from here, so this role is not in `roles` yet: enabling it while Julia's runs elsewhere would send every batch twice. Verified only idle (0 pending rows). |
 | `failover` | `postgres.jl` server_tracking (membership) | **native (6e, 2026-10-04), off by default**: `Failover` takes a Postgres advisory lock on the membership DB (singleton), then every second reads `membership_discovery_url` ({"primal": connstr, "postgres": connstr}) and, when that host answers `pg_is_in_recovery()`, calls `pg_promote()`. Re-pointing the daemons' own pools at a new primary is not done yet (the Julia nodes still run their tracker; this role stays off until they are retired). |
+| `media` | Rust `primal-media` scheduler + Julia `ProcessingGraphExecutionScheduler` + the media nodes (`cache_storage_media.jl`, `media.jl`, `app_media.jl` `import_upload_3`, `internal_services.jl` `purge_media_`, MediaAnalysis `block_media`/`inc_counter`) | **native (8a, 2026-10-04)**: `lib_media/` — `Pgj` (typed Julia JSON, binary cache, node ids), `Procgraph` (executor: atomic claims with `for update skip locked`, ancestry edges, extra/log, cleanup), `Proc` (Eio.Process with deadlines, LD_LIBRARY_PATH stripped), `Media_tools` (downloads with proxy rotation and the 2 GB cap, file/identify/ffprobe/exiftool/ffmpeg/magick, link-preview.py, AI feature endpoints), `Media_store` (v1 key-addressed and v2 sha-addressed layouts, local + S3), `Hls` (AWS MediaConvert over SigV4 with endpoint discovery, Mux, Bunny Stream, Cloudflare Stream), nodes in `Nodes_media`/`Nodes_upload`/`Nodes_moderation`/`Nodes_text`, `Scheduler` (the Rust task list at `max_concurrent_per_name`, the Julia duties `import_upload_3`/`block_media`/`purge_media_` at `julia_duty_concurrency`, 60 s stats, stuck reset, `pn_time_for_pubkeys` refresh every 600 s). Config: the `media` object (table below). `bin/media_tool.exe CONFIG check-ids|execute-node|show-node|pending`. Private nodes (`ext_after_import_upload_2`, `analyze_*`, `purge_user_content` without a purger URL) are never claimed. |
 | `failover`, `rebroadcast`, `dvm_provider` | `postgres.jl`, `event_rebroadcasting.jl`, `dvm_service_provider.jl` | planned (6e) |
 
 | key | meaning |
 | --- | --- |
 | `pushgateway` | optional `{host, port, job}`: `dag_runner_duration` / `dag_runner_all_ok` after each DAG run |
 | `membership_discovery_url` | optional; the membership server's `tracking_url` (used by the `failover` role only) |
+
+## The `media` config object
+
+| key | meaning |
+| --- | --- |
+| `binary_data_cache_dir` | ProcessingGraph.BINARY_DATA_CACHE_DIR (shared with the blossom server) |
+| `media_path`, `media_path_2`, `media_url_root`, `tmp_dir` | Media.MEDIA_PATH / MEDIA_PATH_2 / MEDIA_URL_ROOT / MEDIA_TMP_DIR |
+| `proxies`, `metadata_proxy`, `download_timeout_s` | Media.DOWNLOAD_PROXIES (rotated), MEDIA_METADATA_PROXY (link-preview.py), 30 s |
+| `strip_image_metadata` | primal-media's flag |
+| `s3_providers` | `{name, bucket, bucket2, endpoint, region, domain, access_key, secret_key}` (S3_CONFIGS) |
+| `hls_providers`, `hls_processing_timeout_s` | primal-media's list (`type`, `enabled`, keys, region, library_id, cdn_hostname, role_arn, s3_output_bucket/path, abr_profiles) |
+| `media_paths`, `media_paths_2` | Media.MEDIA_PATHS / MEDIA_PATHS_2: `{uploadfast, upload, cache}` of `{type:"local", host, path}` or `{type:"s3", provider, dir}` |
+| `ai_host`, `ai_timeout_s` | ollama 11434 and the feature endpoints 5013/5014 |
+| `blossom_host` | Media.BLOSSOM_HOST (media_import_2's return) |
+| `ffmpeg_remote_host` | optional ssh host running ffmpeg for variants |
+| `python_path`, `link_preview_script` | for import_preview_pn |
+| `scheduler_period_s`, `max_concurrent_per_name`, `julia_duty_concurrency`, `refresh_matview_period_s` | 1, 200 (Rust), 10 (Julia), 600 |
+| `cloudflare_cache` | `{zone_id, api_key}` for purge cache invalidation (null = off) |
+| `blossom_hosts`, `upload_url_root` | purge_media_'s blossom hosts and `https://_media.primal.net` |
+| `user_content_purger_api` | MediaAnalysis.USER_CONTENT_PURGER_API (null = `purge_user_content` nodes are not claimed) |
+| `execute_funcs` | the funcs this executor claims (null = the default list) |
+| `log` | per-node log lines |
 
 ## Cutover state on <stage-host> (2026-10-04)
 

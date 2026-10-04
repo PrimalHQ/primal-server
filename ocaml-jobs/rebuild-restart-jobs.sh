@@ -2,6 +2,9 @@
 # Rebuild primal-jobs and restart it as a transient systemd --user service (stop-then-start: the
 # roles are singletons, two generations must not run their loops concurrently).
 #   PRIMAL_JOBS_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-jobs-config.json)
+#   PRIMAL_JOBS_MEMMAX  systemd MemoryMax (default 10G; the media role on the media host runs with 30G as primal-media did)
+#   PRIMAL_BUILD_PGHOST host whose DBs the [%pgsql] checks run against (a host whose local schema
+#                       differs from <stage-host>'s, e.g. the media host, builds with PRIMAL_BUILD_PGHOST=<stage-host>)
 set -euo pipefail
 ts() { date +%H:%M:%S; }
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -13,7 +16,7 @@ LOG="$PRIMAL_VAR_DIR/ocaml-jobs.log"
 UNIT=primal-ocaml-jobs
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 echo "$(ts) building (dune build @all) ..." >&2
-(cd "$P" && "$NIX" develop "path:$COMMON" -c dune build @all)
+(cd "$P" && "$NIX" develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
 [[ -x "$EXE" ]] || { echo "ERROR: $EXE not built" >&2; exit 1; }
 [[ -f "$CONFIG" ]] || { echo "ERROR: config file not found: $CONFIG" >&2; exit 1; }
 admin_port="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["admin_port"])' "$CONFIG")"
@@ -25,7 +28,7 @@ loginctl enable-linger "${USER:-$(id -un)}" 2>/dev/null || true
 mkdir -p "$(dirname "$LOG")"
 systemd-run --user --collect --unit="$UNIT" --description="Primal jobs daemon (ocaml-jobs/bin/primal_jobsd.exe)" \
   -p Restart=always -p RestartSec=5 -p OOMPolicy=kill -p StartLimitIntervalSec=0 -p LimitNOFILE=65536 \
-  -p MemoryAccounting=yes -p MemoryHigh=8G -p MemoryMax=10G \
+  -p MemoryAccounting=yes -p MemoryHigh="${PRIMAL_JOBS_MEMHIGH:-8G}" -p MemoryMax="${PRIMAL_JOBS_MEMMAX:-10G}" \
   -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" -p "WorkingDirectory=$P" \
   -- "$NIX" develop "path:$COMMON" -c "$EXE" "$CONFIG"
 for _ in $(seq 1 100); do
