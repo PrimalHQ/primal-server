@@ -79,7 +79,7 @@ let test_funcall_catalogue () =
   let names = native_names () in
   List.iter (fun n -> Alcotest.(check string) n n (to_string (of_string n))) names;
   Alcotest.(check bool) "no duplicates" true (List.length (List.sort_uniq compare names) = List.length names);
-  match of_string "get_notifications" with Proxied _ -> () | _ -> Alcotest.fail "get_notifications is still proxied"
+  match of_string "get_directmsgs" with Proxied _ -> () | _ -> Alcotest.fail "get_directmsgs is still proxied"
 
 let test_nip19 () =
   let j = Yojson.Safe.to_string in
@@ -125,6 +125,48 @@ let test_event_from_user () =
   let bad = kw {|{"event_from_user":{"id":"00","pubkey":"fce7597c60d22555fd4fddb21ab4efe6cfba5dab48f9b6b95f7a02e95c8b8c76","created_at":1,"kind":1,"tags":[],"content":"","sig":"00"}}|} in
   match H.event_from_user bad with Error _ -> () | Ok _ -> Alcotest.fail "unsigned event accepted"
 
+(* {1 Phase 4a} *)
+
+(* DB.notif2namedtuple parity: a YOUR_POST_WAS_ZAPPED row rendered by Julia on 2026-10-04 *)
+let test_notif_json () =
+  let row =
+    { Primal_api.Queries.n_created_at = 1791104973L; n_type = 3L;
+      arg1 = Some (Hex_util.decode_exn "4b9c7c6ec7987bff73e1043d437e205bc52b74248752324505326ea1e0ee517e");
+      arg2 = Some (Hex_util.decode_exn "bfccad6fb7ce0810043b7027ca1bfc82d5c01f62389f7aaa005978a07478a76f");
+      arg3 = Some "69"; arg4 = Some "\"\"" }
+  in
+  match H.notif_of_row ~pubkey_hex:"8fb140b4e8ddef97ce4b821d247278a1a4353362623f64021484b372f948000c" row with
+  | None -> Alcotest.fail "no notif"
+  | Some n ->
+      Alcotest.(check string) "julia json"
+        {|{"id":"c8998d037e4c31e84f51519958392f0ea88585da0141d4e2c523b2b62ca4f844","created_at":1791104973,"message":"","pubkey":"8fb140b4e8ddef97ce4b821d247278a1a4353362623f64021484b372f948000c","satszapped":69,"type":3,"who_zapped_it":"bfccad6fb7ce0810043b7027ca1bfc82d5c01f62389f7aaa005978a07478a76f","your_post":"4b9c7c6ec7987bff73e1043d437e205bc52b74248752324505326ea1e0ee517e"}|}
+        (Yojson.Safe.to_string (`Assoc n.fields));
+      Alcotest.(check (list string)) "pks" [ "bfccad6fb7ce0810043b7027ca1bfc82d5c01f62389f7aaa005978a07478a76f" ] n.pks;
+      Alcotest.(check (list string)) "eids" [ "4b9c7c6ec7987bff73e1043d437e205bc52b74248752324505326ea1e0ee517e" ] n.eids
+
+let test_broadcast_msgs () =
+  let module B = Primal_api.Broadcasts in
+  let counts = List.map Int64.of_int [ 13093; 0; 2289; 12798; 1082; 6338; 278; 582; 0; 0; 0; 0; 0; 0; 0; 0; 2; 168; 159; 836; 2417 ] in
+  Alcotest.(check string) "notification_counts (Julia key order)"
+    {|{"kind":10000112,"pubkey":"8f","1":13093,"2":0,"3":2289,"4":12798,"5":1082,"6":6338,"7":278,"8":582,"101":0,"102":0,"103":0,"104":0,"201":0,"202":0,"203":0,"204":0,"301":2,"302":168,"401":159,"501":836,"601":2417}|}
+    (B.notification_counts_msg ~pubkey_hex:"8f" counts);
+  Alcotest.(check string) "directmsg_count" {|{"kind":10000117,"cnt":624}|} (B.directmsg_count_msg 624L);
+  Alcotest.(check string) "directmsg_count_2" {|{"kind":10000134,"content":"624"}|} (B.directmsg_count_2_msg 624L)
+
+let test_filter_funcall () =
+  let module C = Primal_api.Conn in
+  (match C.filter_funcall {|["REQ","s",{"ids":["107db94a94a9cdc30638e412636f4ba79e7829086306725482e347583a93bea8","zz"]}]|} with
+  | `Call (Primal_api.Funcall.Events, kw) -> Alcotest.(check int) "one valid id" 1 (List.length (Option.get (Kw.str_list_opt kw "event_ids")))
+  | _ -> Alcotest.fail "ids");
+  (match C.filter_funcall {|["REQ","s",{"search":"jack","kinds":[0],"limit":5}]|} with
+  | `Reject "kinds or authors filter is not supported" -> ()
+  | _ -> Alcotest.fail "kinds are rejected like Julia does");
+  (match C.filter_funcall {|["REQ","s",{"cache":["feed",{}]},{"authors":["ab"]}]|} with `Reject _ -> () | _ -> Alcotest.fail "authors in any filter");
+  (match C.filter_funcall {|["REQ","s",{"search":"x"}]|} with `None -> () | _ -> Alcotest.fail "search stays proxied");
+  match C.filter_funcall {|["REQ","s",{"since":1,"until":2,"limit":3,"idsonly":true}]|} with
+  | `Call (Primal_api.Funcall.Events, kw) -> Alcotest.(check bool) "idsonly" true (Kw.bool kw "idsonly" ~default:false)
+  | _ -> Alcotest.fail "since/until"
+
 let () =
   Alcotest.run "primal_api"
     [
@@ -139,6 +181,9 @@ let () =
           Alcotest.test_case "range msg" `Quick test_range_msg;
           Alcotest.test_case "moderation scope" `Quick test_moderation_scope;
           Alcotest.test_case "event_from_user" `Quick test_event_from_user;
+          Alcotest.test_case "notif json" `Quick test_notif_json;
+          Alcotest.test_case "broadcast msgs" `Quick test_broadcast_msgs;
+          Alcotest.test_case "filter funcall" `Quick test_filter_funcall;
           Alcotest.test_case "wants_zlib" `Quick test_wants_zlib;
         ] );
       ( "handlers",

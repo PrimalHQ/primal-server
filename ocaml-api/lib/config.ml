@@ -34,6 +34,9 @@ type t = {
   request_log : string option; (* ws-connector --log-request JSONL path *)
   live_events_enabled : bool; (* poll + LISTEN primal_events distribution *)
   wsconnvars_poll_s : float;
+  (* Phase 4a: push subscriptions *)
+  network_stats_url : string option; (* App.NETWORK_STATS_URL: the importer's HTTP /api answering network_stats *)
+  netstats_period_s : float; (* 1 / CacheServerHandlers.NETSTATS_RATE *)
 }
 
 let field j key =
@@ -85,6 +88,8 @@ let of_json (j : Yojson.Safe.t) : t =
     request_log = rstr_opt j "request_log";
     live_events_enabled = rbool j "live_events_enabled";
     wsconnvars_poll_s = rfloat j "wsconnvars_poll_s";
+    network_stats_url = rstr_opt j "network_stats_url";
+    netstats_period_s = rfloat j "netstats_period_s";
   }
 
 let of_json_file (path : string) : t =

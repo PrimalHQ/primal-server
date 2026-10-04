@@ -40,13 +40,14 @@ let () =
     | None -> false
   in
   let live = Api.Live_events.create () in
+  let bc = Api.Broadcasts.create () in
   Api.Wsconnvars.open_request_log cfg.request_log;
   let init_domain_db () =
     Db.init ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~cache_size:cfg.cache_pool_size
       ~membership_size:cfg.membership_pool_size
   in
   let ws_handler (r : Http_server.req) : Http_server.resp =
-    if is_upgrade r then Http_server.Ws (None, fun session -> Api.Conn.run ~net ~clock cfg stats live session)
+    if is_upgrade r then Http_server.Ws (None, fun session -> Api.Conn.run ~net ~clock cfg stats live bc session)
     else Http_server.Text (200, "Primal cache API Websocket endpoint\n")
   in
   let public_svc =
@@ -69,7 +70,7 @@ let () =
   let admin_fd = Listen.bind ~host:cfg.admin_host ~port:cfg.admin_port () in
   log "listening: ws %s:%d (%d domains), admin %s:%d" cfg.public_ws_host cfg.public_ws_port
     cfg.num_domains cfg.admin_host cfg.admin_port;
-  let admin_svc = Api.Admin.service ~lifecycle ~stats ~cfg ~live in
+  let admin_svc = Api.Admin.service ~lifecycle ~stats ~cfg ~live ~bc in
 
   (* Worker domains: each imports the shared listening fd and runs its own accept loop. *)
   let worker i () =
@@ -95,6 +96,9 @@ let () =
       Fiber.fork_daemon ~sw:msw (fun () ->
           Api.Live_events.run live ~net ~clock ~stats cfg.cache_db;
           `Stop_daemon);
+    Fiber.fork_daemon ~sw:msw (fun () ->
+        Api.Broadcasts.run bc ~net ~clock ~network_stats_url:cfg.network_stats_url ~netstats_period:cfg.netstats_period_s;
+        `Stop_daemon);
     Fiber.fork_daemon ~sw:msw (fun () ->
         if cfg.status_interval_s > 0. then Api.Stats.report_loop ~clock ~interval:cfg.status_interval_s stats;
         `Stop_daemon);

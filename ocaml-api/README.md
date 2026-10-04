@@ -45,6 +45,22 @@ explore_*, user_followers, mutual_follows, parametrized_replaceable_*, search_fi
 is_hidden_by_content_moderation, user_of_ln_address, nostr_stats/network_stats, client_config,
 import_events, get_highlights, find_reposts, invoices_to_zap_receipts, events_nip46,
 update_push_notification_token*) — Phase 4 writes those from the Julia code.
+**Phase 4a (2026-10-04):** the push subscriptions Julia's periodic broadcasters served —
+`notification_counts(_2)` and `directmsg_count(_2)` every second (one statement per tick for all
+subscribed pubkeys), `rebroadcasting_status` every two seconds, `net_stats` every
+`netstats_period_s` from the importer's HTTP `/api` (`network_stats_url`) — are native
+(`Broadcasts`), as are `get_notifications` (one indexed statement instead of Julia's
+time-windowed cursor; `DB.notif2namedtuple` reproduced byte for byte, id included),
+`set_notifications_seen` (membership `pubkey_notifications_seen` + the cache counters; Julia's
+`REPLICATE_TO_SERVERS` is empty in production) and `notifications` (EOSE only: `broadcast_notification`
+lost its producer when the importer moved out of the API node). The non-`cache` REQ filters of
+the Julia CacheServer are handled too: `{"ids"}` and `{"since"/"until"}` map to `events`,
+`{"search", "kinds":[0]}` to `user_search`, other kinds get the NOTICE "unsupported search filter";
+`{"search","kinds":[1]}` (the `search` funcall) stays proxied. Live push of new events to
+since/idsonly subscriptions had no producer left in Julia either. Compared with the reference
+ws-connector on 9007: push subscriptions identical in shape and cadence; `get_notifications`
+identical except the RANGE message, whose since/until Julia sets to the current second.
+
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
 stopped. This host's 9001 is the endpoint used by dev.primal.net (about two thousand connections in
@@ -95,6 +111,8 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `request_log` | path or `null` | JSONL `{t,time,funcall,kwargs,ws,subid}` of handled requests slower than `wsconnvars.metrics_logging_min_request_duration`, when `metrics_logging_enabled` (the replay corpus format) |
 | `live_events_enabled` | `true` | run the live-event distributor on the main domain |
 | `wsconnvars_poll_s` | `1.0` | poll period of the `wsconnvars` table (idle timeout, logging knobs) |
+| `network_stats_url` | `"http://127.0.0.1:14018/api"` or `null` | `App.NETWORK_STATS_URL`: where `net_stats` pushes are fetched from (the importer node's HTTP `/api`) |
+| `netstats_period_s` | `2.0` | `1 / CacheServerHandlers.NETSTATS_RATE` |
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
@@ -144,7 +162,7 @@ app_ext.jl semantics for the rest), `lib/moderation.ml` (content_moderation_filt
 `lib/response.ml`, `lib/queries.ml` (every cache-DB statement, `[%pgsql]`-checked against primal1),
 `lib_membership/queries_mem.ml` (membership statements, checked against `primal_membership_ref`),
 `lib_db/db.ml` (per-domain pools, phantom-tagged handles), `lib/live_events.ml` (subscription
-registry + poll/LISTEN distributor), `lib/wsconnvars.ml` (operator knobs + request log),
+registry + poll/LISTEN distributor), `lib/broadcasts.ml` (the periodic push subscriptions), `lib/wsconnvars.ml` (operator knobs + request log),
 `lib/conn.ml` (one client connection: native dispatch + upstream proxy + idle timer + registry for
 drain), `lib/admin.ml`, `lib/stats.ml`, `lib/files.ml`, `bin/primal_apid.ml`, `bin/primalctl.ml`. The server kernel
 (`Http_server` on httpun-eio/httpun-ws, `Listen`, `Lifecycle`, `Ws_client`, `Zlib_util`) lives in

@@ -55,3 +55,33 @@ let app_settings_value (c : Db.membership Db.conn) ~pubkey : string option =
   match [%pgsql dbh "select value from app_settings where key = $pubkey limit 1"] with
   | Some v :: _ -> Some v
   | _ -> None
+
+(* app_ext.jl set_notifications_seen: est.pubkey_notifications_seen[pubkey] = created_at *)
+let set_notifications_seen (c : Db.membership Db.conn) ~pubkey ~seen_until : unit =
+  let dbh = Db.raw c in
+  let seen_until = Int64.of_int seen_until in
+  ignore
+    [%pgsql dbh
+      "insert into pubkey_notifications_seen (pubkey, seen_until) values ($pubkey, $seen_until) \
+       on conflict (pubkey) do update set seen_until = $seen_until"]
+
+type rebroadcast = {
+  started_at : float option;
+  finished_at : float option;
+  event_idx_intermediate : int64 option;
+  event_count : int64 option;
+  status : string option;
+  kinds_json : string option;
+}
+
+(* app.jl membership_content_rebroadcast_status *)
+let rebroadcast_status (c : Db.membership Db.conn) ~pubkey : rebroadcast option =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "select extract(epoch from started_at)::float8, extract(epoch from finished_at)::float8, event_idx_intermediate, event_count, status, kinds::text \
+       from event_rebroadcasting where pubkey = $pubkey"]
+  with
+  | (started_at, finished_at, event_idx_intermediate, event_count, status, kinds_json) :: _ ->
+      Some { started_at; finished_at; event_idx_intermediate; event_count; status; kinds_json }
+  | [] -> None

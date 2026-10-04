@@ -58,7 +58,8 @@ let register (t : t) ~conn_id ~subid ~(send : string -> unit) (r : Response.regi
           let subs = match Hashtbl.find_opt t.follows user_pubkey with Some s -> s | None -> let s = Hashtbl.create 4 in Hashtbl.replace t.follows user_pubkey s; s in
           Hashtbl.replace subs key { fsend = send; fuser_pubkey = user_pubkey };
           Hashtbl.replace t.sub_follows_key key user_pubkey;
-          note_sub t conn_id subid)
+          note_sub t conn_id subid
+      | _ -> () (* the periodic broadcasters live in Broadcasts *))
 
 let unregister_locked t (key : sub_key) =
   (match Hashtbl.find_opt t.sub_live_key key with

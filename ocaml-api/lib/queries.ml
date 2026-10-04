@@ -590,3 +590,107 @@ let user_has_cmr (c : Db.cache Db.conn) ~pubkey : bool =
   with
   | [] -> false
   | _ -> true
+
+(* {1 Phase 4a: notifications and the periodic counters} *)
+
+type notif_row = {
+  n_created_at : int64;
+  n_type : int64;
+  arg1 : string option; (* bytea *)
+  arg2 : string option; (* bytea *)
+  arg3 : string option; (* jsonb as text *)
+  arg4 : string option; (* jsonb as text *)
+}
+
+let notif_of (created_at, typ, arg1, arg2, arg3, arg4) =
+  match (created_at, typ) with
+  | Some n_created_at, Some n_type -> Some { n_created_at; n_type; arg1; arg2; arg3; arg4 }
+  | _ -> None
+
+(* app_ext.jl get_notifications: newest first; without a type filter Julia drops USER_UNFOLLOWED_YOU
+   rows whose follower follows again (accept_result), so that lives in the WHERE here. *)
+let notifications (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset ~user_pubkey ~(types_json : string option)
+    : notif_row list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  match types_json with
+  | None ->
+      [%pgsql dbh
+        "select created_at, type, arg1, arg2, arg3::text, arg4::text from pubkey_notifications pn \
+         where pubkey = $pubkey and created_at >= $since and created_at <= $until \
+           and notification_is_visible(type, arg1, arg2, arg3, $?user_pubkey) \
+           and not (type = 2 and exists (select 1 from pubkey_followers pf where pf.pubkey = $pubkey and pf.follower_pubkey = pn.arg1)) \
+         order by created_at desc limit $limit offset $offset"]
+      |> List.filter_map notif_of
+  | Some types_json ->
+      [%pgsql dbh
+        "select created_at, type, arg1, arg2, arg3::text, arg4::text from pubkey_notifications pn \
+         where pubkey = $pubkey and created_at >= $since and created_at <= $until \
+           and type = any(array(select (jsonb_array_elements_text($types_json::jsonb))::int8)) \
+           and notification_is_visible(type, arg1, arg2, arg3, $?user_pubkey) \
+         order by created_at desc limit $limit offset $offset"]
+      |> List.filter_map notif_of
+
+(* LIVE_EVENT_HAPPENING: the live event behind a coordinate *)
+let parametrized_event_ids (c : Db.cache Db.conn) ~pubkey ~kind ~(identifier : string) : string list =
+  let dbh = Db.raw c in
+  let kind = i64 kind in
+  [%pgsql dbh
+    "select encode(event_id, 'hex') from parametrized_replaceable_events where pubkey = $pubkey and kind = $kind and identifier = $identifier"]
+  |> List.filter_map Fun.id
+
+(* enrich_feed_events with one timestamp for every post (Julia get_notifications passes now) *)
+let enrich_events_at (c : Db.cache Db.conn) ~(event_ids_json : string) ~t ~user_pubkey ~apply_humaness_check : string list =
+  let dbh = Db.raw c in
+  let t = i64 t in
+  [%pgsql dbh
+    "select distinct e::text from enrich_feed_events( \
+       array(select row(decode(a::text, 'hex'), $t)::post from jsonb_array_elements_text($event_ids_json::jsonb) x(a)), \
+       $?user_pubkey, $apply_humaness_check, 'created_at') f(e) where e is not null"]
+  |> List.filter_map Fun.id
+
+(* (hex id, hex author) of the stored events among [event_ids_json] *)
+let event_authors (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * string) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(e.id, 'hex'), encode(e.pubkey, 'hex') from events e \
+     where e.id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+  |> List.filter_map (function Some i, Some p -> Some (i, p) | _ -> None)
+
+(* app_ext.jl set_notifications_seen: zero every counter of the user (the NotificationType instances) *)
+let reset_notification_counts (c : Db.cache Db.conn) ~pubkey : unit =
+  let dbh = Db.raw c in
+  ignore
+    [%pgsql dbh
+      "update pubkey_notification_cnts set type1 = 0, type2 = 0, type3 = 0, type4 = 0, type5 = 0, type6 = 0, type7 = 0, type8 = 0, \
+         type101 = 0, type102 = 0, type103 = 0, type104 = 0, type201 = 0, type202 = 0, type203 = 0, type204 = 0, \
+         type301 = 0, type302 = 0, type401 = 0, type501 = 0, type601 = 0 where pubkey = $pubkey"]
+
+(* the NotificationType instances, in Julia's enum order (the key order of NOTIFICATIONS_SUMMARY) *)
+let notification_types = [ 1; 2; 3; 4; 5; 6; 7; 8; 101; 102; 103; 104; 201; 202; 203; 204; 301; 302; 401; 501; 601 ]
+
+(* app_ext.jl get_notification_counts for many users at once: (hex pubkey, counts in [notification_types] order) *)
+let notification_counts (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string * int64 list) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(pubkey, 'hex'), type1, type2, type3, type4, type5, type6, type7, type8, type101, type102, type103, type104, \
+       type201, type202, type203, type204, type301, type302, type401, type501, type601 \
+     from pubkey_notification_cnts where pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a)))"]
+  |> List.filter_map (fun (pk, t1, t2, t3, t4, t5, t6, t7, t8, t101, t102, t103, t104, t201, t202, t203, t204, t301, t302, t401, t501, t601) ->
+         match pk with
+         | None -> None
+         | Some pk ->
+             let z = Option.value ~default:0L in
+             let zi = function Some v -> Int64.of_int32 v | None -> 0L in
+             Some
+               ( pk,
+                 [ z t1; z t2; z t3; z t4; z t5; z t6; z t7; z t8; z t101; z t102; z t103; z t104; z t201; z t202; z t203; z t204;
+                   zi t301; zi t302; zi t401; zi t501; zi t601 ] ))
+
+(* app.jl get_directmsg_count(receiver) without sender: the total row *)
+let directmsg_counts (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(receiver, 'hex'), cnt from pubkey_directmsgs_cnt \
+     where receiver = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) and sender is null"]
+  |> List.filter_map (function Some k, Some v -> Some (k, v) | _ -> None)

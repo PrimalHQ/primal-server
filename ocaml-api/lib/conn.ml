@@ -55,8 +55,59 @@ let respond (c : t) (stats : Stats.t) ~subid ?(notices = []) (msgs : string list
   Stats.incr stats.sent
 
 (* Native dispatch of one REQ. Returns true when handled (nothing is forwarded). *)
-let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (c : t)
+(* The non-"cache" REQ filters of the Julia CacheServer. on_client_message first rejects any REQ
+   whose filters carry "kinds" or "authors" (NOTICE, then the connection is closed); then
+   initial_filter_handler maps {"ids"} and {"since"/"until"} to `events` and {"search"} to the
+   `search` funcall (still proxied: `None). The live push of new events to since/idsonly
+   subscriptions had no producer left in Julia (the importer moved out), so a since/until REQ is a
+   one-shot listing. *)
+let filter_funcall (raw : string) : [ `Call of Funcall.t * Kw.t | `Reject of string | `None ] =
+  match Yojson.Safe.from_string raw with
+  | `List (`String "REQ" :: `String _ :: filters) -> (
+      let objs = List.filter_map (function `Assoc f -> Some f | _ -> None) filters in
+      if List.exists (fun f -> List.mem_assoc "kinds" f || List.mem_assoc "authors" f) objs then
+        `Reject "kinds or authors filter is not supported"
+      else
+        match objs with
+        | f :: _ -> (
+            match List.assoc_opt "ids" f with
+            | Some (`List ids) ->
+                let ids = List.filter_map (function `String s when String.length s = 64 && Hex_util.decode_opt s <> None -> Some (`String s) | _ -> None) ids in
+                `Call (Funcall.Events, `Assoc [ ("event_ids", `List ids) ])
+            | _ when List.mem_assoc "search" f -> `None
+            | _ when List.mem_assoc "since" f || List.mem_assoc "until" f ->
+                `Call (Funcall.Events, `Assoc (List.filter (fun (k, _) -> List.mem k [ "since"; "until"; "limit"; "idsonly" ]) f))
+            | _ -> `None)
+        | [] -> `None)
+  | _ -> `None
+  | exception _ -> `None
+
+let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (bc : Broadcasts.t) (c : t)
     (p : Protocol.incoming) : bool =
+  let dispatch_and_respond ~subid ~(fc : string) (f : Funcall.t) (kwargs : Kw.t) : bool =
+    let ctx = { Handlers.cfg; clock; conn_id = c.id; subid } in
+    let t0 = Unix.gettimeofday () in
+    c.inflight <- c.inflight + 1;
+    let outcome = Fun.protect ~finally:(fun () -> c.inflight <- c.inflight - 1) (fun () -> Funcall.dispatch ctx f kwargs) in
+    let elapsed = Unix.gettimeofday () -. t0 in
+    (match outcome with
+    | Response.Handled r ->
+        respond c stats ~subid r.messages;
+        List.iter
+          (fun reg ->
+            Live_events.register live ~conn_id:c.id ~subid ~send:c.session.ws_send_text reg;
+            Broadcasts.register bc ~conn_id:c.id ~subid ~send:c.session.ws_send_text reg)
+          r.registrations;
+        Stats.incr stats.handled;
+        Wsconnvars.log_request ~funcall:fc ~kwargs ~conn_id:c.id ~subid ~elapsed_s:elapsed;
+        if cfg.log_handled then log "handled: %s sub_id=%s %.0fms" fc subid (elapsed *. 1000.)
+    | Response.Notice n ->
+        respond c stats ~subid ~notices:[ n ] [];
+        Stats.incr stats.handled;
+        Wsconnvars.log_request ~funcall:fc ~kwargs ~conn_id:c.id ~subid ~elapsed_s:elapsed
+    | Response.Not_handled -> ());
+    match outcome with Response.Not_handled -> false | _ -> true
+  in
   match p with
   | Protocol.Req { subid; funcall = Some "set_primal_protocol"; kwargs; _ } ->
       if Protocol.wants_zlib kwargs then c.use_zlib <- true;
@@ -65,30 +116,21 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
       Stats.incr stats.handled;
       true
   | Protocol.Req { subid; funcall = Some fc; kwargs; _ } -> (
-      match Funcall.of_string fc with
-      | Funcall.Proxied _ -> false
-      | f ->
-          let ctx = { Handlers.cfg; clock; conn_id = c.id; subid } in
-          let t0 = Unix.gettimeofday () in
-          c.inflight <- c.inflight + 1;
-          let outcome = Fun.protect ~finally:(fun () -> c.inflight <- c.inflight - 1) (fun () -> Funcall.dispatch ctx f kwargs) in
-          let elapsed = Unix.gettimeofday () -. t0 in
-          (match outcome with
-          | Response.Handled r ->
-              respond c stats ~subid r.messages;
-              List.iter (Live_events.register live ~conn_id:c.id ~subid ~send:c.session.ws_send_text) r.registrations;
-              Stats.incr stats.handled;
-              Wsconnvars.log_request ~funcall:fc ~kwargs ~conn_id:c.id ~subid ~elapsed_s:elapsed;
-              if cfg.log_handled then log "handled: %s sub_id=%s %.0fms" fc subid (elapsed *. 1000.)
-          | Response.Notice n ->
-              respond c stats ~subid ~notices:[ n ] [];
-              Stats.incr stats.handled;
-              Wsconnvars.log_request ~funcall:fc ~kwargs ~conn_id:c.id ~subid ~elapsed_s:elapsed
-          | Response.Not_handled -> ());
-          match outcome with Response.Not_handled -> false | _ -> true)
+      match Funcall.of_string fc with Funcall.Proxied _ -> false | f -> dispatch_and_respond ~subid ~fc f kwargs)
+  | Protocol.Req { subid; funcall = None; raw; _ } -> (
+      match filter_funcall raw with
+      | `Call (f, kwargs) -> dispatch_and_respond ~subid ~fc:("filter:" ^ Funcall.to_string f) f kwargs
+      | `Reject n ->
+          (* Julia: NOTICE without EOSE, then close(ws) *)
+          c.session.ws_send_text (Protocol.notice subid n);
+          Stats.incr stats.sent;
+          Stats.incr stats.handled;
+          request_close c;
+          true
+      | `None -> false)
   | _ -> false
 
-let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (session : Http_server.ws_session) : unit =
+let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (bc : Broadcasts.t) (session : Http_server.ws_session) : unit =
   let id = Atomic.fetch_and_add next_id 1 in
   let c =
     { id; session; use_zlib = false; last_msg = Unix.gettimeofday (); backend = None; closing = false; inflight = 0;
@@ -102,6 +144,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (s
     ~finally:(fun () ->
       with_registry (fun () -> Hashtbl.remove registry id);
       Live_events.unregister_conn live ~conn_id:id;
+      Broadcasts.unregister_conn bc ~conn_id:id;
       Stats.decr stats.connections;
       (match c.backend with Some b -> (try Ws_client.close b with _ -> ()) | None -> ());
       try session.ws_close () with _ -> ())
@@ -137,9 +180,13 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (s
                 touch ();
                 Stats.incr stats.recv;
                 let p = Protocol.parse s in
-                (match p with Protocol.Close subid -> Live_events.unregister_sub live ~conn_id:c.id ~subid | _ -> ());
+                (match p with
+                | Protocol.Close subid ->
+                    Live_events.unregister_sub live ~conn_id:c.id ~subid;
+                    Broadcasts.unregister_sub bc ~conn_id:c.id ~subid
+                | _ -> ());
                 let handled =
-                  try handle_native ~clock cfg stats live c p
+                  try handle_native ~clock cfg stats live bc c p
                   with
                   | Eio.Cancel.Cancelled _ as e -> raise e
                   | e ->

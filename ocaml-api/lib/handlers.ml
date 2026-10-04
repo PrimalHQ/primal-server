@@ -1146,3 +1146,161 @@ let membership_media_management_stats (ctx : ctx) (kw : Kw.t) : outcome =
                        (Yojson.Safe.to_string
                           (`Assoc [ ("video", i64json video); ("image", i64json image); ("other", i64json other); ("free", i64json free) ]));
                    ]))
+
+(* {1 Phase 4a: notifications and the push subscriptions} *)
+
+(* src/notifications.jl notification_args: what each argument of a notification type is *)
+type notif_arg = Pk | Eid | Int | Str
+
+let notification_args : (int * (string * notif_arg) list) list =
+  [
+    (1, [ ("follower", Pk) ]);
+    (2, [ ("follower", Pk) ]);
+    (3, [ ("your_post", Eid); ("who_zapped_it", Pk); ("satszapped", Int); ("message", Str) ]);
+    (4, [ ("your_post", Eid); ("who_liked_it", Pk); ("reaction", Str) ]);
+    (5, [ ("your_post", Eid); ("who_reposted_it", Pk) ]);
+    (6, [ ("your_post", Eid); ("who_replied_to_it", Pk); ("reply", Eid) ]);
+    (7, [ ("you_were_mentioned_in", Eid); ("you_were_mentioned_by", Pk) ]);
+    (8, [ ("your_post", Eid); ("your_post_were_mentioned_in", Eid); ("your_post_was_mentioned_by", Pk) ]);
+    (101, [ ("post_you_were_mentioned_in", Eid); ("who_zapped_it", Pk); ("satszapped", Int) ]);
+    (102, [ ("post_you_were_mentioned_in", Eid); ("who_liked_it", Pk) ]);
+    (103, [ ("post_you_were_mentioned_in", Eid); ("who_reposted_it", Pk) ]);
+    (104, [ ("post_you_were_mentioned_in", Eid); ("who_replied_to_it", Pk); ("reply", Eid) ]);
+    (201, [ ("post_your_post_was_mentioned_in", Eid); ("your_post", Eid); ("who_zapped_it", Pk); ("satszapped", Int) ]);
+    (202, [ ("post_your_post_was_mentioned_in", Eid); ("your_post", Eid); ("who_liked_it", Pk) ]);
+    (203, [ ("post_your_post_was_mentioned_in", Eid); ("your_post", Eid); ("who_reposed_it", Pk) ]);
+    (204, [ ("post_your_post_was_mentioned_in", Eid); ("your_post", Eid); ("who_replied_to_it", Pk); ("reply", Eid) ]);
+    (301, [ ("your_post", Eid); ("who_highlighted_it", Pk); ("highlight", Eid) ]);
+    (302, [ ("your_post", Eid); ("who_bookmarked_it", Pk) ]);
+    (401, [ ("event_id", Eid); ("sender", Pk) ]);
+    (501, [ ("live_event_id", Eid); ("host", Pk); ("coordinate", Str) ]);
+    (601, [ ("your_post", Eid); ("who_replied_to_it", Pk); ("reply", Eid) ]);
+  ]
+
+type notif = { fields : (string * Yojson.Safe.t) list; pks : string list; eids : string list; coordinate : string option }
+
+(* DB.notif2namedtuple: typed fields from (arg1, arg2: bytea) (arg3, arg4: jsonb), missing ones
+   skipped; the keys sorted; id = sha256 of the compact JSON; then {"id", sorted...} *)
+let notif_of_row ~(pubkey_hex : string) (r : Queries.notif_row) : notif option =
+  let typ = Int64.to_int r.n_type in
+  match List.assoc_opt typ notification_args with
+  | None -> None
+  | Some spec ->
+      let raw = [ `Bytea r.arg1; `Bytea r.arg2; `Json r.arg3; `Json r.arg4 ] in
+      let pks = ref [] and eids = ref [] and coordinate = ref None in
+      let value (name, kind) raw : (string * Yojson.Safe.t) option =
+        let hex_of = function
+          | `Bytea (Some b) -> Some (Hex_util.encode b)
+          | `Json (Some j) -> ( match Yojson.Safe.from_string j with `String s -> Some (String.lowercase_ascii s) | _ -> None | exception _ -> None)
+          | _ -> None
+        in
+        match kind with
+        | Pk -> ( match hex_of raw with Some h -> pks := h :: !pks; Some (name, `String h) | None -> None)
+        | Eid -> ( match hex_of raw with Some h -> eids := h :: !eids; Some (name, `String h) | None -> None)
+        | Int -> (
+            match raw with
+            | `Json (Some j) -> ( match Yojson.Safe.from_string j with (`Int _ | `Intlit _) as v -> Some (name, v) | `Float f -> Some (name, `Int (int_of_float f)) | _ -> None | exception _ -> None)
+            | _ -> None)
+        | Str -> (
+            match raw with
+            | `Json (Some j) -> (
+                match Yojson.Safe.from_string j with
+                | `String s ->
+                    if name = "coordinate" then coordinate := Some s;
+                    Some (name, `String s)
+                | _ -> None
+                | exception _ -> None)
+            | _ -> None)
+      in
+      let rec zip spec raw acc =
+        match (spec, raw) with
+        | s :: ss, r :: rs -> zip ss rs (match value s r with Some f -> f :: acc | None -> acc)
+        | _ -> List.rev acc
+      in
+      let fields = zip spec raw [] in
+      let all =
+        [ ("pubkey", `String pubkey_hex); ("created_at", `Int (Int64.to_int r.n_created_at)); ("type", `Int typ) ] @ fields
+        |> List.sort (fun (a, _) (b, _) -> compare a b)
+      in
+      let json = Yojson.Safe.to_string (`Assoc all) in
+      let id = Hex_util.encode (Digestif.SHA256.(to_raw_string (digest_string json))) in
+      Some { fields = ("id", `String id) :: all; pks = List.rev !pks; eids = List.rev !eids; coordinate = !coordinate }
+
+(* app_ext.jl get_notifications type_group *)
+let notification_types_of_group = function
+  | "zaps" -> Some [ 3 ]
+  | "replies" -> Some [ 6; 601 ]
+  | "mentions" -> Some [ 7; 8 ]
+  | "reposts" -> Some [ 5 ]
+  | _ -> None
+
+let get_notifications (ctx : ctx) (kw : Kw.t) : outcome =
+  let pubkey = Kw.hex32_exn kw "pubkey" in
+  let pubkey_hex = Hex_util.encode pubkey in
+  let limit = min (Kw.int kw "limit" ~default:1000) 50 in
+  let since = Kw.int kw "since" ~default:0 and until = Kw.int kw "until" ~default:(now ()) in
+  let offset = Kw.int kw "offset" ~default:0 in
+  let user_pubkey = user_pubkey_opt kw in
+  let types = match Kw.str_opt kw "type_group" with Some g -> notification_types_of_group g | None -> None in
+  let types_json = Option.map (fun l -> Yojson.Safe.to_string (`List (List.map (fun t -> `Int t) l))) types in
+  with_cache ctx (fun c ->
+      let rows = Queries.notifications c ~pubkey ~since ~until ~limit ~offset ~user_pubkey ~types_json in
+      let notifs = List.filter_map (notif_of_row ~pubkey_hex) rows in
+      let msgs =
+        List.map (fun n -> content_msg Kind.notification (Yojson.Safe.to_string (`Assoc n.fields))) notifs |> List.sort_uniq compare
+      in
+      let pks = List.concat_map (fun n -> n.pks) notifs |> List.sort_uniq compare in
+      let posts =
+        List.concat_map
+          (fun n ->
+            match n.coordinate with
+            | Some coord when Int64.to_int (List.assoc "type" n.fields |> function `Int t -> Int64.of_int t | _ -> 0L) = 501 -> (
+                match String.split_on_char ':' coord with
+                | [ kind; pk; identifier ] -> (
+                    match (int_of_string_opt kind, Hex_util.decode_opt pk) with
+                    | Some kind, Some pubkey when String.length pubkey = 32 -> Queries.parametrized_event_ids c ~pubkey ~kind ~identifier
+                    | _ -> [])
+                | _ -> [])
+            | _ -> n.eids)
+          notifs
+        |> List.sort_uniq compare
+      in
+      let counts = follower_counts c pks in
+      let profiles =
+        List.map
+          (fun pk ->
+            content_msg Kind.user_profile
+              (Yojson.Safe.to_string
+                 (`Assoc [ ("pubkey", `String pk); ("followers_count", i64json (Option.value (List.assoc_opt pk counts) ~default:0L)) ])))
+          pks
+      in
+      let enriched =
+        if posts = [] then []
+        else Queries.enrich_events_at c ~event_ids_json:(Queries.hexes_json posts) ~t:(now ()) ~user_pubkey ~apply_humaness_check:false
+      in
+      let found, cards = user_cards c pks in
+      Handled (messages (msgs @ profiles @ enriched @ cards @ verified_names c found)))
+
+let set_notifications_seen (ctx : ctx) (kw : Kw.t) : outcome =
+  match event_from_user kw with
+  | Error _ -> julia_error
+  | Ok e ->
+      with_membership ctx (fun m -> Queries_mem.set_notifications_seen m ~pubkey:e.Nostr.pubkey ~seen_until:e.Nostr.created_at);
+      with_cache ctx (fun c -> Queries.reset_notification_counts c ~pubkey:e.Nostr.pubkey);
+      Handled empty
+
+(* {2 push subscriptions} (answered with EOSE; the Broadcasts loops push the values) *)
+
+let subscription (r : Response.registration) : outcome = Handled { messages = []; registrations = [ r ] }
+let notification_counts (_ : ctx) (kw : Kw.t) : outcome = subscription (Notification_counts { pubkey = Kw.hex32_exn kw "pubkey"; v2 = false })
+let notification_counts_2 (_ : ctx) (kw : Kw.t) : outcome = subscription (Notification_counts { pubkey = Kw.hex32_exn kw "pubkey"; v2 = true })
+let directmsg_count (_ : ctx) (kw : Kw.t) : outcome = subscription (Directmsg_count { pubkey = Kw.hex32_exn kw "pubkey"; v2 = false })
+let directmsg_count_2 (_ : ctx) (kw : Kw.t) : outcome = subscription (Directmsg_count { pubkey = Kw.hex32_exn kw "pubkey"; v2 = true })
+let net_stats (_ : ctx) (_ : Kw.t) : outcome = subscription Net_stats
+
+let rebroadcasting_status (_ : ctx) (kw : Kw.t) : outcome =
+  (* Julia verifies event_from_user on every tick and pushes nothing when it fails *)
+  match event_from_user kw with Ok e -> subscription (Rebroadcasting_status { pubkey = e.Nostr.pubkey }) | Error _ -> Handled empty
+
+(* broadcast_notification has no caller any more (the importer moved out of the API node): EOSE only *)
+let notifications (_ : ctx) (_ : Kw.t) : outcome = Handled empty

@@ -91,6 +91,7 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
     (* what the rules need from the DB, collected in one pass *)
     let ids = ref SS.empty and scope_pks = ref SS.empty and trending_pks = ref SS.empty in
     let zap_pairs = ref [] (* (receiver hex, sender hex) *) in
+    let notif_vals = ref SS.empty (* 64-hex values of NOTIFICATION contents: pubkeys or event ids *) in
     List.iter
       (fun p ->
         (match hex_field p "id" with Some id -> ids := SS.add id !ids | None -> ());
@@ -108,15 +109,20 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
                     zap_pairs := (String.lowercase_ascii r, String.lowercase_ascii s) :: !zap_pairs
                 | _ -> ())
             | _ -> ())
+        | None, Some kind when kind = Kind.notification -> (
+            match content_json p with
+            | Some (`Assoc d) ->
+                List.iter (function _, `String v when is_hex64 v -> notif_vals := SS.add (String.lowercase_ascii v) !notif_vals | _ -> ()) d
+            | _ -> ())
         | _ -> ())
       ps;
     let zap_senders = List.map snd !zap_pairs |> SS.of_list in
     let need_db =
-      not (SS.is_empty !ids && SS.is_empty !scope_pks && SS.is_empty !trending_pks && SS.is_empty zap_senders)
+      not (SS.is_empty !ids && SS.is_empty !scope_pks && SS.is_empty !trending_pks && SS.is_empty zap_senders && SS.is_empty !notif_vals)
     in
     if not need_db then msgs
     else begin
-      let hidden_ids, hidden_scope, hidden_trending, hidden_zap_user, hidden_zap_receiver =
+      let hidden_ids, hidden_scope, hidden_trending, hidden_zap_user, hidden_zap_receiver, hidden_notif =
         Db.with_cache ~clock (fun c ->
             let q set scope user = hidden_pubkeys ~clock c ~user_pubkey:user ~scope ~hexes:(SS.elements set) ~author_exempt in
             let hidden_ids =
@@ -140,7 +146,18 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
                   SS.fold (fun s acc -> (r, s) :: acc) h acc)
                 by_receiver []
             in
-            (hidden_ids, hidden_scope, hidden_trending, hidden_zap_user, hidden_zap_receiver))
+            (* NOTIFICATION: a value is hidden when it is a hidden pubkey (content scope) or an
+               event whose author is hidden (Julia is_hidden_ for an EventId) *)
+            let hidden_notif =
+              if SS.is_empty !notif_vals then SS.empty
+              else begin
+                let vals = SS.elements !notif_vals in
+                let authors = Queries.event_authors c ~event_ids_json:(Queries.hexes_json vals) in
+                let hidden_pks = q (SS.of_list (vals @ List.map snd authors)) "content" user_pubkey in
+                SS.filter (fun v -> SS.mem v hidden_pks || (match List.assoc_opt v authors with Some a -> SS.mem a hidden_pks | None -> false)) !notif_vals
+              end
+            in
+            (hidden_ids, hidden_scope, hidden_trending, hidden_zap_user, hidden_zap_receiver, hidden_notif))
       in
       List.filter_map
         (fun p ->
@@ -158,6 +175,13 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
                     Some
                       (Yojson.Safe.to_string
                          (`Assoc [ ("kind", `Int Kind.user_scores); ("content", `String (Yojson.Safe.to_string (`Assoc kept))) ]))
+              | _ -> Some p.text)
+          | _, None, Some kind when kind = Kind.notification -> (
+              match content_json p with
+              | Some (`Assoc d) ->
+                  if List.exists (function _, `String v when is_hex64 v -> SS.mem (String.lowercase_ascii v) hidden_notif | _ -> false) d
+                  then None
+                  else Some p.text
               | _ -> Some p.text)
           | _, None, Some kind when kind = Kind.zap_event -> (
               match content_json p with

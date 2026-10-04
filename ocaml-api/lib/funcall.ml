@@ -54,6 +54,16 @@ type t =
   | Get_recommended_users
   | Get_suggested_users
   | Membership_media_management_stats
+  (* Phase 4a *)
+  | Get_notifications
+  | Set_notifications_seen
+  | Notification_counts
+  | Notification_counts_2
+  | Directmsg_count
+  | Directmsg_count_2
+  | Net_stats
+  | Rebroadcasting_status
+  | Notifications
   | Proxied of string
 
 let names : (string * t) list =
@@ -106,6 +116,15 @@ let names : (string * t) list =
     ("get_recommended_users", Get_recommended_users);
     ("get_suggested_users", Get_suggested_users);
     ("membership_media_management_stats", Membership_media_management_stats);
+    ("get_notifications", Get_notifications);
+    ("set_notifications_seen", Set_notifications_seen);
+    ("notification_counts", Notification_counts);
+    ("notification_counts_2", Notification_counts_2);
+    ("directmsg_count", Directmsg_count);
+    ("directmsg_count_2", Directmsg_count_2);
+    ("net_stats", Net_stats);
+    ("rebroadcasting_status", Rebroadcasting_status);
+    ("notifications", Notifications);
   ]
 
 let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
@@ -197,4 +216,13 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Get_recommended_users -> run Handlers.get_recommended_users
   | Get_suggested_users -> run Handlers.get_suggested_users
   | Membership_media_management_stats -> run Handlers.membership_media_management_stats
+  | Get_notifications -> run Handlers.get_notifications
+  | Set_notifications_seen -> run ~moderate:false Handlers.set_notifications_seen
+  | Notification_counts -> run ~moderate:false Handlers.notification_counts
+  | Notification_counts_2 -> run ~moderate:false Handlers.notification_counts_2
+  | Directmsg_count -> run ~moderate:false Handlers.directmsg_count
+  | Directmsg_count_2 -> run ~moderate:false Handlers.directmsg_count_2
+  | Net_stats -> run ~moderate:false Handlers.net_stats
+  | Rebroadcasting_status -> run ~moderate:false Handlers.rebroadcasting_status
+  | Notifications -> run ~moderate:false Handlers.notifications
   | Proxied _ -> Response.Not_handled
