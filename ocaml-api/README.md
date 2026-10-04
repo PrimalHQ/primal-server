@@ -51,8 +51,11 @@ stopped. This host's 9001 is the endpoint used by dev.primal.net (about two thou
 five days, one at a time), not one of the public cache hosts of `deploy.sh` (<production-host>, <production-host>, <production-host>), so
 it is the low-risk first host of the plan's one-week soak (until 2026-10-11). `cutover-9001.sh` is
 the script that was run; its header has the rollback (restore the config backup, roll back to 9006,
-relaunch ws-connector with its original command line). Soak check: `primalctl replay ... --a
-ws://127.0.0.1:8817 --b ws://127.0.0.1:9001` (Julia direct vs primal-api). Known gap: primal-api
+relaunch ws-connector with its original command line). Soak check: a reference ws-connector runs on 9007 (transient user unit
+`primal-wsconn-ref-9007`, same binary and arguments), so `primalctl replay ... --a
+ws://127.0.0.1:9007 --b ws://127.0.0.1:9001` compares the pre-cutover behaviour with primal-api
+(99.8 % on the first 535 requests after the switch; Julia direct is not the right reference for
+the 3a funcalls, which mirror ws-connector by design). Known gap: primal-api
 does not read `/tmp/wsconn_blocked`, the flag `deploy.sh` sets while it restarts Julia; proxied
 funcalls fail for that window, native ones keep working.
 
