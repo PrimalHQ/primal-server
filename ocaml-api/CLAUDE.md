@@ -17,3 +17,9 @@ The Primal cache API daemon (`primal_apid`) and `primalctl`; see `README.md` and
   forces a handler or an explicit proxy arm.
 - Per-connection fibers run on the domain that accepted the connection; do not share Eio sockets
   or PGOCaml connections across domains.
+- Parity check after handler changes: `_build/default/ocaml-api/bin/primalctl.exe replay
+  $PRIMAL_CONFIG_DIR/requests-sample-2.jsonl --per-funcall 60 --report /tmp/mm.jsonl` (9001 vs
+  9006); the gate is ≥ 99.5 % identical per native funcall. Julia's live node can be stale relative
+  to the source (hot-loading), so check the source before mirroring an observed quirk.
+- The 3b handlers follow app.jl / app_ext.jl, not the ocaml-handlers SQL: several of those SQL
+  functions are wrong (README "Notes"). Julia-raised errors are NOTICE "error".

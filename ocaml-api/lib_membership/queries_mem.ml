@@ -43,3 +43,15 @@ let max_storage (c : Db.membership Db.conn) ~pubkey : int64 option =
   with
   | Some v :: _ -> Some v
   | _ -> None
+
+(* Julia ext_user_get_settings: a user without an app_settings row gets the default settings *)
+let has_app_settings (c : Db.membership Db.conn) ~pubkey : bool =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select 1 from app_settings where key = $pubkey limit 1"] with [] -> false | _ -> true
+
+(* the user's app settings JSON (Julia ext_user_get_settings deep-merges it over the defaults) *)
+let app_settings_value (c : Db.membership Db.conn) ~pubkey : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select value from app_settings where key = $pubkey limit 1"] with
+  | Some v :: _ -> Some v
+  | _ -> None

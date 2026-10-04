@@ -563,3 +563,30 @@ let hidden_pubkeys_default (c : Db.cache Db.conn) ~(scope : string) ~(pubkeys_js
         or ($scope = 'trending' \
             and exists (select 1 from filterlist fl where fl.grp = 'nsfw' and fl.target_type = 'pubkey' and fl.target = decode(a::text, 'hex') and fl.blocked))"]
   |> List.filter_map Fun.id
+
+(* [hidden_pubkeys_default] with Julia's spam_softban_exempt relative to [viewer]: the viewer
+   themself and the pubkeys the viewer follows are exempt from the spam group *)
+let hidden_pubkeys_default_for (c : Db.cache Db.conn) ~viewer ~(scope : string) ~(pubkeys_json : string) ~author_exempt
+    : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select a::text from jsonb_array_elements_text($pubkeys_json::jsonb) x(a) \
+     where (decode(a::text, 'hex') is distinct from $?author_exempt \
+            and decode(a::text, 'hex') is distinct from $?viewer \
+            and not exists (select 1 from pubkey_followers pf where pf.pubkey = decode(a::text, 'hex') and pf.follower_pubkey = $?viewer) \
+            and exists (select 1 from filterlist fl where fl.grp = 'spam' and fl.target_type = 'pubkey' and fl.target = decode(a::text, 'hex') and fl.blocked)) \
+        or ($scope = 'trending' \
+            and exists (select 1 from filterlist fl where fl.grp = 'nsfw' and fl.target_type = 'pubkey' and fl.target = decode(a::text, 'hex') and fl.blocked))"]
+  |> List.filter_map Fun.id
+
+(* whether the importer compiled content-moderation rules for this user (cmr_* tables) *)
+let user_has_cmr (c : Db.cache Db.conn) ~pubkey : bool =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "select 1 where exists (select 1 from cmr_groups where user_pubkey = $pubkey) \
+          or exists (select 1 from cmr_pubkeys_scopes where user_pubkey = $pubkey) \
+          or exists (select 1 from cmr_pubkeys_allowed where user_pubkey = $pubkey)"]
+  with
+  | [] -> false
+  | _ -> true

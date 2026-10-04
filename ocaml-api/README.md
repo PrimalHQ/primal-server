@@ -26,12 +26,15 @@ subscriptions, the `wsconnvars` knobs and the request log are unchanged from 3a.
 is proxied verbatim to the Julia CacheServer (`upstream_julia_ws`), as ws-connector does
 (`set_primal_protocol` is not forwarded; zlib applies to native answers only).
 
-Parity (`scratch wscompare`, multiset of canonical messages vs the production ws-connector → Julia
-on 9001): 25/25 of the 3a set (a trending selector occasionally differs because its data moves
-between the two fetches) and 52/54 of the 3b set are identical; the two remaining are `nip19_decode` with
-TLV ids, where the running Julia predates the flattened `ser()` in app.jl (ours matches the
-source; the method's line number in the live process no longer matches the file). Still proxied on
-purpose, with the reason: `get_notifications` and
+Parity against the production ws-connector → Julia on 9001 (`primalctl replay`, 300 requests per
+funcall from the request corpus, 7238 in all): 99.6 % identical; every native funcall is at
+99.3–100 % and the residue is classified (the deliberate deviations below, counters moving between
+the two fetches, Julia's PARTIAL_RESPONSE under its time budget). `mega_feed_directive` shows
+91.7 % only because its proxied specs (advsearch, reads/follows, nostr-reads-feed, explore-media)
+vary on the Julia side under the six-worker load — one at a time Julia, the shadow and ws-connector
+agree 24/24. The hand-written sets (`scratch wscompare`) are 25/25 (3a) and 52/54 (3b); the two
+remaining are `nip19_decode` with TLV ids, where the running Julia predates the flattened `ser()`
+in app.jl (ours matches the source). Still proxied on purpose, with the reason: `get_notifications` and
 `set_notifications_seen` (in-memory enrichment + cross-node replication), `enrich_feed_events` and
 `note_mentions` (Julia's in-memory `response_messages_for_posts` emits a different pubkey set than
 the SQL `enrich_feed_events`), `explore_legend_counts` (`all_users` is an in-process Julia stat),
@@ -105,7 +108,19 @@ wrappers).
 primalctl req ws://127.0.0.1:9006 server_name                 # one request, frames printed until EOSE
 primalctl req ws://127.0.0.1:9006 user_infos '{"pubkeys":["<hex>"]}' --zlib   # zlib mode (frames inflated)
 primalctl status|metrics|drain [http://127.0.0.1:14006]
+primalctl replay $PRIMAL_CONFIG_DIR/requests-sample-2.jsonl --per-funcall 300 --workers 6 \
+         --report mismatches.jsonl          # parity of 9006 against 9001 over a request corpus
 ```
+
+`replay` is the parity gate of ocaml-plan.md §12: every corpus line (`{t,funcall,kwargs,ws,subid}`,
+the request-log format) is sent to A (`--a`, default the production ws-connector on 9001) and B
+(`--b`, default the shadow on 9006) and the answers are compared as multisets of canonical messages
+(sorted keys, JSON-in-strings canonicalised, integral floats as ints). Only read-only funcalls are
+replayed, by default only the natively answered ones (`--all` adds the proxied ones, `--only a,b`
+restricts); each worker keeps one connection per side and sends CLOSE after EOSE like a client
+(Julia caps open subscriptions per connection). The table lists per funcall: total, identical,
+percentage, timeouts per side, median latency per side; `--report` writes every mismatch with the
+kwargs and up to three messages only one side produced.
 
 ## Layout
 
@@ -138,3 +153,16 @@ drain), `lib/admin.ml`, `lib/stats.ml`, `lib/files.ml`, `bin/primal_apid.ml`, `b
 - `primal_verified_names` in Julia also appends `user_blossom_servers`; Julia's in-memory
   `event_media_response` omits `"mt"` when a resource has no variants (SQL emits null) — see
   `Handlers.verified_names` / `strip_null_mt`.
+- Content moderation for a viewer: Julia compiles the viewer's app settings (deep-merged over the
+  defaults) on every request; the importer materialises those rules into the `cmr_*` tables for
+  only about half of the users with settings (218k of 412k). `Moderation.viewer_rules` therefore
+  uses the SQL predicate when compiled rules exist, hides nothing when the settings switch
+  moderation off, and applies Julia's default rules (spam in content+trending, nsfw in trending,
+  the viewer's follows exempt from spam) otherwise and for requests without a viewer.
+- Deliberate deviations from Julia, kept because the OCaml answer is the better one: accounts on
+  the csam/impersonation filterlist are hidden by the SQL predicate (Julia's
+  `content_moderation_filtering_2` only knows the spam/nsfw groups, so Julia still lists them in
+  `user_scores` and zap lists); a `pubkey_notifications`/`event_stats` row pointing at a purged
+  event makes Julia raise (NOTICE "error") where we answer with the remaining rows; Julia's
+  per-request time budget can cut a large `contact_list` with a PARTIAL_RESPONSE marker where we
+  answer in full.

@@ -4,6 +4,9 @@
      primalctl status [admin-url]                               GET /status of a primal-api
      primalctl drain  [admin-url]                               POST /drain
      primalctl metrics [admin-url]                              GET /metrics
+     primalctl replay <corpus.jsonl> [--a ws://..] [--b ws://..] [--only f1,f2] [--all]
+                      [--per-funcall N] [--workers K] [--timeout S] [--report mismatches.jsonl]
+                                                                parity of B against A over a request corpus
 
    Default admin url: http://127.0.0.1:14001. *)
 
@@ -14,7 +17,8 @@ let default_admin = "http://127.0.0.1:14001"
 let usage () =
   prerr_endline
     "usage: primalctl req <ws-url> <funcall> [kwargs-json] [--zlib]\n\
-    \       primalctl status|drain|metrics [admin-url]";
+    \       primalctl status|drain|metrics [admin-url]\n\
+    \       primalctl replay <corpus.jsonl> [--a ws-url] [--b ws-url] [--only f1,f2] [--all] [--per-funcall N] [--workers K] [--timeout S] [--report file]";
   exit 2
 
 let parse_http_url (u : string) : string * int * string =
@@ -62,8 +66,29 @@ let req ~net ~clock ~url ~funcall ~kwargs ~zlib : unit =
       Printf.eprintf "(%.0f ms)\n%!" ((Unix.gettimeofday () -. t0) *. 1000.);
       Ws_client.close ws
 
+let replay_opts (corpus : string) (rest : string list) : Replay.opts =
+  let rec go (o : Replay.opts) = function
+    | "--a" :: v :: r -> go { o with url_a = v } r
+    | "--b" :: v :: r -> go { o with url_b = v } r
+    | "--only" :: v :: r -> go { o with only = String.split_on_char ',' v } r
+    | "--all" :: r -> go { o with all = true } r
+    | "--per-funcall" :: v :: r -> go { o with per_funcall = int_of_string v } r
+    | "--workers" :: v :: r -> go { o with workers = int_of_string v } r
+    | "--timeout" :: v :: r -> go { o with timeout = float_of_string v } r
+    | "--report" :: v :: r -> go { o with report = Some v } r
+    | [] -> o
+    | a :: _ -> prerr_endline ("unknown replay option: " ^ a); usage ()
+  in
+  go { Replay.default_opts with corpus } rest
+
 let () =
   let args = Array.to_list Sys.argv |> List.tl in
+  (match args with
+  | "replay" :: corpus :: rest ->
+      Mirage_crypto_rng_unix.use_default ();
+      Replay.run (replay_opts corpus rest) ~native:(Primal_api.Funcall.native_names ());
+      exit 0
+  | _ -> ());
   Eio_main.run @@ fun env ->
   Mirage_crypto_rng_unix.use_default ();
   let net = Eio.Stdenv.net env and clock = Eio.Stdenv.clock env in

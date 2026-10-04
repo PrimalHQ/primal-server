@@ -455,7 +455,7 @@ let user_profile (ctx : ctx) (kw : Kw.t) : outcome =
         (* content_moderation_filtering_2 appends search_filterlist for a hidden profile: not native yet *)
         let hidden =
           match user_pubkey with
-          | Some _ -> Queries.hidden_pubkeys c ~user_pubkey ~scope:"content" ~pubkeys_json:pk_json ~author_exempt:None <> []
+          | Some _ -> not (Moderation.SS.is_empty (Moderation.hidden_pubkeys ~clock:ctx.clock c ~user_pubkey ~scope:"content" ~hexes:[ pk_hex ] ~author_exempt:None))
           | None -> false
         in
         if hidden then Not_handled
@@ -554,7 +554,44 @@ let contact_list (ctx : ctx) (kw : Kw.t) : outcome =
           | [] -> []
         in
         let found = List.filter_map (fun m -> match kind_and_pubkey m with Some 0, Some pk -> Some (String.lowercase_ascii pk) | _ -> None) msgs in
-        let keep m = match kind_and_pubkey m with Some k, _ when k = Kind.user_scores || k = Kind.user_follower_counts -> false | _ -> true in
+        (* the SQL user_infos emits media/preview for a meta_data pointer whose event is gone
+           (purged); Julia's in-memory path never reaches those: keep only extras of emitted events *)
+        let md_ids =
+          List.filter_map
+            (fun m ->
+              match Yojson.Safe.from_string m with
+              | `Assoc f -> (
+                  match (List.assoc_opt "kind" f, List.assoc_opt "id" f) with
+                  | Some (`Int 0), Some (`String id) -> Some (String.lowercase_ascii id)
+                  | _ -> None)
+              | _ -> None
+              | exception _ -> None)
+            msgs
+        in
+        let extra_of_known_event m =
+          match kind_and_pubkey m with
+          | Some k, _ when k = Kind.media_metadata || k = Kind.link_metadata || k = Kind.media_hls_urls -> (
+              match Yojson.Safe.from_string m with
+              | `Assoc f -> (
+                  match List.assoc_opt "content" f with
+                  | Some (`String c) -> (
+                      match Yojson.Safe.from_string c with
+                      | `Assoc cf -> (
+                          match List.assoc_opt "event_id" cf with
+                          | Some (`String id) -> List.mem (String.lowercase_ascii id) md_ids
+                          | _ -> true)
+                      | _ -> true
+                      | exception _ -> true)
+                  | _ -> true)
+              | _ -> true
+              | exception _ -> true)
+          | _ -> true
+        in
+        let keep m =
+          match kind_and_pubkey m with
+          | Some k, _ when k = Kind.user_scores || k = Kind.user_follower_counts -> false
+          | _ -> extra_of_known_event m
+        in
         let msgs = List.filter keep msgs |> List.map strip_null_mt in
         Handled
           (messages

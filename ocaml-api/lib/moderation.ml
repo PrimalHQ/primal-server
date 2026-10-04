@@ -48,6 +48,40 @@ let content_json p =
 let author_exempt (kw : Kw.t) : string option =
   if Kw.str kw "notes" ~default:"" = "authored" then Kw.hex32_opt kw "pubkey" else None
 
+(* Julia is_hidden_ for a set of pubkeys. Julia compiles the viewer's settings (deep-merged over
+   the defaults) into rules; the importer materialises those rules into the cmr_* tables that the
+   SQL is_pubkey_hidden reads, but not for every user. So: a viewer whose settings switch content
+   moderation off hides nothing; a viewer with compiled rules uses the SQL predicate; everyone
+   else (no settings, settings without compiled rules, no viewer) gets Julia's default rules. *)
+type viewer_rules = Off | Compiled | Default
+
+let viewer_rules ~clock (c : Db.cache Db.conn) (u : string) : viewer_rules =
+  let settings = Db.with_membership ~clock (fun m -> Queries_mem.app_settings_value m ~pubkey:u) in
+  let switched_off =
+    match settings with
+    | None -> false
+    | Some v -> (
+        match Yojson.Safe.from_string v with
+        | `Assoc f -> List.assoc_opt "applyContentModeration" f = Some (`Bool false)
+        | _ -> false
+        | exception _ -> false)
+  in
+  if switched_off then Off else if Queries.user_has_cmr c ~pubkey:u then Compiled else Default
+
+let hidden_pubkeys ~clock (c : Db.cache Db.conn) ~(user_pubkey : string option) ~(scope : string) ~(hexes : string list)
+    ~(author_exempt : string option) : SS.t =
+  if hexes = [] then SS.empty
+  else
+    let pubkeys_json = Queries.hexes_json hexes in
+    SS.of_list
+      (match user_pubkey with
+      | Some u -> (
+          match viewer_rules ~clock c u with
+          | Off -> []
+          | Compiled -> Queries.hidden_pubkeys c ~user_pubkey ~scope ~pubkeys_json ~author_exempt
+          | Default -> Queries.hidden_pubkeys_default_for c ~viewer:user_pubkey ~scope ~pubkeys_json ~author_exempt)
+      | None -> Queries.hidden_pubkeys_default c ~scope ~pubkeys_json ~author_exempt)
+
 let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_exempt : string option)
     (msgs : string list) : string list =
   if msgs = [] then msgs
@@ -59,14 +93,14 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
     let zap_pairs = ref [] (* (receiver hex, sender hex) *) in
     List.iter
       (fun p ->
-        match (hex_field p "id", hex_field p "pubkey", int_field p "kind") with
-        | Some id, _, _ -> ids := SS.add id !ids
-        | None, Some pk, _ -> if scope <> No_scope then scope_pks := SS.add pk !scope_pks
-        | None, None, Some kind when kind = Kind.user_scores -> (
+        (match hex_field p "id" with Some id -> ids := SS.add id !ids | None -> ());
+        match (hex_field p "pubkey", int_field p "kind") with
+        | Some pk, _ -> if scope <> No_scope then scope_pks := SS.add pk !scope_pks
+        | None, Some kind when kind = Kind.user_scores -> (
             match content_json p with
             | Some (`Assoc d) -> List.iter (fun (k, _) -> if is_hex64 k then trending_pks := SS.add (String.lowercase_ascii k) !trending_pks) d
             | _ -> ())
-        | None, None, Some kind when kind = Kind.zap_event -> (
+        | None, Some kind when kind = Kind.zap_event -> (
             match content_json p with
             | Some (`Assoc d) -> (
                 match (List.assoc_opt "sender" d, List.assoc_opt "receiver" d) with
@@ -84,15 +118,7 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
     else begin
       let hidden_ids, hidden_scope, hidden_trending, hidden_zap_user, hidden_zap_receiver =
         Db.with_cache ~clock (fun c ->
-            let q set scope user =
-              if SS.is_empty set then SS.empty
-              else
-                let pubkeys_json = Queries.hexes_json (SS.elements set) in
-                SS.of_list
-                  (match user with
-                  | Some _ -> Queries.hidden_pubkeys c ~user_pubkey:user ~scope ~pubkeys_json ~author_exempt
-                  | None -> Queries.hidden_pubkeys_default c ~scope ~pubkeys_json ~author_exempt)
-            in
+            let q set scope user = hidden_pubkeys ~clock c ~user_pubkey:user ~scope ~hexes:(SS.elements set) ~author_exempt in
             let hidden_ids =
               if SS.is_empty !ids then SS.empty
               else SS.of_list (Queries.hidden_events c ~event_ids_json:(Queries.hexes_json (SS.elements !ids)))
@@ -118,10 +144,12 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
       in
       List.filter_map
         (fun p ->
+          (* Julia: a hidden/deleted event id drops the message; else the pubkey decides (events
+             included); else the synthetic kinds *)
           match (hex_field p "id", hex_field p "pubkey", int_field p "kind") with
-          | Some id, _, _ -> if SS.mem id hidden_ids then None else Some p.text
-          | None, Some pk, _ -> if SS.mem pk hidden_scope then None else Some p.text
-          | None, None, Some kind when kind = Kind.user_scores -> (
+          | Some id, _, _ when SS.mem id hidden_ids -> None
+          | _, Some pk, _ -> if SS.mem pk hidden_scope then None else Some p.text
+          | _, None, Some kind when kind = Kind.user_scores -> (
               match content_json p with
               | Some (`Assoc d) ->
                   let kept = List.filter (fun (k, _) -> not (SS.mem (String.lowercase_ascii k) hidden_trending)) d in
@@ -131,7 +159,7 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
                       (Yojson.Safe.to_string
                          (`Assoc [ ("kind", `Int Kind.user_scores); ("content", `String (Yojson.Safe.to_string (`Assoc kept))) ]))
               | _ -> Some p.text)
-          | None, None, Some kind when kind = Kind.zap_event -> (
+          | _, None, Some kind when kind = Kind.zap_event -> (
               match content_json p with
               | Some (`Assoc d) -> (
                   match (List.assoc_opt "sender" d, List.assoc_opt "receiver" d) with
