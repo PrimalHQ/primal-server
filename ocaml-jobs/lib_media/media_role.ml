@@ -10,6 +10,7 @@ let register_all () =
 
 let make_ctx ~(cfg : Media_config.t) ~(cache_db : Postgres.conninfo) ~(membership_db : Postgres.conninfo) ~net ~clock ~proc_mgr : Procgraph.ctx =
   register_all ();
+  Proc.ensure_path ();
   { Procgraph.cfg; cache = Postgres.make_pool ~size:48 cache_db; mem = Postgres.make_pool ~size:8 membership_db; net; clock; proc_mgr; verbose = cfg.log }
 
 let run ~(cfg : Media_config.t) ~cache_db ~membership_db ~net ~clock ~proc_mgr ~(stop : unit Promise.t) : unit =

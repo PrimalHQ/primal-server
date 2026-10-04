@@ -2,14 +2,16 @@
                                        sorted-key JSON) and report matches per func
    media_tool CONFIG execute-node HEX    run one stored node with the registered handlers
    media_tool CONFIG show-node HEX       print a node
-   media_tool CONFIG pending             pending counts per func *)
+   media_tool CONFIG pending             pending counts per func
+   media_tool CONFIG import-media URL [EID]   create an import_media_pn node (all variants) and run it now
+   media_tool CONFIG import-preview URL EID   create an import_preview_pn node and run it now *)
 
 open Eio.Std
 module J = Primal_jobs
 module M = Primal_jobs_media
 
 let () =
-  let cfg_path, cmd, arg = match Array.to_list Sys.argv with [ _; c; cmd ] -> (c, cmd, None) | [ _; c; cmd; a ] -> (c, cmd, Some a) | _ -> prerr_endline "usage: media_tool CONFIG (check-ids [LIMIT] | execute-node HEX | show-node HEX | pending)"; exit 2 in
+  let cfg_path, cmd, arg, arg2 = match Array.to_list Sys.argv with [ _; c; cmd ] -> (c, cmd, None, None) | [ _; c; cmd; a ] -> (c, cmd, Some a, None) | [ _; c; cmd; a; b ] -> (c, cmd, Some a, Some b) | _ -> prerr_endline "usage: media_tool CONFIG (check-ids [LIMIT] | execute-node HEX | show-node HEX | pending | import-media URL [EID] | import-preview URL EID)"; exit 2 in
   let cfg = J.Config.of_json_file cfg_path in
   let mcfg = match cfg.media with Some m -> m | None -> prerr_endline "config has no media object"; exit 2 in
   Random.self_init ();
@@ -49,4 +51,15 @@ let () =
   | "pending" ->
       List.iter (fun row -> match row with [ Some f; Some c; oldest ] -> Printf.printf "%-40s %8s  oldest %s\n" f c (Option.value oldest ~default:"") | _ -> ())
         (M.Procgraph.q ctx "select func, count(*), min(created_at)::text from processing_nodes where started_at is null and finished_at is null and created_at > now() - interval '3 days' group by 1 order by 2 desc" [])
+  | "import-media" ->
+      let url = Option.get arg in
+      let eid = match arg2 with Some h -> M.Pgj.event_id_hex h | None -> `Null in
+      let n, r = M.Procgraph.pn ctx ~mod_:"PrimalServer.DB" ~func:"import_media_pn" ~args:(M.Pgj.tuple [ M.Pgj.cache_storage; eid; `String url; M.Pgj.all_variants ]) ~kwargs:(`Assoc []) in
+      Printf.printf "node %s\n" (M.Procgraph.id_hex n);
+      (match r with Ok v -> print_endline (Yojson.Safe.pretty_to_string v) | Error m -> Printf.printf "FAILED: %s\n" m; exit 1)
+  | "import-preview" ->
+      let url = Option.get arg and eid = Option.get arg2 in
+      let n, r = M.Procgraph.pn ctx ~mod_:"PrimalServer.DB" ~func:"import_preview_pn" ~args:(M.Pgj.tuple [ M.Pgj.cache_storage; M.Pgj.event_id_hex eid; `String url ]) ~kwargs:(`Assoc []) in
+      Printf.printf "node %s\n" (M.Procgraph.id_hex n);
+      (match r with Ok v -> print_endline (Yojson.Safe.pretty_to_string v) | Error m -> Printf.printf "FAILED: %s\n" m; exit 1)
   | _ -> prerr_endline "unknown command"; exit 2

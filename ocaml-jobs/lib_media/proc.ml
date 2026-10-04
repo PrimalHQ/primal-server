@@ -8,6 +8,15 @@ open Eio.Std
 
 type result = { status : int; stdout : string; stderr : string }
 
+(* the tools live in the user's nix profile and the system path; a systemd --user unit's PATH may
+   have neither *)
+let ensure_path () : unit =
+  let home = try Sys.getenv "HOME" with Not_found -> "/home/pr" in
+  let want = [ home ^ "/.nix-profile/bin"; "/run/current-system/sw/bin"; "/usr/bin"; "/bin" ] in
+  let cur = try String.split_on_char ':' (Sys.getenv "PATH") with Not_found -> [] in
+  let missing = List.filter (fun d -> (not (List.mem d cur)) && Sys.file_exists d) want in
+  if missing <> [] then Unix.putenv "PATH" (String.concat ":" (cur @ missing))
+
 let clean_env () : string array =
   Array.of_list (List.filter (fun kv -> not (String.length kv >= 16 && String.sub kv 0 16 = "LD_LIBRARY_PATH=")) (Array.to_list (Unix.environment ())))
 
