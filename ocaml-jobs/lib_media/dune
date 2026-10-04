@@ -1,0 +1,9 @@
+; The media role (ocaml-plan.md §10): the processing-graph executor and its nodes, replacing Rust
+; primal-media and the Julia media code on the media host. All SQL is dynamic (Postgres.query):
+; the processing tables live on the media host's DB, not on the DB the ppx is checked against.
+(library
+ (name primal_jobs_media)
+ (public_name primal_jobs.media)
+ (flags
+  (:standard -w -33-26-27 -open Primal_common))
+ (libraries primal_common unix str eio eio.unix yojson digestif.c base64))

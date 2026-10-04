@@ -33,7 +33,11 @@ let () =
           | J.Config.Analytics -> J.Analytics.run ~cfg ~net ~clock ~proc_mgr ~stop
           | J.Config.Dag -> J.Dag.run ~cfg ~net ~clock ~stop
           | J.Config.Rebroadcast -> J.Rebroadcast.run ~cfg ~net ~clock ~stop
-          | J.Config.Failover -> J.Failover.run ~cfg ~net ~clock ~stop);
+          | J.Config.Failover -> J.Failover.run ~cfg ~net ~clock ~stop
+          | J.Config.Media -> (
+              match cfg.media with
+              | Some m -> Primal_jobs_media.Media_role.run ~cfg:m ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr ~stop
+              | None -> log "media role: the config has no \"media\" object"));
           `Stop_daemon))
     cfg.roles;
   Lifecycle.serving lifecycle;

@@ -1,0 +1,4 @@
+(test
+ (name test_media)
+ (flags (:standard -open Primal_common))
+ (libraries primal_common primal_jobs.media alcotest))

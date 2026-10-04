@@ -5,6 +5,6 @@
  (public_name primal_jobs)
  (flags
   (:standard -w -33-26-27 -open Primal_common -open Primal_jobs_membership))
- (libraries primal_common primal_importer primal_jobs_membership primal_api primal_api.db unix str eio eio.unix yojson pgocaml fmt digestif.c)
+ (libraries primal_common primal_importer primal_jobs_membership primal_api primal_api.db primal_jobs.media unix str eio eio.unix yojson pgocaml fmt digestif.c)
  (preprocess
   (pps pgocaml_ppx)))

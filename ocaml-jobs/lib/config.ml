@@ -4,7 +4,7 @@ exception Config_error of string
 
 module U = Yojson.Safe.Util
 
-type role = Dvm_checker | Pg_listener | Trustrank | Analytics | Dag | Rebroadcast | Failover
+type role = Dvm_checker | Pg_listener | Trustrank | Analytics | Dag | Rebroadcast | Failover | Media
 
 let role_of_string = function
   | "dvm_checker" -> Dvm_checker
@@ -14,9 +14,10 @@ let role_of_string = function
   | "dag" -> Dag
   | "rebroadcast" -> Rebroadcast
   | "failover" -> Failover
+  | "media" -> Media
   | s -> raise (Config_error ("roles: unknown role " ^ s))
 
-let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics" | Dag -> "dag" | Rebroadcast -> "rebroadcast" | Failover -> "failover"
+let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics" | Dag -> "dag" | Rebroadcast -> "rebroadcast" | Failover -> "failover" | Media -> "media"
 
 type t = {
   roles : role list;
@@ -58,7 +59,8 @@ type t = {
   dag_log : bool;
   dag_dry_run_window_s : int;
   pushgateway : (string * int * string) option;
-  membership_discovery_url : string option; (* Postgres.Server.tracking_url of the membership server *) (* host, port, job: dag_runner_duration / dag_runner_all_ok as PushGatewayExporter did *) (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
+  membership_discovery_url : string option;
+  media : Primal_jobs_media.Media_config.t option; (* the "media" sub-object (ocaml-plan.md §10); null unless the media role runs *) (* Postgres.Server.tracking_url of the membership server *) (* host, port, job: dag_runner_duration / dag_runner_all_ok as PushGatewayExporter did *) (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
 }
 
 let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")
@@ -121,6 +123,7 @@ let of_json (j : Yojson.Safe.t) : t =
     dag_dry_run_window_s = rint j "dag_dry_run_window_s";
     pushgateway = (match field j "pushgateway" with `Null -> None | o -> Some (rstr o "host", rint o "port", rstr o "job"));
     membership_discovery_url = rstr_opt j "membership_discovery_url";
+    media = (match field j "media" with `Null -> None | o -> ( try Some (Primal_jobs_media.Media_config.of_json o) with Primal_jobs_media.Media_config.Config_error m -> raise (Config_error m)));
   }
 
 let of_json_file (path : string) : t =

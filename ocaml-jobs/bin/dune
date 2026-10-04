@@ -1,5 +1,5 @@
 (executables
- (names primal_jobsd)
+ (names primal_jobsd media_tool)
  (flags
   (:standard -open Primal_common))
- (libraries primal_common primal_jobs eio eio.unix eio_main yojson mirage-crypto-rng.unix))
+ (libraries primal_common primal_jobs primal_jobs.media eio eio.unix eio_main yojson mirage-crypto-rng.unix))
