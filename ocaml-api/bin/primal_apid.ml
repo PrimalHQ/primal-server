@@ -69,8 +69,10 @@ let () =
   in
   let public_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.public_ws_port () in
   let admin_fd = Listen.bind ~host:cfg.admin_host ~port:cfg.admin_port () in
-  log "listening: ws %s:%d (%d domains), admin %s:%d" cfg.public_ws_host cfg.public_ws_port
-    cfg.num_domains cfg.admin_host cfg.admin_port;
+  let internal_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.internal_http_port () in
+  let internal_svc = Api.Internal_http.service ~cfg ~clock in
+  log "listening: ws %s:%d (%d domains), internal http :%d, admin %s:%d" cfg.public_ws_host cfg.public_ws_port
+    cfg.num_domains cfg.internal_http_port cfg.admin_host cfg.admin_port;
   let admin_svc = Api.Admin.service ~lifecycle ~stats ~cfg ~live ~bc in
 
   (* Worker domains: each imports the shared listening fd and runs its own accept loop. *)
@@ -82,9 +84,10 @@ let () =
         Postgres.set_env ~net ~sw:dsw;
         init_domain_db ();
         let sock = Listen.import ~sw:dsw public_fd in
-        Http_server.serve_on ~sw:dsw ~clock ~stop public_svc sock;
-        (* leave the SO_REUSEPORT group now: the connection fibers keep dsw (and so the dup) alive *)
-        Eio.Net.close sock)
+        let isock = Listen.import ~sw:dsw internal_fd in
+        Fiber.both
+          (fun () -> Http_server.serve_on ~sw:dsw ~clock ~stop public_svc sock; Eio.Net.close sock)
+          (fun () -> Http_server.serve_on ~sw:dsw ~clock ~stop internal_svc isock; Eio.Net.close isock))
   in
   let main_domain () =
     Switch.run @@ fun msw ->
@@ -92,6 +95,7 @@ let () =
     init_domain_db ();
     let sock = Listen.import ~sw:msw public_fd in
     let admin_sock = Listen.import ~sw:msw admin_fd in
+    let isock = Listen.import ~sw:msw internal_fd in
     Fiber.fork_daemon ~sw:msw (fun () ->
         Api.Wsconnvars.run ~clock ~period:cfg.wsconnvars_poll_s ~default_idle_s:cfg.idle_connection_timeout_s;
         `Stop_daemon);
@@ -106,11 +110,12 @@ let () =
         if cfg.status_interval_s > 0. then Api.Stats.report_loop ~clock ~interval:cfg.status_interval_s stats;
         `Stop_daemon);
     Lifecycle.serving lifecycle;
-    Fiber.both
-      (fun () ->
-        Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock;
-        Eio.Net.close sock)
-      (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop admin_svc admin_sock)
+    Fiber.all
+      [
+        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock; Eio.Net.close sock);
+        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop internal_svc isock; Eio.Net.close isock);
+        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop admin_svc admin_sock);
+      ]
   in
   (* Drain controller: runs CONCURRENTLY with the accept loops (their switches keep the connection
      fibers alive, so waiting for Fiber.all below would wait for every client to leave on its own).
@@ -123,6 +128,7 @@ let () =
       (* the bound fd itself: with every domain's dup closed the socket leaves the kernel's
          SO_REUSEPORT group and new connections only reach the new generation *)
       (try Unix.close public_fd with _ -> ());
+      (try Unix.close internal_fd with _ -> ());
       log "draining: %d connections, %d http inflight" (Api.Conn.count ()) (Http_server.inflight_connections ());
       let idle = Api.Conn.close_idle ~older_than:30.0 () in
       if idle > 0 then log "closed %d idle connections" idle;

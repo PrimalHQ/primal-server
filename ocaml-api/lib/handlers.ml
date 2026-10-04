@@ -3077,7 +3077,7 @@ let nostr_stats (_ : ctx) (_ : Kw.t) : outcome = julia_error
 (* app.jl get_filterlist = Filterlist.get_dict(): the four curated lists Julia loads from the
    membership `lists` table (app_ext.jl load_lists); the other in-process sets are empty on the
    API nodes (nothing calls Filterlist.load there) *)
-let get_filterlist (ctx : ctx) (_ : Kw.t) : outcome =
+let filterlist_dict (ctx : ctx) : Yojson.Safe.t =
   let lists =
     with_membership ctx (fun c ->
         List.map
@@ -3089,8 +3089,9 @@ let get_filterlist (ctx : ctx) (_ : Kw.t) : outcome =
     [ "import_pubkey_blocked"; "access_pubkey_blocked"; "analytics_pubkey_blocked"; "access_event_blocked"; "analytics_event_blocked";
       "access_pubkey_unblocked"; "analytics_pubkey_unblocked"; "access_event_blocked_spam" ]
   in
-  let d = List.map (fun (k, l) -> (k, `List (List.map (fun h -> `String h) l))) lists @ List.map (fun k -> (k, `List [])) empty in
-  Handled (messages [ content_msg Kind.filterlist (Yojson.Safe.to_string (`Assoc d)) ])
+  `Assoc (List.map (fun (k, l) -> (k, `List (List.map (fun h -> `String h) l))) lists @ List.map (fun k -> (k, `List [])) empty)
+
+let get_filterlist (ctx : ctx) (_ : Kw.t) : outcome = Handled (messages [ content_msg Kind.filterlist (Yojson.Safe.to_string (filterlist_dict ctx)) ])
 
 (* app_ext.jl get_recommended_reads: three random articles of the primal "Nostr-Gems" curation *)
 let get_recommended_reads (ctx : ctx) (_ : Kw.t) : outcome =

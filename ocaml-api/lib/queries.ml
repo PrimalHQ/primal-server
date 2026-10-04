@@ -1528,3 +1528,61 @@ let dvm_feed_results (c : Db.cache Db.conn) ~pubkey : string option =
   with
   | Some r :: _ -> Some r
   | _ -> None
+
+(* {1 Phase 5: InternalServices} *)
+
+(* collect_metadata: the metadata event of every pubkey that has one *)
+let metadata_events_json (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string * string) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(md.key, 'hex'), get_event_jsonb(md.value)::text from meta_data md \
+     where md.key = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a)))"]
+  |> List.filter_map (function Some k, Some e -> Some (k, e) | _ -> None)
+
+let media_url_smallest (c : Db.cache Db.conn) ~(url : string) : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select media_url from media where url = $url order by (width*height) limit 1"] with Some u :: _ -> Some u | _ -> None
+
+let media_url_largest_still (c : Db.cache Db.conn) ~(url : string) : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select media_url from media where url = $url and animated = 0 and size != 'small' order by (width*height) limit 1"] with Some u :: _ -> Some u | _ -> None
+
+let media_url_medium (c : Db.cache Db.conn) ~(url : string) : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select media_url from media where url = $url and size = 'medium' and animated = 0 limit 1"] with Some u :: _ -> Some u | _ -> None
+
+let media_known (c : Db.cache Db.conn) ~(url : string) : bool =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select 1 from media m where m.url = $url limit 1"] with [] -> false | _ -> true
+
+let event_media_url_one (c : Db.cache Db.conn) ~event_id : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select url from event_media where event_id = $event_id limit 1"] with Some u :: _ -> Some u | _ -> None
+
+let video_thumbnail_one (c : Db.cache Db.conn) ~(video_url : string) : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select thumbnail_url from video_thumbnails where video_url = $video_url limit 1"] with Some u :: _ -> Some u | _ -> None
+
+(* preview of a live event: the activity whose host is [pubkey] *)
+let live_event_id (c : Db.cache Db.conn) ~pubkey ~(identifier : string) : string option =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "select encode(event_id, 'hex') from parametrized_replaceable_events pre \
+       where pre.kind = 30311 \
+         and pre.pubkey = (select pubkey from basic_tags where kind = 30311 and tag = 'p' and arg1 = $pubkey and lower(arg3) = 'host' order by created_at desc limit 1) \
+         and pre.identifier = $identifier limit 1"]
+  with
+  | Some e :: _ -> Some e
+  | _ -> None
+
+(* url_lookup: the preferred storage of an upload by its hash *)
+let media_storage_url_by_hash (c : Db.cache Db.conn) ~(h : string) : string option =
+  let dbh = Db.raw c in
+  match
+    [%pgsql dbh
+      "select media_url from media_storage ms, media_storage_priority msp \
+       where ms.h = $h and ms.storage_provider = msp.storage_provider order by msp.priority limit 1"]
+  with
+  | u :: _ -> Some u
+  | [] -> None

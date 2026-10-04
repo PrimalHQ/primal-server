@@ -176,3 +176,71 @@ let plain_request ~net ~clock ?(timeout = 10.0) ?(meth = "GET") ?(body = "") ~ho
   with
   | Ok r -> r
   | Error `Timeout -> failwith (Printf.sprintf "http: %s %s:%d%s timed out" meth host port path)
+
+(* {1 General request} — http or https, custom headers, redirects followed (used by the API's
+   link preview and upstream forwarding). Returns None on any failure or timeout. *)
+
+type response = { status : int; resp_headers : (string * string) list; body : string }
+
+let parse_response (raw : string) : response =
+  match Str_util.split_on_substring raw "\r\n\r\n" with
+  | None -> { status = 0; resp_headers = []; body = raw }
+  | Some (head, _) ->
+      let lines = String.split_on_char '\n' head |> List.map (fun l -> if String.ends_with ~suffix:"\r" l then String.sub l 0 (String.length l - 1) else l) in
+      let status =
+        match lines with
+        | first :: _ -> ( match String.split_on_char ' ' first with _ :: code :: _ -> ( try int_of_string code with _ -> 0) | _ -> 0)
+        | [] -> 0
+      in
+      let resp_headers =
+        List.filter_map
+          (fun l -> match String.index_opt l ':' with Some i -> Some (String.lowercase_ascii (String.trim (String.sub l 0 i)), String.trim (String.sub l (i + 1) (String.length l - i - 1))) | None -> None)
+          (match lines with _ :: rest -> rest | [] -> [])
+      in
+      { status; resp_headers; body = extract_body raw }
+
+(* Python urljoin, enough for Location and og:image values. *)
+let urljoin (base : string) (ref_ : string) : string =
+  if Str_util.find_substring ref_ "://" <> None then ref_
+  else
+    match parse_url base with
+    | None -> ref_
+    | Some b ->
+        let origin = Printf.sprintf "%s://%s%s" b.scheme b.host (if (b.scheme = "https" && b.port = 443) || (b.scheme = "http" && b.port = 80) then "" else ":" ^ string_of_int b.port) in
+        if String.length ref_ >= 2 && String.sub ref_ 0 2 = "//" then b.scheme ^ ":" ^ ref_
+        else if String.length ref_ > 0 && ref_.[0] = '/' then origin ^ ref_
+        else if String.length ref_ > 0 && (ref_.[0] = '?' || ref_.[0] = '#') then origin ^ (match String.index_opt b.path '?' with Some i -> String.sub b.path 0 i | None -> b.path) ^ ref_
+        else
+          let dir = match String.rindex_opt b.path '/' with Some i -> String.sub b.path 0 (i + 1) | None -> "/" in
+          origin ^ dir ^ ref_
+
+let request ~net ~clock ?proxy ?(timeout = 10.0) ?(meth = "GET") ?(headers = []) ?(body = "") ?(max_redirects = 5) (url : string) : response option =
+  let one (u : url) : response option =
+    try
+      Switch.run @@ fun sw ->
+      match
+        Eio.Time.with_timeout clock timeout (fun () ->
+            let tcp = two_way_of_proxy ~sw ~net ~clock ~proxy ~host:u.host ~port:u.port in
+            let flow = if u.scheme = "https" then tls_wrap ~host:u.host tcp else (tcp :> Eio.Flow.two_way_ty r) in
+            let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("Content-Length", string_of_int (String.length body)) :: headers in
+            let req = Printf.sprintf "%s %s HTTP/1.1\r\n%s\r\n%s" meth u.path (String.concat "" (List.map (fun (k, v) -> k ^ ": " ^ v ^ "\r\n") hdrs)) body in
+            Eio.Flow.copy_string req (flow :> _ Eio.Flow.sink);
+            let r = Eio.Buf_read.of_flow (flow :> _ Eio.Flow.source) ~max_size:(16 * 1024 * 1024) in
+            Ok (parse_response (Eio.Buf_read.take_all r)))
+      with
+      | Ok r -> Some r
+      | Error `Timeout -> None
+    with
+    | Eio.Cancel.Cancelled _ as e -> raise e
+    | _ -> None
+  in
+  let rec go url n =
+    match parse_url url with
+    | None -> None
+    | Some u -> (
+        match one u with
+        | Some r when (r.status = 301 || r.status = 302 || r.status = 303 || r.status = 307 || r.status = 308) && n < max_redirects -> (
+            match List.assoc_opt "location" r.resp_headers with Some loc -> go (urljoin url loc) (n + 1) | None -> Some r)
+        | r -> r)
+  in
+  go url 0

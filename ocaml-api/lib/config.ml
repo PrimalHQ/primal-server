@@ -49,6 +49,13 @@ type t = {
   relay_proxy : (string * int) option; (* SOCKS5 host, port for outbound relay connections (Main.PROXY) *)
   dvm_relays : string list; (* DVMFeedChecker.RELAYS: where DVM job requests are published *)
   dvm_requester_seckey : string option; (* raw 32 bytes; App.DVM_REQUESTER_KEYPAIR *)
+  (* Phase 5: InternalServices *)
+  internal_http_port : int; (* 14000+N: InternalServices router *)
+  moderation_http_port : int; (* 24000+N: /purge-media, /pre-sign-urls *)
+  upstream_julia_http : string option; (* Julia's /api, for funcalls still proxied *)
+  index_dirs : (string * string) list; (* Host -> directory holding index.html (preview_handler) *)
+  url_shortening_root_url : string; (* InternalServices.URL_SHORTENING_ROOT_URL *)
+  download_proxies : string list; (* Media.DOWNLOAD_PROXIES ("null" = direct); empty = link previews disabled, as in Julia *)
 }
 
 let field j key =
@@ -135,6 +142,12 @@ let of_json (j : Yojson.Safe.t) : t =
       (match rstr_opt j "dvm_requester_seckey" with
       | None -> None
       | Some h -> ( match Hex_util.decode_opt h with Some b when String.length b = 32 -> Some b | _ -> raise (Config_error "dvm_requester_seckey: expected 64 hex characters")));
+    internal_http_port = rint j "internal_http_port";
+    moderation_http_port = rint j "moderation_http_port";
+    upstream_julia_http = rstr_opt j "upstream_julia_http";
+    index_dirs = (match field j "index_dirs" with `Assoc l -> List.map (fun (h, d) -> (h, U.to_string d)) l | _ -> raise (Config_error "index_dirs: expected an object"));
+    url_shortening_root_url = rstr j "url_shortening_root_url";
+    download_proxies = (match field j "download_proxies" with `List l -> List.map U.to_string l | _ -> raise (Config_error "download_proxies: expected a list"));
   }
 
 let of_json_file (path : string) : t =

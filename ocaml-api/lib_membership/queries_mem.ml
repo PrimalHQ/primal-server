@@ -180,3 +180,31 @@ let take_queued_nip46_events (c : Db.membership Db.conn) ~service_pubkey : strin
   let rows = [%pgsql dbh "select event::text from monitoring_request_queue where service_pubkey = $service_pubkey"] |> List.filter_map Fun.id in
   ignore [%pgsql dbh "delete from monitoring_request_queue where service_pubkey = $service_pubkey"];
   rows
+
+(* {1 Phase 5: InternalServices} *)
+
+(* nostr_json_query_by_name *)
+let verified_pubkeys_by_name (c : Db.membership Db.conn) ~(name : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select encode(pubkey, 'hex') from verified_users where lower(name) = lower($name)"] |> List.filter_map Fun.id
+
+(* mdpubkey: the membership filterlist's blocked pubkeys get no preview *)
+let filterlist_pubkey_blocked (c : Db.membership Db.conn) ~pubkey : bool =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select 1 from filterlist where target_type = 'pubkey' and target = $pubkey and blocked limit 1"] with [] -> false | _ -> true
+
+let short_url_by_url (c : Db.membership Db.conn) ~(url : string) : (string * string) option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select path, ext from short_urls where url = $url limit 1"] with (p, e) :: _ -> Some (p, e) | [] -> None
+
+let short_url_next_idx (c : Db.membership Db.conn) : int64 =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select nextval('short_urls_idx_seq')"] with Some v :: _ -> v | _ -> failwith "short_urls_idx_seq"
+
+let short_url_insert (c : Db.membership Db.conn) ~idx ~(url : string) ~(path : string) ~(ext : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "insert into short_urls (idx, url, path, ext) values ($idx, $url, $path, $ext)"]
+
+let short_url_target (c : Db.membership Db.conn) ~(path : string) : string option =
+  let dbh = Db.raw c in
+  match [%pgsql dbh "select url from short_urls where path = $path and media_block_id is null limit 1"] with u :: _ -> Some u | [] -> None

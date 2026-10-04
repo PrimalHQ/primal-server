@@ -208,6 +208,30 @@ let test_advsearch () =
   Alcotest.(check string) "urls quoted" "x \"https://a.b/c?d=1\" y" (A.quote_urls "x https://a.b/c?d=1 y");
   Alcotest.(check string) "nostr prefix" "from:npub1abc note1xyz" (A.strip_nostr_prefix "from:nostr:npub1abc nostr:note1xyz")
 
+let test_internal_http () =
+  let module I = Primal_api.Internal_http in
+  Alcotest.(check string) "julia pretty" "{\n  \"names\": {\n    \"emma\": \"1c\"\n  }\n}" (Primal_api.Jsonfmt.julia_pretty (`Assoc [ ("names", `Assoc [ ("emma", `String "1c") ]) ]));
+  Alcotest.(check string) "julia pretty empty" "{\n  \"names\": {}\n}" (Primal_api.Jsonfmt.julia_pretty (`Assoc [ ("names", `Assoc []) ]));
+  Alcotest.(check string) "julia pretty list" "{\n  \"a\": [\n    \"x\",\n    \"y\"\n  ],\n  \"b\": []\n}" (Primal_api.Jsonfmt.julia_pretty (`Assoc [ ("a", `List [ `String "x"; `String "y" ]); ("b", `List []) ]));
+  Alcotest.(check string) "escape uri" "https%3A%2F%2Fa.b%2Fc%3Fd%3D1%20e" (I.escape_uri "https://a.b/c?d=1 e");
+  Alcotest.(check string) "strip urls" "see  now" (I.strip_urls "see https://example.com/x?y=1 now");
+  Alcotest.(check string) "ext of url" ".jpg" (I.ext_of_url "https://m.primal.net/claude-test.JPG?x=1");
+  Alcotest.(check bool) "short path is letters" true (String.for_all (fun c -> (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) (I.short_path_of_idx 12345));
+  let page = "<html><head><meta property=\"og:title\" content=\"Primal\">\n<title>Primal</title></head><body></body></html>" in
+  let m = { I.m_title = "Emma"; m_description = "a \"b\"\nc"; m_image = I.Cached "https://x/y.jpg"; m_url = "https://primal.net/emma"; twitter_card = "summary"; twitter_image = "https://x/y.jpg" } in
+  let out = I.og_page page m in
+  Alcotest.(check bool) "old og removed" false (Primal_api.Handlers.has_sub out "content=\"Primal\"");
+  Alcotest.(check bool) "title replaced" true (Primal_api.Handlers.has_sub out "<title>Emma</title>");
+  Alcotest.(check bool) "description escaped" true (Primal_api.Handlers.has_sub out "content=\"a &quot;b&quot;&#10;c\"");
+  Alcotest.(check bool) "image cached" true (Primal_api.Handlers.has_sub out "og:image\" content=\"https://primal.net/media-cache?u=https%3A%2F%2Fx%2Fy.jpg\"");
+  Alcotest.(check bool) "twitter image raw" true (Primal_api.Handlers.has_sub out "twitter:image\" content=\"https://x/y.jpg\"/></head>");
+  let html = "<html><head><link rel=\"icon\" href=\"/fav.ico\"><meta property=\"og:title\" content=\"T &amp; U\"><meta name=\"description\" content='D'><meta property=\"og:image\" content=\"img/p.png\"></head><body><meta property=\"og:title\" content=\"ignored\"></body></html>" in
+  let p = I.parse_preview ~url:"https://ex.com/a/b.html" html in
+  Alcotest.(check string) "title" "T & U" p.I.p_title;
+  Alcotest.(check string) "description" "D" p.I.p_description;
+  Alcotest.(check string) "image joined" "https://ex.com/a/img/p.png" p.I.p_image;
+  Alcotest.(check string) "urljoin abs" "https://ex.com/x" (Http.urljoin "https://ex.com/a/b" "/x")
+
 let test_p_tags () =
   let e = {|{"id":"ab","tags":[["p","532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb"],["p","2895c330c23f383196c0ef988de6da83b83b4583ed5f9c1edb0a559cecd1f900","wss://r"],["e","zz"]]}|} in
   Alcotest.(check int) "all p tags" 2 (List.length (H.p_tag_pubkeys e));
@@ -234,6 +258,7 @@ let () =
           Alcotest.test_case "mega ids" `Quick test_mega_ids;
           Alcotest.test_case "p tags" `Quick test_p_tags;
           Alcotest.test_case "advsearch" `Quick test_advsearch;
+          Alcotest.test_case "internal http" `Quick test_internal_http;
           Alcotest.test_case "wants_zlib" `Quick test_wants_zlib;
         ] );
       ( "handlers",
