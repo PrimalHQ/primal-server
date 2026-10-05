@@ -33,6 +33,18 @@ The dev shell exports `PG*` → `primal1` for the `[%pgsql]` ppx. Membership-tab
 against the local clone `primal_membership_ref` (`sql/membership-refdb-setup.sh`) via a per-directory
 dune `(env ...)`. `sql/migrate.sh` applies versioned migrations (`sql/migrations/README.md`).
 
+`patches/` holds fixes to third-party OCaml packages applied in `flake.nix` through `overrideAttrs`:
+`httpun-ws-frame-queue.patch` (httpun-ws 0.2.0, same code on master): the server delivered only the head of
+its parsed-frame queue per socket read, so a client write carrying three or more WebSocket frames left the
+third and later ones unanswered until the peer's next bytes; `test/test_common.ml` "ws burst" fails without it.
+
+Headless browser for end-to-end checks of the API against the real webapp: `nix shell nixpkgs#chromium`
+and `python3.withPackages (p: [p.playwright])` with `PLAYWRIGHT_BROWSERS_PATH` set to
+`playwright-driver.browsers` (both from the nixos-25.11 binary cache); the webapp takes its cache server
+from `localStorage.cacheServer` (`wss://stage.primal.net/v1` → <stage-host>), so a page script that sets it in
+`add_init_script`, loads primal.net/home, scrolls, and records every WebSocket frame (zlib `EVENTS`
+frames decompress with `zlib.decompress`) sees exactly what a user's browser sees.
+
 ## Conventions
 
 - Every SQL statement goes through `[%pgsql]`; `Postgres.query` (raw) only for tables the ppx

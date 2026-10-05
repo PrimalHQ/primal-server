@@ -1,0 +1,20 @@
+--- a/lib/websocket_connection.ml	2026-10-05 17:52:07.767587453 +0000
++++ b/lib/websocket_connection.ml	2026-10-05 17:52:17.799492896 +0000
+@@ -99,10 +99,14 @@
+         (* we just don't advance the request queue in the case of a parser
+           error. *)
+         op
+-      | `Read as op ->
+-        (* Keep reading when in a "partial" state (`Read). *)
++      | `Read ->
++        (* Keep reading when in a "partial" state (`Read), but first hand
++           every frame that is already complete to the handler: when several
++           frames arrived in one read, only the head of the queue has been
++           delivered, and returning `Read here would leave the rest queued
++           until the peer sends more bytes. *)
+         advance_frame_queue t;
+-        op
++        _next_read_operation t
+       | `Close ->
+         advance_frame_queue t;
+         _next_read_operation t

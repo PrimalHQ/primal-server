@@ -176,6 +176,75 @@ let nip44_roundtrip () =
   Alcotest.(check string) "symmetric" (Hex_util.encode k12) (Hex_util.encode k21);
   List.iter (fun msg -> match Nip44.decrypt ~conversation_key:k21 (Nip44.encrypt ~conversation_key:k12 msg) with Ok m -> Alcotest.(check string) "roundtrip" msg m | Error e -> Alcotest.fail e) [ "a"; "hello, nostr"; String.make 1000 'x'; "{\"kind\":1,\"content\":\"\xc5\xa1\"}" ]
 
+(* Regression: httpun-ws delivered only the first two of N frames that arrived in one socket read
+   (the rest waited for the peer's next bytes); patched in flake.nix. Four frames in ONE write to
+   an echo session must all come back. *)
+let test_ws_burst () =
+  let open Eio.Std in
+  Eio_main.run @@ fun env ->
+  let clock = Eio.Stdenv.clock env and net = Eio.Stdenv.net env in
+  Switch.run @@ fun sw ->
+  let fd = Listen.bind ~host:"127.0.0.1" ~port:0 () in
+  let port = Listen.port_of_fd fd in
+  let echo (s : Http_server.ws_session) =
+    let rec loop () =
+      match s.ws_recv () with
+      | `Text m -> s.ws_send_text m; loop ()
+      | `Binary m -> s.ws_send_binary m; loop ()
+      | `Closed -> ()
+    in
+    loop ()
+  in
+  let svc =
+    Http_server.default_service "echo"
+      [ { Http_server.meth = `GET; pattern = []; handler = (fun _ -> Http_server.Ws (None, echo)) } ]
+  in
+  let stop, resolve_stop = Promise.create () in
+  Fiber.fork ~sw (fun () -> Http_server.serve_on ~sw ~clock ~stop svc (Listen.import ~sw fd));
+  let flow = Eio.Net.connect ~sw net (`Tcp (Eio.Net.Ipaddr.V4.loopback, port)) in
+  let masked payload =
+    let n = String.length payload in
+    let mask = "\x01\x02\x03\x04" in
+    let hdr =
+      if n < 126 then Printf.sprintf "\x81%c" (Char.chr (0x80 lor n))
+      else Printf.sprintf "\x81\xfe%c%c" (Char.chr (n lsr 8)) (Char.chr (n land 0xff))
+    in
+    hdr ^ mask ^ String.init n (fun i -> Char.chr (Char.code payload.[i] lxor Char.code mask.[i mod 4]))
+  in
+  let msgs = List.init 4 (fun i -> Printf.sprintf "{\"n\":%d,\"pad\":\"%s\"}" i (String.make (200 * (i + 1)) 'x')) in
+  Eio.Flow.copy_string
+    "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    flow;
+  let r = Eio.Buf_read.of_flow ~max_size:(1 lsl 20) flow in
+  let status = Eio.Buf_read.line r in
+  Alcotest.(check bool) "101" true (String.length status > 12 && String.sub status 9 3 = "101");
+  let rec skip () = if Eio.Buf_read.line r <> "" then skip () in
+  skip ();
+  (* the four frames in ONE write *)
+  Eio.Flow.copy_string (String.concat "" (List.map masked msgs)) flow;
+  let read_frame () =
+    let h = Eio.Buf_read.take 2 r in
+    let len = Char.code h.[1] land 0x7f in
+    let len =
+      if len = 126 then (
+        let e = Eio.Buf_read.take 2 r in
+        (Char.code e.[0] lsl 8) lor Char.code e.[1])
+      else len
+    in
+    Eio.Buf_read.take len r
+  in
+  let got = ref [] in
+  (match
+     Eio.Time.with_timeout clock 3.0 (fun () ->
+         for _ = 1 to 4 do got := read_frame () :: !got done;
+         Ok ())
+   with
+  | Ok () -> ()
+  | Error `Timeout -> ());
+  Alcotest.(check (list string)) "all four frames of one write are answered" msgs (List.rev !got);
+  Eio.Flow.shutdown flow `All;
+  Promise.resolve resolve_stop ()
+
 let () =
   Alcotest.run "primal_common"
     [ ("nip44", [ Alcotest.test_case "padding" `Quick nip44_padding; Alcotest.test_case "conversation key" `Quick nip44_conversation_key; Alcotest.test_case "roundtrip" `Quick nip44_roundtrip ]);
@@ -196,4 +265,5 @@ let () =
       ("langid", [ Alcotest.test_case "detect" `Quick test_langid ]);
       ("phases", [ Alcotest.test_case "slots" `Quick test_phases ]);
       ("procinfo", [ Alcotest.test_case "formatting" `Quick test_procinfo ]);
+      ("http_server", [ Alcotest.test_case "ws burst" `Quick test_ws_burst ]);
     ]

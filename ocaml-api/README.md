@@ -279,6 +279,21 @@ requests of one page load were 81 % identical; the differences were `get_notific
 poll (both sides answer a notice: "invalid spec format" here, "error" there). `explore_media` takes 2–9 s on
 <stage-host>'s database against 0.6 s on <julia-host>'s with the same code: a <stage-host> data/plan matter, not the port.
 
+**Headless-browser check 2026-10-05 (the "empty home / no trending / empty reads" report):** the API
+answered every replayed request correctly, yet the webapp against stage rendered nothing. Driving the real
+primal.net build in a headless Chromium (`nix shell nixpkgs#chromium` + python playwright, cache server via
+`localStorage.cacheServer`, see `ocaml-common/README.md`) showed the cause: the webapp opens the cache
+socket with a burst of 15–20 REQs in one TCP write, and httpun-ws 0.2.0 delivered only the first two frames
+of such a read to the session, leaving the rest queued until the client sent more bytes (the feeds were
+answered 24 s later, when the page navigated away). A raw-socket client reproduced it deterministically
+(3+ frames in one write → the third never answered; with 20 ms gaps all answered). Fixed by
+`ocaml-common/patches/httpun-ws-frame-queue.patch` (`Websocket_connection._next_read_operation` now drains
+every already-complete frame), regression test "ws burst" in `ocaml-common/test`. After the roll the
+headless walk over /home (with paging), /reads and /explore renders the same counts against stage as
+against cache2. Lesson: replaying requests one at a time cannot see transport-level bugs; keep the
+headless walk (``ocaml-api/tools/webapp-walk.py`, run through `tools/playwright.sh`; `tools/ws-burst.py` is the raw-socket reproducer) as the
+acceptance check for a cutover.
+
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
 `GET /healthz`, `GET /readyz` (503 unless serving — the load balancer / restart script gate),
