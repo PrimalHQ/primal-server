@@ -108,6 +108,19 @@ OCaml importer reconnected within a second). `stats.json` continues the Julia to
 `PRIMALSERVER_PROXY=socks5h://<socks-proxy-host>:1080 bash ../m1_fetcher.sh` (the proxy variable was in
 the old shell's environment, not in the script); it resumes from the same resume files.
 
+## Incident 2026-10-05 and the watchdog
+
+At 00:52:37 UTC every relay connection through the SOCKS proxy (`<socks-proxy-host>:1080`) went silent at
+once (messages 32k/s → 7/s within 30 s, "connected" unchanged: half-open TCP). From 00:53:05 to
+04:52:20 the whole process was frozen: no stats lines, the admin port did not answer, the importer
+received nothing. It resumed by itself, then reconnected slowly (16.6k → 4.8k relays by 06:00, the
+rest in the dead-relay backoff), with RSS at 10.8 GB (2.6 GB after a fresh start). Restarted at 08:08.
+Root cause still open; suspects are a stop-the-world GC blocked by a domain stuck in a blocking
+call, and the memory growth. Because the admin port froze too, the guard is external:
+`watchdog.sh` runs from the transient user timer `primal-fetcher-watchdog` every 2 minutes and
+restarts the unit after two consecutive checks where `/status` does not answer or
+`message_count` has not moved (log `$PRIMAL_VAR_DIR/fetcher-watchdog.log`).
+
 ## Operating
 
 - `./rebuild-restart-fetcher.sh` — build + restart (unit `primal-ocaml-fetcher`,
