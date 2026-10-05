@@ -235,7 +235,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `status_interval_s` | `10.0` | status line period (0 = off) |
 | `log_handled` / `log_not_handled` | `false` | per-request log lines (ws-connector `--log-handled` / `--log-not-handled`) |
 | `cache_db` / `membership_db` | `{host,port,user,database}` | per-domain PGOCaml pools (cache: statement_timeout 30 s) |
-| `cache_pool_size` / `membership_pool_size` | `4` / `2` | connections per worker domain |
+| `cache_pool_size` / `membership_pool_size` | `4` / `2` | connections per worker domain (<stage-host> runs `cache_pool_size` 16 since 2026-10-05 20:44: a logged-in page load fires ~20 REQs at once and the reads feed held all 4) |
 | `content_moderation_root` | path | `default-settings.json`, `app-releases.json` (mtime-cached) |
 | `primal_pubkey` | hex | default `user_pubkey` for handlers (ws-connector constant) |
 | `request_log` | path or `null` | JSONL `{t,time,funcall,kwargs,ws,subid}` of handled requests slower than `wsconnvars.metrics_logging_min_request_duration`, when `metrics_logging_enabled` (the replay corpus format) |
@@ -304,6 +304,11 @@ Julia pg listener keeps writing them (8934 rows for the QA user, 1–4 a day; <j
 and a logged-in home/reads page load fires ~20 REQs at once, so the reads feed's windowed search (6–11 s on
 <stage-host> with `until` paging) holds the 4-connection pool and trivial calls queue behind it for up to 15 s
 (`get_app_settings` 15.7 s, `get_featured_dvm_feeds` 19 s on /explore); same requests alone: 0.1–3 s.
+With `cache_pool_size` 16 (20:44) the rerun shows no queueing: home feed 0.4 s (was 9.8 s), settings calls
+0.2–0.7 s, /explore timings equal to production's (6–8 s there too), no pool timeouts. What remains is the reads
+feed query itself on <stage-host>'s database: 1.4–9.2 s for the same request, and the `until` pages hit the 9 s
+window deadline and come back partial (88 events, page 2 unanswered) where production answers in 1.3 s; on
+<julia-host>'s data the OCaml and Julia timings are equal (1.95 s vs 1.99 s), so it is <stage-host>'s plan/data.
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
