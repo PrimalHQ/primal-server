@@ -18,7 +18,8 @@ let usage () =
   prerr_endline
     "usage: primalctl req <ws-url> <funcall> [kwargs-json] [--zlib]\n\
     \       primalctl status|drain|metrics [admin-url]\n\
-    \       primalctl replay <corpus.jsonl> [--a ws-url] [--b ws-url] [--only f1,f2] [--all] [--per-funcall N] [--workers K] [--timeout S] [--report file]";
+    \       primalctl replay <corpus.jsonl> [--a ws-url] [--b ws-url] [--only f1,f2] [--all] [--per-funcall N] [--workers K] [--timeout S] [--report file]\n\
+    \       primalctl advsearch-sql <user-pubkey-hex> <query> <since> <until> [kinds]   (one window's SQL, params inlined, for EXPLAIN)";
   exit 2
 
 let parse_http_url (u : string) : string * int * string =
@@ -84,6 +85,33 @@ let replay_opts (corpus : string) (rest : string list) : Replay.opts =
 let () =
   let args = Array.to_list Sys.argv |> List.tl in
   (match args with
+  | "advsearch-sql" :: user :: query :: since :: until :: rest ->
+      let user_pubkey = Option.get (Hex_util.decode_opt user) in
+      let kinds = match rest with k :: _ -> List.map int_of_string (String.split_on_char ',' k) | [] -> [] in
+      let now = int_of_float (Unix.gettimeofday ()) in
+      let expr, _ = Primal_api.Advsearch.prepare ~now (Primal_api.Advsearch.quote_urls query) in
+      let sql = Primal_api.Advsearch.to_sql ~user_pubkey expr ~since:(int_of_string since) ~until:(int_of_string until) ~kinds in
+      (* inline $n: bytea params as '\x..'::bytea, numbers bare, the rest quoted *)
+      let params = Array.of_list sql.params in
+      let buf = Buffer.create 4096 in
+      let n = String.length sql.text in
+      let i = ref 0 in
+      while !i < n do
+        if sql.text.[!i] = '$' then begin
+          let j = ref (!i + 1) in
+          while !j < n && sql.text.[!j] >= '0' && sql.text.[!j] <= '9' do incr j done;
+          let k = int_of_string (String.sub sql.text (!i + 1) (!j - !i - 1)) in
+          (match params.(k - 1) with
+          | Some v when String.length v > 2 && String.sub v 0 2 = "\\x" -> Buffer.add_string buf (Printf.sprintf "'%s'::bytea" v)
+          | Some v when int_of_string_opt v <> None || float_of_string_opt v <> None -> Buffer.add_string buf v
+          | Some v -> Buffer.add_string buf (Printf.sprintf "'%s'" (String.concat "''" (String.split_on_char '\'' v)))
+          | None -> Buffer.add_string buf "NULL");
+          i := !j
+        end
+        else (Buffer.add_char buf sql.text.[!i]; incr i)
+      done;
+      print_endline (Buffer.contents buf);
+      exit 0
   | "replay" :: corpus :: rest ->
       Mirage_crypto_rng_unix.use_default ();
       Replay.run (replay_opts corpus rest) ~native:(Primal_api.Funcall.native_names ());
