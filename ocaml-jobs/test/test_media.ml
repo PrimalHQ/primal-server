@@ -44,4 +44,19 @@ let blossom_paths () =
   Alcotest.(check string) "ext" ".mp4" (ext_of "video/x-m4v");
   Alcotest.(check string) "no ext" "" (ext_of "application/x-unknown")
 
-let () = Alcotest.run "primal_jobs_media" [ ("blossom", [ Alcotest.test_case "paths" `Quick blossom_paths ]); ("pgj", [ Alcotest.test_case "julia_float" `Quick julia_float; Alcotest.test_case "typed json" `Quick typed_json ]); ("store", [ Alcotest.test_case "key hash" `Quick key_hash ]) ]
+let proc_run () =
+  Eio_main.run @@ fun env ->
+  let clock = Eio.Stdenv.clock env and proc_mgr = Eio.Stdenv.process_mgr env in
+  let r = Primal_jobs_media.Proc.run ~proc_mgr ~clock [ "echo"; "hi" ] in
+  Alcotest.(check (pair int string)) "echo" (0, "hi\n") (r.status, r.stdout);
+  let big = String.make 3_000_000 'x' in
+  let r = Primal_jobs_media.Proc.run ~proc_mgr ~clock ~stdin_data:big [ "cat" ] in
+  Alcotest.(check (pair int int)) "cat 3 MB through stdin" (0, 3_000_000) (r.status, String.length r.stdout);
+  let r = Primal_jobs_media.Proc.run ~proc_mgr ~clock [ "sh"; "-c"; "echo err >&2; exit 3" ] in
+  Alcotest.(check (pair int string)) "exit code and stderr" (3, "err\n") (r.status, r.stderr);
+  let r = Primal_jobs_media.Proc.run ~proc_mgr ~clock ~timeout:0.3 [ "sleep"; "5" ] in
+  Alcotest.(check int) "timeout" 124 r.status;
+  let rs = Eio.Fiber.List.map ~max_fibers:20 (fun i -> (Primal_jobs_media.Proc.run ~proc_mgr ~clock ~stdin_data:(string_of_int i) [ "cat" ]).stdout) (List.init 50 Fun.id) in
+  Alcotest.(check (list string)) "50 concurrent" (List.init 50 string_of_int) rs
+
+let () = Alcotest.run "primal_jobs_media" [ ("proc", [ Alcotest.test_case "run" `Quick proc_run ]); ("blossom", [ Alcotest.test_case "paths" `Quick blossom_paths ]); ("pgj", [ Alcotest.test_case "julia_float" `Quick julia_float; Alcotest.test_case "typed json" `Quick typed_json ]); ("store", [ Alcotest.test_case "key hash" `Quick key_hash ]) ]

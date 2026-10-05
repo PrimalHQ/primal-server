@@ -20,31 +20,54 @@ let ensure_path () : unit =
 let clean_env () : string array =
   Array.of_list (List.filter (fun kv -> not (String.length kv >= 16 && String.sub kv 0 16 = "LD_LIBRARY_PATH=")) (Array.to_list (Unix.environment ())))
 
-let run ~proc_mgr ~clock ?(timeout = 600.0) ?(stdin_data = "") ?(max_out = 256 * 1024 * 1024) (argv : string list) : result =
+(* Children are created with Unix.create_process_env (posix_spawn, i.e. clone(CLONE_VFORK) on
+   Linux), NOT Eio.Process.spawn: eio_linux spawns with fork(), which copies the page tables of
+   this multi-GB, multi-domain process for every `file`/`ffmpeg`/`identify` child (20+ a second
+   under load) while holding the mmap lock, stalling every other thread on its next page fault
+   (2026-10-05, the media role's throughput collapse). The pipes are Eio pipes so reading and
+   writing stay non-blocking; the wait polls waitpid(WNOHANG). *)
+let run ~proc_mgr:_ ~clock ?(timeout = 600.0) ?(stdin_data = "") ?(max_out = 256 * 1024 * 1024) (argv : string list) : result =
   Switch.run @@ fun sw ->
-  let in_r, in_w = Eio.Process.pipe ~sw proc_mgr in
-  let out_r, out_w = Eio.Process.pipe ~sw proc_mgr in
-  let err_r, err_w = Eio.Process.pipe ~sw proc_mgr in
-  let child = Eio.Process.spawn ~sw proc_mgr ~stdin:in_r ~stdout:out_w ~stderr:err_w ~env:(clean_env ()) argv in
-  Eio.Flow.close in_r;
-  Eio.Flow.close out_w;
-  Eio.Flow.close err_w;
+  (* plain blocking pipes: the child's ends must stay blocking (an Eio pipe sets O_NONBLOCK on
+     both ends and the child inherits it); only the parent's ends become Eio flows *)
+  let in_r, in_w = Unix.pipe ~cloexec:true () in
+  let out_r, out_w = Unix.pipe ~cloexec:true () in
+  let err_r, err_w = Unix.pipe ~cloexec:true () in
+  let prog = match argv with p :: _ -> p | [] -> invalid_arg "Proc.run: empty argv" in
+  let pid =
+    match Unix.create_process_env prog (Array.of_list argv) (clean_env ()) in_r out_w err_w with
+    | pid -> pid
+    | exception e -> List.iter (fun fd -> try Unix.close fd with _ -> ()) [ in_r; in_w; out_r; out_w; err_r; err_w ]; raise e
+  in
+  Unix.close in_r;
+  Unix.close out_w;
+  Unix.close err_w;
+  let in_w = Eio_unix.Net.import_socket_stream ~sw ~close_unix:true in_w in
+  let out_r = Eio_unix.Net.import_socket_stream ~sw ~close_unix:true out_r in
+  let err_r = Eio_unix.Net.import_socket_stream ~sw ~close_unix:true err_r in
   let out = ref "" and err = ref "" in
   let writer () =
     (try if stdin_data <> "" then Eio.Flow.copy_string stdin_data in_w with _ -> ());
     try Eio.Flow.close in_w with _ -> ()
   in
   let reader r dst () = dst := (try Eio.Buf_read.take_all (Eio.Buf_read.of_flow ~max_size:max_out (r :> _ Eio.Flow.source)) with _ -> "") in
+  let status_of = function Unix.WEXITED n -> n | Unix.WSIGNALED n -> 128 + n | Unix.WSTOPPED n -> 128 + n in
+  let rec wait delay =
+    match Unix.waitpid [ Unix.WNOHANG ] pid with
+    | 0, _ -> Eio.Time.sleep clock delay; wait (Float.min 0.2 (delay *. 1.5))
+    | _, st -> status_of st
+    | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait delay
+  in
   let status = ref (-1) in
   let body () =
     Fiber.all [ writer; reader out_r out; reader err_r err ];
-    status := (match Eio.Process.await child with `Exited n -> n | `Signaled n -> 128 + n)
+    status := wait 0.005
   in
   (match Eio.Time.with_timeout clock timeout (fun () -> Ok (body ())) with
   | Ok () -> ()
   | Error `Timeout ->
-      (try Eio.Process.signal child Sys.sigkill with _ -> ());
-      (try ignore (Eio.Process.await child) with _ -> ());
+      (try Unix.kill pid Sys.sigkill with _ -> ());
+      (try ignore (Eio_unix.run_in_systhread ~label:"proc-reap" (fun () -> Unix.waitpid [] pid)) with _ -> ());
       status := 124;
       err := !err ^ Printf.sprintf "\n[timeout after %.0fs]" timeout);
   { status = !status; stdout = !out; stderr = !err }
