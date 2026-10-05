@@ -83,7 +83,13 @@ every Julia/blossom-created node matching the Julia-style hash and every Rust-cr
 sorted-key hash. First hour: all claimed queues at 0 pending; failures are download errors (403/404/
 timeouts) as before. `<tmp>/cache/procgraph` is shared with the blossom server.
 
-**Blossom (2026-10-05 11:03 UTC):** blossom.primal.net (<media-host>:27018) is served by the OCaml unit
+**Blossom:** switched back to the Rust server on 2026-10-05 11:59 UTC at the user's request; it now
+runs as the user unit `primal-rust-blossom` (`run.sh` loop, `PATH` with the nix profile, log
+`$PRIMAL_VAR_DIR/rust-blossom.log`), the OCaml unit is stopped. To switch to OCaml again:
+`rebuild-restart-blossom.sh` (binds beside the Rust server), check `access-control-allow-methods`
+alternates, then `systemctl --user stop primal-rust-blossom`. Stop the old server only after the new
+one answers: the first attempt at the switch-back left 27018 unserved for about 15 seconds.
+Earlier that day (11:03–11:55 UTC) blossom.primal.net (<media-host>:27018) was served by the OCaml unit
 `primal-ocaml-blossom-<ts>` (`rebuild-restart-blossom.sh`, config `primal-blossom-config.json` =
 the jobs config with roles `["blossom"]`, admin 14013, plus the `blossom` object taken from the Rust
 server's config); the Rust `primal_blossom_server` and its `run.sh` loop were stopped once both
