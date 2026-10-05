@@ -28,4 +28,20 @@ let typed_json () =
   Alcotest.(check (list (pair string bool))) "specs" [ ("original", true); ("original", false) ] (List.filteri (fun i _ -> i < 2) (Pgj.variant_specs_of Pgj.all_variants));
   Alcotest.(check (option string)) "symbol" (Some "small") (Pgj.as_symbol (Pgj.symbol "small"))
 
-let () = Alcotest.run "primal_jobs_media" [ ("pgj", [ Alcotest.test_case "julia_float" `Quick julia_float; Alcotest.test_case "typed json" `Quick typed_json ]); ("store", [ Alcotest.test_case "key hash" `Quick key_hash ]) ]
+let blossom_paths () =
+  let open Primal_jobs_media.Blossom in
+  let srv = "https://media.primal.net" and sha = "ef940339e4e34e12520827cf3651c8bbd93c33ba3e3d2d80defc3909ec429050" in
+  let rel p = remote_relpath_for ~media_url:(srv ^ p) ~media_server_url:srv ~sha256_hex:sha in
+  Alcotest.(check (result string string)) "uploads2" (Ok "/uploads2/e/f9/40/ef940339e4e34e12520827cf3651c8bbd93c33ba3e3d2d80defc3909ec429050.mp3") (rel "/uploads2/e/f9/40/ef940339e4e34e12520827cf3651c8bbd93c33ba3e3d2d80defc3909ec429050.mp3");
+  Alcotest.(check (result string string)) "legacy uploads" (Ok "/uploads/e/f9/40/ef940339e4e34e12520827cf3651c8bbd93c33ba3e3d2d80defc3909ec429050.jpg") (rel "/uploads/e/f9/40/ef940339e4e34e12520827cf3651c8bbd93c33ba3e3d2d80defc3909ec429050.jpg");
+  Alcotest.(check bool) "other server" true (Result.is_error (remote_relpath_for ~media_url:("https://other/uploads2/x/" ^ sha ^ ".jpg") ~media_server_url:srv ~sha256_hex:sha));
+  Alcotest.(check bool) "outside uploads" true (Result.is_error (rel ("/cache/e/f9/40/" ^ sha ^ ".jpg")));
+  Alcotest.(check bool) "dotdot" true (Result.is_error (rel ("/uploads2/../" ^ sha ^ ".jpg")));
+  Alcotest.(check bool) "wrong name" true (Result.is_error (rel "/uploads2/e/f9/40/0000.jpg"));
+  Alcotest.(check string) "sha of path" sha (Hex_util.encode (sha_of_path ("/" ^ sha ^ ".jpg")));
+  Alcotest.(check string) "sha of bare path" sha (Hex_util.encode (sha_of_path sha));
+  Alcotest.check_raises "bad sha" (Http_error (400, "invalid sha256")) (fun () -> ignore (sha_of_path "/zz.jpg"));
+  Alcotest.(check string) "ext" ".mp4" (ext_of "video/x-m4v");
+  Alcotest.(check string) "no ext" "" (ext_of "application/x-unknown")
+
+let () = Alcotest.run "primal_jobs_media" [ ("blossom", [ Alcotest.test_case "paths" `Quick blossom_paths ]); ("pgj", [ Alcotest.test_case "julia_float" `Quick julia_float; Alcotest.test_case "typed json" `Quick typed_json ]); ("store", [ Alcotest.test_case "key hash" `Quick key_hash ]) ]

@@ -156,10 +156,12 @@ let cors_headers =
 
 let respond ~(cors : bool) (reqd : Httpun.Reqd.t) (status : int) (content_type : string)
     (extra_headers : (string * string) list) (body : string) : unit =
+  (* a handler may set content-length itself (HEAD answers carry the blob's length with no body) *)
+  let own_length = List.exists (fun (k, _) -> String.lowercase_ascii k = "content-length") extra_headers in
   let headers =
     Httpun.Headers.of_list
       ((if cors then cors_headers else []) @ extra_headers
-      @ [ ("content-type", content_type); ("content-length", string_of_int (String.length body)) ])
+      @ [ ("content-type", content_type) ] @ (if own_length then [] else [ ("content-length", string_of_int (String.length body)) ]))
   in
   Httpun.Reqd.respond_with_string reqd
     (Httpun.Response.create ~headers (Httpun.Status.of_code status))

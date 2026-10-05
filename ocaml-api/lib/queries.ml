@@ -1616,13 +1616,3 @@ let video_thumbnails_for_video (c : Db.cache Db.conn) ~(video_url : string) : st
 
 (* {1 Phase 5c: Blossom} *)
 
-(* find_upload: the preferred storage of an upload by its hash, unblocked *)
-let media_storage_by_hash_full (c : Db.cache Db.conn) ~(h : string) : (string * string * int64 * string) option =
-  let dbh = Db.raw c in
-  match
-    [%pgsql dbh
-      "select ms.media_url, ms.content_type, ms.size, ms.storage_provider from media_storage ms, media_storage_priority msp \
-       where ms.h = $h and ms.media_block_id is null and msp.storage_provider = ms.storage_provider order by msp.priority limit 1"]
-  with
-  | (url, ct, size, sp) :: _ -> Some (url, ct, size, sp)
-  | [] -> None

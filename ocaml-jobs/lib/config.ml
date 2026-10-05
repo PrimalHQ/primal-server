@@ -4,7 +4,7 @@ exception Config_error of string
 
 module U = Yojson.Safe.Util
 
-type role = Dvm_checker | Pg_listener | Trustrank | Analytics | Dag | Rebroadcast | Failover | Media | Ext of string (* a role the private extensions register (Roles) *)
+type role = Dvm_checker | Pg_listener | Trustrank | Analytics | Dag | Rebroadcast | Failover | Media | Blossom | Ext of string (* a role the private extensions register (Roles) *)
 
 let role_of_string = function
   | "dvm_checker" -> Dvm_checker
@@ -15,9 +15,10 @@ let role_of_string = function
   | "rebroadcast" -> Rebroadcast
   | "failover" -> Failover
   | "media" -> Media
+  | "blossom" -> Blossom
   | s -> Ext s
 
-let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics" | Dag -> "dag" | Rebroadcast -> "rebroadcast" | Failover -> "failover" | Media -> "media" | Ext s -> s
+let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics" | Dag -> "dag" | Rebroadcast -> "rebroadcast" | Failover -> "failover" | Media -> "media" | Blossom -> "blossom" | Ext s -> s
 
 type t = {
   roles : role list;
@@ -61,6 +62,7 @@ type t = {
   pushgateway : (string * int * string) option;
   membership_discovery_url : string option;
   media : Primal_jobs_media.Media_config.t option;
+  blossom : Primal_jobs_media.Blossom.config option; (* the "blossom" object: the Blossom server role (needs "media" too) *)
   ext : Yojson.Safe.t; (* the "ext" object for the private extensions; `Null when absent *) (* the "media" sub-object (ocaml-plan.md §10); null unless the media role runs *) (* Postgres.Server.tracking_url of the membership server *) (* host, port, job: dag_runner_duration / dag_runner_all_ok as PushGatewayExporter did *) (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
 }
 
@@ -125,6 +127,7 @@ let of_json (j : Yojson.Safe.t) : t =
     pushgateway = (match field j "pushgateway" with `Null -> None | o -> Some (rstr o "host", rint o "port", rstr o "job"));
     membership_discovery_url = rstr_opt j "membership_discovery_url";
     ext = (match j with `Assoc f -> Option.value (List.assoc_opt "ext" f) ~default:`Null | _ -> `Null);
+    blossom = (match (match j with `Assoc f -> Option.value (List.assoc_opt "blossom" f) ~default:`Null | _ -> `Null) with `Null -> None | o -> ( try Some (Primal_jobs_media.Blossom.config_of_json o) with Primal_jobs_media.Blossom.Config_error m -> raise (Config_error m)));
     media = (match (match j with `Assoc f -> Option.value (List.assoc_opt "media" f) ~default:`Null | _ -> `Null) with `Null -> None | o -> ( try Some (Primal_jobs_media.Media_config.of_json o) with Primal_jobs_media.Media_config.Config_error m -> raise (Config_error m)));
   }
 

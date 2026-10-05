@@ -1,5 +1,5 @@
 (* The API daemon (ocaml-plan.md §5): the public WebSocket port served from N domains (one accept
-   loop each on a shared SO_REUSEPORT socket), the internal/moderation/blossom HTTP ports, admin
+   loop each on a shared SO_REUSEPORT socket), the internal/moderation HTTP ports, admin
    HTTP on 127.0.0.1, rolling-restart drain (§6). bin/primal_apid.ml and the private
    ocaml-ext/bin call [run]; the latter registers its extensions in [init]. *)
 
@@ -76,10 +76,8 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
   let internal_svc = Internal_http.service ~cfg ~clock in
   let moderation_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.moderation_http_port () in
   let moderation_svc = Moderation_http.service ~cfg ~clock in
-  let blossom_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.blossom_http_port () in
-  let blossom_svc = Blossom_http.service ~cfg ~clock in
-  log "listening: ws %s:%d%s (%d domains), internal http :%d, moderation http :%d, blossom :%d, admin %s:%d" cfg.public_ws_host cfg.public_ws_port
-    (match cfg.cache_ws_port with Some p -> Printf.sprintf " + cache ws :%d" p | None -> "") cfg.num_domains cfg.internal_http_port cfg.moderation_http_port cfg.blossom_http_port cfg.admin_host cfg.admin_port;
+  log "listening: ws %s:%d%s (%d domains), internal http :%d, moderation http :%d, admin %s:%d" cfg.public_ws_host cfg.public_ws_port
+    (match cfg.cache_ws_port with Some p -> Printf.sprintf " + cache ws :%d" p | None -> "") cfg.num_domains cfg.internal_http_port cfg.moderation_http_port cfg.admin_host cfg.admin_port;
   let admin_svc = Admin.service ~lifecycle ~stats ~cfg ~live ~bc in
 
   (* Worker domains: each imports the shared listening fd and runs its own accept loop. *)
@@ -107,7 +105,6 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
     let admin_sock = Listen.import ~sw:msw admin_fd in
     let isock = Listen.import ~sw:msw internal_fd in
     let modsock = Listen.import ~sw:msw moderation_fd in
-    let blsock = Listen.import ~sw:msw blossom_fd in
     Fiber.fork_daemon ~sw:msw (fun () ->
         Wsconnvars.run ~clock ~period:cfg.wsconnvars_poll_s ~default_idle_s:cfg.idle_connection_timeout_s;
         `Stop_daemon);
@@ -127,7 +124,6 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
          (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock; Eio.Net.close sock);
          (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop internal_svc isock; Eio.Net.close isock);
          (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop moderation_svc modsock; Eio.Net.close modsock);
-         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop blossom_svc blsock; Eio.Net.close blsock);
          (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop admin_svc admin_sock);
        ]
       @ (match csock with Some c -> [ (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc c; Eio.Net.close c) ] | None -> []))
@@ -145,7 +141,6 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
       (try Unix.close public_fd with _ -> ());
       (try Unix.close internal_fd with _ -> ());
       (try Unix.close moderation_fd with _ -> ());
-      (try Unix.close blossom_fd with _ -> ());
       log "draining: %d connections, %d http inflight" (Conn.count ()) (Http_server.inflight_connections ());
       let idle = Conn.close_idle ~older_than:30.0 () in
       if idle > 0 then log "closed %d idle connections" idle;

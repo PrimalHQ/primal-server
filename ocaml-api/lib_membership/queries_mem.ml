@@ -262,8 +262,3 @@ let blossom_uploads_by_pubkey (c : Db.membership Db.conn) ~pubkey : upload list 
   [%pgsql dbh "select mimetype, created_at, path, size, sha256 from media_uploads where pubkey = $pubkey"]
   |> List.map (fun (up_mimetype, up_created_at, up_path, up_size, up_sha256) -> { up_mimetype; up_created_at; up_path; up_size; up_sha256; up_pubkey = pubkey })
 
-let blossom_upload_by_sha256 (c : Db.membership Db.conn) ~sha256 : upload option =
-  let dbh = Db.raw c in
-  match [%pgsql dbh "select mimetype, created_at, path, size, pubkey from media_uploads where sha256 = $sha256 and media_block_id is null limit 1"] with
-  | (up_mimetype, up_created_at, up_path, up_size, up_pubkey) :: _ -> Some { up_mimetype; up_created_at; up_path; up_size; up_sha256 = Some sha256; up_pubkey }
-  | [] -> None

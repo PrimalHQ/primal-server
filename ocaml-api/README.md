@@ -2,8 +2,8 @@
 
 The Primal cache API daemon in OCaml 5 / Eio (`ocaml-plan.md` §5): the WebSocket cache API that
 clients reach on port 9001 (and the per-node 8800+N ports), later the HTTP services (14000+N,
-24000+N, Blossom 21000+N). It replaces the Rust `ws-connector` and the Julia `CacheServer`,
-`InternalServices` and `Blossom`.
+24000+N). It replaces the Rust `ws-connector` and the Julia `CacheServer` and
+`InternalServices`.
 
 **Status (Phase 3b):** 48 funcall names are answered natively (`Funcall.native_names`, plus
 `set_primal_protocol` in the connection layer): the ws-connector ones of Phase 3a (`set_primal_protocol`, `server_name`, `thread_view`,
@@ -170,10 +170,7 @@ noted below. `Moderation_http` on `moderation_http_port` (24000+N): `/purge-medi
 step for step — media_block record, local roots moved into cdn-hidden/, `S3` providers backed up
 to bucket2 and deleted, Cloudflare cache purge, the media_storage/media_uploads/short_urls rows
 marked) and `/pre-sign-urls`; `Primal_common.S3` is a SigV4 client (check, delete, copy, upload,
-get, pre-signed GET; the AWS documentation vector is a unit test). `Blossom_http` on
-`blossom_http_port` (21000+N): BUD-01/02/04 reads, `/list/<pubkey>`, HEAD /upload with the
-kind-24242 authorization check, and DELETE through purge_media; PUT answers 500 "uploads not
-available" until the media phase lands the upload importer (missing at HEAD, §10.2).
+get, pre-signed GET; the AWS documentation vector is a unit test). Blossom is not part of primal-api: production serves blossom.primal.net from the media host (`ocaml-jobs` role `blossom`, a port of primal-blossom-server).
 
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
@@ -196,7 +193,7 @@ funcalls fail for that window, native ones keep working.
 set, no Studio on this host). Julia API node 17 is retired (its `m1_cache.sh` loop in tmux pane 0:0.0
 was killed, then `["EVAL","exit()"]` on 12017); `primal-api` now also binds its ports: `cache_ws_port`
 8817 (the same WebSocket service; `user_infos` probes answer), `internal_http_port` 14017,
-`moderation_http_port` 24017, `blossom_http_port` 21017. The few funcalls still proxied (uploads,
+`moderation_http_port` 24017 (the Blossom listener 21017 was dropped on 2026-10-05: Blossom is the media host's service, `ocaml-jobs` role `blossom`). The few funcalls still proxied (uploads,
 membership purchase/status, wallet) go to <julia-host>'s Julia node (`upstream_julia_ws`
 ws://<julia-host>:8831, `upstream_julia_http` http://<julia-host>:14031/api). The ws-connector
 shadows on 9005 and 9007 are stopped (their upstream was node 17). Replay before the switch (12 per
@@ -257,7 +254,6 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `dvm_requester_seckey` | hex or `null` | `App.DVM_REQUESTER_KEYPAIR`: signs the kind-5300 job requests (null: `dvm_feed` live path answers NOTICE error) |
 | `internal_http_port` | `14096` (14017 at cutover) | InternalServices router (14000+N) |
 | `moderation_http_port` | `24096` (24017 at cutover) | `/purge-media`, `/pre-sign-urls` (24000+N) |
-| `blossom_http_port` | `21096` (21017 at cutover) | Blossom (21000+N) |
 | `upstream_julia_http` | `"http://127.0.0.1:14017/api"` or `null` | HTTP `/api` forwards funcalls that are still proxied (and `server_name`) there |
 | `index_dirs` | `{"primal.net": "/var/www/dev.primal.net", ...}` | Host -> directory of the web app's index.html (preview_handler); other hosts answer 404 |
 | `url_shortening_root_url` | `"https://m.primal.net"` | `InternalServices.URL_SHORTENING_ROOT_URL` |
@@ -265,8 +261,6 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `s3_providers` | `[{"name","endpoint","region","bucket","bucket2","access_key","secret_key","domain"}]` | `Main.S3_CONFIGS` |
 | `cloudflare` | `{"zone_id","api_key"}` or `null` | cache purge of the cloudflare providers' domains |
 | `media_paths` | `[{"type":"local","label","root"} \| {"type":"s3","provider","label"}]` | the roots a purge walks (`Media.MEDIA_PATHS(_2)`); `label` is the media_storage provider name |
-| `blossom_base_url` | `"https://blossom.primal.net"` | `Blossom.BASE_URL` |
-| `blossom_local_roots` | `[]` | local roots uploads are served from when no storage row exists |
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 

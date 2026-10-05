@@ -19,6 +19,7 @@ Log: `$PRIMAL_VAR_DIR/ocaml-jobs.log`.
 | `rebroadcast` | `event_rebroadcasting.jl` | **native (6e, 2026-10-04), off by default**: `Rebroadcast` polls membership `event_rebroadcasting` every second; each started-unfinished row gets its next batch (up to 100 of the user's events since `event_created_at`, `kinds` filtered, replaceable kinds collapsed to the latest — `App.get_user_events`) broadcast to `target_relays` (one connection per relay, 10 events/s, done when every event has an OK or after 30 s), `event_idx_intermediate` on each first accept, `last_batch_status` as Julia's `JSON.json(res, 2)`, the row advances on success and finishes when a batch repeats (same sha256). Julia's `EventRebroadcasting` is not running on <stage-host>'s nodes and its host is not known from here, so this role is not in `roles` yet: enabling it while Julia's runs elsewhere would send every batch twice. Verified only idle (0 pending rows). |
 | `failover` | `postgres.jl` server_tracking (membership) | **native (6e, 2026-10-04), off by default**: `Failover` takes a Postgres advisory lock on the membership DB (singleton), then every second reads `membership_discovery_url` ({"primal": connstr, "postgres": connstr}) and, when that host answers `pg_is_in_recovery()`, calls `pg_promote()`. Re-pointing the daemons' own pools at a new primary is not done yet (the Julia nodes still run their tracker; this role stays off until they are retired). |
 | `media` | Rust `primal-media` scheduler + Julia `ProcessingGraphExecutionScheduler` + the media nodes (`cache_storage_media.jl`, `media.jl`, `app_media.jl` `import_upload_3`, `internal_services.jl` `purge_media_`, MediaAnalysis `block_media`/`inc_counter`) | **native (8a, 2026-10-04)**: `lib_media/` — `Pgj` (typed Julia JSON, binary cache, node ids), `Procgraph` (executor: atomic claims with `for update skip locked`, ancestry edges, extra/log, cleanup), `Proc` (Eio.Process with deadlines, LD_LIBRARY_PATH stripped), `Media_tools` (downloads with proxy rotation and the 2 GB cap, file/identify/ffprobe/exiftool/ffmpeg/magick, link-preview.py, AI feature endpoints), `Media_store` (v1 key-addressed and v2 sha-addressed layouts, local + S3), `Hls` (AWS MediaConvert over SigV4 with endpoint discovery, Mux, Bunny Stream, Cloudflare Stream), nodes in `Nodes_media`/`Nodes_upload`/`Nodes_moderation`/`Nodes_text`, `Scheduler` (the Rust task list at `max_concurrent_per_name`, the Julia duties `import_upload_3`/`block_media`/`purge_media_` at `julia_duty_concurrency`, 60 s stats, stuck reset, `pn_time_for_pubkeys` refresh every 600 s). Config: the `media` object (table below). `bin/media_tool.exe CONFIG check-ids|execute-node|show-node|pending`. Private nodes (`ext_after_import_upload_2`, `analyze_*`, `purge_user_content` without a purger URL) are never claimed. |
+| `blossom` | Rust `primal-blossom-server` (blossom.primal.net on the media host, :27018) | **native (2026-10-05)**: `lib_media/blossom.ml` — BUD-01/02/04/05 with kind-24242 auth (expiration/t/x tags, csam filterlist and blocked-blob checks), `PUT /upload`, `/media` (exiftool + ffmpeg metadata stripping under bwrap, `media_metadata_stripping`), `/mirror`; the blob goes to every `local_storages` root (`/uploads2/a/bc/de/<sha>.ext`), `media_storage` and `media_uploads` rows, then an `import_upload_3` node with the Rust server's insertion-order id for the media role; `GET` 302 to the storage URL with the ssh fallback that streams a missing local file from `ssh_fallback_host`; `HEAD`, `/list/<pubkey>`, `DELETE` through a `purge_media_` node it waits for (120 s); 60 s blob cache; request log to `log_db`. Runs as its own unit (`rebuild-restart-blossom.sh`, rolling with SO_REUSEPORT, config `primal-blossom-config.json` with roles `["blossom"]`, the `media` object and the `blossom` object below). `bin/blossom_tool.exe` signs auth events and exercises every route. |
 | `studio_broadcast`, `rss_import`, `purger_http` + the `Main.MediaAnalysis` nodes | parent repo `studio_event_broadcasting.jl`, Rust `rss-content-importer`, `user_content_purger.jl`, `media_analysis.jl` | **private (9b, 2026-10-04)**: registered by `primal-net-server/ocaml-ext` through `Roles.register` / `Media.Hooks` / `Procgraph.register`; the production binary is `ocaml-ext/bin/primal_jobsd.exe` (`PRIMAL_EXE=... ./rebuild-restart-jobs.sh`), the public binary refuses those role names at startup. See `ocaml-ext/README.md`. |
 | `dvm_provider` | `dvm_service_provider.jl` | planned |
 
@@ -48,6 +49,22 @@ Log: `$PRIMAL_VAR_DIR/ocaml-jobs.log`.
 | `user_content_purger_api` | MediaAnalysis.USER_CONTENT_PURGER_API (null = `purge_user_content` nodes are not claimed) |
 | `execute_funcs` | the funcs this executor claims (null = the default list) |
 | `log` | per-node log lines |
+
+## The `blossom` config object
+
+| key | value on <media-host> | meaning |
+|---|---|---|
+| `port` | `27018` | the listener (SO_REUSEPORT; the rolling restart overlaps generations) |
+| `base_url`, `media_server_url` | `https://blossom.primal.net`, `https://media.primal.net` | blob URLs in answers; storage URLs |
+| `local_storages` | `{"<media-host>a": "<cdn root>"}` | storage_provider name -> root; every upload is written to each |
+| `media_serving_dir` | `<cdn root>` | where `media_server_url` serves from on this host: a file missing there is served through the ssh fallback |
+| `ssh_fallback_host`, `ssh_fallback_remote_base`, `ssh_fallback_timeout_s` | `sbox`, `/home/cdn`, `300` | `ssh host cat base+relpath`, sha256-verified; unset = redirect only |
+| `log_db` | `{host, port, user, database}` or absent | the `log` table for PUT request logging |
+| `proxy` | `socks5://...` or absent | `/mirror` downloads |
+| `sandboxing` | `true` | exiftool/ffmpeg under `bwrap --unshare-net` with `/nix` read-only and the media `tmp_dir` bound |
+| `node_wait_timeout_s` | `120` | DELETE waits this long for `purge_media_` |
+
+The binary cache and `tmp_dir` come from the `media` object, which the role requires.
 
 ## Cutover state on <media-host>, the media host (2026-10-04)
 

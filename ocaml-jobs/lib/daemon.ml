@@ -24,10 +24,13 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
   let admin_fd = Listen.bind ~host:cfg.admin_host ~port:cfg.admin_port () in
   let admin_sock = Listen.import ~sw admin_fd in
   let admin_svc = Admin.service ~lifecycle ~cfg in
+  let running = Atomic.make (List.length cfg.roles) in
+  let drain_grace_s = 60.0 in
   List.iter
     (fun role ->
       Fiber.fork_daemon ~sw (fun () ->
           Phases.register_domain_slot (Config.string_of_role role);
+          Fun.protect ~finally:(fun () -> ignore (Atomic.fetch_and_add running (-1))) @@ fun () ->
           (match role with
           | Config.Dvm_checker -> Dvm_checker.run ~cfg ~net ~clock ~stop
           | Config.Pg_listener -> Pg_listener.run ~cfg ~net ~clock ~stop
@@ -40,6 +43,14 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
               match cfg.media with
               | Some m -> Primal_jobs_media.Media_role.run ~cfg:m ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr ~stop
               | None -> log "media role: the config has no \"media\" object")
+          | Config.Blossom -> (
+              match (cfg.media, cfg.blossom) with
+              | Some m, Some b ->
+                  let ctx = Primal_jobs_media.Media_role.make_ctx ~cfg:m ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr in
+                  Pushgateway.mkdir_p m.binary_data_cache_dir;
+                  Pushgateway.mkdir_p m.tmp_dir;
+                  Primal_jobs_media.Blossom.run ~cfg:b ~ctx ~clock ~stop
+              | _ -> log "blossom role: the config needs both \"media\" and \"blossom\" objects")
           | Config.Ext name -> ( match Roles.find name with Some f -> f { Roles.cfg; net; clock; proc_mgr; stop } | None -> log "role %s not registered" name));
           `Stop_daemon))
     cfg.roles;
@@ -47,7 +58,12 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
   Fiber.fork_daemon ~sw (fun () ->
       Promise.await stop;
       log "stopping";
-      Eio.Time.sleep clock 1.0;
+      (* roles that serve requests (blossom) finish in-flight work first: wait for every role
+         fiber to return, at most [drain_grace_s] *)
+      let t0 = Unix.gettimeofday () in
+      while Atomic.get running > 0 && Unix.gettimeofday () -. t0 < drain_grace_s do Eio.Time.sleep clock 0.2 done;
+      if Atomic.get running > 0 then log "stopping with %d role(s) still running after %.0fs" (Atomic.get running) drain_grace_s;
+      Eio.Time.sleep clock 0.5;
       Lifecycle.stopped lifecycle;
       exit 0);
   Http_server.serve_on ~sw ~clock ~stop admin_svc admin_sock;

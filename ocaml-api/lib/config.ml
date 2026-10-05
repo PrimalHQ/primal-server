@@ -69,9 +69,6 @@ type t = {
   cloudflare : (string * string) option; (* zone id, API key: cache purge of the cloudflare providers' domains *)
   media_paths : media_path list; (* local roots and S3 providers a purge walks *)
   (* Phase 5c: Blossom *)
-  blossom_http_port : int; (* 21000+N *)
-  blossom_base_url : string; (* Blossom.BASE_URL *)
-  blossom_local_roots : string list; (* Media.MEDIA_PATHS[UPLOADS_DIR] local roots: uploads served from disk *)
 }
 
 let field j key =
@@ -187,9 +184,6 @@ let of_json (j : Yojson.Safe.t) : t =
               | t -> raise (Config_error ("media_paths: unknown type " ^ t)))
             l
       | _ -> raise (Config_error "media_paths: expected a list"));
-    blossom_http_port = rint j "blossom_http_port";
-    blossom_base_url = rstr j "blossom_base_url";
-    blossom_local_roots = (match field j "blossom_local_roots" with `List l -> List.map U.to_string l | _ -> raise (Config_error "blossom_local_roots: expected a list"));
   }
 
 let of_json_file (path : string) : t =

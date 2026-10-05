@@ -48,7 +48,7 @@ shadow ws-connector :9005 running `ocaml-handlers`.
 | 8800+N | Julia CacheServer WS | `primal-api` (health probes, `REPLICATE_TO_SERVERS`, cross-node calls) |
 | 14000+N | InternalServices HTTP | `primal-api` |
 | 24000+N | InternalServices media moderation HTTP | `primal-api` |
-| 21000+N | Blossom HTTP (configured, Julia upload path broken at HEAD) | `primal-api` |
+| 27000+N | Blossom (Rust `primal-blossom-server` on the media host; the Julia 21000+N listener was never production) | `primal-jobs` role `blossom` (2026-10-05) |
 | 12000+N | FirehoseServer: `EVAL`/`EXPR` RCE + import | `primal-importer` import-only line listener (§7.2); no eval |
 | 9000+N | fetcher firehose (127.0.0.1) | `primal-fetcher` same protocol (`STREAM-NEW-EVENTS`) |
 | 14001 | ws-connector pgwire `tasks` | dropped; admin HTTP on 127.0.0.1 (§5.6) |
