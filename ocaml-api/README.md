@@ -191,6 +191,22 @@ the 3a funcalls, which mirror ws-connector by design). Known gap: primal-api
 does not read `/tmp/wsconn_blocked`, the flag `deploy.sh` sets while it restarts Julia; proxied
 funcalls fail for that window, native ones keep working.
 
+**Phase 10 on <stage-host> (2026-10-05 00:13 UTC):** the production binary here is the private build
+`ocaml-ext/bin/primal_apid.exe` (`PRIMAL_EXE=... ./rebuild-restart-api.sh`; `ext.crash_report_file`
+set, no Studio on this host). Julia API node 17 is retired (its `m1_cache.sh` loop in tmux pane 0:0.0
+was killed, then `["EVAL","exit()"]` on 12017); `primal-api` now also binds its ports: `cache_ws_port`
+8817 (the same WebSocket service; `user_infos` probes answer), `internal_http_port` 14017,
+`moderation_http_port` 24017, `blossom_http_port` 21017. The few funcalls still proxied (uploads,
+membership purchase/status, wallet) go to <julia-host>'s Julia node (`upstream_julia_ws`
+ws://<julia-host>:8831, `upstream_julia_http` http://<julia-host>:14031/api). The ws-connector
+shadows on 9005 and 9007 are stopped (their upstream was node 17). Replay before the switch (12 per
+funcall, 696 requests, new binary vs ws-connector→Julia): 92.4 % identical, every difference a known
+one (`get_notifications`, `get_featured_dvm_feeds`, live counters, two slow-feed timeouts) or a Julia
+node-17 quirk (`explore_legend_counts` all_users = 2; `follow_lists` wrapped in an
+`event_media_response` object). Rollback: restore `primal-api-config.json.bak-20261005000625-pre-phase10`,
+start `bash ../m1_cache.sh` again in a tmux pane, rerun the restart script. The public hosts
+(<production-host>/<production-host>/<production-host>) and <julia-host> keep Julia + ws-connector by decision.
+
 ## Build / run
 
 ```sh
