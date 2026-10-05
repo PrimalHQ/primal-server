@@ -294,6 +294,17 @@ against cache2. Lesson: replaying requests one at a time cannot see transport-le
 headless walk (``ocaml-api/tools/webapp-walk.py`, run through `tools/playwright.sh`; `tools/ws-burst.py` is the raw-socket reproducer) as the
 acceptance check for a cutover.
 
+**Logged-in walk 2026-10-05 20:00 (QA user via `NSEC_FILE`, pages home/reads/explore/notifications/messages/
+bookmarks):** every page renders against stage as against cache2; the 253 requests of the walk replayed on the
+same data (shadow 9009 over <julia-host>'s DB vs Julia 8831) are 91.7 % identical, the rest being the trending feed's
+drifting follower-count batches, `get_recommended_reads` (random), `live_events_from_follows` (<julia-host>'s Julia)
+and `get_notifications` differing only in the one-second `since/until` stamp. Two stage-only observations are
+data, not the port: stage's notifications start with live-stream notifications (type 501) because <stage-host>'s
+Julia pg listener keeps writing them (8934 rows for the QA user, 1–4 a day; <julia-host>'s stopped 2025-09-24),
+and a logged-in home/reads page load fires ~20 REQs at once, so the reads feed's windowed search (6–11 s on
+<stage-host> with `until` paging) holds the 4-connection pool and trivial calls queue behind it for up to 15 s
+(`get_app_settings` 15.7 s, `get_featured_dvm_feeds` 19 s on /explore); same requests alone: 0.1–3 s.
+
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
 `GET /healthz`, `GET /readyz` (503 unless serving — the load balancer / restart script gate),

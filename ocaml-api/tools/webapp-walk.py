@@ -1,11 +1,18 @@
 import sys, json, time, zlib, re
 from playwright.sync_api import sync_playwright
+# usage: webapp-walk.py CACHE_WS_URL TAG [/page,/page,...]
+#   NSEC_FILE=path  log in as that key (the webapp's "local" login: localStorage.primalSec); the key is
+#                   never printed and is scrubbed from every file written here.
+import os
 cache = sys.argv[1]            # e.g. wss://stage.primal.net/v1
+nsec = open(os.environ["NSEC_FILE"]).read().strip() if os.environ.get("NSEC_FILE") else None
+def scrub(x): return x.replace(nsec, "<nsec>") if nsec else x
 tag = sys.argv[2]
 pages = sys.argv[3].split(",") if len(sys.argv) > 3 else ["/home", "/reads"]
 frames = []   # (t, dir, text)
 t0 = time.time()
 def dec(payload):
+    payload = payload if not isinstance(payload, str) else scrub(payload)
     if isinstance(payload, (bytes, bytearray)):
         try: return zlib.decompress(payload).decode()
         except Exception as e: return "<<binary %d %s>>" % (len(payload), e)
@@ -14,6 +21,8 @@ with sync_playwright() as p:
     b = p.chromium.launch(headless=True)
     ctx = b.new_context(viewport={"width": 1400, "height": 1000})
     ctx.add_init_script("try{localStorage.setItem('cacheServer', %s)}catch(e){}" % json.dumps(cache))
+    if nsec:
+        ctx.add_init_script("try{localStorage.setItem('primalSec', %s); localStorage.setItem('loginType', 'local')}catch(e){}" % json.dumps(nsec))
     pg = ctx.new_page()
     cons = []
     pg.on("console", lambda m: cons.append((round(time.time()-t0,1), m.type, m.text[:300])))
@@ -47,12 +56,12 @@ with sync_playwright() as p:
             ci = counts(); frames.append((round(time.time()-t0,1), "counts-scroll%d" % (i+1), json.dumps(ci)))
         pg.screenshot(path="shot-%s%s.png" % (tag, path.replace("/", "_")), full_page=False)
         txt = pg.evaluate("document.body.innerText")
-        open("text-%s%s.txt" % (tag, path.replace("/", "_")), "w").write(txt)
+        open("text-%s%s.txt" % (tag, path.replace("/", "_")), "w").write(scrub(txt))
     b.close()
 with open("frames-%s.jsonl" % tag, "w") as f:
-    for fr in frames: f.write(json.dumps(fr) + "\n")
+    for fr in frames: f.write(scrub(json.dumps(fr)) + "\n")
 with open("console-%s.txt" % tag, "w") as f:
-    for c in cons: f.write("%s %s %s\n" % c)
+    for c in cons: f.write(scrub("%s %s %s\n" % c))
 # summary: per request subid -> sent count, events, eose, notice
 reqs = {}
 order = []
