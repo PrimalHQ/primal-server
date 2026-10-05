@@ -139,6 +139,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
       (* the bound fd itself: with every domain's dup closed the socket leaves the kernel's
          SO_REUSEPORT group and new connections only reach the new generation *)
       (try Unix.close public_fd with _ -> ());
+      (match cache_fd with Some fd -> (try Unix.close fd with _ -> ()) | None -> ());
       (try Unix.close internal_fd with _ -> ());
       (try Unix.close moderation_fd with _ -> ());
       log "draining: %d connections, %d http inflight" (Conn.count ()) (Http_server.inflight_connections ());
