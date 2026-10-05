@@ -309,6 +309,14 @@ With `cache_pool_size` 16 (20:44) the rerun shows no queueing: home feed 0.4 s (
 feed query itself on <stage-host>'s database: 1.4–9.2 s for the same request, and the `until` pages hit the 9 s
 window deadline and come back partial (88 events, page 2 unanswered) where production answers in 1.3 s; on
 <julia-host>'s data the OCaml and Julia timings are equal (1.95 s vs 1.99 s), so it is <stage-host>'s plan/data.
+EXPLAIN of one window (`primalctl advsearch-sql <user> "kind:30023 scope:myfollowsinteractions minwords:100
+features:summary" <since> <until>` → `explain (analyze, buffers) declare cur no scroll cursor for ...`): the plan
+is the same on both hosts (reads by published_at backwards, advsearch by id per row, the scope subplans), 98 ms
+warm / 2.7 s cold on <stage-host> for a 64 h window, 170 ms on <julia-host>. The time goes into the number of windows: <stage-host>
+imported no kind-30023 events between early August and 2026-09-29 (0 per sampled hour vs 60–420 on <julia-host>), so
+its `reads` table has 20 articles for that month against <julia-host>'s 83k; the search walks back through the empty
+weeks (window 1h→4h→…→4096h) and the last, 170-day window eats the 9 s deadline. Not the port: the fix is to
+import the missing long-form events into <stage-host> (the DAG's reads node covers by imported_at and will pick them up).
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
