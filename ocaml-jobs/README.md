@@ -66,6 +66,29 @@ Log: `$PRIMAL_VAR_DIR/ocaml-jobs.log`.
 
 The binary cache and `tmp_dir` come from the `media` object, which the role requires.
 
+## Media role throughput (2026-10-05)
+
+Three defects made the OCaml media role 5–10x slower per node than the Rust executor under load
+(backlog of 3.8k imports, 23-minute median wait), each fixed and verified against the Rust server
+run side by side the same afternoon (Rust: 300–400 imports/min at 60–75 running; OCaml now the same):
+
+1. every node ran on one domain (`Scheduler` forked node fibers on its own domain): synchronous
+   file writes and sha256 of large originals stalled every fiber for minutes. Nodes now execute on
+   `worker_domains` (default 8) worker domains with their own DB pools (`worker_pool_size`).
+   Two domain-safety bugs surfaced at once: `Dns_resolvconf.parse` (ocamlyacc, global
+   `Stdlib.Parsing` state → SIGSEGV) is now cached under a mutex, and `Str` (global C backtrack
+   stack) was replaced by `Re` in `lib_media`.
+2. `Proc.run` used `Eio.Process.spawn`, which forks: 20+ forks/s of a multi-GB, 20-thread process
+   copy its page tables under the mmap lock and stall every other thread on its next page fault
+   (threads in D state on `lock_mm_and_find_vma`). Children are now created with
+   `Unix.create_process_env` (posix_spawn), blocking pipes for the child, Eio flows for the parent.
+3. the HTTP client resolved every request through 8.8.8.8 (the media host has no local cache);
+   hundreds of fibers doing that at once were rate-limited into 5 s timeouts. `Http.resolve` caches
+   addresses for 120 s.
+
+Also: the Rust config's `tasks.max_concurrent_per_name` is 200, not the 50 the OCaml config had
+carried from the example file; the <media-host> config now says 200.
+
 ## Cutover state on <media-host>, the media host (2026-10-04)
 
 The OCaml tree on <media-host> is the git worktree `<config-dir>/primal-server-ocaml5`
