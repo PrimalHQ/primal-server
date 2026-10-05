@@ -21,7 +21,7 @@ let () =
   let net = Eio.Stdenv.net env and clock = Eio.Stdenv.clock env and proc_mgr = Eio.Stdenv.process_mgr env in
   Switch.run @@ fun sw ->
   Postgres.set_env ~net ~sw;
-  let ctx = M.Media_role.make_ctx ~cfg:mcfg ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr in
+  let ctx = M.Media_role.make_ctx ~cfg:mcfg ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr ~domain_mgr:(Eio.Stdenv.domain_mgr env) in
   match cmd with
   | "check-ids" ->
       let limit = Option.value (Option.bind arg int_of_string_opt) ~default:10000 in

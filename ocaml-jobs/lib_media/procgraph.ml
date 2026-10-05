@@ -17,6 +17,7 @@ type ctx = {
   net : Eio_unix.Net.t;
   clock : float Eio.Time.clock_ty r;
   proc_mgr : Eio_unix.Process.mgr_ty r;
+  domain_mgr : Eio.Domain_manager.ty r; (* the scheduler's worker domains *)
   verbose : bool;
 }
 

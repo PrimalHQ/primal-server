@@ -10,6 +10,7 @@ let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Som
 let rstr j k = try U.to_string (field j k) with U.Type_error _ -> raise (Config_error ("media." ^ k ^ ": expected a string"))
 let rstr_opt j k = match field j k with `Null -> None | v -> Some (U.to_string v)
 let rint j k = try U.to_int (field j k) with U.Type_error _ -> raise (Config_error ("media." ^ k ^ ": expected an integer"))
+let field_opt j key = match j with `Assoc f -> List.assoc_opt key f | _ -> None
 let rfloat j k = match field j k with `Int i -> float_of_int i | `Float f -> f | _ -> raise (Config_error ("media." ^ k ^ ": expected a number"))
 let rbool j k = try U.to_bool (field j k) with U.Type_error _ -> raise (Config_error ("media." ^ k ^ ": expected a boolean"))
 let rlist j k = match field j k with `List l -> l | _ -> raise (Config_error ("media." ^ k ^ ": expected a list"))
@@ -61,7 +62,9 @@ type t = {
   ffmpeg_remote_host : string option;
   python_path : string; (* for link-preview.py *)
   link_preview_script : string;
-  scheduler_period_s : float; (* 1 *)
+  scheduler_period_s : float;
+  worker_domains : int; (* domains executing nodes (the scheduler claims on its own); default 8 *)
+  worker_pool_size : int; (* cache-DB connections per worker domain; default 8 (membership: 3) *) (* 1 *)
   max_concurrent_per_name : int; (* Rust tasks.max_concurrent_per_name 200 *)
   julia_duty_concurrency : int; (* import_upload_3 / block_media / purge_media_: 10 *)
   refresh_matview_period_s : float; (* 600 *)
@@ -118,6 +121,8 @@ let of_json (j : Yojson.Safe.t) : t =
     python_path = rstr j "python_path";
     link_preview_script = rstr j "link_preview_script";
     scheduler_period_s = rfloat j "scheduler_period_s";
+    worker_domains = (match field_opt j "worker_domains" with Some (`Int n) when n >= 1 -> n | _ -> 8);
+    worker_pool_size = (match field_opt j "worker_pool_size" with Some (`Int n) when n >= 1 -> n | _ -> 8);
     max_concurrent_per_name = rint j "max_concurrent_per_name";
     julia_duty_concurrency = rint j "julia_duty_concurrency";
     refresh_matview_period_s = rfloat j "refresh_matview_period_s";

@@ -15,7 +15,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
   Random.self_init ();
   Eio_main.run @@ fun env ->
   Mirage_crypto_rng_unix.use_default ();
-  let net = Eio.Stdenv.net env and clock = Eio.Stdenv.clock env and proc_mgr = Eio.Stdenv.process_mgr env in
+  let net = Eio.Stdenv.net env and clock = Eio.Stdenv.clock env and proc_mgr = Eio.Stdenv.process_mgr env and domain_mgr = Eio.Stdenv.domain_mgr env in
   Switch.run @@ fun sw ->
   Postgres.set_env ~net ~sw;
   let lifecycle = Lifecycle.create ~sw ~clock () in
@@ -41,12 +41,12 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
           | Config.Failover -> Failover.run ~cfg ~net ~clock ~stop
           | Config.Media -> (
               match cfg.media with
-              | Some m -> Primal_jobs_media.Media_role.run ~cfg:m ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr ~stop
+              | Some m -> Primal_jobs_media.Media_role.run ~cfg:m ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr ~domain_mgr ~stop
               | None -> log "media role: the config has no \"media\" object")
           | Config.Blossom -> (
               match (cfg.media, cfg.blossom) with
               | Some m, Some b ->
-                  let ctx = Primal_jobs_media.Media_role.make_ctx ~cfg:m ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr in
+                  let ctx = Primal_jobs_media.Media_role.make_ctx ~cfg:m ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~net ~clock ~proc_mgr ~domain_mgr in
                   Pushgateway.mkdir_p m.binary_data_cache_dir;
                   Pushgateway.mkdir_p m.tmp_dir;
                   Primal_jobs_media.Blossom.run ~cfg:b ~ctx ~clock ~stop
