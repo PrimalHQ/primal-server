@@ -2,6 +2,7 @@
 # Rebuild primal-fetcher and restart it as a transient systemd --user service (stop-then-start:
 # one fetcher per state directory — two would fight over the resume files and double the firehose).
 #   PRIMAL_FETCHER_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-fetcher-config.json)
+#   PRIMAL_MALLOC_ARENA_MAX  glibc malloc arena cap for the daemon (memory experiment; unset = glibc default of 8 x cores)
 set -euo pipefail
 ts() { date +%H:%M:%S; }
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -26,6 +27,7 @@ mkdir -p "$(dirname "$LOG")"
 systemd-run --user --collect --unit="$UNIT" --description="Primal fetcher daemon (ocaml-fetcher/bin/primal_fetcherd.exe)" \
   -p Restart=always -p RestartSec=5 -p OOMPolicy=kill -p StartLimitIntervalSec=0 -p LimitNOFILE=262144 \
   -p MemoryAccounting=yes -p MemoryHigh=10G -p MemoryMax=12G \
+  ${PRIMAL_MALLOC_ARENA_MAX:+-p "Environment=MALLOC_ARENA_MAX=$PRIMAL_MALLOC_ARENA_MAX"} \
   -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" -p "WorkingDirectory=$P" \
   -- "$NIX" develop "path:$COMMON" -c "$EXE" "$CONFIG"
 for _ in $(seq 1 100); do

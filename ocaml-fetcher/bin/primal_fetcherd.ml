@@ -93,9 +93,9 @@ let () =
         | `Stop -> ()
         | `Tick ->
             let m = Atomic.get stats.message_count and a = Atomic.get stats.any in
-            log "relays %d/%d/%d (providing|connected|total) connecting %d waiting %d | msgs %d/s new %d/s | seenearly %d parseerr %d verifyerr %d | fh subs %d dropped %d | qlen %d dedup %d | rss %s"
+            log "relays %d/%d/%d (providing|connected|total) connecting %d waiting %d | msgs %d/s new %d/s | seenearly %d parseerr %d verifyerr %d | fh subs %d dropped %d | qlen %d dedup %d | rss %s | wsbuf %s/%d"
               (Atomic.get stats.relays_providing) (Atomic.get stats.relays_connected) (Atomic.get stats.relays_total) (Atomic.get stats.connecting) (Atomic.get stats.relays_waiting) ((m - !pm) / 10) ((a - !pa) / 10) (Atomic.get stats.seenearly) (Atomic.get stats.parseerr) (Atomic.get stats.verifyerr)
-              (F.Firehose.subscribers firehose) (Atomic.get stats.firehose_dropped) (Eio.Stream.length q) (F.Dedup.size dedup) (Procinfo.fmt_bytes (Procinfo.read_rss_bytes ()));
+              (F.Firehose.subscribers firehose) (Atomic.get stats.firehose_dropped) (Eio.Stream.length q) (F.Dedup.size dedup) (Procinfo.fmt_bytes (Procinfo.read_rss_bytes ())) (Procinfo.fmt_bytes (Ws_client.total_reader_capacity ())) (Ws_client.client_count ());
             pm := m;
             pa := a;
             loop ()

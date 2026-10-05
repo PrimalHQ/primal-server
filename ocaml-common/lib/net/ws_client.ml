@@ -13,10 +13,26 @@
 type t = {
   flow : Eio.Flow.two_way_ty Eio.Std.r;
   mutable reader : Eio.Buf_read.t; (* replaced by a fresh small one after a large frame, see [shrink] *)
+  mutable cap : int; (* the reader's buffer capacity as last accounted in [total_capacity] *)
   clock : float Eio.Time.clock_ty Eio.Std.r;
   mutable closed : bool;
   resp_headers : (string * string) list; (* the 101 response's headers, lowercased names *)
 }
+
+(* {1 Read-buffer accounting}
+   A Buf_read's buffer is a Bigarray outside the OCaml heap; it doubles whenever a frame does not
+   fit and never shrinks by itself, so with tens of thousands of relay connections these buffers
+   are the bulk of the process RSS. The capacity is read from the Buf_read record's first field
+   (eio 1.3: [{ mutable buf : Cstruct.buffer; ... }]); the live totals are atomics for the
+   daemons' status pages. *)
+let reader_capacity (r : Eio.Buf_read.t) : int =
+  let buf : Cstruct.buffer = Obj.obj (Obj.field (Obj.repr r) 0) in
+  Bigarray.Array1.dim buf
+
+let total_capacity = Atomic.make 0
+let live_clients = Atomic.make 0
+let total_reader_capacity () = Atomic.get total_capacity
+let client_count () = Atomic.get live_clients
 
 let base64_encode (s : string) : string =
   let tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" in
@@ -91,7 +107,10 @@ let connect ?(headers : (string * string) list = []) ?(tls = false) ?proxy ~sw
   in
   let resp_headers = headers [] in
   Phases.phase "idle";
-  { flow; reader; clock; closed = false; resp_headers }
+  let cap = reader_capacity reader in
+  ignore (Atomic.fetch_and_add total_capacity cap);
+  ignore (Atomic.fetch_and_add live_clients 1);
+  { flow; reader; cap; clock; closed = false; resp_headers }
 
 (* ------------------------------------------------------------------ frames *)
 
@@ -155,9 +174,18 @@ let read_frame (t : t) : int * bool * string =
    frame over 64 KB, the reader is replaced by a fresh 4 KB one over the same flow. *)
 let shrink_threshold = 64 * 1024
 
+(* keep [cap] and the total in step with the reader's buffer, which Buf_read grows on its own *)
+let account (t : t) : unit =
+  let c = reader_capacity t.reader in
+  if c <> t.cap then begin
+    ignore (Atomic.fetch_and_add total_capacity (c - t.cap));
+    t.cap <- c
+  end
+
 let shrink (t : t) (last_len : int) : unit =
   if last_len > shrink_threshold && Eio.Buf_read.buffered_bytes t.reader = 0 then
-    t.reader <- Eio.Buf_read.of_flow ~max_size:(64 * 1024 * 1024) (t.flow :> Eio.Flow.source_ty Eio.Std.r)
+    t.reader <- Eio.Buf_read.of_flow ~max_size:(64 * 1024 * 1024) (t.flow :> Eio.Flow.source_ty Eio.Std.r);
+  account t
 
 (* Receive the next complete message (text or binary; continuation frames assembled, pings
    answered). `Closed on close frame / EOF. *)
@@ -223,5 +251,8 @@ let recv_timeout (t : t) ~(timeout : float) : [ `Msg of string | `Closed | `Time
 let close (t : t) : unit =
   if not t.closed then begin
     (try send_frame t ~opcode:0x8 "" with _ -> ());
-    t.closed <- true
+    t.closed <- true;
+    ignore (Atomic.fetch_and_add total_capacity (-t.cap));
+    ignore (Atomic.fetch_and_add live_clients (-1));
+    t.cap <- 0
   end
