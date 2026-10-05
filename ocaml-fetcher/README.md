@@ -121,6 +121,18 @@ call, and the memory growth. Because the admin port froze too, the guard is exte
 restarts the unit after two consecutive checks where `/status` does not answer or
 `message_count` has not moved (log `$PRIMAL_VAR_DIR/fetcher-watchdog.log`).
 
+## Memory (2026-10-05)
+
+With 16.6k relay connections the process sat at 7.5 GB RSS of which only 2.1 GB was OCaml heap.
+The WebSocket read buffers (Bigarrays, now accounted as `ws_read_buffers_bytes` / `ws_clients` in
+`/status` and `wsbuf` on the stats line) are a small part: 21 KB per connection, 353 MB in all.
+The rest was glibc malloc arena fragmentation across the 9 domains: restarted with
+`MALLOC_ARENA_MAX=2` the same 16.6k connections cost 3.6 GB RSS (1.4 GB outside the heap), so
+`rebuild-restart-fetcher.sh` now sets it by default (`PRIMAL_MALLOC_ARENA_MAX` overrides). Per
+connection: about 130 KB of heap (TLS engine state, fibers, parsed frames) plus 90 KB outside it.
+Whether the remaining figure grows at a constant connection count is still to be measured over a
+day (the overnight 10.8 GB was seen after a reconnect storm, not at steady state).
+
 ## Operating
 
 - `./rebuild-restart-fetcher.sh` — build + restart (unit `primal-ocaml-fetcher`,
