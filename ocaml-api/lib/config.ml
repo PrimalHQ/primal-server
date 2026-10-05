@@ -17,6 +17,7 @@ type t = {
   servername : string; (* ws-connector --servername; answered by server_name *)
   public_ws_host : string;
   public_ws_port : int; (* 9001 in production; a side port while shadowing *)
+  cache_ws_port : int option; (* 8800+N: the Julia CacheServer port — the same WS service for health probes and cross-node calls; null while Julia holds it *)
   admin_host : string; (* 127.0.0.1 *)
   admin_port : int;
   num_domains : int; (* worker domains, each with its own accept loop *)
@@ -96,6 +97,7 @@ let of_json (j : Yojson.Safe.t) : t =
     servername = rstr j "servername";
     public_ws_host = rstr j "public_ws_host";
     public_ws_port = rint j "public_ws_port";
+    cache_ws_port = (match field j "cache_ws_port" with `Null -> None | v -> Some (U.to_int v));
     admin_host = rstr j "admin_host";
     admin_port = rint j "admin_port";
     num_domains = rint j "num_domains";

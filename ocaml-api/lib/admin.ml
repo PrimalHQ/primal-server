@@ -13,6 +13,7 @@ let service ~(lifecycle : Lifecycle.t) ~(stats : Stats.t) ~(cfg : Config.t) ~(li
         ("uptime_s", `Float (Lifecycle.uptime lifecycle));
         ("servername", `String cfg.servername);
         ("public_ws_port", `Int cfg.public_ws_port);
+        ("cache_ws_port", (match cfg.cache_ws_port with Some p -> `Int p | None -> `Null));
         ("upstream", `String cfg.upstream_julia_ws);
         ("connections", `Int (Conn.count ()));
         ( "live_subscriptions",

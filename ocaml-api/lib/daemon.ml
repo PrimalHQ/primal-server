@@ -70,6 +70,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
     }
   in
   let public_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.public_ws_port () in
+  let cache_fd = Option.map (fun p -> Listen.bind ~host:cfg.public_ws_host ~port:p ()) cfg.cache_ws_port in
   let admin_fd = Listen.bind ~host:cfg.admin_host ~port:cfg.admin_port () in
   let internal_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.internal_http_port () in
   let internal_svc = Internal_http.service ~cfg ~clock in
@@ -77,8 +78,8 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
   let moderation_svc = Moderation_http.service ~cfg ~clock in
   let blossom_fd = Listen.bind ~host:cfg.public_ws_host ~port:cfg.blossom_http_port () in
   let blossom_svc = Blossom_http.service ~cfg ~clock in
-  log "listening: ws %s:%d (%d domains), internal http :%d, moderation http :%d, blossom :%d, admin %s:%d" cfg.public_ws_host cfg.public_ws_port
-    cfg.num_domains cfg.internal_http_port cfg.moderation_http_port cfg.blossom_http_port cfg.admin_host cfg.admin_port;
+  log "listening: ws %s:%d%s (%d domains), internal http :%d, moderation http :%d, blossom :%d, admin %s:%d" cfg.public_ws_host cfg.public_ws_port
+    (match cfg.cache_ws_port with Some p -> Printf.sprintf " + cache ws :%d" p | None -> "") cfg.num_domains cfg.internal_http_port cfg.moderation_http_port cfg.blossom_http_port cfg.admin_host cfg.admin_port;
   let admin_svc = Admin.service ~lifecycle ~stats ~cfg ~live ~bc in
 
   (* Worker domains: each imports the shared listening fd and runs its own accept loop. *)
@@ -91,15 +92,18 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
         init_domain_db ();
         let sock = Listen.import ~sw:dsw public_fd in
         let isock = Listen.import ~sw:dsw internal_fd in
-        Fiber.both
-          (fun () -> Http_server.serve_on ~sw:dsw ~clock ~stop public_svc sock; Eio.Net.close sock)
-          (fun () -> Http_server.serve_on ~sw:dsw ~clock ~stop internal_svc isock; Eio.Net.close isock))
+        let csock = Option.map (Listen.import ~sw:dsw) cache_fd in
+        Fiber.all
+          ([ (fun () -> Http_server.serve_on ~sw:dsw ~clock ~stop public_svc sock; Eio.Net.close sock);
+             (fun () -> Http_server.serve_on ~sw:dsw ~clock ~stop internal_svc isock; Eio.Net.close isock) ]
+          @ (match csock with Some c -> [ (fun () -> Http_server.serve_on ~sw:dsw ~clock ~stop public_svc c; Eio.Net.close c) ] | None -> [])))
   in
   let main_domain () =
     Switch.run @@ fun msw ->
     Postgres.set_env ~net ~sw:msw;
     init_domain_db ();
     let sock = Listen.import ~sw:msw public_fd in
+    let csock = Option.map (Listen.import ~sw:msw) cache_fd in
     let admin_sock = Listen.import ~sw:msw admin_fd in
     let isock = Listen.import ~sw:msw internal_fd in
     let modsock = Listen.import ~sw:msw moderation_fd in
@@ -119,13 +123,14 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
         `Stop_daemon);
     Lifecycle.serving lifecycle;
     Fiber.all
-      [
-        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock; Eio.Net.close sock);
-        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop internal_svc isock; Eio.Net.close isock);
-        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop moderation_svc modsock; Eio.Net.close modsock);
-        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop blossom_svc blsock; Eio.Net.close blsock);
-        (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop admin_svc admin_sock);
-      ]
+      ([
+         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc sock; Eio.Net.close sock);
+         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop internal_svc isock; Eio.Net.close isock);
+         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop moderation_svc modsock; Eio.Net.close modsock);
+         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop blossom_svc blsock; Eio.Net.close blsock);
+         (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop admin_svc admin_sock);
+       ]
+      @ (match csock with Some c -> [ (fun () -> Http_server.serve_on ~sw:msw ~clock ~stop public_svc c; Eio.Net.close c) ] | None -> []))
   in
   (* Drain controller: runs CONCURRENTLY with the accept loops (their switches keep the connection
      fibers alive, so waiting for Fiber.all below would wait for every client to leave on its own).

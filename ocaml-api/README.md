@@ -209,6 +209,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 |---|---|---|
 | `servername` | `"wscm"` | answered by `server_name` (ws-connector `--servername`) |
 | `public_ws_host` / `public_ws_port` | `"0.0.0.0"` / `9006` | the cache API WebSocket (9001 in production) |
+| `cache_ws_port` | `8817` or `null` | the Julia CacheServer port (8800+N): the same WebSocket service for health probes (`monitor-cache-server.sh`) and cross-node calls; `null` while a Julia node holds it |
 | `admin_host` / `admin_port` | `"127.0.0.1"` / `14006` | admin HTTP (below) |
 | `num_domains` | `4` | worker domains; each runs an accept loop on the shared SO_REUSEPORT socket |
 | `upstream_julia_ws` | `"ws://127.0.0.1:8817"` | fallback proxy target for everything not handled natively |
