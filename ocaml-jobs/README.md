@@ -83,6 +83,18 @@ every Julia/blossom-created node matching the Julia-style hash and every Rust-cr
 sorted-key hash. First hour: all claimed queues at 0 pending; failures are download errors (403/404/
 timeouts) as before. `<tmp>/cache/procgraph` is shared with the blossom server.
 
+**Blossom (2026-10-05 11:03 UTC):** blossom.primal.net (<media-host>:27018) is served by the OCaml unit
+`primal-ocaml-blossom-<ts>` (`rebuild-restart-blossom.sh`, config `primal-blossom-config.json` =
+the jobs config with roles `["blossom"]`, admin 14013, plus the `blossom` object taken from the Rust
+server's config); the Rust `primal_blossom_server` and its `run.sh` loop were stopped once both
+answered on 27018. Verified on the shadow (27099, same databases and storage) before the swap:
+welcome/HEAD/GET/404/400 answers identical to the Rust server, the QA user's `/list` identical
+(1173 items), an upload through `/upload` and one through `/media` (EXIF comment stripped, row in
+`media_metadata_stripping`) stored, listed, processed by `import_upload_3` within seconds and
+deleted through `purge_media_` (404 on both servers after the 60 s cache). Rollback: stop the OCaml
+unit, then in `<config-dir>/primal-blossom-server`
+`CONFIG_FILE=<config-dir>/primal-blossom-server-config.json sh ./run.sh target/release/primal_blossom_server`.
+
 ## Cutover state on <stage-host> (2026-10-04)
 
 Julia node 18 no longer runs: the DAG runner (`DAGRunner.stop()`), the DVM feed checker, the
