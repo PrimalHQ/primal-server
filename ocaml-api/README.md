@@ -262,6 +262,15 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `cloudflare` | `{"zone_id","api_key"}` or `null` | cache purge of the cloudflare providers' domains |
 | `media_paths` | `[{"type":"local","label","root"} \| {"type":"s3","provider","label"}]` | the roots a purge walks (`Media.MEDIA_PATHS(_2)`); `label` is the media_storage provider name |
 
+## Request log on <stage-host> (stage.primal.net)
+
+Since 2026-10-05 17:10 UTC the API records every request (`wsconnvars.metrics_logging_min_request_duration = 0`;
+the ws-connector default was 2.0 s, i.e. slow calls only) to `$PRIMAL_VAR_DIR/metrics-wsconn.log`, the
+input format of `primalctl replay`. stage.primal.net is <edge-proxy>'s nginx proxying `/` to <stage-host>:9001 and `/api` to
+<stage-host>:14017, so this is the stage webapp's traffic. To replay a day against <julia-host>'s Julia:
+`primalctl replay $PRIMAL_VAR_DIR/metrics-wsconn.log --a ws://127.0.0.1:9001 --b ws://<julia-host>:8831 --all --report /tmp/r.jsonl`.
+Restore the threshold with `update wsconnvars set value = '2.0' where name = 'metrics_logging_min_request_duration'`.
+
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
 `GET /healthz`, `GET /readyz` (503 unless serving — the load balancer / restart script gate),
