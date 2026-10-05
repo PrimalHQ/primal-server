@@ -28,7 +28,7 @@ loginctl enable-linger "${USER:-$(id -un)}" 2>/dev/null || true
 mkdir -p "$(dirname "$LOG")"
 unit="$UNIT_PREFIX-$(date +%Y%m%d%H%M%S)"
 systemd-run --user --collect --unit="$unit" --description="Primal Blossom server (primal-jobs role blossom)" \
-  -p RestartSec=5 -p OOMPolicy=kill -p StartLimitIntervalSec=0 -p LimitNOFILE=65536 \
+  -p Restart=on-failure -p RestartSec=5 -p OOMPolicy=kill -p StartLimitIntervalSec=0 -p LimitNOFILE=65536 \
   -p MemoryAccounting=yes -p MemoryHigh="${PRIMAL_BLOSSOM_MEMHIGH:-20G}" -p MemoryMax="${PRIMAL_BLOSSOM_MEMMAX:-24G}" \
   -p "Environment=MALLOC_ARENA_MAX=${PRIMAL_MALLOC_ARENA_MAX:-2}" \
   -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" -p "WorkingDirectory=$P" \
