@@ -100,7 +100,7 @@ let parse_mimetype (ctx : Procgraph.ctx) (data : string) : string =
     let mt = String.trim r.stdout in
     if r.status = 0 && mt <> "" then mt else "application/octet-stream"
 
-let re_dims = Str.regexp ", \\([0-9]+\\) ?x ?\\([0-9]+\\)\\(, \\|$\\)"
+let re_dims = Re.compile (Re.seq [ Re.str ", "; Re.group (Re.rep1 Re.digit); Re.opt (Re.char ' '); Re.char 'x'; Re.opt (Re.char ' '); Re.group (Re.rep1 Re.digit); Re.alt [ Re.str ", "; Re.eol ] ])
 
 (* (width, height, duration) *)
 let parse_image_dimensions (ctx : Procgraph.ctx) (data : string) : (int * int * float) option =
@@ -114,7 +114,7 @@ let parse_image_dimensions (ctx : Procgraph.ctx) (data : string) : (int * int * 
   | None ->
       Proc.with_tmp_file data (fun path ->
           let r = Proc.run ~proc_mgr:ctx.proc_mgr ~clock:ctx.clock ~timeout:60.0 [ "file"; path ] in
-          let from_file = if r.status = 0 then (try ignore (Str.search_forward re_dims r.stdout 0); Some (int_of_string (Str.matched_group 1 r.stdout), int_of_string (Str.matched_group 2 r.stdout), 0.0) with Not_found -> None) else None in
+          let from_file = if r.status = 0 then (match Re.exec_opt re_dims r.stdout with Some g -> Some (int_of_string (Re.Group.get g 1), int_of_string (Re.Group.get g 2), 0.0) | None -> None) else None in
           match from_file with
           | Some d -> Some d
           | None -> (

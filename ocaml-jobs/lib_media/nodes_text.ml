@@ -17,10 +17,15 @@ let text_query (ctx : ctx) ?(model = "llama3.1") ~(num_predict : int) (query : s
   | Some s -> s
   | None -> fail "no chat response"
 
+let re_nostr = Re.compile (Re.seq [ Re.opt (Re.str "nostr:"); Re.str "nostr1"; Re.rep1 (Re.alt [ Re.rg 'a' 'z'; Re.digit ]) ])
+let re_url = Re.compile (Re.seq [ Re.str "http"; Re.opt (Re.char 's'); Re.str "://"; Re.rep1 (Re.compl [ Re.set " \t\n" ]) ])
+let re_hashtag = Re.compile (Re.seq [ Re.char '#'; Re.rep1 (Re.compl [ Re.set " \t\n" ]) ])
+let re_ws = Re.compile (Re.rep1 (Re.set " \t\n\r"))
+
 let clean_text (t : string) : string =
-  let t = Str.global_replace (Str.regexp "\\(nostr:\\)?nostr1[a-z0-9]+") " " t in
-  let t = Str.global_replace (Str.regexp "https?://[^ \t\n]+") " " t in
-  Str.global_replace (Str.regexp "#[^ \t\n]+") " " t
+  let t = Re.replace_string re_nostr ~by:" " t in
+  let t = Re.replace_string re_url ~by:" " t in
+  Re.replace_string re_hashtag ~by:" " t
 
 let utf8_prefix (s : string) (n : int) : string =
   (* first n code points *)
@@ -35,7 +40,7 @@ let utf8_prefix (s : string) (n : int) : string =
   done;
   Buffer.contents b
 
-let words s = List.filter (( <> ) "") (Str.split (Str.regexp "[ \t\n\r]+") s)
+let words s = List.filter (( <> ) "") (Re.split re_ws s)
 let categories = [ "art"; "bitcoin"; "finance"; "food"; "fun and memes"; "gaming"; "health and fitness"; "human rights"; "music"; "news"; "nostr"; "philosophy"; "photography"; "podcasts"; "primal"; "sports"; "tech"; "travel" ]
 
 let import_text_event_pn (ctx : ctx) (n : node) : Pgj.t =

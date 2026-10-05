@@ -119,16 +119,29 @@ end
 include Dns_client.Make (Transport)
 
 (* Nameservers from /etc/resolv.conf (e.g. "nameserver 8.8.8.8"), falling back to the library
-   defaults. Parsed per call — the file is tiny and rarely changes. *)
+   defaults. Dns_resolvconf.parse is an ocamlyacc parser over Stdlib.Parsing's GLOBAL state: two
+   domains parsing at once corrupt it (SIGSEGV in List.rev_append under Parsing.loop, seen on the
+   media host 2026-10-05), so the parse runs under a mutex and its result is cached until the
+   file's mtime changes. *)
+let ns_mutex = Mutex.create ()
+let ns_cache : (float * (Ipaddr.t * int) list) option ref = ref None
+
 let system_nameservers () : (Ipaddr.t * int) list =
-  let parsed =
-    try
-      match Dns_resolvconf.parse (In_channel.with_open_text "/etc/resolv.conf" In_channel.input_all) with
-      | Ok l -> List.map (fun (`Nameserver ip) -> (ip, 53)) l
-      | Error _ -> []
-    with _ -> []
-  in
-  match parsed with [] -> List.map (fun ip -> (ip, 53)) Dns_client.default_resolvers | l -> l
+  let mtime = try (Unix.stat "/etc/resolv.conf").Unix.st_mtime with _ -> 0.0 in
+  Mutex.protect ns_mutex (fun () ->
+      match !ns_cache with
+      | Some (t, l) when t = mtime -> l
+      | _ ->
+          let parsed =
+            try
+              match Dns_resolvconf.parse (In_channel.with_open_text "/etc/resolv.conf" In_channel.input_all) with
+              | Ok l -> List.map (fun (`Nameserver ip) -> (ip, 53)) l
+              | Error _ -> []
+            with _ -> []
+          in
+          let l = match parsed with [] -> List.map (fun ip -> (ip, 53)) Dns_client.default_resolvers | l -> l in
+          ns_cache := Some (mtime, l);
+          l)
 
 let timeout_ns = 5_000_000_000L (* 5s budget per attempt, well under https_get's 10s *)
 

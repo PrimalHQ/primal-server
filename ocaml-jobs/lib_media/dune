@@ -6,4 +6,4 @@
  (public_name primal_jobs.media)
  (flags
   (:standard -w -33-26-27 -open Primal_common))
- (libraries primal_common unix str eio eio.unix yojson digestif.c base64))
+ (libraries primal_common unix re eio eio.unix yojson digestif.c base64 mirage-crypto-rng.unix))

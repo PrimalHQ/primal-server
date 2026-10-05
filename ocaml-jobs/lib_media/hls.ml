@@ -118,8 +118,8 @@ let s3_list_keys (ctx : ctx) (sp : S3.provider) ~(prefix : string) : string list
   let auth = S3.authorization sp ~now ~meth:"GET" ~path ~query ~headers ~payload_hash in
   match Http.request ~net:ctx.net ~clock:ctx.clock ~timeout:30.0 ~meth:"GET" ~headers:(("Authorization", auth) :: List.filter (fun (k, _) -> k <> "host") headers) ~max_redirects:0 (sp.endpoint ^ path ^ "?" ^ S3.canonical_query query) with
   | Some r when r.status = 200 ->
-      let re = Str.regexp "<Key>\\([^<]*\\)</Key>" in
-      let rec all pos acc = match Str.search_forward re r.body pos with i -> all (i + 1) (Str.matched_group 1 r.body :: acc) | exception Not_found -> List.rev acc in
+      let re = Re.compile (Re.seq [ Re.str "<Key>"; Re.group (Re.rep (Re.compl [ Re.char '<' ])); Re.str "</Key>" ]) in
+      let all _pos _acc = List.map (fun g -> Re.Group.get g 1) (Re.all re r.body) in
       all 0 []
   | Some r -> fail "S3 list failed: HTTP %d" r.status
   | None -> fail "S3 list failed"

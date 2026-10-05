@@ -48,6 +48,7 @@ let run (ctx : ctx) ~(stop : unit Promise.t) : unit =
         Eio.Domain_manager.run ctx.domain_mgr (fun () ->
             Switch.run @@ fun dsw ->
             Postgres.set_env ~net:ctx.net ~sw:dsw;
+            Mirage_crypto_rng_unix.use_default ();
             let wctx = { ctx with cache = Postgres.make_pool ~size:cfg.worker_pool_size ctx.cache.Postgres.ci; mem = Postgres.make_pool ~size:3 ctx.mem.Postgres.ci } in
             Fiber.all
               (List.init worker_fibers (fun _ () ->
