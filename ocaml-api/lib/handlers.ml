@@ -1257,10 +1257,8 @@ let get_notifications (ctx : ctx) (kw : Kw.t) : outcome =
                  (`Assoc [ ("pubkey", `String pk); ("followers_count", i64json (Option.value (List.assoc_opt pk counts) ~default:0L)) ])))
           pks
       in
-      let enriched =
-        if posts = [] then []
-        else Queries.enrich_events_at c ~event_ids_json:(Queries.hexes_json posts) ~t:(now ()) ~user_pubkey ~apply_humaness_check:false
-      in
+      (* Julia enriches even an empty list: the SQL emits the (empty) elements message *)
+      let enriched = Queries.enrich_events_at c ~event_ids_json:(Queries.hexes_json posts) ~t:(now ()) ~user_pubkey ~apply_humaness_check:false in
       let found, cards = user_cards c pks in
       Handled (messages (msgs @ profiles @ enriched @ cards @ verified_names c found)))
 
@@ -1379,9 +1377,9 @@ let scored_content (ctx : ctx) (a : scored_args) : string list option =
         let posts_json =
           Yojson.Safe.to_string (`List (List.map (fun (r : Queries.scored_row) -> `List [ `String (hex r.s_event_id); `Int (Int64.to_int r.s_value) ]) posts))
         in
-        if a.pg then Some (if posts = [] then [] else Queries.enrich_posts c ~posts_json ~user_pubkey:a.user_pubkey ~apply_humaness_check:a.humaness)
+        if a.pg then Some (Queries.enrich_posts c ~posts_json ~user_pubkey:a.user_pubkey ~apply_humaness_check:a.humaness)
         else begin
-          let msgs = if posts = [] then [] else Queries.enrich_posts c ~posts_json ~user_pubkey:a.user_pubkey ~apply_humaness_check:false in
+          let msgs = Queries.enrich_posts c ~posts_json ~user_pubkey:a.user_pubkey ~apply_humaness_check:false in
           let msgs = List.filter (fun m -> match kind_and_pubkey m with Some k, _ when k = Kind.range -> false | _ -> true) msgs in
           Some (msgs @ [ range_msg ~order_by:(Queries.scored_field_name field) (List.map (fun (r : Queries.scored_row) -> (hex r.s_event_id, r.s_value)) posts) ])
         end)
@@ -1911,7 +1909,7 @@ let posts_json (posts : (string * int) list) = Yojson.Safe.to_string (`List (Lis
 
 (* enrich_feed_events_pg over (hex, created_at) posts *)
 let enrich_pg (c : Db.cache Db.conn) ~user_pubkey (posts : (string * int64) list) : string list =
-  if posts = [] then [] else Queries.enrich_posts c ~posts_json:(posts_json (List.map (fun (h, t) -> (h, Int64.to_int t)) posts)) ~user_pubkey ~apply_humaness_check:false
+  Queries.enrich_posts c ~posts_json:(posts_json (List.map (fun (h, t) -> (h, Int64.to_int t)) posts)) ~user_pubkey ~apply_humaness_check:false
 
 (* "!contentmoderationdemofeed:<name>": a canned feed from the content-moderation repo *)
 let demo_feed (ctx : ctx) ~user_pubkey (query : string) : outcome =
@@ -1936,7 +1934,7 @@ let demo_feed (ctx : ctx) ~user_pubkey (query : string) : outcome =
             | _ -> raise (Kw.Invalid "demo feed"))
         | _ -> []
       in
-      let msgs = if posts = [] then [] else with_cache ctx (fun c -> Queries.enrich_posts c ~posts_json:(posts_json posts) ~user_pubkey:(Some user_pubkey) ~apply_humaness_check:false) in
+      let msgs = with_cache ctx (fun c -> Queries.enrich_posts c ~posts_json:(posts_json posts) ~user_pubkey:(Some user_pubkey) ~apply_humaness_check:false) in
       let notes, rest = List.partition (fun m -> match kind_and_pubkey m with Some 1, _ -> true | _ -> false) msgs in
       let notes =
         List.map
@@ -2992,7 +2990,7 @@ let feed_2 (ctx : ctx) (kw : Kw.t) : outcome =
               let enrich posts =
                 let posts = List.stable_sort (fun (_, a) (_, b) -> if order = "asc" then compare a b else compare b a) posts |> List.filteri (fun i _ -> i < limit) in
                 let posts_json = Yojson.Safe.to_string (`List (List.map (fun (e, t) -> `List [ `String e; `Int (Int64.to_int t) ]) posts)) in
-                let msgs = if posts = [] then [] else Queries.enrich_posts c ~posts_json ~user_pubkey ~apply_humaness_check:false in
+                let msgs = Queries.enrich_posts c ~posts_json ~user_pubkey ~apply_humaness_check:false in
                 Handled (messages (msgs @ [ range_msg ~order_by:"created_at" posts ]))
               in
               match notes with

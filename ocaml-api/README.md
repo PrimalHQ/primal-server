@@ -271,6 +271,14 @@ input format of `primalctl replay`. stage.primal.net is <edge-proxy>'s nginx pro
 `primalctl replay $PRIMAL_VAR_DIR/metrics-wsconn.log --a ws://127.0.0.1:9001 --b ws://<julia-host>:8831 --all --report /tmp/r.jsonl`.
 Restore the threshold with `update wsconnvars set value = '2.0' where name = 'metrics_logging_min_request_duration'`.
 
+**Stage replay 2026-10-05 (same data, shadow 9009 over <julia-host>'s DB vs Julia 8831):** the stage webapp's 99
+requests of one page load were 81 % identical; the differences were `get_notifications` with no results
+(fixed: the SQL enrichment now runs on an empty list too, emitting the empty elements message as Julia),
+`get_recommended_reads` (three random articles on both sides), `explore_legend_counts` (`all_users`, known),
+`live_events_from_follows` (<julia-host>'s older Julia lacks it) and the empty-spec `multi_kind_mega_feed_directive`
+poll (both sides answer a notice: "invalid spec format" here, "error" there). `explore_media` takes 2–9 s on
+<stage-host>'s database against 0.6 s on <julia-host>'s with the same code: a <stage-host> data/plan matter, not the port.
+
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
 `GET /healthz`, `GET /readyz` (503 unless serving — the load balancer / restart script gate),
