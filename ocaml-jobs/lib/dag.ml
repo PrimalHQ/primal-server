@@ -49,10 +49,14 @@ let coverages (dbh : Postgres.dbh) ~(cov : string) : (int * int) list =
 (* The end of the contiguous coverage of every current node (every name under T.cov of a table in
    T.all), the smallest of them: nothing is uncovered before it, so a restarted runner can begin
    there instead of walking from dag_since through years of covered segments. A hole in a node's
-   coverage (a failed segment behind covered ones) stops that node's frontier at the hole. *)
+   coverage (a failed segment behind covered ones) stops that node's frontier at the hole; the
+   nodes with a bounded lookback are left out. *)
 let coverage_frontier (dbh : Postgres.dbh) : int option =
   let rows = [%pgsql dbh "select name, t, t2 from coverages_1_8656fc443b order by name, t"] in
-  let current name = List.exists (fun t -> String.starts_with ~prefix:(T.cov t) name) T.all in
+  (* nodes with their own lookback (advsearch 30 d, note_length 15 d, note_stats 30 d, update_user_search
+     3 d) never cover history contiguously and bound themselves anyway *)
+  let full_history = List.filter (fun t -> t <> T.advsearch && t <> T.note_length && t <> T.note_stats && t <> T.coverages) T.all in
+  let current name = List.exists (fun t -> String.starts_with ~prefix:(T.cov t) name) full_history in
   let by_name = Hashtbl.create 32 in
   List.iter (fun (name, t, t2) -> if current name then Hashtbl.replace by_name name ((Int64.to_int t, Int64.to_int t2) :: (try Hashtbl.find by_name name with Not_found -> []))) rows;
   Hashtbl.fold
