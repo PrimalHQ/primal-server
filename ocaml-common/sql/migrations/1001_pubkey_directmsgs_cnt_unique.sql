@@ -1,6 +1,6 @@
 -- pubkey_directmsgs_cnt: one row per (receiver, sender), NULL sender = the receiver's total.
 -- The importer's former select-then-insert upkeep raced between worker domains and left duplicate
--- rows (7,490 on <stage-host> by 2026-10-06); their multi-row updates deadlocked and stalled every worker
+-- rows (7,490 on the stage host by 2026-10-06); their multi-row updates deadlocked and stalled every worker
 -- on one hot receiver during a backfill. Merge duplicates (sum of counts, newest latest_at and its
 -- event id), then the unique index the importer's upsert (ON CONFLICT (receiver, sender)) infers.
 -- Idempotent: nothing to merge and the index already present are both no-ops.

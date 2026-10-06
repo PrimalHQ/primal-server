@@ -91,7 +91,8 @@
           # Membership DB (Julia :membership). Used at runtime by the dev tools; membership-table
           # queries are compile-time checked against the local schema-only clone
           # primal_membership_ref (sql/membership-refdb-setup.sh) via per-directory dune env.
-          PGMEMBERSHIPHOST = "<membership-db-host>";
+          # The host is deployment-specific: export PGMEMBERSHIPHOST in the environment (the code
+          # falls back to PGHOST).
           PGMEMBERSHIPPORT = "5432";
           PGMEMBERSHIPDATABASE = "primal";
           PGMEMBERSHIPUSER = "primal";

@@ -11,7 +11,7 @@
 # Schema only: no data is copied. Re-run whenever the membership schema changes.
 set -euo pipefail
 
-FROM_HOST=<membership-db-host>  FROM_PORT=5432   FROM_USER=primal  FROM_DB=primal
+FROM_HOST="${PRIMAL_MEMBERSHIP_HOST:?set PRIMAL_MEMBERSHIP_HOST to the membership Postgres host}"  FROM_PORT=5432   FROM_USER=primal  FROM_DB=primal
 TO_HOST=127.0.0.1       TO_PORT=54017    TO_USER=pr        TO_DB=primal_membership_ref
 
 echo "rebuilding $TO_DB on $TO_HOST:$TO_PORT (drop + recreate)"

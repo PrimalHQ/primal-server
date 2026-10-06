@@ -172,12 +172,12 @@ to bucket2 and deleted, Cloudflare cache purge, the media_storage/media_uploads/
 marked) and `/pre-sign-urls`; `Primal_common.S3` is a SigV4 client (check, delete, copy, upload,
 get, pre-signed GET; the AWS documentation vector is a unit test). Blossom is not part of primal-api: production serves blossom.primal.net from the media host (`ocaml-jobs` role `blossom`, a port of primal-blossom-server).
 
-**Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
+**Cutover A (2026-10-04 09:45 UTC, host the stage host):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in a tmux pane from its own checkout) is
 stopped (its tmux pane ran a relaunch loop: the first stop was followed by a silent respawn that
 shared 9001 with primal-api for 48 minutes; the loop was interrupted at 10:32 — check
 `ss -ltnp | grep :9001` after every change). This host's 9001 is the endpoint used by dev.primal.net (about two thousand connections in
-five days, one at a time), not one of the public cache hosts of `deploy.sh` (<production-host>, <production-host>, <production-host>), so
+five days, one at a time), not one of the public cache hosts of `deploy.sh` (the three production API hosts), so
 it is the low-risk first host of the plan's one-week soak (until 2026-10-11). `cutover-9001.sh` is
 the script that was run; its header has the rollback (restore the config backup, roll back to 9006,
 relaunch ws-connector with its original command line). Soak check: a reference ws-connector runs on 9007 (transient user unit
@@ -188,13 +188,13 @@ the 3a funcalls, which mirror ws-connector by design). Known gap: primal-api
 does not read `/tmp/wsconn_blocked`, the flag `deploy.sh` sets while it restarts Julia; proxied
 funcalls fail for that window, native ones keep working.
 
-**Phase 10 on <stage-host> (2026-10-05 00:13 UTC):** the production binary here is the private build
+**Phase 10 on the stage host (2026-10-05 00:13 UTC):** the production binary here is the private build
 `ocaml-ext/bin/primal_apid.exe` (`PRIMAL_EXE=... ./rebuild-restart-api.sh`; `ext.crash_report_file`
 set, no Studio on this host). Julia API node 17 is retired (its `m1_cache.sh` loop in tmux pane 0:0.0
 was killed, then `["EVAL","exit()"]` on 12017); `primal-api` now also binds its ports: `cache_ws_port`
 8817 (the same WebSocket service; `user_infos` probes answer), `internal_http_port` 14017,
 `moderation_http_port` 24017 (the Blossom listener 21017 was dropped on 2026-10-05: Blossom is the media host's service, `ocaml-jobs` role `blossom`). The few funcalls still proxied (uploads,
-membership purchase/status, wallet) go to <julia-host>'s Julia node (`upstream_julia_ws`
+membership purchase/status, wallet) go to the Julia host's Julia node (`upstream_julia_ws`
 ws://<julia-host>:8831, `upstream_julia_http` http://<julia-host>:14031/api). The ws-connector
 shadows on 9005 and 9007 are stopped (their upstream was node 17). Replay before the switch (12 per
 funcall, 696 requests, new binary vs ws-connector→Julia): 92.4 % identical, every difference a known
@@ -202,7 +202,7 @@ one (`get_notifications`, `get_featured_dvm_feeds`, live counters, two slow-feed
 node-17 quirk (`explore_legend_counts` all_users = 2; `follow_lists` wrapped in an
 `event_media_response` object). Rollback: restore `primal-api-config.json.bak-20261005000625-pre-phase10`,
 start `bash ../m1_cache.sh` again in a tmux pane, rerun the restart script. The public hosts
-(<production-host>/<production-host>/<production-host>) and <julia-host> keep Julia + ws-connector by decision.
+(<production-host>/<production-host>/a production host) and the Julia host keep Julia + ws-connector by decision.
 
 ## Build / run
 
@@ -234,10 +234,10 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `drain_grace_s` / `drain_ws_max_s` | `30.0` / `900.0` | rolling restart: idle WS closed at once, active after grace, all by the hard deadline |
 | `status_interval_s` | `10.0` | status line period (0 = off) |
 | `log_handled` / `log_not_handled` | `false` | per-request log lines (ws-connector `--log-handled` / `--log-not-handled`) |
-| `request_concurrency` | `8` on <stage-host> | REQs of one connection handled at once. `1` = strictly in order like ws-connector and Julia, where one slow feed delays every later answer on that socket (a profile header waited 10 s behind the reads feed). >1 runs REQs in fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages stay in order). |
-| `anon_feed_cache_s` | `30.0` on <stage-host> | `mega_feed_directive` / `multi_kind_mega_feed_directive` pages answered for the anonymous default pubkey are reused for this long (`0` = off; one computation per key, concurrent misses wait for it; `/status` shows hits/misses/entries). Every logged-out visitor asks the identical feeds on every route. |
+| `request_concurrency` | `8` on the stage host | REQs of one connection handled at once. `1` = strictly in order like ws-connector and Julia, where one slow feed delays every later answer on that socket (a profile header waited 10 s behind the reads feed). >1 runs REQs in fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages stay in order). |
+| `anon_feed_cache_s` | `30.0` on the stage host | `mega_feed_directive` / `multi_kind_mega_feed_directive` pages answered for the anonymous default pubkey are reused for this long (`0` = off; one computation per key, concurrent misses wait for it; `/status` shows hits/misses/entries). Every logged-out visitor asks the identical feeds on every route. |
 | `cache_db` / `membership_db` | `{host,port,user,database}` | per-domain PGOCaml pools (cache: statement_timeout 30 s) |
-| `cache_pool_size` / `membership_pool_size` | `4` / `2` | connections per worker domain (<stage-host> runs `cache_pool_size` 16 since 2026-10-05 20:44: a logged-in page load fires ~20 REQs at once and the reads feed held all 4) |
+| `cache_pool_size` / `membership_pool_size` | `4` / `2` | connections per worker domain (the stage host runs `cache_pool_size` 16 since 2026-10-05 20:44: a logged-in page load fires ~20 REQs at once and the reads feed held all 4) |
 | `content_moderation_root` | path | `default-settings.json`, `app-releases.json` (mtime-cached) |
 | `primal_pubkey` | hex | default `user_pubkey` for handlers (ws-connector constant) |
 | `request_log` | path or `null` | JSONL `{t,time,funcall,kwargs,ws,subid}` of handled requests slower than `wsconnvars.metrics_logging_min_request_duration`, when `metrics_logging_enabled` (the replay corpus format) |
@@ -264,22 +264,22 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `cloudflare` | `{"zone_id","api_key"}` or `null` | cache purge of the cloudflare providers' domains |
 | `media_paths` | `[{"type":"local","label","root"} \| {"type":"s3","provider","label"}]` | the roots a purge walks (`Media.MEDIA_PATHS(_2)`); `label` is the media_storage provider name |
 
-## Request log on <stage-host> (stage.primal.net)
+## Request log on the stage host (stage.primal.net)
 
 Since 2026-10-05 17:10 UTC the API records every request (`wsconnvars.metrics_logging_min_request_duration = 0`;
 the ws-connector default was 2.0 s, i.e. slow calls only) to `$PRIMAL_VAR_DIR/metrics-wsconn.log`, the
-input format of `primalctl replay`. stage.primal.net is <edge-proxy>'s nginx proxying `/` to <stage-host>:9001 and `/api` to
-<stage-host>:14017, so this is the stage webapp's traffic. To replay a day against <julia-host>'s Julia:
+input format of `primalctl replay`. stage.primal.net is the edge proxy's nginx proxying `/` to <stage-host>:9001 and `/api` to
+<stage-host>:14017, so this is the stage webapp's traffic. To replay a day against the Julia host's Julia:
 `primalctl replay $PRIMAL_VAR_DIR/metrics-wsconn.log --a ws://127.0.0.1:9001 --b ws://<julia-host>:8831 --all --report /tmp/r.jsonl`.
 Restore the threshold with `update wsconnvars set value = '2.0' where name = 'metrics_logging_min_request_duration'`.
 
-**Stage replay 2026-10-05 (same data, shadow 9009 over <julia-host>'s DB vs Julia 8831):** the stage webapp's 99
+**Stage replay 2026-10-05 (same data, shadow 9009 over the Julia host's DB vs Julia 8831):** the stage webapp's 99
 requests of one page load were 81 % identical; the differences were `get_notifications` with no results
 (fixed: the SQL enrichment now runs on an empty list too, emitting the empty elements message as Julia),
 `get_recommended_reads` (three random articles on both sides), `explore_legend_counts` (`all_users`, known),
-`live_events_from_follows` (<julia-host>'s older Julia lacks it) and the empty-spec `multi_kind_mega_feed_directive`
+`live_events_from_follows` (the Julia host's older Julia lacks it) and the empty-spec `multi_kind_mega_feed_directive`
 poll (both sides answer a notice: "invalid spec format" here, "error" there). `explore_media` takes 2–9 s on
-<stage-host>'s database against 0.6 s on <julia-host>'s with the same code: a <stage-host> data/plan matter, not the port.
+the stage host's database against 0.6 s on the Julia host's with the same code: a the stage host data/plan matter, not the port.
 
 **Headless-browser check 2026-10-05 (the "empty home / no trending / empty reads" report):** the API
 answered every replayed request correctly, yet the webapp against stage rendered nothing. Driving the real
@@ -298,56 +298,56 @@ acceptance check for a cutover.
 
 **Logged-in walk 2026-10-05 20:00 (QA user via `NSEC_FILE`, pages home/reads/explore/notifications/messages/
 bookmarks):** every page renders against stage as against cache2; the 253 requests of the walk replayed on the
-same data (shadow 9009 over <julia-host>'s DB vs Julia 8831) are 91.7 % identical, the rest being the trending feed's
-drifting follower-count batches, `get_recommended_reads` (random), `live_events_from_follows` (<julia-host>'s Julia)
+same data (shadow 9009 over the Julia host's DB vs Julia 8831) are 91.7 % identical, the rest being the trending feed's
+drifting follower-count batches, `get_recommended_reads` (random), `live_events_from_follows` (the Julia host's Julia)
 and `get_notifications` differing only in the one-second `since/until` stamp. Two stage-only observations are
-data, not the port: stage's notifications start with live-stream notifications (type 501) because <stage-host>'s
-Julia pg listener keeps writing them (8934 rows for the QA user, 1–4 a day; <julia-host>'s stopped 2025-09-24),
+data, not the port: stage's notifications start with live-stream notifications (type 501) because the stage host's
+Julia pg listener keeps writing them (8934 rows for the QA user, 1–4 a day; the Julia host's stopped 2025-09-24),
 and a logged-in home/reads page load fires ~20 REQs at once, so the reads feed's windowed search (6–11 s on
-<stage-host> with `until` paging) holds the 4-connection pool and trivial calls queue behind it for up to 15 s
+the stage host with `until` paging) holds the 4-connection pool and trivial calls queue behind it for up to 15 s
 (`get_app_settings` 15.7 s, `get_featured_dvm_feeds` 19 s on /explore); same requests alone: 0.1–3 s.
 With `cache_pool_size` 16 (20:44) the rerun shows no queueing: home feed 0.4 s (was 9.8 s), settings calls
 0.2–0.7 s, /explore timings equal to production's (6–8 s there too), no pool timeouts. What remains is the reads
-feed query itself on <stage-host>'s database: 1.4–9.2 s for the same request, and the `until` pages hit the 9 s
+feed query itself on the stage host's database: 1.4–9.2 s for the same request, and the `until` pages hit the 9 s
 window deadline and come back partial (88 events, page 2 unanswered) where production answers in 1.3 s; on
-<julia-host>'s data the OCaml and Julia timings are equal (1.95 s vs 1.99 s), so it is <stage-host>'s plan/data.
+the Julia host's data the OCaml and Julia timings are equal (1.95 s vs 1.99 s), so it is the stage host's plan/data.
 EXPLAIN of one window (`primalctl advsearch-sql <user> "kind:30023 scope:myfollowsinteractions minwords:100
 features:summary" <since> <until>` → `explain (analyze, buffers) declare cur no scroll cursor for ...`): the plan
 is the same on both hosts (reads by published_at backwards, advsearch by id per row, the scope subplans), 98 ms
-warm / 2.7 s cold on <stage-host> for a 64 h window, 170 ms on <julia-host>. The time goes into the number of windows: <stage-host>
-imported no kind-30023 events between early August and 2026-09-29 (0 per sampled hour vs 60–420 on <julia-host>), so
-its `reads` table has 20 articles for that month against <julia-host>'s 83k; the search walks back through the empty
+warm / 2.7 s cold on the stage host for a 64 h window, 170 ms on the Julia host. The time goes into the number of windows: the stage host
+imported no kind-30023 events between early August and 2026-09-29 (0 per sampled hour vs 60–420 on the Julia host), so
+its `reads` table has 20 articles for that month against the Julia host's 83k; the search walks back through the empty
 weeks (window 1h→4h→…→4096h) and the last, 170-day window eats the 9 s deadline. Not the port: the fix is to
-import the missing long-form events into <stage-host> (the DAG's reads node covers by imported_at and will pick them up).
+import the missing long-form events into the stage host (the DAG's reads node covers by imported_at and will pick them up).
 Done 2026-10-06 01:30–02:35 UTC with `ocaml-importer/tools/backfill-events.py` (kind 30023, created_at
-2026-07-13..2026-09-30 from <julia-host> through the import listener): 274,902 imported, 6,221 duplicates, 1,719
-rejected; the DAG's reads node filled the weeks within minutes (<stage-host>'s weekly `reads` counts now equal <julia-host>'s).
-After it (cache warm) the QA user's reads page answers in 2.0 s / page 2 in 1.8 s on <stage-host>, as on <julia-host>'s Julia
+2026-07-13..2026-09-30 from the Julia host through the import listener): 274,902 imported, 6,221 duplicates, 1,719
+rejected; the DAG's reads node filled the weeks within minutes (the stage host's weekly `reads` counts now equal the Julia host's).
+After it (cache warm) the QA user's reads page answers in 2.0 s / page 2 in 1.8 s on the stage host, as on the Julia host's Julia
 (2.1 / 2.0 s); the first cold runs still took 5–9 s while the freshly written rows were read from disk.
-**The gap is wider than long-form:** <stage-host> imported no events of ANY kind between about 2026-07-11 and
-2026-09-29 (0 per sampled noon hour vs 25k on <julia-host>; 538k in the 2026-07-10 hour, then nothing until 142k on
+**The gap is wider than long-form:** the stage host imported no events of ANY kind between about 2026-07-11 and
+2026-09-29 (0 per sampled noon hour vs 25k on the Julia host; 538k in the 2026-07-10 hour, then nothing until 142k on
 09-30). Notes, profiles, reactions, zaps and relay lists of those eleven weeks are missing on the stage host,
-which is why its feed answers carry fewer profile/relay-list messages than <julia-host>'s for the same request. A full
+which is why its feed answers carry fewer profile/relay-list messages than the Julia host's for the same request. A full
 backfill is ~100M events and needs a database-level copy, not the import listener (~60 events/s).
 
-**Concurrent requests per connection (2026-10-06 03:26, <stage-host> `request_concurrency` 8):** the webapp opens a
+**Concurrent requests per connection (2026-10-06 03:26, the stage host `request_concurrency` 8):** the webapp opens a
 socket per route and asks for the home and reads feeds before the page's own calls, and ws-connector/Julia
 answer in order, so a profile header waited 10 s behind the reads feed on stage. `Conn` now runs REQs in
 fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages stay in order). Same socket,
-reads feed first then the five profile calls: <stage-host> answers the profile calls at 0.06 s and the feed at 0.97 s;
+reads feed first then the five profile calls: the stage host answers the profile calls at 0.06 s and the feed at 0.97 s;
 Julia answers nothing before the feed (1.17 s) and the profile calls at 1.24–1.49 s.
 
-**Anonymous feed cache (2026-10-06 03:37, <stage-host> `anon_feed_cache_s` 30):** the anonymous reads feed answers in
+**Anonymous feed cache (2026-10-06 03:37, the stage host `anon_feed_cache_s` 30):** the anonymous reads feed answers in
 0.9 s once per 30 s and 0.1 s for every other logged-out visitor in between (`/status` → `anon_feed_cache`
 hits/misses); logged-in feeds are untouched. Fresh entries are answered inline on the reader, without a
 `request_concurrency` slot, so a hit is not queued behind the page's burst (03:43: the reads page's feed answered
-in 0.2 s instead of 1.1 s). The first `until`-paged reads pages for the anonymous network are still slow on <stage-host>
+in 0.2 s instead of 1.1 s). The first `until`-paged reads pages for the anonymous network are still slow on the stage host
 (cold windows), the cache only removes the repeats; the TTL runs from the computation, hits do not extend it.
 
 **Profile media tab (2026-10-06):** the webapp's media grid asks `mega_feed_directive` with spec
 `{"id":"feed","kind":"notes","notes":"user_media_thumbnails","pubkey":…}`; `feed_with` knew only follows/authored/
 replies and forwarded it to the Julia upstream (which never compresses: 499 KB per page instead of 141 KB, and
-stage depended on <julia-host> for it). It now goes to the native `feed_2`; the four-request media corpus is identical
+stage depended on the Julia host for it). It now goes to the native `feed_2`; the four-request media corpus is identical
 to Julia on the same data. A page is 449 messages for 20 thumbnails (media metadata 177 KB, zap receipts 152 KB,
 profiles 58 KB raw); a thumbnails-only enrichment would need a client-side opt-in, so it is not done.
 

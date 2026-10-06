@@ -16,7 +16,7 @@ type t = {
   archive_enabled : bool;
   relays_dir : string; (* directory of relays-active.txt, relays.txt, relays-paid.txt, relays-mined-*.txt (Fetching.load_relays) *)
   relays_file : string option; (* PRIMALSERVER_RELAYS: use this list instead of relays_dir *)
-  extra_relays : string list; (* start_fetcher.jl: ws://<internal-relay-host>:7777 *)
+  extra_relays : string list; (* start_fetcher.jl: the internal relay *)
   no_proxy_relays : string list; (* relays connected directly even when proxy is set *)
   proxy : (string * int) option; (* PRIMALSERVER_PROXY socks5h://host:port *)
   proxy_url : string option; (* the same, verbatim, for the message envelope *)

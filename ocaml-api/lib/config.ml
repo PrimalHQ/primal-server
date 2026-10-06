@@ -36,7 +36,7 @@ type t = {
   log_not_handled : bool;
   (* Phase 3: native funcalls *)
   cache_db : Postgres.conninfo; (* 127.0.0.1:54017/primal1 *)
-  membership_db : Postgres.conninfo; (* <membership-db-host>:5432/primal *)
+  membership_db : Postgres.conninfo; (* the membership Postgres (Julia :membership) *)
   cache_pool_size : int; (* per domain; ws-handlers used 16 process-wide *)
   membership_pool_size : int;
   content_moderation_root : string; (* default-settings.json, app-releases.json, ... *)

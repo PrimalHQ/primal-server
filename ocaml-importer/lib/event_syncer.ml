@@ -137,7 +137,7 @@ let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.connin
 (* {1 Backfill}
 
    Replay one peer's event table over a past imported_at range into the import queue: the repair
-   for a node that imported nothing for a while (<stage-host>, 2026-07-11..09-29). Keyset pagination on
+   for a node that imported nothing for a while (the stage host, 2026-07-11..09-29). Keyset pagination on
    (imported_at, id) — event_imported_at_id_idx on the peer — in batches of [batch] rows, each
    batch submitted in created_at order (parents before replies, as the live syncer does); the
    bounded worker queue applies the backpressure (Eio.Stream.add blocks when it is full). The

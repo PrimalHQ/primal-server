@@ -86,7 +86,7 @@ rebuild-restart-fetcher.sh   build + stop-then-start as systemd --user unit prim
 - `Ws_client` now shrinks its read buffer after a frame over 64 KB (otherwise each long-lived
   connection kept its largest frame's buffer forever).
 
-## Shadow comparison and cutover (<stage-host>, 2026-10-04)
+## Shadow comparison and cutover (the stage host, 2026-10-04)
 
 Shadow run (port 9027, own state/archive dirs, `since = now`) next to the Julia fetcher,
 `firehose_tap` on both for the same 180 s:

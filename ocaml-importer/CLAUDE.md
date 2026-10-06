@@ -89,6 +89,6 @@ Julia importer node (double decrements) — see README → Phase 1.
   one upsert statement (migration `ocaml-common/sql/migrations/1001_*`); apply such migrations before
   building, the `[%pgsql]` `ON CONFLICT` check needs the index.
 - Gap repair: `event_sync_backfill` in the config (or `tools/backfill-events.py` for one kind) replays a
-  peer's `event` table into the import queue, ~2–4k events/s on <stage-host>, resumable from its state file. Set
+  peer's `event` table into the import queue, ~2–4k events/s on the stage host, resumable from its state file. Set
   the key back to `null` and restart when `backfill: done` is logged. The DAG lags behind such a burst
   (bounded windows, see ocaml-jobs) and catches up afterwards.

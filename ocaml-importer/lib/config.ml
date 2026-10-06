@@ -106,7 +106,7 @@ let from_env () : t =
       (match getenv "IMPORTER_EVENT_SYNC_REMOTES" with
       | Some s when String.trim s <> "" ->
           String.split_on_char ',' s |> List.map String.trim |> List.filter (fun h -> h <> "")
-      | _ -> [ "<peer-host>"; "<media-host>"; "<peer-host>"; "<julia-host>" ]);
+      | _ -> [] (* the peers are deployment-specific: the JSON config names them *));
     event_sync_interval = float_env "IMPORTER_EVENT_SYNC_INTERVAL" 60.0;
     event_sync_overlap = int_env "IMPORTER_EVENT_SYNC_OVERLAP" 600;
     event_sync_backfill = None;

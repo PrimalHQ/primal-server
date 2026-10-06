@@ -46,7 +46,7 @@ third and later ones unanswered until the peer's next bytes; `test/test_common.m
 Headless browser for end-to-end checks of the API against the real webapp: `nix shell nixpkgs#chromium`
 and `python3.withPackages (p: [p.playwright])` with `PLAYWRIGHT_BROWSERS_PATH` set to
 `playwright-driver.browsers` (both from the nixos-25.11 binary cache); the webapp takes its cache server
-from `localStorage.cacheServer` (`wss://stage.primal.net/v1` → <stage-host>), so a page script that sets it in
+from `localStorage.cacheServer` (`wss://stage.primal.net/v1` → the stage host), so a page script that sets it in
 `add_init_script`, loads primal.net/home, scrolls, and records every WebSocket frame (zlib `EVENTS`
 frames decompress with `zlib.decompress`) sees exactly what a user's browser sees.
 

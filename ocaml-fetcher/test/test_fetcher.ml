@@ -25,7 +25,7 @@ let julia_float () =
 
 let resume_dir () =
   Alcotest.(check string) "escaping" "/s/wss___relay_damus_io" (Resume.relay_dir ~state_dir:"/s" "wss://relay.damus.io");
-  Alcotest.(check string) "escaping 2" "/s/ws___192_168_18_7_7777" (Resume.relay_dir ~state_dir:"/s" "ws://<internal-relay-host>:7777")
+  Alcotest.(check string) "escaping 2" "/s/ws___10_0_0_5_7777" (Resume.relay_dir ~state_dir:"/s" "ws://10.0.0.5:7777")
 
 let private_hosts () =
   Alcotest.(check bool) "192.168" true (Relay_url.private_ipv4_host "10.0.0.2");

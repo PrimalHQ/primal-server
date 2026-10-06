@@ -56,7 +56,7 @@ type t = {
   hls_processing_timeout_s : float;
   media_paths : paths; (* Media.MEDIA_PATHS *)
   media_paths_2 : paths; (* Media.MEDIA_PATHS_2 *)
-  ai_host : string; (* <ai-host>: ollama 11434, classifiers 5012.., features 5013/5014 *)
+  ai_host : string; (* the AI host: ollama 11434, classifiers 5012.., features 5013/5014 *)
   ai_timeout_s : float;
   blossom_host : string; (* media_import_2 returns BLOSSOM_HOST/<file> *)
   ffmpeg_remote_host : string option;

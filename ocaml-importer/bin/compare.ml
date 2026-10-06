@@ -1,6 +1,6 @@
 (* Verification tool (plan milestone 6): diff recent rows in the importer's relevant tables
    between the LOCAL Postgres (this host's OCaml importer) and a REMOTE one (the Julia importer,
-   default <julia-host>, same port/credentials/dbname — override host with COMPARE_HOST).
+   COMPARE_HOST, required; same port/credentials/dbname unless COMPARE_* override them).
 
    Both importers consume the same firehose, so recent rows should match closely; larger diffs
    flag bugs to fix. We window on the event's created_at (intrinsic and identical across both,

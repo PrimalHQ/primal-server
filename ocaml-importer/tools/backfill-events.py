@@ -1,9 +1,10 @@
-# backfill-events.py START END [batch] [step_hours]: pull kind-30023 events from a peer cache DB (<julia-host>) by
+# backfill-events.py START END [batch] [step_hours]: pull kind-30023 events from a peer cache DB (PRIMAL_BACKFILL_REMOTE) by
 # created_at window and push them through this host's import listener (["IMPORT", [events]] lines on
 # 127.0.0.1:12118); the DAG re-covers by imported_at, so derived tables (reads, ...) follow. Idempotent.
-# Used 2026-10-06 to backfill <stage-host>'s missing long-form events of 2026-07-13..09-30 (274,902 imported,
+# Used 2026-10-06 to backfill the stage host's missing long-form events of 2026-07-13..09-30 (274,902 imported,
 # 1,719 rejected by the importer gate, ~60 events/s with three parallel date ranges).
-import sys, json, socket, subprocess, time, datetime
+import sys, json, socket, subprocess, time, datetime, os
+REMOTE = os.environ.get("PRIMAL_BACKFILL_REMOTE") or sys.exit("set PRIMAL_BACKFILL_REMOTE to the peer cache DB host")
 start = datetime.datetime.fromisoformat(sys.argv[1]).replace(tzinfo=datetime.timezone.utc)
 end = datetime.datetime.fromisoformat(sys.argv[2]).replace(tzinfo=datetime.timezone.utc)
 batch = int(sys.argv[3]) if len(sys.argv) > 3 else 200
@@ -22,7 +23,7 @@ t = start
 while t < end:
     t0 = time.time()
     s, u = int(t.timestamp()), int((t + step).timestamp())
-    out = subprocess.run(["psql", "-h", "<julia-host>", "-p", "54017", "-U", "pr", "primal1", "-At", "-c", "set statement_timeout=120000", "-c", SQL % (s, u)],
+    out = subprocess.run(["psql", "-h", REMOTE, "-p", "54017", "-U", "pr", "primal1", "-At", "-c", "set statement_timeout=120000", "-c", SQL % (s, u)],
                          capture_output=True, text=True)
     if out.returncode != 0: print("psql failed", t, out.stderr[:200], flush=True); sys.exit(1)
     evs = [json.loads(l) for l in out.stdout.split("\n") if l.startswith("{")]

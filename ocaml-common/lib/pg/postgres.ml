@@ -143,13 +143,13 @@ let membership_conninfo () =
   }
 
 (* Remote DB for verification (bin/compare.ml): the Julia importer's Postgres. Defaults to the
-   local port/credentials with only the host differing (default <julia-host>), but each field can
+   local port/credentials with only the host differing (COMPARE_HOST, required), but each field can
    be overridden independently with COMPARE_* since the Julia box often uses a different database
    name (e.g. primal1) than the local reference DB. *)
 let remote_conninfo () =
   let c = cache_conninfo () in
   {
-    host = Option.value (getenv_opt "COMPARE_HOST") ~default:"<julia-host>";
+    host = (match getenv_opt "COMPARE_HOST" with Some h -> h | None -> failwith "COMPARE_HOST (the Julia host's Postgres) is not set");
     port = (match getenv_opt "COMPARE_PORT" with Some p -> int_of_string p | None -> c.port);
     user = Option.value (getenv_opt "COMPARE_USER") ~default:c.user;
     database = Option.value (getenv_opt "COMPARE_DATABASE") ~default:c.database;

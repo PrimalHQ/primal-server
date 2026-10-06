@@ -747,7 +747,7 @@ let import_directmsg (est : est) (e : Nostr.t) : unit =
         ignore [%pgsql dbh "insert into pubkey_directmsgs_1_c794110a2c (receiver, sender, created_at, event_id) values ($receiver, $sender, $created_at, $event_id)"];
       (* pubkey_directmsgs_cnt: one row per (receiver, null) and (receiver, sender), kept with a
          single upsert over the unique index (receiver, sender) NULLS NOT DISTINCT. The former
-         select-then-insert dance raced between workers (7,490 duplicate rows on <stage-host> by
+         select-then-insert dance raced between workers (7,490 duplicate rows on the stage host by
          2026-10-06) and its multi-row updates then deadlocked, stalling every worker on one hot
          receiver during the backfill. *)
       let bump (sender : string option) =

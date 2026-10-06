@@ -106,7 +106,7 @@ let pr u = Option.map (fun (a, b, c, d) -> ((a, b), (c, d))) (Relay_broadcast.pa
 
 let test_relay_url () =
   Alcotest.check relay_url_t "wss default" (Some ((true, "relay.primal.net"), (443, "/"))) (pr "wss://relay.primal.net");
-  Alcotest.check relay_url_t "ws with port and path" (Some ((false, "<internal-relay-host>"), (7777, "/x"))) (pr "ws://<internal-relay-host>:7777/x");
+  Alcotest.check relay_url_t "ws with port and path" (Some ((false, "10.0.0.5"), (7777, "/x"))) (pr "ws://10.0.0.5:7777/x");
   Alcotest.check relay_url_t "trailing slash" (Some ((true, "nos.lol"), (443, "/"))) (pr "wss://nos.lol/");
   Alcotest.check relay_url_t "http rejected" None (pr "https://x.y")
 

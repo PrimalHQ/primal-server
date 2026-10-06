@@ -6,7 +6,7 @@
 #   PRIMAL_JOBS_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-jobs-config.json, see below)
 #   PRIMAL_JOBS_MEMMAX  systemd MemoryMax (default 10G; the media role on the media host runs with 30G as primal-media did)
 #   PRIMAL_BUILD_PGHOST host whose DBs the [%pgsql] checks run against (a host whose local schema
-#                       differs from <stage-host>'s, e.g. the media host, builds with PRIMAL_BUILD_PGHOST=<stage-host>)
+#                       differs from the stage host's, e.g. the media host, builds with PRIMAL_BUILD_PGHOST=<stage-host>)
 set -euo pipefail
 ts() { date +%H:%M:%S; }
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"

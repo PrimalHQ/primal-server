@@ -464,7 +464,7 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
        over w seconds that took d seconds sets it to w * target / d, target 30 s, at most doubling,
        halved on failure, 10 s .. 1 h), and the window is then shrunk until it holds at most
        [max_events] events (an indexed count on event.imported_at): the nodes load a window's events
-       into memory and handle them one by one, so an import burst (the <stage-host> backfill, 4,000
+       into memory and handle them one by one, so an import burst (the stage host's backfill, 4,000
        events/s) must not hand them millions at once. Runs that finish within a second repeat
        back-to-back (up to 500 per tick) so covered history after a restart is skipped quickly. The
        lag behind now is logged; it shrinks whenever the nodes outrun the importer. *)
