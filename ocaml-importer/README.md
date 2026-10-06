@@ -23,7 +23,7 @@ Everything runs inside the shared `../ocaml-common` Nix flake (one dune workspac
 repo root, so `_build/` is `../_build`):
 
 ```sh
-P=<checkout>/ocaml-importer
+P=$(git rev-parse --show-toplevel)/ocaml-importer
 
 nix develop "path:$P/../ocaml-common"                       # interactive dev shell
 nix develop "path:$P/../ocaml-common" -c dune build @all    # build everything
@@ -149,7 +149,7 @@ The backfill surfaced two importer issues, both fixed on 2026-10-06: `pubkey_dir
 | `IMPORTER_STATS_FILE` | `<storage>/primalnode<report-node>/cache/db/stats.json` | Julia stats file the `cache_any` total is loaded from and persisted to. |
 | `IMPORTER_PUSHGATEWAY_INTERVAL` | `15` | Seconds between pushes. |
 | `IMPORTER_PUSH_NOTIFICATIONS` | `false` | Deliver device push notifications (APNS/FCM) via the sender subprocess (see [Push notifications](#notifications)). |
-| `IMPORTER_PUSH_NOTIFICATION_SENDER_BIN` | `<parent-checkout>/push-notification-sender/target/release/push-notification-sender` | The push-notification-sender binary (JSON lines over stdin/stdout). |
+| `IMPORTER_PUSH_NOTIFICATION_SENDER_BIN` | `<parent repo>/push-notification-sender/target/release/push-notification-sender` (resolved relative to the binary) | The push-notification-sender binary (JSON lines over stdin/stdout). |
 | `IMPORTER_PUSH_NOTIFICATIONS_PERIOD` | `5` | Seconds between push transmission batches (Julia `PERIOD`). |
 | `IMPORTER_PUSH_NOTIFICATIONS_LOG` | `false` | Dump each sender request/response JSON to stdout (Julia `LOG`). |
 | `PRIMALSERVER_REPORT_NODE_IDX` | `18` | Reporting node identity for the two defaults above (distinct from the firehose node `NODE_IDX`). |

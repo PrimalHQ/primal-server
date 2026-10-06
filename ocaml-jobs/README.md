@@ -56,7 +56,7 @@ Log: `$PRIMAL_VAR_DIR/ocaml-jobs.log`.
 |---|---|---|
 | `port` | `27018` | the listener (SO_REUSEPORT; the rolling restart overlaps generations) |
 | `base_url`, `media_server_url` | `https://blossom.primal.net`, `https://media.primal.net` | blob URLs in answers; storage URLs |
-| `local_storages` | `{"<media-host>a": "<cdn root>"}` | storage_provider name -> root; every upload is written to each |
+| `local_storages` | `{"<provider>": "<cdn root>"}` | storage_provider name -> root; every upload is written to each |
 | `media_serving_dir` | `<cdn root>` | where `media_server_url` serves from on this host: a file missing there is served through the ssh fallback |
 | `ssh_fallback_host`, `ssh_fallback_remote_base`, `ssh_fallback_timeout_s` | `sbox`, `/home/cdn`, `300` | `ssh host cat base+relpath`, sha256-verified; unset = redirect only |
 | `log_db` | `{host, port, user, database}` or absent | the `log` table for PUT request logging |
@@ -91,7 +91,7 @@ carried from the example file; the <media-host> config now says 200.
 
 ## Cutover state on <media-host>, the media host (2026-10-04)
 
-The OCaml tree on <media-host> is the git worktree `<config-dir>/primal-server-ocaml5`
+The OCaml tree on <media-host> is a git worktree of this repo (branch ocaml5)
 (branch fetched from <stage-host> over ssh into `refs/remotes/<stage-host>/ocaml5`); it builds with
 `PRIMAL_BUILD_PGHOST=<stage-host>` because the `[%pgsql]` checks need <stage-host>'s schema. The unit
 `primal-ocaml-jobs` there runs `roles: ["media"]` with `execute_funcs` = the Rust scheduler's list
@@ -104,7 +104,7 @@ is SIGSTOPped (`kill -CONT` it and it restarts the Rust scheduler — the rollba
 for (`Hooks.after_import_upload`, filled in Phase 9). Node ids: `media_tool check-ids` on <media-host> showed
 every Julia/blossom-created node matching the Julia-style hash and every Rust-created node the
 sorted-key hash. First hour: all claimed queues at 0 pending; failures are download errors (403/404/
-timeouts) as before. `<tmp>/cache/procgraph` is shared with the blossom server.
+timeouts) as before. The procgraph cache directory (`cache_dir`) is shared with the blossom server.
 
 **Blossom:** switched back to the Rust server on 2026-10-05 11:59 UTC at the user's request; it now
 runs as the user unit `primal-rust-blossom` (`run.sh` loop, `PATH` with the nix profile, log
@@ -121,8 +121,8 @@ welcome/HEAD/GET/404/400 answers identical to the Rust server, the QA user's `/l
 (1173 items), an upload through `/upload` and one through `/media` (EXIF comment stripped, row in
 `media_metadata_stripping`) stored, listed, processed by `import_upload_3` within seconds and
 deleted through `purge_media_` (404 on both servers after the 60 s cache). Rollback: stop the OCaml
-unit, then in `<config-dir>/primal-blossom-server`
-`CONFIG_FILE=<config-dir>/primal-blossom-server-config.json sh ./run.sh target/release/primal_blossom_server`.
+unit, then in the primal-blossom-server checkout
+`CONFIG_FILE=<its config> sh ./run.sh target/release/primal_blossom_server`.
 
 ## Cutover state on <stage-host> (2026-10-04)
 
@@ -130,7 +130,7 @@ Julia node 18 no longer runs: the DAG runner (`DAGRunner.stop()`), the DVM feed 
 TrustRank maker, the PG listener and `precalculate_analytics` (`unregister_cached_function`); the
 jobs daemon runs all five (`roles` in the config). The Julia API node 17 used to receive the DAG
 output table names from node 18 over rex after every run; `primalnode_config.jl` now includes
-`<config-dir>/dag_outputs_pinned.jl` (the last pushed value) so a Julia API restart
+`dag_outputs_pinned.jl` next to the configs (the last pushed value) so a Julia API restart
 keeps working. **Rollback** of any role: stop primal-jobs (or remove the role), then in the node 18
 REPL `DAGRunner.start()`, `DVMFeedChecker.start()`, `TrustRankMaker.start(cache_storage)`,
 `CacheStoragePgListener.start(cache_storage)`, `App.register_cache_function(:precalculate_analytics,

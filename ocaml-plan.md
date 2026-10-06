@@ -5,7 +5,7 @@ Status: proposal v2 (2026-10-03). Replaces the earlier `ocaml-api-plan.md` (rena
 End state: this repo contains OCaml, SQL, shell and config only. Every `.jl`, `.rs`, `Cargo.toml`,
 `Project.toml`, Python helper and the Julia nix flake are deleted. Clients and peers keep using the
 same ports and wire protocols. The reference stack is `ocaml-importer/` (already in production) and
-`<config-dir>/tsunami-backend-scheduler/kernel/` ("tsunami kernel"), which runs the same
+the tsunami-backend-scheduler kernel (a sibling checkout, "tsunami kernel"), which runs the same
 toolchain with httpun-eio/httpun-ws servers and script-driven rolling restarts (its task-queue
 framework is not adopted: background jobs keep their current loop-based design, §2.5).
 
@@ -94,7 +94,7 @@ shadow ws-connector :9005 running `ocaml-handlers`.
 | Studio (private repo) | `app_studio.jl` (197), `studio_event_broadcasting.jl` (93), `sql/studio.sql` (682), Rust `rss-content-importer/` (589) | per request / 1 s / 120 s | `studio_operation` funcall, `studio.scheduled_events` + `rss_feed_items` broadcasting, RSS drafts |
 | User content purger (private repo) | `user_content_purger.jl` (458) | HTTP :22000 | media purges, filterlist entries, Bunny purge |
 
-Production runtime config is **not in the repo**: `<config-dir>/primalnode_config*.jl`
+Production runtime config is **not in the repo**: `primalnode_config*.jl` next to the configs
 (pools, content-moderation files, keys, which subsystems start, `APP_ROOT`, DAG wiring,
 `REPORTING_WHITELIST` pubkeys). Media-host and wallet-host configs live on other hosts.
 
@@ -381,12 +381,12 @@ Logs: `[component]`-prefixed lines to stdout, appended by systemd to `$PRIMAL_VA
   "upstream_julia_ws": "ws://127.0.0.1:8817", "proxied_funcalls": [],
   "import_node": {"host":"127.0.0.1","port":12018}, "replicate_to": ["ws://<peer-host>:8831", ...],
   "search_upstream": "http://<search-host>:14017/api", "network_stats_url": null, "stats_file": "...",
-  "content_moderation_root": "<config-dir>/content-moderation",
+  "content_moderation_root": "<content-moderation checkout>",
   "index_dirs": {"primal.net": "/var/www/dev.primal.net", ...},
   "media": {"paths": ..., "paths_2": ..., "url_root": ..., "blossom_base_url": ..., "download_proxies": [...],
             "s3_providers": {...}, "cloudflare": {...}, "bunny": {...}},
   "drain": {"grace_s": 30, "ws_max_s": 900}, "idle_connection_timeout_s": 600, "max_subscriptions": 200,
-  "request_timeout_s": 10.0, "pushgateway": {...}, "request_log": "$PRIMAL_VAR_DIR/metrics-wsconn.log" }
+  "request_timeout_s": 10.0, "pushgateway": {...}, "request_log": "<var dir>/metrics-wsconn.log" }
 ```
 Secrets (`algos_user` nsec, DVM requester key, S3 keys, Cloudflare/Bunny keys, DVM salt) are file
 paths, never inline (tsunami convention). `primalnode_config*.jl` values are migrated in Phase 0.
@@ -839,7 +839,7 @@ kernel; until then the `wallet*` funcalls proxy to it via `wallet.upstream`.
   blossom auth, SigV4 vectors, node-id hash vectors, `for_mentiones`, langid accuracy, drain state
   machine, dedup set, relay URL sanitising.
 - **Golden replay** (`primalctl replay`, port of `ws-replay`): corpus
-  `<config-dir>/requests-sample-2.jsonl` (~42k requests), canonical JSON diff per
+  the 42k-request sample corpus (`requests-sample-2.jsonl`, outside the repo), canonical JSON diff per
   funcall, allow-list for nondeterministic funcalls. Gate ≥ 99.5 % per funcall before flipping it.
 - **Job parity**: for every DAG node/analytics key, a `compare` tool diffs rows produced by Julia
   (peer host DB) and OCaml (local) over the same segment, like the importer's `compare`.
@@ -859,7 +859,7 @@ Sizes are relative effort. Each phase ends with its parity gate.
 
 | Phase | Deliverable | Gate | Size |
 |---|---|---|---|
-| **0** Workspace + `ocaml-common` (**done 2026-10-03**) | dune-workspace, flake, extraction §4.1, tsunami modules imported (ws_client, pg_listen, pool semantics; httpd and the richer http client follow in Phase 2 where they are first needed), membership ref DB script, `migrate.sh`, `primalnode_config*.jl` → `ocaml-common/config/primalnode-snapshot.json` (redacted; per-daemon JSON configs are written when each daemon's `Config.t` exists) | importer rebuilt on ocaml-common and redeployed, parity unchanged; `dune build @all` + `dune test` green | M |
+| **0** Workspace + `ocaml-common` (**done 2026-10-03**) | dune-workspace, flake, extraction §4.1, tsunami modules imported (ws_client, pg_listen, pool semantics; httpd and the richer http client follow in Phase 2 where they are first needed), membership ref DB script, `migrate.sh`, `primalnode_config*.jl` → `ocaml-ext/config/primalnode-snapshot.json` (private repo) (redacted; per-daemon JSON configs are written when each daemon's `Config.t` exists) | importer rebuilt on ocaml-common and redeployed, parity unchanged; `dune build @all` + `dune test` green | M |
 | **1** Importer completion (**code done 2026-10-03**; cutover flags pending) | §7.1 gaps: `expire_scores` (flag `expire_scores_enabled`), `update_user_search`, `update_content_moderation_rules` + live-event notify, `add_human_override`/`get_trusted_followers_count`, ws-importer writes (live events with proof verification, follow packs, zap invoices, live mute lists); §7.2 import listener (`import_listener_port`, 12118 while Julia node 18 holds 12018) with per-event DAG indexers (`dag_index.ml`) and reply broadcasting (`Relay_broadcast`); Julia `App.IMPORT_EVENTS_LINE_SERVER` switch | `score_expiry` drains; hook decrements match Julia hosts; `import_events` from the Julia API node routed to the listener works | S/M |
 | **2** Server kernel + lifecycle (**done 2026-10-04**) | `Http_server` (httpun-eio/gluten/httpun-ws; bounded outbound queue, size caps), `Listen` (one SO_REUSEPORT fd shared by N domains), `Lifecycle` (blocked signals + `Thread.wait_signal`, §6.3; concurrent drain controller), admin endpoint, `rebuild-restart-api.sh` (generations as transient units), `primalctl req/status/metrics/drain` (replay follows with Phase 3's parity work); `primal-api` on **9006** (9005 is taken by the ocaml-handlers shadow) answering `server_name`/`set_primal_protocol` natively and proxying the rest to Julia 8817 exactly like ws-connector (`set_primal_protocol` not forwarded, zlib for native answers only) | drain under load verified (20 clients: idle closed at once, active after 30 s grace, clients reconnect to the new generation, old exits); zlib frames inflate to the identical body (byte identity with ws-connector is impossible: flate2 emits stored blocks where zlib compresses; Julia uses zlib) | M |
 | **3** Replace ws-connector (**3a done 2026-10-04**, **3b done 2026-10-04**; 3c pending) | 3a: the 17 ws-connector funcalls, live-event subscriptions (poll + LISTEN), `wsconnvars`, request log — identical to ws-connector on the compare set. 3b: the `ocaml-handlers` catalogue whose SQL exists in primal1 — 32 more funcall names native (48 in `Funcall.t`), `Moderation` = port of `content_moderation_filtering_2` (incl. the default rules for requests without `user_pubkey`); 52/54 identical to Julia, the rest documented in `ocaml-api/README.md` (ocaml-handlers SQL was wrong in four places and was replaced by plain statements; what stays proxied and why is listed there). 3c: `primalctl replay` (done 2026-10-04: corpus → A/B multiset compare, per-funcall table, mismatch report; read-only funcalls only) measured 7.2k real requests at 99.6 % identical with every native funcall ≥ 99.0 % and the residue classified in `ocaml-api/README.md` (deliberate deviations, moving counters, Julia partial responses); cutover A done 2026-10-04 on <stage-host> (the dev.primal.net endpoint; ws-connector 9001 stopped, `ocaml-api/cutover-9001.sh`), soak until 2026-10-11, then the public cache hosts <production-host>/<production-host>/<production-host> | replay ≥ 99.5 % per native funcall; one week on one host | L |
@@ -922,7 +922,7 @@ host, and after a final grep of all databases for `pg_primal` functions and `plp
   `sql/` (functions split into `ocaml-common/sql/migrations`, dumps kept as reference),
   `pgfuncs1.sql`, `multikindfeed-index.sql` (as migrations), `adv-search-queries.json` (tests),
   `docs/`, `TRENDING-BOOSTING-ANALYSIS.md`.
-- `<config-dir>/ocaml-handlers` and `tr_sorted.jls` retired; `primalnode_config*.jl`
+- the `ocaml-handlers` checkout and `tr_sorted.jls` retired; `primalnode_config*.jl`
   replaced by the JSON configs.
 - Parent repo (`primal-net-server`, after Phase 9): `src/*.jl`, `ext/*.jl`, `start_*.jl`, `load*.jl`,
   `*.jl` at root, `Project.toml`/`Manifest.toml`, `studio/` (Rust stub), `rss-content-importer/`

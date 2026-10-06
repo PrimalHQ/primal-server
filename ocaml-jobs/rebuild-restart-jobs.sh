@@ -3,7 +3,7 @@
 # roles are singletons, two generations must not run their loops concurrently).
 #   PRIMAL_EXE          the binary to run (default the public primal_jobsd.exe; the private build is
 #                       $ROOT/_build/default/ocaml-ext/bin/primal_jobsd.exe)
-#   PRIMAL_JOBS_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-jobs-config.json)
+#   PRIMAL_JOBS_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-jobs-config.json, see below)
 #   PRIMAL_JOBS_MEMMAX  systemd MemoryMax (default 10G; the media role on the media host runs with 30G as primal-media did)
 #   PRIMAL_BUILD_PGHOST host whose DBs the [%pgsql] checks run against (a host whose local schema
 #                       differs from <stage-host>'s, e.g. the media host, builds with PRIMAL_BUILD_PGHOST=<stage-host>)
@@ -11,10 +11,15 @@ set -euo pipefail
 ts() { date +%H:%M:%S; }
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$P/.." && pwd -P)"
+# Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
+# in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
+# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
 COMMON="$ROOT/ocaml-common"
 EXE="${PRIMAL_EXE:-$ROOT/_build/default/ocaml-jobs/bin/primal_jobsd.exe}"
-CONFIG="${PRIMAL_JOBS_CONFIG:-$PRIMAL_CONFIG_DIR/primal-jobs-config.json}"
-LOG="$PRIMAL_VAR_DIR/ocaml-jobs.log"
+CONFIG="${PRIMAL_JOBS_CONFIG:-$CONFIG_DIR/primal-jobs-config.json}"
+LOG="$VAR_DIR/ocaml-jobs.log"
 UNIT=primal-ocaml-jobs
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 echo "$(ts) building (dune build @all) ..." >&2

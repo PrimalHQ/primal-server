@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # Rebuild primal-fetcher and restart it as a transient systemd --user service (stop-then-start:
 # one fetcher per state directory — two would fight over the resume files and double the firehose).
-#   PRIMAL_FETCHER_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-fetcher-config.json)
+#   PRIMAL_FETCHER_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-fetcher-config.json, see below)
 #   PRIMAL_MALLOC_ARENA_MAX  glibc malloc arena cap (default 2: with the glibc default of 8 x cores the
 #                       fetcher sat at 7.5 GB RSS for 16.6k relays, with 2 arenas at 3.6 GB; see README)
 set -euo pipefail
 ts() { date +%H:%M:%S; }
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$P/.." && pwd -P)"
+# Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
+# in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
+# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
 COMMON="$ROOT/ocaml-common"
 EXE="${PRIMAL_EXE:-$ROOT/_build/default/ocaml-fetcher/bin/primal_fetcherd.exe}"
-CONFIG="${PRIMAL_FETCHER_CONFIG:-$PRIMAL_CONFIG_DIR/primal-fetcher-config.json}"
-LOG="$PRIMAL_VAR_DIR/ocaml-fetcher.log"
+CONFIG="${PRIMAL_FETCHER_CONFIG:-$CONFIG_DIR/primal-fetcher-config.json}"
+LOG="$VAR_DIR/ocaml-fetcher.log"
 UNIT=primal-ocaml-fetcher
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 echo "$(ts) building (dune build @all) ..." >&2

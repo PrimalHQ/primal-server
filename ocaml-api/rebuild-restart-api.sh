@@ -7,18 +7,23 @@
 # A broken build, a missing config or a new generation that does not become ready leaves the
 # running one untouched.
 #
-#   PRIMAL_API_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-api-config.json)
+#   PRIMAL_API_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-api-config.json, see below)
 #   PRIMAL_EXE         binary to run (default this workspace's build; ocaml-ext overrides it)
 set -euo pipefail
 ts() { date +%H:%M:%S; }
 
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$P/.." && pwd -P)"
+# Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
+# in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
+# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
 COMMON="$ROOT/ocaml-common"
 EXE="${PRIMAL_EXE:-$ROOT/_build/default/ocaml-api/bin/primal_apid.exe}"
-CONFIG="${PRIMAL_API_CONFIG:-$PRIMAL_CONFIG_DIR/primal-api-config.json}"
-LOG="$PRIMAL_VAR_DIR/ocaml-api.log"
-PIDFILE="$PRIMAL_VAR_DIR/ocaml-api.pid"
+CONFIG="${PRIMAL_API_CONFIG:-$CONFIG_DIR/primal-api-config.json}"
+LOG="$VAR_DIR/ocaml-api.log"
+PIDFILE="$VAR_DIR/ocaml-api.pid"
 UNIT_PREFIX=primal-ocaml-api
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 

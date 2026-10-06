@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild the importer with dune and, if the build succeeds, (re)start main.exe as a transient
-# systemd --user service logging to $PRIMAL_VAR_DIR/ocaml-importer.log.
+# systemd --user service logging to $PRIMAL_VAR_DIR/ocaml-importer.log (default $PRIMAL_VAR_DIR).
 #
 # Why a systemd service (not the old `setsid ... &`): it puts main.exe in its OWN cgroup with
 # memory accounting (so its RSS is attributed to it, not lumped into the shared tmux scope that the
@@ -25,12 +25,17 @@ P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # The repo root is the dune workspace (see ../dune-workspace): _build lives there, and the toolchain
 # dev shell is ocaml-common's flake (shared by every OCaml project in the repo).
 ROOT="$(cd -- "$P/.." && pwd -P)"
+# Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
+# in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
+# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
 COMMON="$ROOT/ocaml-common"
 EXE="$ROOT/_build/default/ocaml-importer/bin/main.exe"
 # All runtime settings come from this JSON file; override the path with IMPORTER_CONFIG.
-CONFIG="${IMPORTER_CONFIG:-$PRIMAL_CONFIG_DIR/primal-importer-config.json}"
-LOG="$PRIMAL_VAR_DIR/ocaml-importer.log"
-PIDFILE="$PRIMAL_VAR_DIR/ocaml-importer.pid"
+CONFIG="${IMPORTER_CONFIG:-$CONFIG_DIR/primal-importer-config.json}"
+LOG="$VAR_DIR/ocaml-importer.log"
+PIDFILE="$VAR_DIR/ocaml-importer.pid"
 UNIT=primal-ocaml-importer          # transient systemd --user unit name (-> $UNIT.service)
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"  # abs path: user manager PATH lacks nix
 

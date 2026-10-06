@@ -33,6 +33,11 @@ The dev shell exports `PG*` → `primal1` for the `[%pgsql]` ppx. Membership-tab
 against the local clone `primal_membership_ref` (`sql/membership-refdb-setup.sh`) via a per-directory
 dune `(env ...)`. `sql/migrate.sh` applies versioned migrations (`sql/migrations/README.md`).
 
+Deployment layout, shared by every `rebuild-restart-*.sh`: the daemons' JSON configs live outside the
+checkout in `PRIMAL_CONFIG_DIR` (default two directories above the repo root, next to the parent repo),
+logs, pid and state files in `PRIMAL_VAR_DIR` (default `$PRIMAL_VAR_DIR`); each script also takes
+its own `PRIMAL_*_CONFIG` override.
+
 `patches/` holds fixes to third-party OCaml packages applied in `flake.nix` through `overrideAttrs`:
 `httpun-ws-frame-queue.patch` (httpun-ws 0.2.0, same code on master): the server delivered only the head of
 its parsed-frame queue per socket read, so a client write carrying three or more WebSocket frames left the

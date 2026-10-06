@@ -8,10 +8,16 @@
 #       <checkout>/ocaml-fetcher/watchdog.sh
 #   PRIMAL_FETCHER_ADMIN  admin status URL (default from the config's admin_port)
 set -u
-CONFIG="${PRIMAL_FETCHER_CONFIG:-$PRIMAL_CONFIG_DIR/primal-fetcher-config.json}"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
+# in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
+# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
+CONFIG="${PRIMAL_FETCHER_CONFIG:-$CONFIG_DIR/primal-fetcher-config.json}"
 UNIT=primal-ocaml-fetcher
-STATE="$PRIMAL_VAR_DIR/fetcher-watchdog.state"
-LOG="$PRIMAL_VAR_DIR/fetcher-watchdog.log"
+STATE="$VAR_DIR/fetcher-watchdog.state"
+LOG="$VAR_DIR/fetcher-watchdog.log"
 port="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["admin_port"])' "$CONFIG")"
 url="${PRIMAL_FETCHER_ADMIN:-http://127.0.0.1:$port/status}"
 now="$(date '+%Y-%m-%d %H:%M:%S')"

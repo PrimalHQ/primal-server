@@ -2,7 +2,7 @@
 # Rebuild and roll the Blossom server (primal-jobs with roles ["blossom"]) as the Rust run.sh did:
 # the new generation binds the same port with SO_REUSEPORT, then the old one gets SIGTERM and
 # finishes its in-flight uploads (the daemon waits up to 60 s for its roles) before exiting.
-#   PRIMAL_BLOSSOM_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-blossom-config.json)
+#   PRIMAL_BLOSSOM_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-blossom-config.json, see below)
 #   PRIMAL_EXE             binary (default this workspace's primal_jobsd.exe; the ocaml-ext build also works)
 #   PRIMAL_BUILD_PGHOST    host for the [%pgsql] checks (see rebuild-restart-jobs.sh)
 #   PRIMAL_MALLOC_ARENA_MAX glibc arena cap (default 2)
@@ -10,10 +10,15 @@ set -euo pipefail
 ts() { date +%H:%M:%S; }
 P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$P/.." && pwd -P)"
+# Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
+# in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
+# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
 COMMON="$ROOT/ocaml-common"
 EXE="${PRIMAL_EXE:-$ROOT/_build/default/ocaml-jobs/bin/primal_jobsd.exe}"
-CONFIG="${PRIMAL_BLOSSOM_CONFIG:-$PRIMAL_CONFIG_DIR/primal-blossom-config.json}"
-LOG="$PRIMAL_VAR_DIR/ocaml-blossom.log"
+CONFIG="${PRIMAL_BLOSSOM_CONFIG:-$CONFIG_DIR/primal-blossom-config.json}"
+LOG="$VAR_DIR/ocaml-blossom.log"
 UNIT_PREFIX=primal-ocaml-blossom
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 echo "$(ts) building (dune build @all) ..." >&2

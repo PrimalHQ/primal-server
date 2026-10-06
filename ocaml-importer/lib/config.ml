@@ -124,9 +124,10 @@ let from_env () : t =
     push_notification_sender_bin =
       Option.value (getenv "IMPORTER_PUSH_NOTIFICATION_SENDER_BIN")
         ~default:
-          (Filename.concat
-             (Option.value (getenv "HOME") ~default:".")
-             "<config-dir>/primal-net-server/push-notification-sender/target/release/push-notification-sender");
+          ((* the sender is a sibling project of this repo in the parent checkout:
+              <repo>/_build/default/ocaml-importer/bin/main.exe -> <repo>/../push-notification-sender *)
+           let rec up n d = if n = 0 then d else up (n - 1) (Filename.dirname d) in
+           Filename.concat (up 5 Sys.executable_name) "push-notification-sender/target/release/push-notification-sender");
     push_notifications_period = float_env "IMPORTER_PUSH_NOTIFICATIONS_PERIOD" 5.0;
     push_notifications_log = bool_env "IMPORTER_PUSH_NOTIFICATIONS_LOG" false;
     cs =

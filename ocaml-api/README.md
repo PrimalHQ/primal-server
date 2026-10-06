@@ -173,7 +173,7 @@ marked) and `/pre-sign-urls`; `Primal_common.S3` is a SigV4 client (check, delet
 get, pre-signed GET; the AWS documentation vector is a unit test). Blossom is not part of primal-api: production serves blossom.primal.net from the media host (`ocaml-jobs` role `blossom`, a port of primal-blossom-server).
 
 **Cutover A (2026-10-04 09:45 UTC, host <stage-host>):** `primal-api` serves port 9001 on this host and the
-ws-connector that held it (started 2026-09-30 in tmux pane 0:19.1 from `<tmp>/ws-connector`) is
+ws-connector that held it (started 2026-09-30 in a tmux pane from its own checkout) is
 stopped (its tmux pane ran a relaunch loop: the first stop was followed by a silent respawn that
 shared 9001 with primal-api for 48 minutes; the loop was interrupted at 10:32 — check
 `ss -ltnp | grep :9001` after every change). This host's 9001 is the endpoint used by dev.primal.net (about two thousand connections in
@@ -216,7 +216,7 @@ nix develop "path:$C" -c dune test
 Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daemon) and
 `primalctl.exe` (operator CLI).
 
-## Configuration (`$PRIMAL_CONFIG_DIR/primal-api-config.json`, every key required)
+## Configuration (`$PRIMAL_CONFIG_DIR/primal-api-config.json`, the restart script's default; every key required)
 
 | Key | Example | Purpose |
 |---|---|---|
@@ -393,7 +393,7 @@ wrappers).
 primalctl req ws://127.0.0.1:9006 server_name                 # one request, frames printed until EOSE
 primalctl req ws://127.0.0.1:9006 user_infos '{"pubkeys":["<hex>"]}' --zlib   # zlib mode (frames inflated)
 primalctl status|metrics|drain [http://127.0.0.1:14006]
-primalctl replay $PRIMAL_CONFIG_DIR/requests-sample-2.jsonl --per-funcall 300 --workers 6 \
+primalctl replay <corpus.jsonl> --per-funcall 300 --workers 6 \
          --report mismatches.jsonl          # parity of 9006 against 9001 over a request corpus
 ```
 
