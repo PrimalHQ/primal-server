@@ -337,6 +337,11 @@ fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages s
 reads feed first then the five profile calls: <stage-host> answers the profile calls at 0.06 s and the feed at 0.97 s;
 Julia answers nothing before the feed (1.17 s) and the profile calls at 1.24–1.49 s.
 
+**Anonymous feed cache (2026-10-06 03:37, <stage-host> `anon_feed_cache_s` 30):** the anonymous reads feed answers in
+0.9 s once per 30 s and 0.1 s for every other logged-out visitor in between (`/status` → `anon_feed_cache`
+hits/misses); logged-in feeds are untouched. The first `until`-paged reads pages for the anonymous network are
+still slow on <stage-host> (cold windows), the cache only removes the repeats.
+
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
 `GET /healthz`, `GET /readyz` (503 unless serving — the load balancer / restart script gate),
