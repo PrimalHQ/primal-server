@@ -317,6 +317,9 @@ imported no kind-30023 events between early August and 2026-09-29 (0 per sampled
 its `reads` table has 20 articles for that month against <julia-host>'s 83k; the search walks back through the empty
 weeks (window 1h→4h→…→4096h) and the last, 170-day window eats the 9 s deadline. Not the port: the fix is to
 import the missing long-form events into <stage-host> (the DAG's reads node covers by imported_at and will pick them up).
+Done 2026-10-06 01:30–02:35 UTC with `ocaml-importer/tools/backfill-events.py` (kind 30023, created_at
+2026-07-13..2026-09-30 from <julia-host> through the import listener): 274,902 imported, 6,221 duplicates, 1,719
+rejected; the DAG's reads node filled the weeks within minutes (<stage-host>'s weekly `reads` counts now equal <julia-host>'s).
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
