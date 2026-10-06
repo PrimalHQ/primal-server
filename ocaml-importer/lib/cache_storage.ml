@@ -745,31 +745,22 @@ let import_directmsg (est : est) (e : Nostr.t) : unit =
       in
       if not exists then
         ignore [%pgsql dbh "insert into pubkey_directmsgs_1_c794110a2c (receiver, sender, created_at, event_id) values ($receiver, $sender, $created_at, $event_id)"];
-      (* pubkey_directmsgs_cnt: maintain per (receiver, null) and (receiver, sender) *)
-      let bump ~with_sender =
-        if with_sender then begin
-          (match [%pgsql dbh "select 1 from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender = $sender limit 1"] with
-           | [] -> ignore [%pgsql dbh "insert into pubkey_directmsgs_cnt_1_efdf9742a6 (receiver, sender, cnt, latest_at, latest_event_id) values ($receiver, $sender, 0, $created_at, $event_id)"]
-           | _ -> ());
-          ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set cnt = cnt + 1 where receiver = $receiver and sender = $sender"];
-          (match [%pgsql dbh "select latest_at from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender = $sender limit 1"] with
-           | prev :: _ when created_at >= prev ->
-               ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set latest_at = $created_at, latest_event_id = $event_id where receiver = $receiver and sender = $sender"]
-           | _ -> ())
-        end
-        else begin
-          (match [%pgsql dbh "select 1 from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender is null limit 1"] with
-           | [] -> ignore [%pgsql dbh "insert into pubkey_directmsgs_cnt_1_efdf9742a6 (receiver, sender, cnt, latest_at, latest_event_id) values ($receiver, null, 0, $created_at, $event_id)"]
-           | _ -> ());
-          ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set cnt = cnt + 1 where receiver = $receiver and sender is null"];
-          (match [%pgsql dbh "select latest_at from pubkey_directmsgs_cnt_1_efdf9742a6 where receiver = $receiver and sender is null limit 1"] with
-           | prev :: _ when created_at >= prev ->
-               ignore [%pgsql dbh "update pubkey_directmsgs_cnt_1_efdf9742a6 set latest_at = $created_at, latest_event_id = $event_id where receiver = $receiver and sender is null"]
-           | _ -> ())
-        end
+      (* pubkey_directmsgs_cnt: one row per (receiver, null) and (receiver, sender), kept with a
+         single upsert over the unique index (receiver, sender) NULLS NOT DISTINCT. The former
+         select-then-insert dance raced between workers (7,490 duplicate rows on <stage-host> by
+         2026-10-06) and its multi-row updates then deadlocked, stalling every worker on one hot
+         receiver during the backfill. *)
+      let bump (sender : string option) =
+        ignore
+          [%pgsql dbh
+            "insert into pubkey_directmsgs_cnt_1_efdf9742a6 (receiver, sender, cnt, latest_at, latest_event_id) \
+             values ($receiver, $?sender, 1, $created_at, $event_id) \
+             on conflict (receiver, sender) do update set cnt = pubkey_directmsgs_cnt_1_efdf9742a6.cnt + 1, \
+               latest_at = greatest(pubkey_directmsgs_cnt_1_efdf9742a6.latest_at, excluded.latest_at), \
+               latest_event_id = case when excluded.latest_at >= pubkey_directmsgs_cnt_1_efdf9742a6.latest_at then excluded.latest_event_id else pubkey_directmsgs_cnt_1_efdf9742a6.latest_event_id end"]
       in
-      bump ~with_sender:false;
-      bump ~with_sender:true
+      bump None;
+      bump (Some sender)
 
 (* {1 Deletions} (Julia import_delete_event; reads cleanup deferred to ext) *)
 
