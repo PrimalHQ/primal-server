@@ -436,25 +436,30 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
     Promise.await stop
   end
   else
-    (* The run window is [since, min now (since + span)]: span is unbounded while runs succeed and
-       halves (down to 10 s) after a failed run, doubling back after each full success. Without it a
-       burst of imports (a backfill at thousands of events/s) makes every run fail on its statement
-       timeout and the window only grows, so the runner never catches up. *)
-    let span = ref max_int in
+    (* The run window is [since, min now (since + span)], sized by what the last run cost: a run
+       over w seconds that took d seconds sets the next span to w * target / d (target 30 s of
+       processing per run), at most doubling, at least 10 s, and a failed run halves it. The
+       nodes load a window's events into memory and handle them one by one, so without this an
+       import burst (the <stage-host> backfill, 4,000 events/s) gave a first window of millions of events
+       that ran for hours, or failed on the statement timeout while the window kept growing. The
+       lag behind now is logged; it shrinks whenever the nodes outrun the importer. *)
+    let span = ref 60 and target = 30.0 in
     Periodic.run ~clock ~stop ~period:cfg.dag_period_s ~label:"dag" (fun () ->
         let now = Utils.current_time () in
         let since_ = max !since 1672531200 in
-        let until = if !span = max_int || since_ + !span >= now then now else since_ + !span in
+        let until = min now (since_ + !span) in
         let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log } in
         let t0 = Unix.gettimeofday () in
         run_pipeline r;
         let ok = Atomic.get r.running in
         if ok && not cfg.dag_dry_run then since := until;
-        (if ok then (if until < now && !span < max_int / 2 then span := !span * 2)
-         else span := max 10 ((until - since_) / 2));
         let dur = Unix.gettimeofday () -. t0 in
-        log "run %s in %.1fs (window %d .. %d%s)" (if ok then "ok" else "FAILED") dur r.since until
-          (if !span = max_int then "" else Printf.sprintf ", span %ds, lag %ds" !span (now - until));
+        let w = max 1 (until - since_) in
+        (span :=
+           if ok then max 10 (min (!span * 2) (int_of_float (float_of_int w *. target /. Float.max dur 0.5)))
+           else max 10 (w / 2));
+        log "run %s in %.1fs (window %d .. %d, next span %ds%s)" (if ok then "ok" else "FAILED") dur r.since until !span
+          (if now - until > 0 then Printf.sprintf ", lag %ds" (now - until) else "");
         match cfg.pushgateway with
         | Some (host, port, job) -> (
             try Pushgateway.set_values ~net ~clock ~timeout:5.0 ~host ~port ~job [ ("dag_runner_duration", "gauge", Printf.sprintf "%.3f" dur); ("dag_runner_all_ok", "gauge", if ok then "1" else "0") ]
