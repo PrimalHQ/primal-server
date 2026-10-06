@@ -344,6 +344,13 @@ hits/misses); logged-in feeds are untouched. Fresh entries are answered inline o
 in 0.2 s instead of 1.1 s). The first `until`-paged reads pages for the anonymous network are still slow on <stage-host>
 (cold windows), the cache only removes the repeats; the TTL runs from the computation, hits do not extend it.
 
+**Profile media tab (2026-10-06):** the webapp's media grid asks `mega_feed_directive` with spec
+`{"id":"feed","kind":"notes","notes":"user_media_thumbnails","pubkey":…}`; `feed_with` knew only follows/authored/
+replies and forwarded it to the Julia upstream (which never compresses: 499 KB per page instead of 141 KB, and
+stage depended on <julia-host> for it). It now goes to the native `feed_2`; the four-request media corpus is identical
+to Julia on the same data. A page is 449 messages for 20 thumbnails (media metadata 177 KB, zap receipts 152 KB,
+profiles 58 KB raw); a thumbnails-only enrichment would need a client-side opt-in, so it is not done.
+
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
 `GET /healthz`, `GET /readyz` (503 unless serving — the load balancer / restart script gate),

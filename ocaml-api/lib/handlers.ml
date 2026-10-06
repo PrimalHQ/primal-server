@@ -146,6 +146,11 @@ let get_notifications_seen (ctx : ctx) (kw : Kw.t) : outcome =
                (`Assoc [ ("kind", `Int Kind.notifications_seen_until); ("content", `String (Int64.to_string t)) ]);
            ])
 
+(* feed_2 (defined after the feed building blocks) answers the notes variants feed_with does not:
+   mega_feed_directive {"id":"feed","kind":"notes","notes":"user_media_thumbnails"} (the profile
+   page's media tab) was forwarded to the Julia upstream until 2026-10-06. *)
+let feed_2_ref : (ctx -> Kw.t -> outcome) ref = ref (fun _ _ -> Not_handled)
+
 let rec feed (ctx : ctx) (kw : Kw.t) : outcome = feed_with ~user_pubkey:(user_pubkey_or_primal ctx kw) ctx kw
 
 (* [user_pubkey] as resolved by the caller: ws-connector's primal default for `feed`, Julia's
@@ -178,6 +183,7 @@ and feed_with ~(user_pubkey : string option) (ctx : ctx) (kw : Kw.t) : outcome =
            (with_cache ctx (fun c ->
                 Queries.feed_user_authored c ~pubkey ~since ~until ~include_replies:1 ~limit ~offset ~user_pubkey
                   ~apply_humaness_check:false ~kinds)))
+  | "user_media_thumbnails" -> !feed_2_ref ctx kw
   | _ -> Not_handled
 
 let long_form_content_feed (ctx : ctx) (kw : Kw.t) : outcome =
@@ -3007,6 +3013,8 @@ let feed_2 (ctx : ctx) (kw : Kw.t) : outcome =
                   if Queries.is_user_blocked c ~pubkey then Handled empty else enrich (Queries.media_note_ids c ~pubkey ~since ~until ~limit ~offset)
               | "bookmarks" -> Not_handled (* the bookmarks walk stays with Julia for now *)
               | _ -> julia_error))
+
+let () = feed_2_ref := feed_2
 
 (* app_ext.jl feed_directive_2 = feed_directive_ with feed_2 *)
 let feed_directive_2 (ctx : ctx) (kw : Kw.t) : outcome =
