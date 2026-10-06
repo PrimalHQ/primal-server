@@ -339,8 +339,10 @@ Julia answers nothing before the feed (1.17 s) and the profile calls at 1.24–1
 
 **Anonymous feed cache (2026-10-06 03:37, <stage-host> `anon_feed_cache_s` 30):** the anonymous reads feed answers in
 0.9 s once per 30 s and 0.1 s for every other logged-out visitor in between (`/status` → `anon_feed_cache`
-hits/misses); logged-in feeds are untouched. The first `until`-paged reads pages for the anonymous network are
-still slow on <stage-host> (cold windows), the cache only removes the repeats.
+hits/misses); logged-in feeds are untouched. Fresh entries are answered inline on the reader, without a
+`request_concurrency` slot, so a hit is not queued behind the page's burst (03:43: the reads page's feed answered
+in 0.2 s instead of 1.1 s). The first `until`-paged reads pages for the anonymous network are still slow on <stage-host>
+(cold windows), the cache only removes the repeats; the TTL runs from the computation, hits do not extend it.
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
