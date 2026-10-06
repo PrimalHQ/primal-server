@@ -46,6 +46,23 @@ type run = { since : int; until : int; running : bool Atomic.t; dry_run : bool; 
 let coverages (dbh : Postgres.dbh) ~(cov : string) : (int * int) list =
   [%pgsql dbh "select t, t2 from coverages_1_8656fc443b where name = $cov"] |> List.map (fun (t, t2) -> (Int64.to_int t, Int64.to_int t2))
 
+(* The end of the contiguous coverage of every current node (every name under T.cov of a table in
+   T.all), the smallest of them: nothing is uncovered before it, so a restarted runner can begin
+   there instead of walking from dag_since through years of covered segments. A hole in a node's
+   coverage (a failed segment behind covered ones) stops that node's frontier at the hole. *)
+let coverage_frontier (dbh : Postgres.dbh) : int option =
+  let rows = [%pgsql dbh "select name, t, t2 from coverages_1_8656fc443b order by name, t"] in
+  let current name = List.exists (fun t -> String.starts_with ~prefix:(T.cov t) name) T.all in
+  let by_name = Hashtbl.create 32 in
+  List.iter (fun (name, t, t2) -> if current name then Hashtbl.replace by_name name ((Int64.to_int t, Int64.to_int t2) :: (try Hashtbl.find by_name name with Not_found -> []))) rows;
+  Hashtbl.fold
+    (fun _ segs acc ->
+      let segs = List.rev segs in
+      let rec walk frontier = function (t, t2) :: rest when t <= frontier -> walk (max frontier t2) rest | _ -> frontier in
+      let f = match segs with (t, t2) :: rest -> walk t2 rest | [] -> 0 in
+      Some (match acc with Some a -> min a f | None -> f))
+    by_name None
+
 let set_coverage (dbh : Postgres.dbh) ~(cov : string) ~t ~t2 : unit =
   let t = i64 t and t2 = i64 t2 in
   ignore [%pgsql dbh "insert into coverages_1_8656fc443b (name, t, t2) values ($cov, $t, $t2) on conflict (name, t) do update set t = $t, t2 = $t2"]
@@ -424,8 +441,11 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
       assert_tables est.CS.dbh;
       (match [%pgsql (est.CS.dbh) "select humaness_threshold_trustrank()::float8"] with Some t :: _ -> CSE.humaness_threshold := t | _ -> ());
       log "humaness threshold %g" !CSE.humaness_threshold);
-  let since = ref cfg.dag_since in
-  log "runner: since %d, period %.0fs, tasks %d%s" !since cfg.dag_period_s cfg.dag_tasks (if cfg.dag_dry_run then ", DRY RUN (every segment rolled back, no coverage written)" else "");
+  let frontier = if cfg.dag_dry_run then None else with_est pools (fun est -> coverage_frontier est.CS.dbh) in
+  let since = ref (match frontier with Some f when f > cfg.dag_since -> f | _ -> cfg.dag_since) in
+  log "runner: since %d (config %d, coverage frontier %s), period %.0fs, tasks %d%s" !since cfg.dag_since
+    (match frontier with Some f -> string_of_int f | None -> "none") cfg.dag_period_s cfg.dag_tasks
+    (if cfg.dag_dry_run then ", DRY RUN (every segment rolled back, no coverage written)" else "");
   if cfg.dag_dry_run && cfg.dag_dry_run_window_s > 0 then begin
     (* one exercise of every node over the last [dag_dry_run_window_s] seconds, coverage ignored, all rolled back *)
     let until = Utils.current_time () in
