@@ -235,6 +235,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `status_interval_s` | `10.0` | status line period (0 = off) |
 | `log_handled` / `log_not_handled` | `false` | per-request log lines (ws-connector `--log-handled` / `--log-not-handled`) |
 | `request_concurrency` | `8` on <stage-host> | REQs of one connection handled at once. `1` = strictly in order like ws-connector and Julia, where one slow feed delays every later answer on that socket (a profile header waited 10 s behind the reads feed). >1 runs REQs in fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages stay in order). |
+| `anon_feed_cache_s` | `30.0` on <stage-host> | `mega_feed_directive` / `multi_kind_mega_feed_directive` pages answered for the anonymous default pubkey are reused for this long (`0` = off; one computation per key, concurrent misses wait for it; `/status` shows hits/misses/entries). Every logged-out visitor asks the identical feeds on every route. |
 | `cache_db` / `membership_db` | `{host,port,user,database}` | per-domain PGOCaml pools (cache: statement_timeout 30 s) |
 | `cache_pool_size` / `membership_pool_size` | `4` / `2` | connections per worker domain (<stage-host> runs `cache_pool_size` 16 since 2026-10-05 20:44: a logged-in page load fires ~20 REQs at once and the reads feed held all 4) |
 | `content_moderation_root` | path | `default-settings.json`, `app-releases.json` (mtime-cached) |

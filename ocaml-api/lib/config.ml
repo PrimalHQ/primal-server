@@ -27,6 +27,7 @@ type t = {
   ws_max_message_bytes : int;
   ws_outbound_queue : int;
   ws_send_stall_s : float;
+  anon_feed_cache_s : float; (* feed pages for the anonymous pubkey reused this long (0 = off), see Anon_cache *)
   request_concurrency : int; (* REQs of one connection handled at once (1 = in order, as ws-connector/Julia) *)
   drain_grace_s : float; (* after the stop signal: time for in-flight requests before WS close *)
   drain_ws_max_s : float; (* hard deadline for all connections *)
@@ -105,6 +106,7 @@ let of_json (j : Yojson.Safe.t) : t =
     ws_max_message_bytes = rint j "ws_max_message_bytes";
     ws_outbound_queue = rint j "ws_outbound_queue";
     ws_send_stall_s = rfloat j "ws_send_stall_s";
+    anon_feed_cache_s = rfloat j "anon_feed_cache_s";
     request_concurrency = rint j "request_concurrency";
     drain_grace_s = rfloat j "drain_grace_s";
     drain_ws_max_s = rfloat j "drain_ws_max_s";

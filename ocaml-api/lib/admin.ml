@@ -21,6 +21,9 @@ let service ~(lifecycle : Lifecycle.t) ~(stats : Stats.t) ~(cfg : Config.t) ~(li
           `Assoc [ ("addresses", `Int a); ("follows_users", `Int f); ("connections", `Int c) ] );
         ("broadcast_subscriptions", `Int (Broadcasts.stats bc));
         ("inflight_http", `Int (Http_server.inflight_connections ()));
+        ( "anon_feed_cache",
+          let h, m, w, n = Anon_cache.stats () in
+          `Assoc [ ("hits", `Int h); ("misses", `Int m); ("waits", `Int w); ("entries", `Int n); ("ttl_s", `Float cfg.anon_feed_cache_s) ] );
         ("rss_bytes", `Int (Procinfo.read_rss_bytes ()));
       ]
   in

@@ -88,7 +88,14 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
     let ctx = { Handlers.cfg; clock; conn_id = c.id; subid } in
     let t0 = Unix.gettimeofday () in
     c.inflight <- c.inflight + 1;
-    let outcome = Fun.protect ~finally:(fun () -> c.inflight <- c.inflight - 1) (fun () -> Funcall.dispatch ctx f kwargs) in
+    let outcome =
+      Fun.protect
+        ~finally:(fun () -> c.inflight <- c.inflight - 1)
+        (fun () ->
+          if cfg.anon_feed_cache_s > 0.0 && Anon_cache.cacheable f kwargs then
+            Anon_cache.lookup ~ttl:cfg.anon_feed_cache_s ~key:(Anon_cache.key f kwargs) ~compute:(fun () -> Funcall.dispatch ctx f kwargs)
+          else Funcall.dispatch ctx f kwargs)
+    in
     let elapsed = Unix.gettimeofday () -. t0 in
     (match outcome with
     | Response.Handled r ->

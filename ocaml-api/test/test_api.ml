@@ -237,9 +237,42 @@ let test_p_tags () =
   Alcotest.(check int) "all p tags" 2 (List.length (H.p_tag_pubkeys e));
   Alcotest.(check int) "exactly two fields" 1 (List.length (H.p_tag_pubkeys ~exactly_two:true e))
 
+(* Anon_cache: eligibility, key canonicalisation, hit/miss/TTL, and that answers with live
+   registrations or non-Handled outcomes are never stored. *)
+let test_anon_cache () =
+  let open Primal_api in
+  let kw s = Yojson.Safe.from_string s in
+  let anon = Handlers.primal_pubkey_hex in
+  Alcotest.(check bool) "anonymous feed" true (Anon_cache.cacheable Funcall.Mega_feed_directive (kw (Printf.sprintf {|{"spec":"x","user_pubkey":"%s"}|} anon)));
+  Alcotest.(check bool) "no user_pubkey" true (Anon_cache.cacheable Funcall.Multi_kind_mega_feed_directive (kw {|{"spec":"x"}|}));
+  Alcotest.(check bool) "logged-in user" false (Anon_cache.cacheable Funcall.Mega_feed_directive (kw {|{"spec":"x","user_pubkey":"88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079"}|}));
+  Alcotest.(check bool) "other funcall" false (Anon_cache.cacheable Funcall.Scored (kw {|{"selector":"trending_4h"}|}));
+  Alcotest.(check string) "key order-insensitive" (Anon_cache.key Funcall.Mega_feed_directive (kw {|{"limit":20,"spec":"x"}|})) (Anon_cache.key Funcall.Mega_feed_directive (kw {|{"spec":"x","limit":20}|}));
+  Alcotest.(check bool) "key distinguishes offset" true (Anon_cache.key Funcall.Mega_feed_directive (kw {|{"spec":"x","offset":0}|}) <> Anon_cache.key Funcall.Mega_feed_directive (kw {|{"spec":"x","offset":1}|}));
+  let calls = ref 0 in
+  let compute () = incr calls; Response.Handled (Response.messages [ "m" ]) in
+  let r1 = Anon_cache.lookup ~ttl:60.0 ~key:"k1" ~compute in
+  let r2 = Anon_cache.lookup ~ttl:60.0 ~key:"k1" ~compute in
+  Alcotest.(check int) "second lookup is a hit" 1 !calls;
+  (match (r1, r2) with Response.Handled a, Response.Handled b -> Alcotest.(check (list string)) "same answer" a.messages b.messages | _ -> Alcotest.fail "handled");
+  ignore (Anon_cache.lookup ~ttl:0.0 ~key:"k2" ~compute);
+  ignore (Anon_cache.lookup ~ttl:0.0 ~key:"k2" ~compute);
+  Alcotest.(check int) "ttl 0 never hits" 3 !calls;
+  let notice () = incr calls; Response.Notice "n" in
+  ignore (Anon_cache.lookup ~ttl:60.0 ~key:"k3" ~compute:notice);
+  ignore (Anon_cache.lookup ~ttl:60.0 ~key:"k3" ~compute:notice);
+  Alcotest.(check int) "notices are not cached" 5 !calls;
+  let reg () = incr calls; Response.Handled { Response.messages = [ "m" ]; registrations = [ Response.Live_events_from_follows { user_pubkey = "x" } ] } in
+  ignore (Anon_cache.lookup ~ttl:60.0 ~key:"k4" ~compute:reg);
+  ignore (Anon_cache.lookup ~ttl:60.0 ~key:"k4" ~compute:reg);
+  Alcotest.(check int) "registrations are not cached" 7 !calls;
+  let h, m, _, n = Anon_cache.stats () in
+  Alcotest.(check bool) "stats" true (h = 1 && m = 7 && n >= 1)
+
 let () =
   Alcotest.run "primal_api"
     [
+      ("anon_cache", [ Alcotest.test_case "cache" `Quick test_anon_cache ]);
       ( "protocol",
         [
           Alcotest.test_case "parse" `Quick test_parse;
