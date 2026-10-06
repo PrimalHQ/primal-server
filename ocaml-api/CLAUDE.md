@@ -7,9 +7,9 @@ The Primal cache API daemon (`primal_apid`) and `primalctl`; see `README.md` and
   (`dune test`). `_build/` is at the repo root.
 - **Always use `./rebuild-restart-api.sh` after code changes.** It does a rolling restart (new
   generation first, old one drained with SIGUSR1); never launch `primal_apid.exe` by hand next to a
-  running generation on the same port. Log: `$PRIMAL_VAR_DIR/ocaml-api.log`; status:
+  running generation on the same port. Log and status commands are printed by the script; status:
   `curl -s http://127.0.0.1:14006/status`.
-- Config is `$PRIMAL_CONFIG_DIR/primal-api-config.json`, every key required (README table).
+- Config is the JSON file the restart script passes (`PRIMAL_API_CONFIG`), every key required (README table).
 - Protocol parity rules: never re-serialize upstream frames; `set_primal_protocol` is answered
   locally and not forwarded; zlib only for native responses; NOTICE texts must match Julia's.
 - Handlers return values (`Response`/`Http_server.resp`); the kernel writes frames. When adding a
@@ -20,7 +20,7 @@ The Primal cache API daemon (`primal_apid`) and `primalctl`; see `README.md` and
 - Parity check after handler changes: same data, `primalctl replay <corpus.jsonl> --a ws://127.0.0.1:9009
   --b ws://<julia-host>:8831 --all --report /tmp/r.jsonl` (9009 = the shadow `primal-api-ext-shadow-config.json`
   over the Julia host's database; start it with `systemd-run --user` as the README shows). The corpus is
-  the stage request log `$PRIMAL_VAR_DIR/metrics-wsconn.log` (every request is recorded there) or a
+  the stage request log (`metrics-wsconn.log` next to the API log; every request is recorded there) or a
   hand-made JSONL; `primalctl sign <nsec-file> <kind> <content>` makes the signed `event_from_user` the
   membership funcalls need. The gate is ≥ 99.5 % identical per native funcall; known drifts are the
   trending feeds' follower-count batches and `get_recommended_reads` (random). Julia's live node can be
