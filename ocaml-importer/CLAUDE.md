@@ -29,7 +29,7 @@ reference DB `primal_importer_ref` is only for occasional tests.
 `main.exe` reads **all** of its settings from a single JSON file given as its sole argument
 (`main.exe <config.json>`); the environment is **not** consulted at runtime. The file lives at
 `$PRIMAL_CONFIG_DIR/primal-importer-config.json` and `rebuild-restart-importer.sh` passes it
-automatically (override with `IMPORTER_CONFIG`). Every key is required. To change a runtime
+automatically (override with `IMPORTER_CONFIG`). Every key is required (`event_sync_backfill` is the one nullable key). To change a runtime
 setting, edit that JSON file and restart. The defaults are documented in `README.md` →
 Configuration and encoded in `Config.from_env` (`lib/config.ml`), which the dev tools
 (`bin/compare`, etc. — these still read the environment) use; `Config.of_json_file` loads the
@@ -84,3 +84,11 @@ Julia importer node (double decrements) — see README → Phase 1.
   compile-time check) against `mem_dbh`, use `decode($n,'hex')` for bytea params, and gate the
   feature on the table actually being present (see `Cache_storage_ext.init_notification_gating`).
 - `sql/refdb-truncate.sh` may only ever touch `primal_importer_ref`; never truncate `primal1`.
+- Worker domains race on hot rows: a select-then-insert upkeep across 12 workers left 7,490 duplicate
+  `pubkey_directmsgs_cnt` rows and deadlocked. Counters that several workers touch need a unique index and
+  one upsert statement (migration `ocaml-common/sql/migrations/1001_*`); apply such migrations before
+  building, the `[%pgsql]` `ON CONFLICT` check needs the index.
+- Gap repair: `event_sync_backfill` in the config (or `tools/backfill-events.py` for one kind) replays a
+  peer's `event` table into the import queue, ~2–4k events/s on <stage-host>, resumable from its state file. Set
+  the key back to `null` and restart when `backfill: done` is logged. The DAG lags behind such a burst
+  (bounded windows, see ocaml-jobs) and catches up afterwards.
