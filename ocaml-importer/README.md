@@ -139,6 +139,7 @@ cache connection**, so only the `PG*` set is required.
 | `IMPORTER_EVENT_SYNC_REMOTES` | `<peer-host>,<media-host>,<peer-host>,<julia-host>` | Comma-separated peer Postgres hosts to pull from (same port/credentials as the local cache DB). |
 | `IMPORTER_EVENT_SYNC_INTERVAL` | `60` | Seconds between sync cycles. |
 | `IMPORTER_EVENT_SYNC_OVERLAP` | `600` | Seconds of lookback behind the local max `created_at` each cycle (the 10-minute self-healing window). |
+| `event_sync_backfill` (JSON only) | `null` | One-off gap repair: `{remote, from_ts, to_ts, batch, state_file}` replays the peer's `event` table with `imported_at` in `[from_ts, to_ts)` into the import queue (keyset pagination on `(imported_at, id)`, batches submitted in `created_at` order, bounded by the worker queue; progress in `state_file`, resumes on restart; the fiber ends when the range is done). Used on <stage-host> 2026-10-06 for the 2026-07-10..09-30 gap from <julia-host>. Set back to `null` afterwards. |
 | `IMPORTER_PUSHGATEWAY` | `true` | Publish the cumulative imported-event count (`cache_any`) to a Prometheus pushgateway (see [Pushgateway](#pushgateway)). |
 | `IMPORTER_PUSHGATEWAY_HOST` | `127.0.0.1` | Pushgateway host. |
 | `IMPORTER_PUSHGATEWAY_PORT` | `9091` | Pushgateway port. |

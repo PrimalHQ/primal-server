@@ -133,3 +133,86 @@ let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.connin
       |> List.iter submit;
     Eio.Time.sleep clock interval
   done
+
+(* {1 Backfill}
+
+   Replay one peer's event table over a past imported_at range into the import queue: the repair
+   for a node that imported nothing for a while (<stage-host>, 2026-07-11..09-29). Keyset pagination on
+   (imported_at, id) — event_imported_at_id_idx on the peer — in batches of [batch] rows, each
+   batch submitted in created_at order (parents before replies, as the live syncer does); the
+   bounded worker queue applies the backpressure (Eio.Stream.add blocks when it is full). The
+   cursor is written to [state_file] after every batch, so a restart resumes where it stopped; the
+   file holds "<imported_at> <id hex>". Finished = cursor past [to_ts]; the fiber then returns. *)
+
+let read_state (file : string) : (int * string) option =
+  try
+    let ic = open_in file in
+    let line = Fun.protect ~finally:(fun () -> close_in ic) (fun () -> input_line ic) in
+    match String.split_on_char ' ' (String.trim line) with
+    | [ t; id ] -> Some (int_of_string t, Hex_util.decode_exn id)
+    | _ -> None
+  with _ -> None
+
+let write_state (file : string) (t : int) (id : string) : unit =
+  let tmp = file ^ ".tmp" in
+  let oc = open_out tmp in
+  Fun.protect ~finally:(fun () -> close_out oc) (fun () -> Printf.fprintf oc "%d %s\n" t (Hex_util.encode id));
+  Sys.rename tmp file
+
+let backfill ~(clock : _ Eio.Time.clock) ~(remote : Pg.conninfo) ~(from_ts : int) ~(to_ts : int) ~(batch : int)
+    ~(state_file : string) ~(submit : Nostr.t -> unit) () : unit =
+  let cursor_t, cursor_id =
+    match read_state state_file with
+    | Some (t, id) when t >= from_ts -> (ref t, ref id)
+    | _ -> (ref from_ts, ref "")
+  in
+  let started = Unix.gettimeofday () and total = ref 0 and last_log = ref 0.0 in
+  Printf.printf "backfill: %s imported_at %d..%d from (%d, %s), batch %d\n%!" remote.Pg.host from_ts to_ts !cursor_t
+    (if !cursor_id = "" then "-" else Hex_util.encode !cursor_id) batch;
+  let dbh = ref None in
+  let conn () = match !dbh with Some d -> d | None -> let d = Pg.connect remote in dbh := Some d; d in
+  let drop () = (match !dbh with Some d -> (try Pg.close d with _ -> ()) | None -> ()); dbh := None in
+  let finished = ref false in
+  while not !finished do
+    match
+      let d = conn () in
+      let t = Int64.of_int !cursor_t and id = !cursor_id and lim = Int64.of_int batch and to64 = Int64.of_int to_ts in
+      [%pgsql d
+        "select id, pubkey, created_at, kind, tags, content, sig, imported_at from event \
+         where (imported_at, id) > ($t, $id) and imported_at < $to64 order by imported_at, id limit $lim"]
+    with
+    | exception (Eio.Cancel.Cancelled _ as e) -> raise e
+    | exception exn ->
+        Printf.eprintf "backfill: %s: %s (retry in 30 s)\n%!" remote.Pg.host (Printexc.to_string exn);
+        drop ();
+        Eio.Time.sleep clock 30.0
+    | [] ->
+        finished := true;
+        write_state state_file to_ts "";
+        Printf.printf "backfill: done, %d events in %.0f s\n%!" !total (Unix.gettimeofday () -. started)
+    | rows ->
+        let last_t = ref !cursor_t and last_id = ref !cursor_id in
+        let evs =
+          List.map
+            (fun (id, pubkey, created_at, kind, tags, content, sig_, imported_at) ->
+              let ia = Int64.to_int imported_at in
+              if ia > !last_t || (ia = !last_t && id > !last_id) then (last_t := ia; last_id := id);
+              event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_)
+            rows
+        in
+        List.sort (fun (a : Nostr.t) (b : Nostr.t) -> Int.compare a.created_at b.created_at) evs |> List.iter submit;
+        total := !total + List.length evs;
+        cursor_t := !last_t;
+        cursor_id := !last_id;
+        write_state state_file !cursor_t !cursor_id;
+        let now = Unix.gettimeofday () in
+        if now -. !last_log >= 60.0 then begin
+          last_log := now;
+          let el = now -. started in
+          let rate = float_of_int !total /. el in
+          let span = float_of_int (to_ts - from_ts) and done_ = float_of_int (!cursor_t - from_ts) in
+          Printf.printf "backfill: at imported_at %d (%.1f%% of range), %d events, %.0f/s, %.1f h elapsed\n%!" !cursor_t
+            (100.0 *. done_ /. span) !total rate (el /. 3600.)
+        end
+  done;
+  drop ()

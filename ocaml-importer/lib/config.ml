@@ -1,6 +1,11 @@
 (* Runtime configuration from the environment, mirroring the globals set in
    start_media_importer.jl (FirehoseClient.PORT = 9000+NODEIDX, VERIFY_ZAPPERS, Main.PROXY). *)
 
+(* Event_syncer.backfill: pull [remote]'s events with imported_at in [from_ts, to_ts) in keyset
+   batches of [batch] rows and submit them to the import queue (the normal import path, no relay
+   broadcast); progress is kept in [state_file] so a restart resumes. null = no backfill. *)
+type backfill = { remote : string; from_ts : int; to_ts : int; batch : int; state_file : string }
+
 type t = {
   firehose_host : string;
   firehose_port : int;
@@ -11,6 +16,8 @@ type t = {
   event_sync_remotes : string list; (* peer Postgres hosts (same port/credentials as local) *)
   event_sync_interval : float; (* seconds between sync cycles *)
   event_sync_overlap : int; (* seconds of lookback behind local max created_at *)
+  event_sync_backfill : backfill option;
+      (* one-off: replay a peer's event table over a past imported_at range into the import queue (gap repair) *)
   pushgateway_enabled : bool; (* publish the imported count to a Prometheus pushgateway *)
   pushgateway_host : string;
   pushgateway_port : int;
@@ -102,6 +109,7 @@ let from_env () : t =
       | _ -> [ "<peer-host>"; "<media-host>"; "<peer-host>"; "<julia-host>" ]);
     event_sync_interval = float_env "IMPORTER_EVENT_SYNC_INTERVAL" 60.0;
     event_sync_overlap = int_env "IMPORTER_EVENT_SYNC_OVERLAP" 600;
+    event_sync_backfill = None;
     pushgateway_enabled = bool_env "IMPORTER_PUSHGATEWAY" true;
     pushgateway_host = Option.value (getenv "IMPORTER_PUSHGATEWAY_HOST") ~default:"127.0.0.1";
     pushgateway_port = int_env "IMPORTER_PUSHGATEWAY_PORT" 9091;
@@ -203,6 +211,13 @@ let of_json (j : Yojson.Safe.t) : t =
     event_sync_remotes = rstrlist j "event_sync_remotes";
     event_sync_interval = rfloat j "event_sync_interval";
     event_sync_overlap = rint j "event_sync_overlap";
+    event_sync_backfill =
+      (match field j "event_sync_backfill" with
+      | `Null -> None
+      | b ->
+          Some
+            { remote = rstr b "remote"; from_ts = rint b "from_ts"; to_ts = rint b "to_ts"; batch = rint b "batch";
+              state_file = rstr b "state_file" });
     pushgateway_enabled = rbool j "pushgateway_enabled";
     pushgateway_host = rstr j "pushgateway_host";
     pushgateway_port = rint j "pushgateway_port";

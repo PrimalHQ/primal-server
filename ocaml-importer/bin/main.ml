@@ -265,8 +265,23 @@ let () =
         ~interval:cfg.event_sync_interval ~overlap:cfg.event_sync_overlap ()
   in
 
+  let backfill_slot = Importer.Stats.new_slot "backfill" in
+  let run_backfill () =
+    match cfg.event_sync_backfill with
+    | None -> ()
+    | Some b ->
+        Importer.Event_syncer.backfill ~clock ~remote:{ cfg.cache_db with Pg.host = b.remote } ~from_ts:b.from_ts
+          ~to_ts:b.to_ts ~batch:b.batch ~state_file:b.state_file
+          ~submit:(fun e ->
+            Importer.Stats.set_slot backfill_slot "submit";
+            WP.submit_event pool e;
+            Importer.Stats.set_slot backfill_slot "idle";
+            Importer.Stats.submitted stats)
+          ()
+  in
   Fiber.all
     [
+      run_backfill;
       (fun () ->
         WP.run
           ~on_worker_init:(fun i ->
