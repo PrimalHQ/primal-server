@@ -1,5 +1,6 @@
 # webapp-compare.py TAG_A TAG_B: line up the requests of two webapp-walk runs (frames-TAG.jsonl) by page and
-# function and flag unanswered/empty/notice differences; events inside zlib EVENTS frames are counted.
+# function (signed-event args and id lists normalised, replies attributed to the oldest open request of a subid)
+# and flag unanswered/empty/notice differences; events inside zlib EVENTS frames are counted.
 # compare.py TAG_A TAG_B : per page and request, messages/kinds/notices/latency from frames-TAG.jsonl
 import sys, json, collections
 def load(tag):

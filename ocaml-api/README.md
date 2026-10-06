@@ -292,7 +292,7 @@ answered 24 s later, when the page navigated away). A raw-socket client reproduc
 every already-complete frame), regression test "ws burst" in `ocaml-common/test`. After the roll the
 headless walk over /home (with paging), /reads and /explore renders the same counts against stage as
 against cache2. Lesson: replaying requests one at a time cannot see transport-level bugs; keep the
-headless walk (``ocaml-api/tools/webapp-walk.py`, run through `tools/playwright.sh`; `tools/ws-burst.py` is the raw-socket reproducer) as the
+headless walk (``ocaml-api/tools/webapp-walk.py` (NSEC_FILE for a logged-in session), run through `tools/playwright.sh`, compared with `tools/webapp-compare.py`; `tools/ws-burst.py` is the raw-socket reproducer; `tools/ws-direct.py` and `tools/ws-head-of-line.py` (via `tools/websockets.sh`) time single requests and the per-connection ordering; `tools/advsearch-windows.py` replays a windowed search through psql) as the
 acceptance check for a cutover.
 
 **Logged-in walk 2026-10-05 20:00 (QA user via `NSEC_FILE`, pages home/reads/explore/notifications/messages/
