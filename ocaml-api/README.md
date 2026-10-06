@@ -320,6 +320,13 @@ import the missing long-form events into <stage-host> (the DAG's reads node cove
 Done 2026-10-06 01:30–02:35 UTC with `ocaml-importer/tools/backfill-events.py` (kind 30023, created_at
 2026-07-13..2026-09-30 from <julia-host> through the import listener): 274,902 imported, 6,221 duplicates, 1,719
 rejected; the DAG's reads node filled the weeks within minutes (<stage-host>'s weekly `reads` counts now equal <julia-host>'s).
+After it (cache warm) the QA user's reads page answers in 2.0 s / page 2 in 1.8 s on <stage-host>, as on <julia-host>'s Julia
+(2.1 / 2.0 s); the first cold runs still took 5–9 s while the freshly written rows were read from disk.
+**The gap is wider than long-form:** <stage-host> imported no events of ANY kind between about 2026-07-11 and
+2026-09-29 (0 per sampled noon hour vs 25k on <julia-host>; 538k in the 2026-07-10 hour, then nothing until 142k on
+09-30). Notes, profiles, reactions, zaps and relay lists of those eleven weeks are missing on the stage host,
+which is why its feed answers carry fewer profile/relay-list messages than <julia-host>'s for the same request. A full
+backfill is ~100M events and needs a database-level copy, not the import listener (~60 events/s).
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
