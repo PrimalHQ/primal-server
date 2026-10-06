@@ -46,6 +46,11 @@ let sweep now =
   if Hashtbl.length table > max_entries then
     Hashtbl.filter_map_inplace (fun _ e -> match e with Ready (exp, _) when exp < now -> None | e -> Some e) table
 
+(* A fresh entry exists: the answer costs nothing, so Conn serves it inline without a fiber slot. *)
+let fresh (key : string) : bool =
+  let now = Unix.gettimeofday () in
+  with_lock (fun () -> match Hashtbl.find_opt table key with Some (Ready (exp, _)) -> exp > now | _ -> false)
+
 let stats () = (Atomic.get hits, Atomic.get misses, Atomic.get waits, with_lock (fun () -> Hashtbl.length table))
 
 let lookup ~(ttl : float) ~(key : string) ~(compute : unit -> Response.outcome) : Response.outcome =

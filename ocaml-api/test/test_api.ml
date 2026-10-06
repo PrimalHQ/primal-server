@@ -266,6 +266,8 @@ let test_anon_cache () =
   ignore (Anon_cache.lookup ~ttl:60.0 ~key:"k4" ~compute:reg);
   ignore (Anon_cache.lookup ~ttl:60.0 ~key:"k4" ~compute:reg);
   Alcotest.(check int) "registrations are not cached" 7 !calls;
+  Alcotest.(check bool) "fresh" true (Anon_cache.fresh "k1");
+  Alcotest.(check bool) "not fresh" false (Anon_cache.fresh "k2" || Anon_cache.fresh "k3" || Anon_cache.fresh "nope");
   let h, m, _, n = Anon_cache.stats () in
   Alcotest.(check bool) "stats" true (h = 1 && m = 7 && n >= 1)
 

@@ -228,7 +228,14 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
                 | _ -> ());
                 let in_order =
                   concurrency = 1
-                  || match p with Protocol.Req { funcall = Some "set_primal_protocol"; _ } | Protocol.Close _ | Protocol.Other _ -> true | Protocol.Req _ -> false
+                  ||
+                  match p with
+                  | Protocol.Req { funcall = Some "set_primal_protocol"; _ } | Protocol.Close _ | Protocol.Other _ -> true
+                  | Protocol.Req { funcall = Some fc; kwargs; _ } ->
+                      (* a fresh anonymous-feed cache entry is answered inline: no slot, no wait behind the burst *)
+                      cfg.anon_feed_cache_s > 0.0
+                      && (match Funcall.of_string fc with f when Anon_cache.cacheable f kwargs -> Anon_cache.fresh (Anon_cache.key f kwargs) | _ -> false)
+                  | Protocol.Req _ -> false
                 in
                 if in_order then handle_parsed s p
                 else begin
