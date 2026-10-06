@@ -262,3 +262,66 @@ let blossom_uploads_by_pubkey (c : Db.membership Db.conn) ~pubkey : upload list 
   [%pgsql dbh "select mimetype, created_at, path, size, sha256 from media_uploads where pubkey = $pubkey"]
   |> List.map (fun (up_mimetype, up_created_at, up_path, up_size, up_sha256) -> { up_mimetype; up_created_at; up_path; up_size; up_sha256; up_pubkey = pubkey })
 
+
+(* {1 membership_content_rebroadcast_* / media management / leaderboards} (app.jl) *)
+
+let rebroadcast_running (c : Db.membership Db.conn) ~pubkey : bool =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select 1 from event_rebroadcasting where pubkey = $pubkey and started_at is not null and finished_at is null"] <> []
+
+let rebroadcast_cancel (c : Db.membership Db.conn) ~pubkey : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "update event_rebroadcasting set finished_at = now(), status = 'canceled' where pubkey = $pubkey and finished_at is null"]
+
+let rebroadcast_start (c : Db.membership Db.conn) ~pubkey ~event_count ~(relays_json : string) ~(kinds_json : string) : unit =
+  let dbh = Db.raw c in
+  ignore [%pgsql dbh "delete from event_rebroadcasting where pubkey = $pubkey"];
+  ignore
+    [%pgsql dbh
+      "insert into event_rebroadcasting (pubkey, started_at, finished_at, event_created_at, event_idx, event_count, target_relays, status, kinds, exception, failed_batches, batchhash, last_batch_status, event_idx_intermediate) \
+       values ($pubkey, now(), null, 0, 0, $event_count, $relays_json::jsonb, 'started', $kinds_json::jsonb, null, 0, null, null, 0)"]
+
+(* membership_media_management_uploads: (sha256, path, size, mimetype, created_at) *)
+let media_uploads_list (c : Db.membership Db.conn) ~pubkey ~since ~until ~limit ~offset : (string * string * int64 * string * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select mu.sha256, mu.path, mu.size, mu.mimetype, mu.created_at from media_uploads mu \
+     where mu.pubkey = $pubkey and mu.created_at >= $since and mu.created_at <= $until and mu.media_block_id is null \
+     order by mu.created_at desc limit $limit offset $offset"]
+  |> List.filter_map (function Some sha, path, size, mt, t -> Some (sha, path, size, mt, t) | _ -> None)
+
+let media_upload_owned (c : Db.membership Db.conn) ~sha256 ~pubkey : bool =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select 1 from media_uploads where sha256 = $sha256 and pubkey = $pubkey"] <> []
+
+let update_used_storage (c : Db.membership Db.conn) ~pubkey : unit =
+  let dbh = Db.raw c in
+  ignore
+    [%pgsql dbh
+      "update memberships set used_storage = (select coalesce(sum(size), 0) from (select distinct on (sha256) size from media_uploads \
+         where pubkey = $pubkey and sha256 is not null and media_block_id is null) distinct_uploads) where pubkey = $pubkey"]
+
+(* membership_legends_leaderboard: (key, index, pubkey, last_donation, donated_btc sats) ordered by
+   [order_by] (donated_btc / last_donation descending, index ascending); one statement, the key
+   chosen by CASE because the ppx cannot take a column name as a parameter *)
+let legend_leaderboard (c : Db.membership Db.conn) ~(order_by : string) ~since ~until ~limit ~offset : (int64 * int64 * string * int64 * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "with a as (select row_number() over () as index, * from (select ls.pubkey, extract(epoch from ls.last_donation)::int8 as last_donation, (ls.donated_btc*100000000)::int8 as donated_btc \
+       from legend_users ls, memberships ms, membership_legend_customization mlc \
+       where ms.pubkey = ls.pubkey and ms.pubkey = mlc.pubkey and mlc.in_leaderboard and ls.donated_btc > 0 order by ls.donated_btc desc) b), \
+     k as (select (case when $order_by = 'donated_btc' then donated_btc when $order_by = 'last_donation' then last_donation else index end)::int8 as key, index, pubkey, last_donation, donated_btc from a) \
+     select key, index, pubkey, last_donation, donated_btc from k where key >= $since and key <= $until \
+     order by (case when $order_by = 'index' then key end) asc nulls last, (case when $order_by <> 'index' then key end) desc nulls last limit $limit offset $offset"]
+  |> List.filter_map (function Some k, Some i, Some pk, ld, db -> Some (k, i, pk, Option.value ld ~default:0L, Option.value db ~default:0L) | _ -> None)
+
+(* membership_premium_leaderboard: (key, index, pubkey, premium_since) *)
+let premium_leaderboard (c : Db.membership Db.conn) ~(order_by : string) ~since ~until ~limit ~offset : (int64 * int64 * string * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "with a as (select row_number() over () as index, * from (select pu.pubkey, extract(epoch from ms.premium_since)::int8 as premium_since \
+       from premium_users pu, memberships ms where ms.pubkey = pu.pubkey order by ms.premium_since) b), \
+     k as (select (case when $order_by = 'premium_since' then premium_since else index end)::int8 as key, index, pubkey, premium_since from a) \
+     select key, index, pubkey, premium_since from k where key >= $since and key <= $until \
+     order by (case when $order_by = 'index' then key end) asc nulls last, (case when $order_by <> 'index' then key end) desc nulls last limit $limit offset $offset"]
+  |> List.filter_map (function Some k, Some i, Some pk, ps -> Some (k, i, pk, Option.value ps ~default:0L) | _ -> None)

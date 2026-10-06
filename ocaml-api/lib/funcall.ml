@@ -148,11 +148,34 @@ type t =
   | Broadcast_events
   | Broadcast_reply
   | Dvm_feed
+  (* 2026-10-06: the membership content funcalls that were forwarded to Julia *)
+  | Membership_content_stats
+  | Membership_recovery_contact_lists
+  | Membership_recover_contact_list
+  | Membership_content_backup
+  | Membership_content_rebroadcast_status
+  | Membership_content_rebroadcast_cancel
+  | Membership_content_rebroadcast_start
+  | Membership_legends_leaderboard
+  | Membership_premium_leaderboard
+  | Membership_media_management_uploads
+  | Membership_media_management_delete
   | Proxied of string
 
 let names : (string * t) list =
   [
     ("thread_view", Thread_view);
+    ("membership_content_stats", Membership_content_stats);
+    ("membership_recovery_contact_lists", Membership_recovery_contact_lists);
+    ("membership_recover_contact_list", Membership_recover_contact_list);
+    ("membership_content_backup", Membership_content_backup);
+    ("membership_content_rebroadcast_status", Membership_content_rebroadcast_status);
+    ("membership_content_rebroadcast_cancel", Membership_content_rebroadcast_cancel);
+    ("membership_content_rebroadcast_start", Membership_content_rebroadcast_start);
+    ("membership_legends_leaderboard", Membership_legends_leaderboard);
+    ("membership_premium_leaderboard", Membership_premium_leaderboard);
+    ("membership_media_management_uploads", Membership_media_management_uploads);
+    ("membership_media_management_delete", Membership_media_management_delete);
     ("multi_kind_thread_view", Multi_kind_thread_view);
     ("scored", Scored);
     ("get_default_app_settings", Get_default_app_settings);
@@ -334,6 +357,17 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Thread_view -> run ~moderate:false Handlers.thread_view
   | Multi_kind_thread_view -> run ~moderate:false Handlers.multi_kind_thread_view
   | Scored -> run ~moderate:false Handlers.scored
+  | Membership_content_stats -> run ~moderate:false Handlers.membership_content_stats
+  | Membership_recovery_contact_lists -> run ~moderate:false Handlers.membership_recovery_contact_lists
+  | Membership_recover_contact_list -> run ~moderate:false Handlers.membership_recover_contact_list
+  | Membership_content_backup -> run ~moderate:false Handlers.membership_content_backup
+  | Membership_content_rebroadcast_status -> run ~moderate:false Handlers.membership_content_rebroadcast_status
+  | Membership_content_rebroadcast_cancel -> run ~moderate:false Handlers.membership_content_rebroadcast_cancel
+  | Membership_content_rebroadcast_start -> run ~moderate:false Handlers.membership_content_rebroadcast_start
+  | Membership_legends_leaderboard -> run ~moderate:false Handlers.membership_legends_leaderboard
+  | Membership_premium_leaderboard -> run ~moderate:false Handlers.membership_premium_leaderboard
+  | Membership_media_management_uploads -> run ~moderate:false Handlers.membership_media_management_uploads
+  | Membership_media_management_delete -> run ~moderate:false Handlers.membership_media_management_delete
   | Get_default_app_settings -> run ~moderate:false Handlers.get_default_app_settings
   | Get_app_releases -> run ~moderate:false Handlers.get_app_releases
   | Get_bookmarks -> run ~moderate:false Handlers.get_bookmarks

@@ -1616,3 +1616,65 @@ let video_thumbnails_for_video (c : Db.cache Db.conn) ~(video_url : string) : st
 
 (* {1 Phase 5c: Blossom} *)
 
+
+(* {1 Formerly proxied: bookmarks feed, plain events, the membership content funcalls} *)
+
+(* (hex id, kind, created_at) of the stored events among [event_ids_json] that event_created_at
+   knows (Julia's bookmarks walk reads created_at from est.event_created_at and skips the rest) *)
+let events_meta_by_ids (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * int64 * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select encode(e.id, 'hex'), e.kind, eca.created_at from events e, event_created_at eca \
+     where e.id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a))) and eca.event_id = e.id"]
+  |> List.filter_map (function Some h, Some k, Some t -> Some (h, k, t) | _ -> None)
+
+(* membership_content_stats: the author's event counts per kind *)
+let kind_counts (c : Db.cache Db.conn) ~pubkey : (int64 * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh "select kind, count(1) as cnt from events where pubkey = $pubkey group by kind order by cnt desc"]
+  |> List.filter_map (function Some k, Some n -> Some (k, n) | _ -> None)
+
+(* membership_recovery_contact_lists_: per day, the author's kind-3 event with most follows, newest 30 days *)
+let recovery_contact_lists (c : Db.cache Db.conn) ~pubkey : (string * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "with cls as (select created_at/(24*3600)::int8 as day, id, created_at, jsonb_array_length(tags) as follows \
+                  from events where pubkey = $pubkey and kind = 3) \
+     select distinct on (day) encode(id, 'hex'), created_at from cls order by day desc, follows desc, id limit 30"]
+  |> List.filter_map (function Some h, Some t -> Some (h, t) | _ -> None)
+
+(* get_user_events: the author's events from [since] in created_at order (event json, kind,
+   created_at, the d tag of parametrized replaceable events); [kinds_json] = null for all kinds *)
+let user_events (c : Db.cache Db.conn) ~pubkey ~since ~(kinds_json : string option) ~limit : (string * int64 * int64 * string option) list =
+  let dbh = Db.raw c in
+  let since = i64 since and limit = i64 limit in
+  let rows =
+    match kinds_json with
+    | None ->
+        [%pgsql dbh
+          "select get_event_jsonb(e.id)::text, e.kind, e.created_at, (select t->>1 from jsonb_array_elements(e.tags) t where t->>0 = 'd' limit 1) \
+           from events e where e.pubkey = $pubkey and e.created_at >= $since order by e.created_at asc limit $limit"]
+    | Some kinds_json ->
+        [%pgsql dbh
+          "select get_event_jsonb(e.id)::text, e.kind, e.created_at, (select t->>1 from jsonb_array_elements(e.tags) t where t->>0 = 'd' limit 1) \
+           from events e where e.pubkey = $pubkey and e.created_at >= $since \
+             and e.kind = any(array(select (a::text)::int8 from jsonb_array_elements_text($kinds_json::jsonb) x(a))) \
+           order by e.created_at asc limit $limit"]
+  in
+  List.filter_map (function Some j, Some k, Some t, d -> Some (j, k, t, d) | _ -> None) rows
+
+(* The number of events a content rebroadcast sends: every non-replaceable event plus one per
+   replaceable key (kind 0, 3, 10000-19999: the kind; 30000-39999: kind + d tag) *)
+let user_event_count (c : Db.cache Db.conn) ~pubkey ~(kinds_json : string option) : int64 =
+  let dbh = Db.raw c in
+  let kinds_json = Option.value kinds_json ~default:"null" in
+  match
+    [%pgsql dbh
+      "with es as (select kind, (select t->>1 from jsonb_array_elements(tags) t where t->>0 = 'd' limit 1) as d from events \
+                   where pubkey = $pubkey and ($kinds_json::jsonb = 'null'::jsonb or kind = any(array(select (a::text)::int8 from jsonb_array_elements_text($kinds_json::jsonb) x(a))))) \
+       select (select count(*) from es where not (kind in (0, 3) or (kind >= 10000 and kind < 20000) or (kind >= 30000 and kind < 40000))) \
+            + (select count(distinct kind) from es where kind in (0, 3) or (kind >= 10000 and kind < 20000)) \
+            + (select count(distinct (kind, d)) from es where kind >= 30000 and kind < 40000)"]
+  with
+  | Some n :: _ -> n
+  | _ -> 0L

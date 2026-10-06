@@ -19,7 +19,8 @@ let usage () =
     "usage: primalctl req <ws-url> <funcall> [kwargs-json] [--zlib]\n\
     \       primalctl status|drain|metrics [admin-url]\n\
     \       primalctl replay <corpus.jsonl> [--a ws-url] [--b ws-url] [--only f1,f2] [--all] [--per-funcall N] [--workers K] [--timeout S] [--report file]\n\
-    \       primalctl advsearch-sql <user-pubkey-hex> <query> <since> <until> [kinds]   (one window's SQL, params inlined, for EXPLAIN)";
+    \       primalctl advsearch-sql <user-pubkey-hex> <query> <since> <until> [kinds]   (one window's SQL, params inlined, for EXPLAIN)\n\
+    \       primalctl sign <nsec-file> <kind> <content> [tags-json]   (a signed event as JSON, for event_from_user corpora)";
   exit 2
 
 let parse_http_url (u : string) : string * int * string =
@@ -85,6 +86,23 @@ let replay_opts (corpus : string) (rest : string list) : Replay.opts =
 let () =
   let args = Array.to_list Sys.argv |> List.tl in
   (match args with
+  | "sign" :: nsec_file :: kind :: content :: rest ->
+      Mirage_crypto_rng_unix.use_default ();
+      let ic = open_in nsec_file in
+      let nsec = Fun.protect ~finally:(fun () -> close_in ic) (fun () -> String.trim (input_line ic)) in
+      let seckey =
+        match Bech32.decode ~hrp:"nsec" nsec with
+        | Some data when String.length data = 32 -> data
+        | _ -> ( match Hex_util.decode_opt nsec with Some k when String.length k = 32 -> k | _ -> failwith "nsec file: bech32 nsec or 64 hex expected")
+      in
+      let tags : Nostr.tag list =
+        match rest with
+        | t :: _ -> ( match Yojson.Safe.from_string t with `List l -> List.map (function `List x -> x | v -> [ v ]) l | _ -> [])
+        | [] -> []
+      in
+      let e = Nostr.create ~seckey ~created_at:(int_of_float (Unix.gettimeofday ())) ~kind:(int_of_string kind) ~tags ~content in
+      print_endline (Yojson.Safe.to_string (Nostr.to_json e));
+      exit 0
   | "advsearch-sql" :: user :: query :: since :: until :: rest ->
       let user_pubkey = Option.get (Hex_util.decode_opt user) in
       let kinds = match rest with k :: _ -> List.map int_of_string (String.split_on_char ',' k) | [] -> [] in
