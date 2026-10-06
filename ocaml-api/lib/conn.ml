@@ -165,6 +165,39 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
           raise e);
       let backend = Option.get c.backend in
       let touch () = c.last_msg <- Unix.gettimeofday () in
+      (* Requests of one connection. ws-connector and Julia answer them strictly in order, so one
+         slow feed delays everything the page asks for next on that socket (a profile header behind
+         a 9 s reads feed). With request_concurrency > 1, REQs run in their own fibers, at most that
+         many at once (the semaphore makes the reader wait, so a client cannot queue unbounded work);
+         set_primal_protocol (changes how later answers are framed), CLOSE (drops live subscriptions)
+         and anything forwarded verbatim stay in order on the reader. Clients key every message by
+         subid and wait for its EOSE, so interleaved answers are fine; frames of one answer are
+         queued by one fiber, and the upstream socket is written under a mutex. In-flight fibers
+         finish after the client loop ends (the switch waits), so a closing connection still gets
+         its last answers queued before the socket closes. *)
+      let concurrency = max 1 cfg.request_concurrency in
+      let slots = Eio.Semaphore.make concurrency in
+      let backend_lock = Eio.Mutex.create () in
+      let forward s =
+        Eio.Mutex.use_rw ~protect:true backend_lock (fun () -> Ws_client.send_text backend s);
+        Stats.incr stats.proxied
+      in
+      let handle_parsed s (p : Protocol.incoming) =
+        let handled =
+          try handle_native ~clock cfg stats live bc c p
+          with
+          | Eio.Cancel.Cancelled _ as e -> raise e
+          | e ->
+              Stats.incr stats.errors;
+              log "native handler: %s" (Printexc.to_string e);
+              false
+        in
+        (match p with
+        | Protocol.Req { funcall = Some fc; subid; _ } when (not handled) && cfg.log_not_handled ->
+            log "not handled: %s sub_id=%s" fc subid
+        | _ -> ());
+        if not handled then forward s
+      in
       let client_loop () =
         let rec loop () =
           if c.closing then ()
@@ -174,7 +207,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
             | `Binary b ->
                 touch ();
                 Stats.incr stats.recv;
-                Ws_client.send_binary backend b;
+                Eio.Mutex.use_rw ~protect:true backend_lock (fun () -> Ws_client.send_binary backend b);
                 Stats.incr stats.proxied;
                 loop ()
             | `Text s ->
@@ -186,22 +219,24 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
                     Live_events.unregister_sub live ~conn_id:c.id ~subid;
                     Broadcasts.unregister_sub bc ~conn_id:c.id ~subid
                 | _ -> ());
-                let handled =
-                  try handle_native ~clock cfg stats live bc c p
-                  with
-                  | Eio.Cancel.Cancelled _ as e -> raise e
-                  | e ->
-                      Stats.incr stats.errors;
-                      log "native handler: %s" (Printexc.to_string e);
-                      false
+                let in_order =
+                  concurrency = 1
+                  || match p with Protocol.Req { funcall = Some "set_primal_protocol"; _ } | Protocol.Close _ | Protocol.Other _ -> true | Protocol.Req _ -> false
                 in
-                (match p with
-                | Protocol.Req { funcall = Some fc; subid; _ } when (not handled) && cfg.log_not_handled ->
-                    log "not handled: %s sub_id=%s" fc subid
-                | _ -> ());
-                if not handled then begin
-                  Ws_client.send_text backend s;
-                  Stats.incr stats.proxied
+                if in_order then handle_parsed s p
+                else begin
+                  Eio.Semaphore.acquire slots;
+                  Fiber.fork ~sw (fun () ->
+                      Fun.protect
+                        ~finally:(fun () -> Eio.Semaphore.release slots)
+                        (fun () ->
+                          try handle_parsed s p
+                          with
+                          | Eio.Cancel.Cancelled _ as e -> raise e
+                          | exn ->
+                              Stats.incr stats.errors;
+                              log "connection %d: %s" c.id (Printexc.to_string exn);
+                              request_close c))
                 end;
                 loop ()
         in

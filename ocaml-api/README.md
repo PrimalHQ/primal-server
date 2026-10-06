@@ -234,6 +234,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `drain_grace_s` / `drain_ws_max_s` | `30.0` / `900.0` | rolling restart: idle WS closed at once, active after grace, all by the hard deadline |
 | `status_interval_s` | `10.0` | status line period (0 = off) |
 | `log_handled` / `log_not_handled` | `false` | per-request log lines (ws-connector `--log-handled` / `--log-not-handled`) |
+| `request_concurrency` | `8` on <stage-host> | REQs of one connection handled at once. `1` = strictly in order like ws-connector and Julia, where one slow feed delays every later answer on that socket (a profile header waited 10 s behind the reads feed). >1 runs REQs in fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages stay in order). |
 | `cache_db` / `membership_db` | `{host,port,user,database}` | per-domain PGOCaml pools (cache: statement_timeout 30 s) |
 | `cache_pool_size` / `membership_pool_size` | `4` / `2` | connections per worker domain (<stage-host> runs `cache_pool_size` 16 since 2026-10-05 20:44: a logged-in page load fires ~20 REQs at once and the reads feed held all 4) |
 | `content_moderation_root` | path | `default-settings.json`, `app-releases.json` (mtime-cached) |
@@ -327,6 +328,13 @@ After it (cache warm) the QA user's reads page answers in 2.0 s / page 2 in 1.8 
 09-30). Notes, profiles, reactions, zaps and relay lists of those eleven weeks are missing on the stage host,
 which is why its feed answers carry fewer profile/relay-list messages than <julia-host>'s for the same request. A full
 backfill is ~100M events and needs a database-level copy, not the import listener (~60 events/s).
+
+**Concurrent requests per connection (2026-10-06 03:26, <stage-host> `request_concurrency` 8):** the webapp opens a
+socket per route and asks for the home and reads feeds before the page's own calls, and ws-connector/Julia
+answer in order, so a profile header waited 10 s behind the reads feed on stage. `Conn` now runs REQs in
+fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages stay in order). Same socket,
+reads feed first then the five profile calls: <stage-host> answers the profile calls at 0.06 s and the feed at 0.97 s;
+Julia answers nothing before the feed (1.17 s) and the profile calls at 1.24–1.49 s.
 
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
