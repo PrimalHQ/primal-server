@@ -59,6 +59,7 @@ type t = {
   dag_poll_votes_enabled : bool; (* DAG.POLL_VOTE_IMPORT_ENABLED *)
   dag_log : bool;
   dag_dry_run_window_s : int;
+  dag_statement_timeout_s : int; (* per-statement limit of the DAG's connections (default 30; a backfill needs more) *)
   pushgateway : (string * int * string) option;
   membership_discovery_url : string option;
   media : Primal_jobs_media.Media_config.t option;
@@ -124,6 +125,7 @@ let of_json (j : Yojson.Safe.t) : t =
     dag_poll_votes_enabled = rbool j "dag_poll_votes_enabled";
     dag_log = rbool j "dag_log";
     dag_dry_run_window_s = rint j "dag_dry_run_window_s";
+    dag_statement_timeout_s = (try rint j "dag_statement_timeout_s" with Config_error _ -> 30);
     pushgateway = (match field j "pushgateway" with `Null -> None | o -> Some (rstr o "host", rint o "port", rstr o "job"));
     membership_discovery_url = rstr_opt j "membership_discovery_url";
     ext = (match j with `Assoc f -> Option.value (List.assoc_opt "ext" f) ~default:`Null | _ -> `Null);

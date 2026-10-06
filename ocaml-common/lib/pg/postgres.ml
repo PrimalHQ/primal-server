@@ -204,21 +204,21 @@ let is_connection_error : exn -> bool = function
    (connect lazily / reconnect after a failed mid-use connection). The slot count is invariant, so
    the pool can neither shrink nor deadlock while the server is down — takers just see connect
    errors until it returns. Semantics from the tsunami kernel's lib/pg.ml. *)
-type pool = { conns : dbh option Eio.Stream.t; ci : conninfo }
+type pool = { conns : dbh option Eio.Stream.t; ci : conninfo; statement_timeout_ms : int }
 
-let make_pool ~size (ci : conninfo) : pool =
+let make_pool ?(statement_timeout_ms = 30_000) ~size (ci : conninfo) : pool =
   let conns = Eio.Stream.create size in
   for _ = 1 to size do
     Eio.Stream.add conns None
   done;
-  { conns; ci }
+  { conns; ci; statement_timeout_ms }
 
 let use (p : pool) (f : dbh -> 'a) : 'a =
   let dbh =
     match Eio.Stream.take p.conns with
     | Some d -> d
     | None -> (
-        match connect p.ci with
+        match connect ~statement_timeout_ms:p.statement_timeout_ms p.ci with
         | d -> d
         | exception e ->
             Eio.Stream.add p.conns None;

@@ -418,7 +418,8 @@ let assert_tables (dbh : Postgres.dbh) : unit =
     T.all
 
 let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
-  let pools = { cache = Postgres.make_pool ~size:(cfg.dag_tasks + 2) cfg.cache_db; mem = Postgres.make_pool ~size:(cfg.dag_tasks + 2) cfg.membership_db } in
+  let statement_timeout_ms = cfg.dag_statement_timeout_s * 1000 in
+  let pools = { cache = Postgres.make_pool ~statement_timeout_ms ~size:(cfg.dag_tasks + 2) cfg.cache_db; mem = Postgres.make_pool ~statement_timeout_ms ~size:(cfg.dag_tasks + 2) cfg.membership_db } in
   with_est pools (fun est ->
       assert_tables est.CS.dbh;
       (match [%pgsql (est.CS.dbh) "select humaness_threshold_trustrank()::float8"] with Some t :: _ -> CSE.humaness_threshold := t | _ -> ());
@@ -435,15 +436,25 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
     Promise.await stop
   end
   else
+    (* The run window is [since, min now (since + span)]: span is unbounded while runs succeed and
+       halves (down to 10 s) after a failed run, doubling back after each full success. Without it a
+       burst of imports (a backfill at thousands of events/s) makes every run fail on its statement
+       timeout and the window only grows, so the runner never catches up. *)
+    let span = ref max_int in
     Periodic.run ~clock ~stop ~period:cfg.dag_period_s ~label:"dag" (fun () ->
-        let until = Utils.current_time () in
-        let r = { since = max !since 1672531200; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log } in
+        let now = Utils.current_time () in
+        let since_ = max !since 1672531200 in
+        let until = if !span = max_int || since_ + !span >= now then now else since_ + !span in
+        let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log } in
         let t0 = Unix.gettimeofday () in
         run_pipeline r;
         let ok = Atomic.get r.running in
         if ok && not cfg.dag_dry_run then since := until;
+        (if ok then (if until < now && !span < max_int / 2 then span := !span * 2)
+         else span := max 10 ((until - since_) / 2));
         let dur = Unix.gettimeofday () -. t0 in
-        log "run %s in %.1fs (window %d .. %d)" (if ok then "ok" else "FAILED") dur r.since until;
+        log "run %s in %.1fs (window %d .. %d%s)" (if ok then "ok" else "FAILED") dur r.since until
+          (if !span = max_int then "" else Printf.sprintf ", span %ds, lag %ds" !span (now - until));
         match cfg.pushgateway with
         | Some (host, port, job) -> (
             try Pushgateway.set_values ~net ~clock ~timeout:5.0 ~host ~port ~job [ ("dag_runner_duration", "gauge", Printf.sprintf "%.3f" dur); ("dag_runner_all_ok", "gauge", if ok then "1" else "0") ]
