@@ -351,6 +351,22 @@ stage depended on <julia-host> for it). It now goes to the native `feed_2`; the 
 to Julia on the same data. A page is 449 messages for 20 thumbnails (media metadata 177 KB, zap receipts 152 KB,
 profiles 58 KB raw); a thumbnails-only enrichment would need a client-side opt-in, so it is not done.
 
+**Formerly proxied requests, native since 2026-10-06 (commit 038628f):** the bookmarks feed (`notes:
+"bookmarks"` in `feed`, `mega_feed_directive`, `multi_kind_mega_feed_directive`; the e/a tags of the user's
+kind-10003 list, only ids known to `event_created_at`, as Julia), `events` without `extended_response`, and
+`membership_content_stats`, `membership_content_backup` (get_user_events: replaceable kinds reduced to their
+latest), `membership_recovery_contact_lists`, `membership_recover_contact_list` (a no-op in Julia too),
+`membership_content_rebroadcast_start/status/cancel` (rows of `event_rebroadcasting`; the engine is
+ocaml-jobs' rebroadcast role), `membership_legends_leaderboard`, `membership_premium_leaderboard`,
+`membership_media_management_uploads`, `membership_media_management_delete` (purges through the API's own
+moderation listener, then recomputes `used_storage`). Same-data replay against Julia: 12/13 identical; the
+one difference is a `{pubkey: 0}` follower-count message for a leaderboard user without data that Julia
+omits. A 300-event backup is the same set in a different order (ties on `created_at`). `primalctl sign
+<nsec-file> <kind> <content> [tags]` makes the signed `event_from_user` such corpora need.
+Still forwarded: `upload`, `upload_chunk`, `upload_complete`, `upload_cancel` (the legacy chunked upload path,
+`app_media.jl`; no current webapp caller) and the edge cases listed under conditional hand-backs (a hidden
+profile's `search_filterlist`, `feed` for a user without a followers row, unknown feed directive strings).
+
 ## Admin HTTP (127.0.0.1:`admin_port`)
 
 `GET /healthz`, `GET /readyz` (503 unless serving — the load balancer / restart script gate),
