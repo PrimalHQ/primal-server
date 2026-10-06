@@ -4334,7 +4334,7 @@ end
 
 function events_nip46(est::DB.CacheStorage; event_ids::Vector)
     res = []
-    session = Postgres.make_session(Postgres.PGConnStr("host=<julia-host> port=54017 dbname=primal1 user=pr"))
+    session = Postgres.make_session(Postgres.PGConnStr("host=192.168.44.7 port=54017 dbname=primal1 user=pr"))
     try
         for eid in event_ids 
             eid = castmaybe(eid, Nostr.EventId)
