@@ -2,6 +2,8 @@
 # Rebuild primal-fetcher and restart it as a transient systemd --user service (stop-then-start:
 # one fetcher per state directory — two would fight over the resume files and double the firehose).
 #   PRIMAL_FETCHER_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-fetcher-config.json, see below)
+#   PRIMAL_FETCHER_MEMHIGH / PRIMAL_FETCHER_MEMMAX  systemd MemoryHigh / MemoryMax (default 10G / 12G; above
+#                       MemoryHigh the kernel throttles every allocation — the 2026-10-07 'freeze' at 63k known relays)
 #   PRIMAL_MALLOC_ARENA_MAX  glibc malloc arena cap (default 2: with the glibc default of 8 x cores the
 #                       fetcher sat at 7.5 GB RSS for 16.6k relays, with 2 arenas at 3.6 GB; see README)
 set -euo pipefail
@@ -10,9 +12,9 @@ P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$P/.." && pwd -P)"
 # Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
 # in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
-# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+# logs, pid and state files in PRIMAL_VAR_DIR (default $HOME/var/primalserver).
 CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
-VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$HOME/var/primalserver}"
 COMMON="$ROOT/ocaml-common"
 EXE="${PRIMAL_EXE:-$ROOT/_build/default/ocaml-fetcher/bin/primal_fetcherd.exe}"
 CONFIG="${PRIMAL_FETCHER_CONFIG:-$CONFIG_DIR/primal-fetcher-config.json}"
@@ -32,7 +34,7 @@ loginctl enable-linger "${USER:-$(id -un)}" 2>/dev/null || true
 mkdir -p "$(dirname "$LOG")"
 systemd-run --user --collect --unit="$UNIT" --description="Primal fetcher daemon (ocaml-fetcher/bin/primal_fetcherd.exe)" \
   -p Restart=always -p RestartSec=5 -p OOMPolicy=kill -p StartLimitIntervalSec=0 -p LimitNOFILE=262144 \
-  -p MemoryAccounting=yes -p MemoryHigh=10G -p MemoryMax=12G \
+  -p MemoryAccounting=yes -p "MemoryHigh=${PRIMAL_FETCHER_MEMHIGH:-10G}" -p "MemoryMax=${PRIMAL_FETCHER_MEMMAX:-12G}" \
   -p "Environment=MALLOC_ARENA_MAX=${PRIMAL_MALLOC_ARENA_MAX:-2}" \
   -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" -p "WorkingDirectory=$P" \
   -- "$NIX" develop "path:$COMMON" -c "$EXE" "$CONFIG"

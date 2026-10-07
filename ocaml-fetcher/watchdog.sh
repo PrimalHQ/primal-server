@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# systemd timer units get a minimal PATH without bash: install the timer with
+#   -p Environment=PATH=/run/current-system/sw/bin:/usr/bin:/bin   (the 2026-10-05 install lacked it and never ran).
 # External liveness watchdog for primal-fetcher: the daemon's admin /status must answer and its
 # message counter must move. Two consecutive failures (checks run every 2 minutes) restart the unit.
 # Why external: on 2026-10-05 00:53–04:52 the whole process froze (every domain, the admin port
@@ -11,9 +13,9 @@ set -u
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
 # in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
-# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+# logs, pid and state files in PRIMAL_VAR_DIR (default $HOME/var/primalserver).
 CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
-VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$HOME/var/primalserver}"
 CONFIG="${PRIMAL_FETCHER_CONFIG:-$CONFIG_DIR/primal-fetcher-config.json}"
 UNIT=primal-ocaml-fetcher
 STATE="$VAR_DIR/fetcher-watchdog.state"

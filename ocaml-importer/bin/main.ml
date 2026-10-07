@@ -272,6 +272,7 @@ let () =
     | Some b ->
         Importer.Event_syncer.backfill ~clock ~remote:{ cfg.cache_db with Pg.host = b.remote } ~from_ts:b.from_ts
           ~to_ts:b.to_ts ~batch:b.batch ~state_file:b.state_file
+          ~headroom:(fun () -> WP.length pool < WP.capacity pool / 2)
           ~submit:(fun e ->
             Importer.Stats.set_slot backfill_slot "submit";
             WP.submit_event pool e;

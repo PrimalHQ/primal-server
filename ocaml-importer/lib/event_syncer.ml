@@ -160,7 +160,7 @@ let write_state (file : string) (t : int) (id : string) : unit =
   Sys.rename tmp file
 
 let backfill ~(clock : _ Eio.Time.clock) ~(remote : Pg.conninfo) ~(from_ts : int) ~(to_ts : int) ~(batch : int)
-    ~(state_file : string) ~(submit : Nostr.t -> unit) () : unit =
+    ~(state_file : string) ~(submit : Nostr.t -> unit) ?(headroom : unit -> bool = fun () -> true) () : unit =
   let cursor_t, cursor_id =
     match read_state state_file with
     | Some (t, id) when t >= from_ts -> (ref t, ref id)
@@ -200,6 +200,10 @@ let backfill ~(clock : _ Eio.Time.clock) ~(remote : Pg.conninfo) ~(from_ts : int
               event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_)
             rows
         in
+        (* the live firehose and the regular syncer share the bounded queue: a backfill that keeps it full
+           starves them (the stage host received no live events for 25 h on 2026-10-06), so wait until the
+           queue has room before each batch *)
+        while not (headroom ()) do Eio.Time.sleep clock 0.2 done;
         List.sort (fun (a : Nostr.t) (b : Nostr.t) -> Int.compare a.created_at b.created_at) evs |> List.iter submit;
         total := !total + List.length evs;
         cursor_t := !last_t;

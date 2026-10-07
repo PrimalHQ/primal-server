@@ -12,9 +12,9 @@ P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$P/.." && pwd -P)"
 # Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
 # in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
-# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+# logs, pid and state files in PRIMAL_VAR_DIR (default $HOME/var/primalserver).
 CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
-VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$HOME/var/primalserver}"
 COMMON="$ROOT/ocaml-common"
 EXE="${PRIMAL_EXE:-$ROOT/_build/default/ocaml-jobs/bin/primal_jobsd.exe}"
 CONFIG="${PRIMAL_BLOSSOM_CONFIG:-$CONFIG_DIR/primal-blossom-config.json}"

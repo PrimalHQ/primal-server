@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild the importer with dune and, if the build succeeds, (re)start main.exe as a transient
-# systemd --user service logging to $PRIMAL_VAR_DIR/ocaml-importer.log (default $PRIMAL_VAR_DIR).
+# systemd --user service logging to $PRIMAL_VAR_DIR/ocaml-importer.log (default $HOME/var/primalserver).
 #
 # Why a systemd service (not the old `setsid ... &`): it puts main.exe in its OWN cgroup with
 # memory accounting (so its RSS is attributed to it, not lumped into the shared tmux scope that the
@@ -27,9 +27,9 @@ P="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$P/.." && pwd -P)"
 # Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
 # in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
-# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+# logs, pid and state files in PRIMAL_VAR_DIR (default $HOME/var/primalserver).
 CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
-VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$HOME/var/primalserver}"
 COMMON="$ROOT/ocaml-common"
 EXE="$ROOT/_build/default/ocaml-importer/bin/main.exe"
 # All runtime settings come from this JSON file; override the path with IMPORTER_CONFIG.

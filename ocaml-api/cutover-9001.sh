@@ -21,9 +21,9 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 # Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
 # in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
-# logs, pid and state files in PRIMAL_VAR_DIR (default $PRIMAL_VAR_DIR).
+# logs, pid and state files in PRIMAL_VAR_DIR (default $HOME/var/primalserver).
 CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
-VAR_DIR="${PRIMAL_VAR_DIR:-$PRIMAL_VAR_DIR}"
+VAR_DIR="${PRIMAL_VAR_DIR:-$HOME/var/primalserver}"
 CFG=${PRIMAL_API_CONFIG:-$CONFIG_DIR/primal-api-config.json}
 ts=$(date +%Y%m%d%H%M%S)
 cp "$CFG" "$CFG.bak-$ts-pre-cutover"

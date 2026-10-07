@@ -15,9 +15,11 @@ open Eio.Std
    queue. [Msg] is a raw line (parsed by the worker); [Event] is an already-parsed Nostr event. *)
 type payload = Msg of string | Event of Nostr.t
 type job = { enq_at : float; payload : payload }
-type t = { queue : job Eio.Stream.t }
+type t = { queue : job Eio.Stream.t; capacity : int }
 
-let create ~capacity : t = { queue = Eio.Stream.create capacity }
+let create ~capacity : t = { queue = Eio.Stream.create capacity; capacity }
+let length (t : t) : int = Eio.Stream.length t.queue
+let capacity (t : t) : int = t.capacity
 
 (* Submit a job; blocks the caller if the queue is at capacity (backpressure). *)
 let submit (t : t) (payload : payload) : unit =
