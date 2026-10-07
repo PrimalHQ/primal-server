@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # systemd timer units get a minimal PATH without bash: install the timer with
-#   -p Environment=PATH=/run/current-system/sw/bin:/usr/bin:/bin   (the 2026-10-05 install lacked it and never ran).
+#   -p "Environment=PATH=$HOME/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin"   (bash and python3; the 2026-10-05 install lacked it and never ran).
 # External liveness watchdog for primal-fetcher: the daemon's admin /status must answer and its
 # message counter must move. Two consecutive failures (checks run every 2 minutes) restart the unit.
 # Why external: on 2026-10-05 00:53–04:52 the whole process froze (every domain, the admin port

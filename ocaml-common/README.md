@@ -35,7 +35,7 @@ dune `(env ...)`. `sql/migrate.sh` applies versioned migrations (`sql/migrations
 
 Deployment layout, shared by every `rebuild-restart-*.sh`: the daemons' JSON configs live outside the
 checkout in `PRIMAL_CONFIG_DIR` (default two directories above the repo root, next to the parent repo),
-logs, pid and state files in `PRIMAL_VAR_DIR` (default `$PRIMAL_VAR_DIR`); each script also takes
+logs, pid and state files in `PRIMAL_VAR_DIR` (default `$HOME/var/primalserver`); each script also takes
 its own `PRIMAL_*_CONFIG` override.
 
 `patches/` holds fixes to third-party OCaml packages applied in `flake.nix` through `overrideAttrs`:
