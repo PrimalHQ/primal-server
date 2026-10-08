@@ -59,7 +59,7 @@ let cloudflare_purge (ctx : ctx) ~(zone_id : string) ~(api_key : string) (file_u
         Http.request ~net ~clock:ctx.clock ~timeout:20.0 ~meth:"POST" ~headers:[ ("Authorization", "Bearer " ^ api_key); ("Content-Type", "application/json") ] ~body
           ("https://api.cloudflare.com/client/v4/zones/" ^ zone_id ^ "/purge_cache")
       with
-      | Some r when r.Http.status = 200 -> ()
+      | Some r when r.Http.status = 200 -> log "cloudflare purge %s ok" file_url
       | Some r -> log "cloudflare purge %s: HTTP %d" file_url r.Http.status
       | None -> log "cloudflare purge %s failed" file_url)
 
