@@ -42,6 +42,10 @@ NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"  # abs path: user
 
 # 1. Rebuild everything. On failure, stop here WITHOUT touching the running importer, so a broken
 #    build leaves the current (working) process undisturbed. Build output goes to this terminal.
+# schema first: the daemons' [%pgsql] checks at build time and the daemons themselves need every
+# migration applied to THIS host's database (migrate.sh: public.schema_migrations, idempotent files)
+echo "$(ts 2>/dev/null) applying SQL migrations ..." >&2
+(cd "$COMMON" && "$NIX" develop "path:$COMMON" -c "$COMMON/sql/migrate.sh")
 echo "building $P (dune build @all, workspace root $ROOT) ..." >&2
 (cd "$P" && nix develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
 

@@ -21,6 +21,10 @@ CONFIG="${PRIMAL_BLOSSOM_CONFIG:-$CONFIG_DIR/primal-blossom-config.json}"
 LOG="$VAR_DIR/ocaml-blossom.log"
 UNIT_PREFIX=primal-ocaml-blossom
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
+# schema first: the daemons' [%pgsql] checks at build time and the daemons themselves need every
+# migration applied to THIS host's database (migrate.sh: public.schema_migrations, idempotent files)
+echo "$(ts 2>/dev/null) applying SQL migrations ..." >&2
+(cd "$COMMON" && "$NIX" develop "path:$COMMON" -c "$COMMON/sql/migrate.sh")
 echo "$(ts) building (dune build @all) ..." >&2
 (cd "$ROOT" && "$NIX" develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
 [[ -x "$EXE" ]] || { echo "ERROR: $EXE not built" >&2; exit 1; }

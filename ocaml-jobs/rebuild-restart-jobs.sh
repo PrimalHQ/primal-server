@@ -22,6 +22,10 @@ CONFIG="${PRIMAL_JOBS_CONFIG:-$CONFIG_DIR/primal-jobs-config.json}"
 LOG="$VAR_DIR/ocaml-jobs.log"
 UNIT=primal-ocaml-jobs
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
+# schema first: the daemons' [%pgsql] checks at build time and the daemons themselves need every
+# migration applied to THIS host's database (migrate.sh: public.schema_migrations, idempotent files)
+echo "$(ts 2>/dev/null) applying SQL migrations ..." >&2
+(cd "$COMMON" && "$NIX" develop "path:$COMMON" -c "$COMMON/sql/migrate.sh")
 echo "$(ts) building (dune build @all) ..." >&2
 # from the workspace root: @all in a subdirectory builds only that directory, and PRIMAL_EXE may
 # point at the private ocaml-ext binary
