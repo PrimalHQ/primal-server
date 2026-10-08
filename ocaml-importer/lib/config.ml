@@ -138,6 +138,8 @@ let from_env () : t =
         disable_trustrank = bool_env "IMPORTER_DISABLE_TRUSTRANK" false;
         import_reporting = bool_env "IMPORTER_IMPORT_REPORTING" false;
         reporting_whitelist = pubkey_list_env "IMPORTER_REPORTING_WHITELIST";
+        download_media = bool_env "IMPORTER_DOWNLOAD_MEDIA" false;
+        download_previews = bool_env "IMPORTER_DOWNLOAD_PREVIEWS" false;
       };
     cache_db = Postgres.cache_conninfo ();
     membership_db = Postgres.membership_conninfo ();
@@ -237,6 +239,8 @@ let of_json (j : Yojson.Safe.t) : t =
         disable_trustrank = rbool j "disable_trustrank";
         import_reporting = rbool j "import_reporting";
         reporting_whitelist = rpubkeys j "reporting_whitelist";
+        download_media = rbool j "download_media";
+        download_previews = rbool j "download_previews";
       };
     cache_db = conninfo_of_json (field j "cache_db");
     membership_db = conninfo_of_json (field j "membership_db");

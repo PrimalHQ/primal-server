@@ -169,6 +169,8 @@ Booleans accept `1/true/yes/on` and `0/false/no/off`.
 | `default_settings_file` | `null` | `content-moderation/default-settings.json`, deep-merged under each user's app settings (Julia `ext_user_get_settings`). |
 | `relay_broadcast_timeout` | `15.0` | Per-relay budget when re-broadcasting a reply's thread parents to the author's relays (Julia `broadcast_reply`). |
 | `poll_vote_import_enabled` | `true` | Julia `DAG.POLL_VOTE_IMPORT_ENABLED` for the per-event poll-stats indexer. |
+| `download_media` | `false` (`IMPORTER_DOWNLOAD_MEDIA`) | Julia `DOWNLOAD_MEDIA`: queue `import_media_pn` + `import_media_fast_pn` processing nodes for every image/video URL of a human author's note (content URLs, `imeta` urls of picture/video events, long-form `image` tags, video `url`/`thumb`/`image` tags), and re-queue a note's media on every reaction to it. On only on the media host, whose jobs daemon (media role) executes the nodes; the node ids are Julia's, so an existing node is reset to pending as `@pnd` did. |
+| `download_previews` | `false` (`IMPORTER_DOWNLOAD_PREVIEWS`) | Julia `DOWNLOAD_PREVIEWS`: queue `import_preview_pn` (link preview) nodes for the other URLs. Media host only. |
 
 Also always on since Phase 1 (no key): `update_user_search` on metadata changes, the ws-importer
 table writes (`live_event_participants` with participant-proof verification, `follow_lists`,

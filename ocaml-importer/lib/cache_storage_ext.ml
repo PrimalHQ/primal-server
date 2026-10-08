@@ -243,9 +243,115 @@ let for_mentiones ?(resolve_a = true) (est : CS.est) (e : Nostr.t) (body : Nostr
       (List.rev !acc)
   end
 
-(* Julia import_note_urls: media-URL extraction + download. Every branch is gated on
-   DOWNLOAD_MEDIA, off in the importer, so this is a no-op. TODO: media import subsystem. *)
-let import_note_urls (_est : CS.est) (_e : Nostr.t) : unit = ()
+(* {1 media imports} (Julia import_note_urls / import_long_form_note_urls / for_urls)
+
+   On the media host the importer queues the media-import processing nodes that the jobs daemon's
+   media role executes: import_media_pn + import_media_fast_pn for image and video URLs,
+   import_preview_pn for every other URL (link previews), exactly as the Julia media importer did
+   with DOWNLOAD_MEDIA / DOWNLOAD_PREVIEWS on. Both are off everywhere else (config download_media /
+   download_previews). Node ids are Julia's (sha256 of the insertion-ordered {mod, func, args,
+   kwargs}; verified against Julia-created rows), and an existing node is reset to pending as Julia's
+   @pnd update_node did — so a reaction re-queues the liked note's media (ext_reaction), which keeps
+   popular notes' media fresh. *)
+
+let image_exts = [ ".png"; ".gif"; ".jpg"; ".jpeg"; ".webp" ]
+let video_exts = [ ".mp4"; ".mov"; ".3gp" ]
+
+(* Julia re_url (cache_storage_ext.jl:1030): http(s)://, optional www., 1-256 host/path chars, a dot,
+   a 1-6 alphanumeric TLD at a word boundary, then any run of URL chars. Its \pL (Unicode letters)
+   is approximated as ASCII alphanumerics plus any non-ASCII byte. *)
+let re_url =
+  let open Re in
+  let letter = alt [ alnum; rg '\128' '\255' ] in
+  compile
+    (seq
+       [
+         str "http"; opt (char 's'); str "://"; opt (str "www.");
+         repn (alt [ letter; set "-@:%._+~#=" ]) 1 (Some 256);
+         char '.'; repn alnum 1 (Some 6); eow;
+         rep (alt [ letter; set "-@:%_+.~#?&/=" ]);
+       ])
+
+(* Julia for_urls: every URL in the content, plus the imeta "url ..." entries of picture / video
+   events. *)
+let for_urls (e : Nostr.t) (body : string -> unit) : unit =
+  List.iter (fun g -> body (Re.Group.get g 0)) (Re.all re_url e.content);
+  if e.kind = Nostr.kind_picture || e.kind = Nostr.kind_video_long_form || e.kind = Nostr.kind_video_short_form
+  then
+    List.iter
+      (function
+        | `String "imeta" :: items ->
+            List.iter
+              (function
+                | `String it -> (
+                    match List.filter (fun s -> s <> "") (String.split_on_char ' ' it) with
+                    | "url" :: u :: _ -> body u
+                    | _ -> ())
+                | _ -> ())
+              items
+        | _ -> ())
+      e.tags
+
+(* Julia ProcessingGraph.update_node as @pnd calls it: insert the node pending, or reset an
+   existing one to pending (result/exception/started_at/finished_at/extra cleared). The jobs
+   daemon's scheduler claims it. Dynamic SQL: the processing tables only exist on the media host. *)
+let schedule_node (est : CS.est) ~(mod_ : string) ~(func : string) ~(args : Pgj.t) : unit =
+  let kwargs = `Assoc [] in
+  let id = Pgj.node_id_insertion ~mod_ ~func ~args ~kwargs in
+  try
+    ignore
+      (Postgres.query est.CS.dbh
+         "insert into processing_nodes (id, created_at, updated_at, mod, func, args, kwargs, result, \
+          exception, started_at, finished_at, extra, code_sha256) \
+          values (decode($1, 'hex'), now(), now(), $2, $3, $4::jsonb, $5::jsonb, null, false, null, null, null, null) \
+          on conflict (id) do update set updated_at = now(), mod = excluded.mod, func = excluded.func, \
+          args = excluded.args, kwargs = excluded.kwargs, result = null, exception = false, \
+          started_at = null, finished_at = null, extra = null, code_sha256 = null"
+         [ Some id; Some mod_; Some func; Some (Pgj.to_string args); Some (Pgj.to_string kwargs) ])
+  with
+  | Eio.Cancel.Cancelled _ as ex -> raise ex
+  | ex -> Printf.eprintf "schedule_node %s: %s\n%!" func (Printexc.to_string ex)
+
+(* @pnd <func>(est, e.id, url, extra...) in PrimalServer.DB *)
+let media_node (est : CS.est) ~(func : string) (e : Nostr.t) (url : string) (extra : Pgj.t list) : unit =
+  schedule_node est ~mod_:"PrimalServer.DB" ~func
+    ~args:(Pgj.tuple ([ Pgj.cache_storage; Pgj.event_id_hex (Hex_util.encode e.id); `String url ] @ extra))
+
+(* Julia [(:original, true)] *)
+let original_only : Pgj.t = `List [ Pgj.tuple [ Pgj.symbol "original"; `Bool true ] ]
+
+(* Julia any(startswith(splitext(lowercase(url))[2], ext) for ext in exts) *)
+let has_ext (exts : string list) (url : string) : bool =
+  let ext = String.lowercase_ascii (Filename.extension url) in
+  List.exists (fun x -> String.starts_with ~prefix:x ext) exts
+
+let import_note_urls (est : CS.est) (e : Nostr.t) : unit =
+  let cfg = est.CS.cfg in
+  if (cfg.CS.download_media || cfg.CS.download_previews) && ext_is_human ~threshold:0.0 est e.pubkey then
+    for_urls e (fun url ->
+        if has_ext image_exts url then begin
+          if cfg.CS.download_media then begin
+            media_node est ~func:"import_media_pn" e url [ Pgj.all_variants ];
+            media_node est ~func:"import_media_fast_pn" e url []
+          end
+        end
+        else if has_ext video_exts url then begin
+          if cfg.CS.download_media then begin
+            media_node est ~func:"import_media_pn" e url [ original_only ];
+            media_node est ~func:"import_media_fast_pn" e url []
+          end
+        end
+        else if cfg.CS.download_previews then media_node est ~func:"import_preview_pn" e url [])
+
+(* Julia import_long_form_note_urls: the content URLs (trust-gated) plus the "image" tags (not). *)
+let import_long_form_note_urls (est : CS.est) (e : Nostr.t) : unit =
+  import_note_urls est e;
+  if est.CS.cfg.CS.download_media then
+    List.iter
+      (function
+        | `String "image" :: `String url :: _ -> media_node est ~func:"import_media_pn" e url [ Pgj.all_variants ]
+        | _ -> ())
+      e.tags
 
 (* {1 zaps} (Julia import_zap_receipt / zap_receiver) *)
 
@@ -794,7 +900,13 @@ let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
 
 let ext_reaction (est : CS.est) (e : Nostr.t) (eid : string) : unit =
   CS.event_hook est eid
-    (CS.Score_event_cb { initiator = e.pubkey; scored_at = e.created_at; action = "like"; increment = 1 })
+    (CS.Score_event_cb { initiator = e.pubkey; scored_at = e.created_at; action = "like"; increment = 1 });
+  (* Julia: a reaction re-queues the liked note's media imports (cache_storage_ext.jl:297). *)
+  if est.CS.cfg.CS.download_media || est.CS.cfg.CS.download_previews then
+    match CS.get_event est eid with
+    | Some ee when ee.kind = Nostr.kind_text_note -> import_note_urls est ee
+    | Some ee when ee.kind = Nostr.kind_long_form_content -> import_long_form_note_urls est ee
+    | _ -> ()
 
 let ext_reply (est : CS.est) (e : Nostr.t) (parent_eid : string) : unit =
   CS.event_hook est parent_eid
@@ -844,9 +956,19 @@ let ext_pubkey_zap (est : CS.est) (e : Nostr.t) (zapped_pk : string) (amount_sat
         [%pgsql dbh "update pubkey_zapped_1_17f1f622a9 set zaps = zaps + 1, satszapped = satszapped + $amount where pubkey = $zapped_pk"]
   | _ -> ()
 
-(* long-form / video / live: only media imports, all gated on DOWNLOAD_MEDIA — no-ops here. *)
-let ext_long_form_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls est e
-let ext_video_note (est : CS.est) (e : Nostr.t) : unit = import_note_urls est e
+(* long-form / video: only media imports (see {1 media imports}). *)
+let ext_long_form_note (est : CS.est) (e : Nostr.t) : unit = import_long_form_note_urls est e
+
+(* Julia ext_video_note: the content URLs plus the url / thumb / image tags. *)
+let ext_video_note (est : CS.est) (e : Nostr.t) : unit =
+  import_note_urls est e;
+  if est.CS.cfg.CS.download_media then
+    List.iter
+      (function
+        | `String ("url" | "thumb" | "image") :: `String url :: _ ->
+            media_node est ~func:"import_media_pn" e url [ Pgj.all_variants ]
+        | _ -> ())
+      e.tags
 
 (* Julia ext_preimport_check: !(pubkey in Filterlist.import_pubkey_blocked) — read the local
    filterlist. *)

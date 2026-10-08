@@ -19,6 +19,8 @@ type config = {
          pubkey so ext_is_human is true for everyone (used when no TrustRankMaker runs). *)
   import_reporting : bool; (* Julia IMPORT_REPORTING_EVENTS: process kind-1984 reports *)
   reporting_whitelist : string list; (* raw 32-byte pubkeys allowed to report (REPORTING_WHITELIST) *)
+  download_media : bool; (* Julia DOWNLOAD_MEDIA: queue import_media_pn / import_media_fast_pn nodes (media host) *)
+  download_previews : bool; (* Julia DOWNLOAD_PREVIEWS: queue import_preview_pn nodes for non-media URLs (media host) *)
 }
 
 let default_config =
@@ -29,6 +31,8 @@ let default_config =
     disable_trustrank = false;
     import_reporting = false;
     reporting_whitelist = [];
+    download_media = false;
+    download_previews = false;
   }
 
 (* [dbh] is the cache DB (Julia :p0); [mem_dbh] is the membership DB (Julia :membership),

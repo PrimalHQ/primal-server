@@ -96,7 +96,9 @@ The OCaml tree on the media host is a git worktree of this repo (branch ocaml5)
 `PRIMAL_BUILD_PGHOST=<stage-host>` because the `[%pgsql]` checks need the stage host's schema. The unit
 `primal-ocaml-jobs` there runs `roles: ["media"]` with `execute_funcs` = the Rust scheduler's list
 (`import_media_fast_pn`, `import_media_fast_pn_2`, `import_media_pn`, `import_preview_pn`,
-`import_media_hls_pn`, `import_text_event_pn`), `MemoryMax=30G`. Rust `primal-media` is stopped: the
+`import_media_hls_pn`, `import_text_event_pn`), `MemoryMax=30G`. Since 2026-10-08 the OCaml importer
+on the media host is the producer of these nodes (`download_media` / `download_previews` in its
+config; see ocaml-importer/README.md) — the Julia media importer that queued them is gone. Rust `primal-media` is stopped: the
 interactive zsh that looped `timeout 1800 systemd-run ... primal-media run-processing-graph-scheduler`
 is SIGSTOPped (`kill -CONT` it and it restarts the Rust scheduler — the rollback). Julia node 18's
 `ProcessingGraphExecutionScheduler` keeps `import_upload_3`, `block_media` and `purge_media_`: its

@@ -13,6 +13,7 @@
   eio.unix
   eio_main
   yojson
+  re
   ppx_yojson_conv_lib
   hex
   uuidm
