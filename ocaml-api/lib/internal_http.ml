@@ -11,7 +11,13 @@ open Http_server
 type ctx = Handlers.ctx
 
 let ctx_of (cfg : Config.t) clock : ctx = { Handlers.cfg; clock; conn_id = 0; subid = "http" }
-let guard (f : unit -> resp) : resp = try f () with Eio.Cancel.Cancelled _ as e -> raise e | _ -> Text (500, "error")
+let guard (f : unit -> resp) : resp =
+  try f ()
+  with
+  | Eio.Cancel.Cancelled _ as e -> raise e
+  | e ->
+      Printf.printf "%s [http] handler error: %s\n%!" (Procinfo.timestamp ()) (Printexc.to_string e);
+      Text (500, "error")
 
 let api_headers = [ ("content-type", "application/json") ]
 let no_store = ("cache-control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0")

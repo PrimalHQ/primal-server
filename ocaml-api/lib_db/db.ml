@@ -12,7 +12,7 @@ type 'db pool = Pool : Postgres.pool -> 'db pool [@@unboxed]
 type 'db conn = Conn : Postgres.dbh -> 'db conn [@@unboxed]
 
 let raw (Conn d : 'db conn) : Postgres.dbh = d
-let use (Pool p : 'db pool) (f : 'db conn -> 'a) : 'a = Postgres.use p (fun dbh -> f (Conn dbh))
+let use ?acquire (Pool p : 'db pool) (f : 'db conn -> 'a) : 'a = Postgres.use ?acquire p (fun dbh -> f (Conn dbh))
 
 type pools = { cache : cache pool; membership : membership pool }
 
@@ -31,17 +31,11 @@ let pools () : pools =
 let cache () : cache pool = (pools ()).cache
 let membership () : membership pool = (pools ()).membership
 
-(* ws-connector's pool.get() timeout: 15 s waiting for a free connection -> "Database pool timeout". *)
+(* ws-connector's pool.get() timeout: 15 s waiting for a free connection -> "Database pool timeout".
+   The timeout bounds the wait for the lease only; the callback runs unbounded (Postgres.use). *)
 let pool_get_timeout = 15.0
 
-exception Pool_timeout
+exception Pool_timeout = Postgres.Pool_timeout
 
-let with_cache ~clock (f : cache conn -> 'a) : 'a =
-  match Eio.Time.with_timeout clock pool_get_timeout (fun () -> Ok (use (cache ()) f)) with
-  | Ok v -> v
-  | Error `Timeout -> raise Pool_timeout
-
-let with_membership ~clock (f : membership conn -> 'a) : 'a =
-  match Eio.Time.with_timeout clock pool_get_timeout (fun () -> Ok (use (membership ()) f)) with
-  | Ok v -> v
-  | Error `Timeout -> raise Pool_timeout
+let with_cache ~clock (f : cache conn -> 'a) : 'a = use ~acquire:(clock, pool_get_timeout) (cache ()) f
+let with_membership ~clock (f : membership conn -> 'a) : 'a = use ~acquire:(clock, pool_get_timeout) (membership ()) f

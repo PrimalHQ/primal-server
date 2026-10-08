@@ -213,8 +213,14 @@ let make_pool ?(statement_timeout_ms = 30_000) ~size (ci : conninfo) : pool =
   done;
   { conns; ci; statement_timeout_ms }
 
-let use (p : pool) (f : dbh -> 'a) : 'a =
-  let dbh =
+exception Pool_timeout
+
+(* [acquire] = (clock, seconds) bounds ONLY the wait for a free slot and its lazy connect, never
+   [f]: a timeout wrapped around the callback (as Db.with_cache did until 2026-10-08) cancels any
+   long-running lease — the media purge's S3 round trips were cut off after 15 s with a
+   Cancelled Not_first. *)
+let use ?acquire (p : pool) (f : dbh -> 'a) : 'a =
+  let take () =
     match Eio.Stream.take p.conns with
     | Some d -> d
     | None -> (
@@ -223,6 +229,14 @@ let use (p : pool) (f : dbh -> 'a) : 'a =
         | exception e ->
             Eio.Stream.add p.conns None;
             raise e)
+  in
+  let dbh =
+    match acquire with
+    | None -> take ()
+    | Some (clock, timeout) -> (
+        match Eio.Time.with_timeout clock timeout (fun () -> Ok (take ())) with
+        | Ok d -> d
+        | Error `Timeout -> raise Pool_timeout)
   in
   match f dbh with
   | v ->
