@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#   PRIMAL_BUILD_PGHOST  host whose DBs the [%pgsql] checks run against (a host whose local schema differs, e.g. the media host)
 # Rebuild the importer with dune and, if the build succeeds, (re)start main.exe as a transient
 # systemd --user service logging to $PRIMAL_VAR_DIR/ocaml-importer.log (default $HOME/var/primalserver).
 #

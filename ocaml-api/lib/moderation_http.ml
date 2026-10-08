@@ -93,7 +93,12 @@ let purge_media (ctx : ctx) ~(pubkey : string option) ~(surl : string) ~(reason 
         | Some prov, Some net -> (
             let key = String.sub p 1 (String.length p - 1) in
             try
-              if S3.check ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov key then begin
+              let present =
+                match S3.check_opt ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov key with
+                | Some b -> b
+                | None -> log "s3 check %s %s failed: object left in place" name p; false
+              in
+              if present then begin
                 mb.files <- `Assoc [ ("mp", `List [ `String "s3"; `String name ]); ("p", `String p) ] :: mb.files;
                 (match prov.S3.bucket2 with
                 | Some b2 -> ignore (S3.copy ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov ~source_bucket:prov.bucket ~source_key:key ~destination_bucket:b2 ~destination_key:key)

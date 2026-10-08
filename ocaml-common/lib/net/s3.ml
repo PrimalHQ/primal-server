@@ -81,6 +81,14 @@ let request ~net ~clock ?proxy ?(timeout = 30.0) (p : provider) ~meth ~(bucket :
 let ok (r : Http.response option) = match r with Some r -> r.Http.status >= 200 && r.status < 300 | None -> false
 
 let check ~net ~clock ?proxy (p : provider) ?(bucket = p.bucket) (key : string) : bool = ok (request ~net ~clock ?proxy p ~meth:"HEAD" ~bucket ~key ())
+
+(* [check] cannot tell "no such object" from "the request failed"; a purge that silently skips a
+   provider on a failed HEAD leaves the object in place (the media host's SOCKS proxy did that on
+   2026-10-08). None = the request itself failed or timed out. *)
+let check_opt ~net ~clock ?proxy (p : provider) ?(bucket = p.bucket) (key : string) : bool option =
+  match request ~net ~clock ?proxy p ~meth:"HEAD" ~bucket ~key () with
+  | Some r -> Some (r.Http.status >= 200 && r.status < 300)
+  | None -> None
 let delete ~net ~clock ?proxy (p : provider) ?(bucket = p.bucket) (key : string) : bool = ok (request ~net ~clock ?proxy p ~meth:"DELETE" ~bucket ~key ())
 
 let copy ~net ~clock ?proxy (p : provider) ~source_bucket ~source_key ~destination_bucket ~destination_key : bool =

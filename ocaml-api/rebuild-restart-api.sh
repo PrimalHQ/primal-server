@@ -8,6 +8,7 @@
 # running one untouched.
 #
 #   PRIMAL_API_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-api-config.json, see below)
+#   PRIMAL_BUILD_PGHOST  host whose DBs the [%pgsql] checks run against (a host whose local schema differs, e.g. the media host)
 #   PRIMAL_EXE         binary to run (default this workspace's build; ocaml-ext overrides it)
 set -euo pipefail
 ts() { date +%H:%M:%S; }

@@ -2,6 +2,7 @@
 # Rebuild primal-fetcher and restart it as a transient systemd --user service (stop-then-start:
 # one fetcher per state directory — two would fight over the resume files and double the firehose).
 #   PRIMAL_FETCHER_CONFIG  config file (default $PRIMAL_CONFIG_DIR/primal-fetcher-config.json, see below)
+#   PRIMAL_BUILD_PGHOST  host whose DBs the [%pgsql] checks run against (a host whose local schema differs, e.g. the media host)
 #   PRIMAL_FETCHER_MEMHIGH / PRIMAL_FETCHER_MEMMAX  systemd MemoryHigh / MemoryMax (default 10G / 12G; above
 #                       MemoryHigh the kernel throttles every allocation — the 2026-10-07 'freeze' at 63k known relays)
 #   PRIMAL_MALLOC_ARENA_MAX  glibc malloc arena cap (default 2: with the glibc default of 8 x cores the
