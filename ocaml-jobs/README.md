@@ -91,8 +91,9 @@ carried from the example file; the the media host config now says 200.
 
 ## Cutover state on the media host, the media host (2026-10-04)
 
-The OCaml tree on the media host is a git worktree of this repo (branch ocaml5)
-(branch fetched from the stage host over ssh into `refs/remotes/<stage-host>/ocaml5`); it builds with
+The OCaml tree on the media host is a detached checkout of this repo's `main` (remote `ppr31`
+= the stage host's clone over ssh, fetch refspec limited to `main`; deploy = `git fetch ppr31 &&
+git checkout --detach ppr31/main`, then the restart script); it builds with
 `PRIMAL_BUILD_PGHOST=<stage-host>` because the `[%pgsql]` checks need the stage host's schema. The unit
 `primal-ocaml-jobs` there runs `roles: ["media"]` with `execute_funcs` = the Rust scheduler's list
 (`import_media_fast_pn`, `import_media_fast_pn_2`, `import_media_pn`, `import_preview_pn`,
