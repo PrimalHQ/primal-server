@@ -22,12 +22,19 @@ type t = {
   mutable exception_count : int;
   mutable last_exception : string;
   mutable last_connected_at : float;
+  host : string; (* Relay_url.host_key: host[:port] *)
+  root : bool; (* the relay's root url (no path) *)
+  mutable filtered : bool; (* the REQs carry cfg.req_kinds; cleared on a CLOSED (fallback to unfiltered) *)
+  mutable firsts : int; (* events this relay delivered before any other (set by the processor) *)
 }
 
-type item = { line : string; ev : Yojson.Safe.t option (* the EVENT's event object, for the dedup/archive path *) }
+type item = { line : string; ev : Yojson.Safe.t option; (* the EVENT's event object, for the dedup/archive path *) relay : t }
 
 let create ~(cfg : Config.t) ~(since : int) (url : string) : t =
-  { url; parsed = Relay_broadcast.parse_relay_url url; use_proxy = not (List.mem url cfg.no_proxy_relays); since; saved_since = since; last_save = 0.0; delay = cfg.base_delay_s; waiting_delay = false; connected = false; message_count = 0; exception_count = 0; last_exception = ""; last_connected_at = 0.0 }
+  let host, root = Relay_url.host_key url in
+  let filtered = cfg.req_kinds <> None && not (List.mem host cfg.req_kinds_exempt_hosts) in
+  { url; parsed = Relay_broadcast.parse_relay_url url; use_proxy = not (List.mem url cfg.no_proxy_relays); since; saved_since = since; last_save = 0.0; delay = cfg.base_delay_s; waiting_delay = false; connected = false;
+    message_count = 0; exception_count = 0; last_exception = ""; last_connected_at = 0.0; host; root; filtered; firsts = 0 }
 
 let subid_chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 let randsubid () = String.init 30 (fun _ -> subid_chars.[Random.int 36])
@@ -84,7 +91,7 @@ let run ~(cfg : Config.t) ~(stats : Stats.t) ~(dedup : Dedup.t) ~net ~clock ~(st
   let base = [ ("func", `String "nostr_fetch_events"); ("runid", `String runid); ("relay_url", `String t.url); ("timeout", `Int (int_of_float cfg.timeout_s)); ("proxy", match (t.use_proxy, cfg.proxy_url) with true, Some p -> `String p | _ -> `Null) ] in
   let produce ?(m = `Null) ?(ev = None) (extra : (string * Yojson.Safe.t) list) =
     let line = Julia_json.envelope ~now:(Unix.gettimeofday ()) (`Assoc (base @ extra)) m in
-    emit { line; ev }
+    emit { line; ev; relay = t }
   in
   let err exn subfunc =
     t.exception_count <- t.exception_count + 1;
@@ -132,14 +139,21 @@ let run ~(cfg : Config.t) ~(stats : Stats.t) ~(dedup : Dedup.t) ~net ~clock ~(st
                    try Ws_client.close ws with _ -> ())
                  (fun () ->
                    produce ~m:(`Assoc [ ("since", `Int t.since) ]) [ ("event", `String "connected") ];
-                   List.iter
-                     (fun (qparams : (string * Yojson.Safe.t) list) ->
-                       let q = `List [ `String "REQ"; `String (randsubid ()); `Assoc (("since", `Int t.since) :: qparams) ] in
-                       produce ~m:(`Assoc [ ("query", q) ]) [ ("event", `String "request") ];
-                       let msg = Yojson.Safe.to_string q in
-                       Stats.add stats.chars_sent (String.length msg);
-                       Ws_client.send_text ws msg)
-                     [ []; [ ("authors", `List authors) ] ];
+                   (* the two REQs; with cfg.req_kinds (and the relay not exempt) both carry the kinds filter *)
+                   let send_reqs () =
+                     let kinds =
+                       if t.filtered then (match cfg.req_kinds with Some ks -> [ ("kinds", `List (List.map (fun k -> `Int k) ks)) ] | None -> []) else []
+                     in
+                     List.iter
+                       (fun (qparams : (string * Yojson.Safe.t) list) ->
+                         let q = `List [ `String "REQ"; `String (randsubid ()); `Assoc ((("since", `Int t.since) :: kinds) @ qparams) ] in
+                         produce ~m:(`Assoc [ ("query", q) ]) [ ("event", `String "request") ];
+                         let msg = Yojson.Safe.to_string q in
+                         Stats.add stats.chars_sent (String.length msg);
+                         Ws_client.send_text ws msg)
+                       [ []; [ ("authors", `List authors) ] ]
+                   in
+                   send_reqs ();
                    let rec read_loop () =
                      match Ws_client.recv_timeout ws ~timeout:cfg.timeout_s with
                      | `Closed -> ()
@@ -150,6 +164,16 @@ let run ~(cfg : Config.t) ~(stats : Stats.t) ~(dedup : Dedup.t) ~net ~clock ~(st
                          if t.message_count = 0 then Stats.incr stats.relays_providing;
                          t.message_count <- t.message_count + 1;
                          Stats.incr stats.message_count;
+                         if String.length s > 9 && String.sub s 0 9 = "[\"CLOSED\"" then begin
+                           Stats.incr stats.closed_msgs;
+                           if t.filtered then begin
+                             (* the relay refused the kinds-filtered REQ: fall back to the unfiltered ones, once *)
+                             t.filtered <- false;
+                             Stats.incr stats.kinds_fallbacks;
+                             produce ~m:(`String s) [ ("event", `String "kinds_fallback") ];
+                             send_reqs ()
+                           end
+                         end;
                          let advance c =
                            t.since <- min (Utils.current_time ()) (max t.since (c - 1));
                            save_since ~force:false

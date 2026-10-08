@@ -29,22 +29,46 @@ let load_files ~(cfg : Config.t) : string list =
   let seen = Hashtbl.create 1024 in
   List.filter (fun u -> if Hashtbl.mem seen u then false else (Hashtbl.replace seen u (); true)) (urls @ cfg.extra_relays)
 
-type t = { cfg : Config.t; stats : Stats.t; mu : Mutex.t; known : (string, Relay_conn.t) Hashtbl.t; domains : Relay_conn.t Eio.Stream.t array }
+(* [known] is keyed by the sanitised url (Relay_url.sanitize_valid; the raw string when it does
+   not sanitise), so "wss://x/" and "wss://x" are one relay; the first spelling seen is the one
+   connected (and names the resume file). [paths] counts the accepted non-root variants per host
+   for cfg.max_paths_per_host: the mined lists carry hundreds of per-user paths of one relay host
+   (haven inboxes, prisms, random suffixes), each a full duplicate stream. *)
+type t = {
+  cfg : Config.t;
+  stats : Stats.t;
+  mu : Mutex.t;
+  known : (string, Relay_conn.t) Hashtbl.t;
+  paths : (string, int) Hashtbl.t;
+  domains : Relay_conn.t Eio.Stream.t array;
+}
 
-let create ~cfg ~stats ~(domains : Relay_conn.t Eio.Stream.t array) = { cfg; stats; mu = Mutex.create (); known = Hashtbl.create 8192; domains }
+let create ~cfg ~stats ~(domains : Relay_conn.t Eio.Stream.t array) =
+  { cfg; stats; mu = Mutex.create (); known = Hashtbl.create 8192; paths = Hashtbl.create 4096; domains }
 
 let default_since (cfg : Config.t) = match cfg.fetcher_since with Some s -> s | None -> Utils.current_time ()
 
-(* update_fetchers!: start a fetcher for every url not yet known *)
+(* update_fetchers!: start a fetcher for every url not yet known (and within the per-host cap) *)
 let add (t : t) (urls : string list) : int =
   let added = ref 0 in
   List.iter
     (fun url ->
-      let fresh = Mutex.protect t.mu (fun () -> not (Hashtbl.mem t.known url)) in
-      if fresh then begin
+      let key = match Relay_url.sanitize_valid url with Some k -> k | None -> url in
+      let host, root = Relay_url.host_key url in
+      let admit =
+        Mutex.protect t.mu (fun () ->
+            if Hashtbl.mem t.known key then false
+            else if root || t.cfg.max_paths_per_host < 0 then true
+            else begin
+              let n = Option.value (Hashtbl.find_opt t.paths host) ~default:0 in
+              if n < t.cfg.max_paths_per_host then (Hashtbl.replace t.paths host (n + 1); true)
+              else (Stats.incr t.stats.relays_capped; false)
+            end)
+      in
+      if admit then begin
         let since = match Resume.load ~state_dir:t.cfg.state_dir url with Some s -> s | None -> default_since t.cfg in
         let c = Relay_conn.create ~cfg:t.cfg ~since url in
-        Mutex.protect t.mu (fun () -> Hashtbl.replace t.known url c);
+        Mutex.protect t.mu (fun () -> Hashtbl.replace t.known key c);
         Stats.incr t.stats.relays_total;
         incr added;
         let d = Hashtbl.hash url mod Array.length t.domains in

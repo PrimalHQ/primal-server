@@ -33,6 +33,9 @@ type t = {
   num_domains : int; (* relay connections are spread over this many domains by url hash *)
   dedup_keep_s : int; (* in-memory dedup window (replaces the SQLite deduped_events shards) *)
   firehose_forward_raw : bool; (* Fetching.message_processors[:firehose_server]: every relay message to the firehose *)
+  max_paths_per_host : int; (* relay-set control: non-root url variants kept per host (-1 = unlimited; the root url always) *)
+  req_kinds : int list option; (* relay-set control: "kinds" of the REQs sent to non-exempt relays; null = unfiltered *)
+  req_kinds_exempt_hosts : string list; (* hosts (host[:port]) that always get the unfiltered REQs *)
   firehose_queue : int; (* per-subscriber bounded queue, drop when full (Julia: Channel(20_000)) *)
   log_connections : bool;
 }
@@ -87,6 +90,9 @@ let of_json (j : Yojson.Safe.t) : t =
     num_domains = rint j "num_domains";
     dedup_keep_s = rint j "dedup_keep_s";
     firehose_forward_raw = rbool j "firehose_forward_raw";
+    max_paths_per_host = rint j "max_paths_per_host";
+    req_kinds = (match field j "req_kinds" with `Null -> None | `List l -> Some (List.map U.to_int l) | _ -> raise (Config_error "req_kinds: expected a list of integers or null"));
+    req_kinds_exempt_hosts = rlist j "req_kinds_exempt_hosts";
     firehose_queue = rint j "firehose_queue";
     log_connections = rbool j "log_connections";
   }

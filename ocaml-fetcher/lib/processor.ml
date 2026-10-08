@@ -30,7 +30,8 @@ let process ~(cfg : Config.t) ~(stats : Stats.t) ~(dedup : Dedup.t) ~(archive : 
                 (match archive with
                 | Some a -> ( try Archive.append a ~created_at:e.created_at it.line with exn -> Stats.incr stats.archive_errors; log "archive: %s" (Printexc.to_string exn))
                 | None -> ());
-                ignore (Dedup.check_and_add dedup (Hex_util.encode e.id) ~now);
+                (* a first delivery: the relay-set quality signal (admin /relays "firsts") *)
+                if Dedup.check_and_add dedup (Hex_util.encode e.id) ~now then it.relay.Relay_conn.firsts <- it.relay.Relay_conn.firsts + 1;
                 Firehose.broadcast firehose it.line
               end))
   | None -> ());

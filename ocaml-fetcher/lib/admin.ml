@@ -19,7 +19,7 @@ let service ~(lifecycle : Lifecycle.t) ~(cfg : Config.t) ~(stats : Stats.t) ~(de
   in
   let relays_page () =
     let cs = List.sort (fun (a : Relay_conn.t) b -> compare b.message_count a.message_count) (Relay_set.conns relays) in
-    `List (List.map (fun (c : Relay_conn.t) -> `Assoc [ ("url", `String c.url); ("connected", `Bool c.connected); ("waiting", `Bool c.waiting_delay); ("delay", `Float c.delay); ("messages", `Int c.message_count); ("exceptions", `Int c.exception_count); ("since", `Int c.since); ("last_exception", `String c.last_exception) ]) cs)
+    `List (List.map (fun (c : Relay_conn.t) -> `Assoc [ ("url", `String c.url); ("host", `String c.host); ("firsts", `Int c.firsts); ("filtered", `Bool c.filtered); ("connected", `Bool c.connected); ("waiting", `Bool c.waiting_delay); ("delay", `Float c.delay); ("messages", `Int c.message_count); ("exceptions", `Int c.exception_count); ("since", `Int c.since); ("last_exception", `String c.last_exception) ]) cs)
   in
   default_service "admin"
     [

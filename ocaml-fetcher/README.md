@@ -64,6 +64,33 @@ rebuild-restart-fetcher.sh   build + stop-then-start as systemd --user unit prim
 | `firehose_forward_raw` | also forward every raw relay message (Julia behaviour; false in production here) |
 | `firehose_queue` | per-subscriber queue (20000) |
 | `log_connections` | reserved |
+| `max_paths_per_host` | relay-set control: non-root url variants kept per host (2; -1 = unlimited). The root url of a host is always kept. |
+| `req_kinds` | relay-set control: the `kinds` array put in both REQs sent to a relay (null = unfiltered REQs, the Julia behaviour) |
+| `req_kinds_exempt_hosts` | hosts (`host[:port]`) whose REQs stay unfiltered, so kinds outside `req_kinds` still arrive through them |
+
+### Relay-set controls (2026-10-08)
+
+Measured on the stage host before these: 63k known urls on 17k hosts, 16.6k connected, 42-58k
+messages/s of which 98.5 % duplicates; 94 % of all messages came from hosts with five or more
+url variants (per-user haven paths, prisms, random suffixes mined from contact lists and relay
+lists — one host with 105 paths alone delivered 45 %), each variant a full duplicate stream; and
+92 % of the unique events were kinds the importer rejects (ephemeral 2xxxx). Three controls:
+
+- **Per-host cap** (`max_paths_per_host`): urls are keyed by their sanitised form, so `wss://x/`
+  and `wss://x` are one relay, and a host keeps its root url plus at most N other paths, in
+  discovery order (the curated relays-*.txt files come first). Skipped urls count in
+  `relays_capped`. Some multi-path hosts are genuinely different streams (haven `/outbox` vs
+  `/inbox`), hence 2 rather than 0.
+- **Firsts counter**: the processor attributes every event it accepts first to the relay that
+  delivered it (`firsts` on the admin `/relays` page, per url). This is the quality signal for
+  choosing which variants and which relays to keep; nothing acts on it yet.
+- **Kinds filter** (`req_kinds`, `req_kinds_exempt_hosts`): a Nostr filter cannot express the
+  importer's accepted ranges (1xxxx, 3xxxx), so `req_kinds` is a positive list (the importer's
+  fixed kinds plus every range kind seen with volume on the stage host plus the NIP-defined
+  ones) sent to every relay except the exempt hosts (the large aggregators and the internal relay),
+  which stay unfiltered so rare and new kinds still arrive. A relay answering CLOSED to the
+  filtered REQ is re-subscribed unfiltered once (`kinds_fallbacks`; `closed_msgs` counts all
+  CLOSEDs). The raw archive is no longer complete for the filtered relays.
 
 ## Deviations from the Julia fetcher (deliberate)
 

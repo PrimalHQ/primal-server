@@ -74,3 +74,13 @@ let private_ipv4_host (host : string) : bool =
   match String.split_on_char '.' host with
   | [ a; b; _; _ ] -> ( match (int_of_string_opt a, int_of_string_opt b) with Some a, Some b -> (a = 192 && b = 168) || a = 10 || a = 127 | _ -> false)
   | _ -> false
+
+(* Relay-set controls: the host key (host, plus :port when not the default) and whether the url is
+   the relay's root. Unparsable urls key on themselves and count as roots (they stay dead, as in
+   Julia, and must not be capped away from the stats). *)
+let host_key (url : string) : string * bool =
+  match parse url with
+  | Some p ->
+      let p = sanitize p in
+      ((match p.port with Some pt -> p.host ^ ":" ^ pt | None -> p.host), p.path = "")
+  | None -> (url, true)

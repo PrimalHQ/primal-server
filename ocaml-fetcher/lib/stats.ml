@@ -22,11 +22,14 @@ type t = {
   firehose_sent : int Atomic.t;
   firehose_dropped : int Atomic.t;
   processor_queue_full : int Atomic.t;
+  relays_capped : int Atomic.t; (* urls skipped by max_paths_per_host *)
+  closed_msgs : int Atomic.t; (* CLOSED messages from relays *)
+  kinds_fallbacks : int Atomic.t; (* relays re-subscribed without the kinds filter after a CLOSED *)
 }
 
 let create () =
   let z () = Atomic.make 0 in
-  { message_count = z (); exception_count = z (); chars_received = z (); chars_sent = z (); relays_total = z (); relays_connected = z (); connecting = z (); relays_waiting = z (); relays_providing = z (); seen = z (); seenearly = z (); parseerr = z (); verifyerr = z (); any = z (); archive_errors = z (); firehose_sent = z (); firehose_dropped = z (); processor_queue_full = z () }
+  { message_count = z (); exception_count = z (); chars_received = z (); chars_sent = z (); relays_total = z (); relays_connected = z (); connecting = z (); relays_waiting = z (); relays_providing = z (); seen = z (); seenearly = z (); parseerr = z (); verifyerr = z (); any = z (); archive_errors = z (); firehose_sent = z (); firehose_dropped = z (); processor_queue_full = z (); relays_capped = z (); closed_msgs = z (); kinds_fallbacks = z () }
 
 let add a n = ignore (Atomic.fetch_and_add a n)
 let incr a = add a 1
@@ -39,7 +42,7 @@ let to_json (t : t) : Yojson.Safe.t =
     [ ("message_count", `Int (Atomic.get t.message_count)); ("exception_count", `Int (Atomic.get t.exception_count)); ("chars_received", `Int (Atomic.get t.chars_received)); ("chars_sent", `Int (Atomic.get t.chars_sent));
       ("relays_total", `Int (Atomic.get t.relays_total)); ("relays_connected", `Int (Atomic.get t.relays_connected)); ("connecting", `Int (Atomic.get t.connecting)); ("relays_waiting", `Int (Atomic.get t.relays_waiting)); ("relays_providing", `Int (Atomic.get t.relays_providing));
       ("seen", `Int (Atomic.get t.seen)); ("seenearly", `Int (Atomic.get t.seenearly)); ("parseerr", `Int (Atomic.get t.parseerr)); ("verifyerr", `Int (Atomic.get t.verifyerr)); ("any", `Int (Atomic.get t.any));
-      ("archive_errors", `Int (Atomic.get t.archive_errors)); ("firehose_sent", `Int (Atomic.get t.firehose_sent)); ("firehose_dropped", `Int (Atomic.get t.firehose_dropped)); ("processor_queue_full", `Int (Atomic.get t.processor_queue_full)) ]
+      ("archive_errors", `Int (Atomic.get t.archive_errors)); ("firehose_sent", `Int (Atomic.get t.firehose_sent)); ("firehose_dropped", `Int (Atomic.get t.firehose_dropped)); ("processor_queue_full", `Int (Atomic.get t.processor_queue_full)); ("relays_capped", `Int (Atomic.get t.relays_capped)); ("closed_msgs", `Int (Atomic.get t.closed_msgs)); ("kinds_fallbacks", `Int (Atomic.get t.kinds_fallbacks)) ]
 
 (* stats.json: the whole object is kept verbatim; the persisted counters are baseline + session. *)
 let load_baseline (path : string) : (string * Yojson.Safe.t) list * (string * int) list =
