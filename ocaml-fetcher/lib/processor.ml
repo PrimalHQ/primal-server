@@ -30,8 +30,9 @@ let process ~(cfg : Config.t) ~(stats : Stats.t) ~(dedup : Dedup.t) ~(archive : 
                 (match archive with
                 | Some a -> ( try Archive.append a ~created_at:e.created_at it.line with exn -> Stats.incr stats.archive_errors; log "archive: %s" (Printexc.to_string exn))
                 | None -> ());
-                (* a first delivery: the relay-set quality signal (admin /relays "firsts") *)
-                if Dedup.check_and_add dedup (Hex_util.encode e.id) ~now then it.relay.Relay_conn.firsts <- it.relay.Relay_conn.firsts + 1;
+                (* a first delivery of a kept kind (req_kinds when set): the relay-set quality signal (admin /relays "firsts") *)
+                let first = Dedup.check_and_add dedup (Hex_util.encode e.id) ~now in
+                if first && (match cfg.req_kinds with Some ks -> List.mem e.kind ks | None -> true) then it.relay.Relay_conn.firsts <- it.relay.Relay_conn.firsts + 1;
                 Firehose.broadcast firehose it.line
               end))
   | None -> ());

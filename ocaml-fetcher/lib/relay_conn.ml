@@ -139,21 +139,23 @@ let run ~(cfg : Config.t) ~(stats : Stats.t) ~(dedup : Dedup.t) ~net ~clock ~(st
                    try Ws_client.close ws with _ -> ())
                  (fun () ->
                    produce ~m:(`Assoc [ ("since", `Int t.since) ]) [ ("event", `String "connected") ];
-                   (* the two REQs; with cfg.req_kinds (and the relay not exempt) both carry the kinds filter *)
-                   let send_reqs () =
+                   (* the two REQs; with cfg.req_kinds (and the relay not exempt) both carry the kinds filter.
+                      [subs] remembers each live subscription (subid -> its params and whether it was filtered)
+                      so a CLOSED can be matched to the REQ it refuses. *)
+                   let subs = ref [] in
+                   let send_req ~filtered (qparams : (string * Yojson.Safe.t) list) =
                      let kinds =
-                       if t.filtered then (match cfg.req_kinds with Some ks -> [ ("kinds", `List (List.map (fun k -> `Int k) ks)) ] | None -> []) else []
+                       if filtered then (match cfg.req_kinds with Some ks -> [ ("kinds", `List (List.map (fun k -> `Int k) ks)) ] | None -> []) else []
                      in
-                     List.iter
-                       (fun (qparams : (string * Yojson.Safe.t) list) ->
-                         let q = `List [ `String "REQ"; `String (randsubid ()); `Assoc ((("since", `Int t.since) :: kinds) @ qparams) ] in
-                         produce ~m:(`Assoc [ ("query", q) ]) [ ("event", `String "request") ];
-                         let msg = Yojson.Safe.to_string q in
-                         Stats.add stats.chars_sent (String.length msg);
-                         Ws_client.send_text ws msg)
-                       [ []; [ ("authors", `List authors) ] ]
+                     let sid = randsubid () in
+                     let q = `List [ `String "REQ"; `String sid; `Assoc ((("since", `Int t.since) :: kinds) @ qparams) ] in
+                     subs := (sid, (qparams, filtered && kinds <> [])) :: !subs;
+                     produce ~m:(`Assoc [ ("query", q) ]) [ ("event", `String "request") ];
+                     let msg = Yojson.Safe.to_string q in
+                     Stats.add stats.chars_sent (String.length msg);
+                     Ws_client.send_text ws msg
                    in
-                   send_reqs ();
+                   List.iter (send_req ~filtered:t.filtered) [ []; [ ("authors", `List authors) ] ];
                    let rec read_loop () =
                      match Ws_client.recv_timeout ws ~timeout:cfg.timeout_s with
                      | `Closed -> ()
@@ -166,13 +168,22 @@ let run ~(cfg : Config.t) ~(stats : Stats.t) ~(dedup : Dedup.t) ~net ~clock ~(st
                          Stats.incr stats.message_count;
                          if String.length s > 9 && String.sub s 0 9 = "[\"CLOSED\"" then begin
                            Stats.incr stats.closed_msgs;
-                           if t.filtered then begin
-                             (* the relay refused the kinds-filtered REQ: fall back to the unfiltered ones, once *)
-                             t.filtered <- false;
-                             Stats.incr stats.kinds_fallbacks;
-                             produce ~m:(`String s) [ ("event", `String "kinds_fallback") ];
-                             send_reqs ()
-                           end
+                           (* a CLOSED for one of our kinds-filtered REQs: re-send that REQ unfiltered, once. Only the plain
+                              REQ's refusal can be about the kinds (the authors REQ is refused by relays that dropped prefix
+                              matching, filter or not), so only that one marks the relay unfiltered for its next connections. *)
+                           (match Yojson.Safe.from_string s with
+                           | `List (_ :: `String sid :: _) -> (
+                               match List.assoc_opt sid !subs with
+                               | Some (qparams, true) ->
+                                   subs := List.remove_assoc sid !subs;
+                                   if qparams = [] then begin
+                                     t.filtered <- false;
+                                     Stats.incr stats.kinds_fallbacks;
+                                     produce ~m:(`String s) [ ("event", `String "kinds_fallback") ]
+                                   end;
+                                   send_req ~filtered:false qparams
+                               | _ -> ())
+                           | _ | exception _ -> ())
                          end;
                          let advance c =
                            t.since <- min (Utils.current_time ()) (max t.since (c - 1));

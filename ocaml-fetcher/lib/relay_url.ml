@@ -46,9 +46,12 @@ let sanitize (u : parts) : parts =
   (* strip(u.host, [' ']): spaces only — a tab inside the host survives, as it does in Julia *)
   let strip_spaces s = let n = String.length s in let i = ref 0 and j = ref n in while !i < n && s.[!i] = ' ' do incr i done; while !j > !i && s.[!j - 1] = ' ' do decr j done; String.sub s !i (!j - !i) in
   let host = String.lowercase_ascii (strip_spaces u.host) in
+  (* beyond Julia: a trailing dot on the host (DNS root) and an upper-case scheme name the same relay *)
+  let host = if String.length host > 1 && host.[String.length host - 1] = '.' then String.sub host 0 (String.length host - 1) else host in
+  let scheme = String.lowercase_ascii u.scheme in
   let path = rstrip_slashes (normpath u.path) in
-  let port = match (u.scheme, u.port) with ("ws", Some "80") | ("wss", Some "443") -> None | _ -> u.port in
-  { u with host; path; port }
+  let port = match (scheme, u.port) with ("ws", Some "80") | ("wss", Some "443") -> None | _ -> u.port in
+  { u with scheme; host; path; port }
 
 let ends_with ~suffix s = let ls = String.length s and lf = String.length suffix in ls >= lf && String.sub s (ls - lf) lf = suffix
 
