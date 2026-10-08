@@ -48,16 +48,24 @@ let event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_ : Nostr.t =
     sig_;
   }
 
-(* One pull from one remote: events with imported_at >= since. Returns (events, high_water) where
-   high_water is the largest imported_at seen (>= since), so the caller continues strictly forward
-   next cycle. Events are returned (not submitted) so the caller can merge all remotes and submit in
-   created_at order. *)
-let pull_remote (dbh : Pg.dbh) ~(since : int) : Nostr.t list * int =
+(* Max rows per remote per pull. PGOCaml materializes the whole result, and a failed pull doesn't
+   advance the high-water, so an uncapped catch-up window (e.g. after a stall) grows every cycle until
+   it blows the cgroup memory limit or the remote's statement timeout. Events cost ~1.3KB each in the
+   heap, so this bounds a cycle to ~250MB per remote; a backlog drains over successive cycles. *)
+let pull_limit = 200_000
+
+(* One pull from one remote: up to [pull_limit] events with imported_at >= since. Returns
+   (events, high_water, full) where high_water is the largest imported_at seen (>= since), so the
+   caller continues strictly forward next cycle, and [full] says the limit was hit (more is pending).
+   Rows sharing the high-water second are re-read next pull and count as duplicates. Events are
+   returned (not submitted) so the caller can merge all remotes and submit in created_at order. *)
+let pull_remote (dbh : Pg.dbh) ~(since : int) : Nostr.t list * int * bool =
   let since64 = Int64.of_int since in
+  let limit64 = Int64.of_int pull_limit in
   let rows =
     [%pgsql dbh
       "select id, pubkey, created_at, kind, tags, content, sig, imported_at from event \
-       where imported_at >= $since64 order by imported_at"]
+       where imported_at >= $since64 order by imported_at limit $limit64"]
   in
   let hw = ref since in
   let evs =
@@ -68,7 +76,14 @@ let pull_remote (dbh : Pg.dbh) ~(since : int) : Nostr.t list * int =
         event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_)
       rows
   in
-  (evs, !hw)
+  let full = List.length rows >= pull_limit in
+  (* A full pull that never left the [since] second would re-read the same rows forever; step past
+     it (dropping that second's unread rows). Needs > pull_limit imports in one second, so rare. *)
+  if full && !hw = since then begin
+    Printf.eprintf "event_syncer: >= %d events at imported_at %d; skipping ahead\n%!" pull_limit since;
+    hw := since + 1
+  end;
+  (evs, !hw, full)
 
 (* Loop forever (intended as a fiber). Per-remote state = a lazily-(re)connected handle plus a
    high-water imported_at; both are kept across cycles, and the high-water survives a reconnect
@@ -107,19 +122,22 @@ let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.connin
        cycle's batch, then submit ordered by created_at asc — so a parent is enqueued before its
        replies (created_at(reply) >= created_at(parent)), which lets reply/mention notifications and
        the deferred event_stats hooks resolve on first import instead of waiting for a later event. *)
-    let batch = ref [] and total = ref 0 in
+    let batch = ref [] and total = ref 0 and backlog = ref false in
     List.iter
       (fun (ci, slot, last) ->
         try
           let dbh = get_conn ci slot in
           let since = !last in
-          let evs, hw = pull_remote dbh ~since in
+          let evs, hw, full = pull_remote dbh ~since in
           if hw > !last then last := hw;
+          if full then backlog := true;
           let n = List.length evs in
           if n > 0 then begin
             batch := List.rev_append evs !batch;
             total := !total + n;
-            Printf.printf "event_syncer: %s +%d events (imported_at %d..%d)\n%!" ci.Pg.host n since hw
+            Printf.printf "event_syncer: %s +%d events (imported_at %d..%d)%s\n%!" ci.Pg.host n since
+              hw
+              (if full then " [limit hit, backlog]" else "")
           end
         with
         | Eio.Cancel.Cancelled _ as e -> raise e
@@ -131,7 +149,9 @@ let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.connin
       !batch
       |> List.sort (fun (a : Nostr.t) (b : Nostr.t) -> Int.compare a.created_at b.created_at)
       |> List.iter submit;
-    Eio.Time.sleep clock interval
+    (* While some remote is behind, go again right away; submit blocks on the full worker queue, so
+       catch-up is paced by the import rate rather than by [interval]. *)
+    Eio.Time.sleep clock (if !backlog then 1.0 else interval)
   done
 
 (* {1 Backfill}

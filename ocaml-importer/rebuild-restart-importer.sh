@@ -96,7 +96,7 @@ systemd-run --user --collect --unit="$UNIT" \
   --description="Primal OCaml importer (ocaml-importer/bin/main.exe)" \
   -p Restart=always -p RestartSec=5 -p OOMPolicy=kill -p StartLimitIntervalSec=0 \
   -p LimitNOFILE=65536 \
-  -p MemoryAccounting=yes -p MemoryHigh=9G -p MemoryMax=10G \
+  -p MemoryAccounting=yes -p "MemoryHigh=${PRIMAL_IMPORTER_MEMHIGH:-16G}" -p "MemoryMax=${PRIMAL_IMPORTER_MEMMAX:-20G}" \
   -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
   -p "WorkingDirectory=$P" \
   -- "$NIX" develop "path:$COMMON" -c "$EXE" "$CONFIG"
