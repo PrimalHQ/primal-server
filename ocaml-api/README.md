@@ -170,7 +170,16 @@ noted below. `Moderation_http` on `moderation_http_port` (24000+N): `/purge-medi
 step for step — media_block record, local roots moved into cdn-hidden/, `S3` providers backed up
 to bucket2 and deleted, Cloudflare cache purge, the media_storage/media_uploads/short_urls rows
 marked) and `/pre-sign-urls`; `Primal_common.S3` is a SigV4 client (check, delete, copy, upload,
-get, pre-signed GET; the AWS documentation vector is a unit test). Blossom is not part of primal-api: production serves blossom.primal.net from the media host (`ocaml-jobs` role `blossom`, a port of primal-blossom-server).
+get, pre-signed GET; the AWS documentation vector is a unit test). Verified on the media host on
+2026-10-08 against Julia node 18 with throwaway Blossom uploads of the QA user: identical
+media_block record (file set, media/upload/blossom URL sets, hidden directories), all media_storage
+and media_uploads rows marked, local copies moved to `cdn-hidden/` NEXT TO the root (Julia derives it
+from the file depth: root `/mnt/ext/var/cdn` -> `/mnt/ext/var/cdn-hidden`), every S3 object copied to
+`bucket2` and deleted, the Cloudflare cache purged. The walk runs 10 entries at a time (Julia:
+asyncmap ntasks=10; 28 s for an upload with 7 storage rows) and holds no pooled connection across the
+S3/file work. The first run found a latent bug: `Db.with_cache`/`with_membership` wrapped the WHOLE
+callback in the 15 s pool-wait timeout, so any lease over 15 s was cancelled (`Cancelled Not_first`
+mid-S3); `Postgres.use ?acquire` now bounds only the wait for a free connection. Blossom is not part of primal-api: production serves blossom.primal.net from the media host (`ocaml-jobs` role `blossom`, a port of primal-blossom-server).
 
 **Cutover A (2026-10-04 09:45 UTC, host the stage host):** `primal-api` serves port 9001 on this host and the
 ws-connector that held it (started 2026-09-30 in a tmux pane from its own checkout) is
