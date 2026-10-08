@@ -7,3 +7,5 @@ pljava/
 logs/
 /ocaml-ext
 __pycache__/
+_build/
+core.*
