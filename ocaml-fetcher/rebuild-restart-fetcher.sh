@@ -22,7 +22,7 @@ LOG="$VAR_DIR/ocaml-fetcher.log"
 UNIT=primal-ocaml-fetcher
 NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 echo "$(ts) building (dune build @all) ..." >&2
-(cd "$P" && "$NIX" develop "path:$COMMON" -c dune build @all)
+(cd "$P" && "$NIX" develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
 [[ -x "$EXE" ]] || { echo "ERROR: $EXE not built" >&2; exit 1; }
 [[ -f "$CONFIG" ]] || { echo "ERROR: config file not found: $CONFIG" >&2; exit 1; }
 admin_port="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["admin_port"])' "$CONFIG")"

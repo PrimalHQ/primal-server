@@ -29,7 +29,7 @@ NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"
 
 # 1. Build (the whole workspace: ocaml-common + ocaml-api). Failure leaves the running daemon alone.
 echo "$(ts) building $P (dune build @all) ..." >&2
-(cd "$P" && "$NIX" develop "path:$COMMON" -c dune build @all)
+(cd "$P" && "$NIX" develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
 [[ -x "$EXE" ]] || { echo "ERROR: $EXE not built" >&2; exit 1; }
 [[ -f "$CONFIG" ]] || { echo "ERROR: config file not found: $CONFIG" >&2; exit 1; }
 

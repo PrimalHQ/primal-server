@@ -42,7 +42,7 @@ NIX="$(command -v nix || echo /run/current-system/sw/bin/nix)"  # abs path: user
 # 1. Rebuild everything. On failure, stop here WITHOUT touching the running importer, so a broken
 #    build leaves the current (working) process undisturbed. Build output goes to this terminal.
 echo "building $P (dune build @all, workspace root $ROOT) ..." >&2
-(cd "$P" && nix develop "path:$COMMON" -c dune build @all)
+(cd "$P" && nix develop "path:$COMMON" -c env ${PRIMAL_BUILD_PGHOST:+PGHOST=$PRIMAL_BUILD_PGHOST} dune build @all)
 
 # 1b. The config file is required. Check it now — before touching the running importer — so a
 #     missing config leaves the current process undisturbed (same policy as a broken build).
