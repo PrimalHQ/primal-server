@@ -1488,14 +1488,6 @@ let score24h_of (c : Db.cache Db.conn) ~event_id : int64 option =
 
 (* {1 Phase 4f} *)
 
-(* DB.add_human_override: a user who posts through Primal is human *)
-let human_override_upsert (c : Db.cache Db.conn) ~pubkey ~(source : string) : unit =
-  let dbh = Db.raw c in
-  ignore
-    [%pgsql dbh
-      "insert into human_override (pubkey, is_human, added_at, source) values ($pubkey, true, now(), $source) \
-       on conflict (pubkey) do update set is_human = true, source = $source"]
-
 (* app.jl invoices_to_zap_receipts: invoice -> zap receipt event JSON *)
 let invoices_zap_receipts (c : Db.cache Db.conn) ~(invoices_json : string) : (string * string) list =
   let dbh = Db.raw c in

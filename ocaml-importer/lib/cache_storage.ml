@@ -1226,9 +1226,11 @@ let expire_scores (est : est) : int =
   List.length [%pgsql dbh "delete from score_expiry where expire_at <= $tnow returning event_id"]
 
 (* Julia DB.add_human_override (cache_storage_ext.jl:1053): the API marks the author of every
-   event imported through import_events as human. *)
+   event imported through import_events as human. In the membership DB, like Julia's
+   MembershipDBDict: the caches get human_override by logical replication, and a cache-side row would
+   collide with the replicated insert of the same pubkey (the subscription then stops). *)
 let add_human_override (est : est) ~(pubkey : string) ~(is_human : bool) ~(source : string) : unit =
-  let dbh = est.dbh in
+  let dbh = est.mem_dbh in
   ignore
     [%pgsql dbh
       "insert into human_override (pubkey, is_human, added_at, source) values ($pubkey, $is_human, now(), $source) \

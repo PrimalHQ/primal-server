@@ -10,6 +10,16 @@ let notifications_seen_until (c : Db.membership Db.conn) ~pubkey : int64 option 
   | None :: _ -> Some 0L
   | [] -> None
 
+(* DB.add_human_override: a user who posts through Primal is human. human_override lives in the
+   membership DB (Julia's MembershipDBDict) and reaches the caches by logical replication; a cache-side
+   write would collide with the replicated insert of the same pubkey and stop the subscription. *)
+let human_override_upsert (c : Db.membership Db.conn) ~pubkey ~(source : string) : unit =
+  let dbh = Db.raw c in
+  ignore
+    [%pgsql dbh
+      "insert into human_override (pubkey, is_human, added_at, source) values ($pubkey, true, now(), $source) \
+       on conflict (pubkey) do update set is_human = true, source = $source"]
+
 (* {1 Phase 3b} *)
 
 (* app_ext.jl get_app_subsettings: the stored settings as JSON text *)

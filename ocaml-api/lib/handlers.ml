@@ -3767,7 +3767,7 @@ let import_events (ctx : ctx) (kw : Kw.t) : outcome =
   | None -> Handled empty
   | Some (host, port) ->
       let parsed = List.map (fun j -> try Nostr.of_json j with _ -> raise Julia_err) events in
-      with_cache ctx (fun c -> List.iter (fun e -> try Queries.human_override_upsert c ~pubkey:e.Nostr.pubkey ~source:"import_events" with _ -> ()) parsed);
+      with_membership ctx (fun m -> List.iter (fun e -> try Queries_mem.human_override_upsert m ~pubkey:e.Nostr.pubkey ~source:"import_events" with _ -> ()) parsed);
       let imported, errors =
         try line_server_import ctx ~host ~port events
         with e ->
