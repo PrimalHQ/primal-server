@@ -8,10 +8,16 @@ open Eio.Std
 let log fmt = Printf.ksprintf (fun s -> Printf.printf "%s [primal-jobs] %s\n%!" (Procinfo.timestamp ()) s) fmt
 
 let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : unit =
-  let cfg_path = match argv with [| _; p |] -> p | _ -> prerr_endline "usage: primal_jobsd <config.json>"; exit 2 in
+  let cfg_path, check_only =
+    match argv with
+    | [| _; "--check-config"; p |] -> (p, true)
+    | [| _; p |] -> (p, false)
+    | _ -> prerr_endline "usage: primal_jobsd <config.json>\n       primal_jobsd --check-config <config.json>   parse the config (and run the extensions' init), then exit"; exit 2
+  in
   let cfg = try Config.of_json_file cfg_path with Config.Config_error m -> prerr_endline ("primal-jobs: config error: " ^ m); exit 2 in
   (try init cfg with exn -> prerr_endline ("primal-jobs: extension init failed: " ^ Printexc.to_string exn); exit 2);
   List.iter (function Config.Ext name when Roles.find name = None -> prerr_endline ("primal-jobs: role " ^ name ^ " is not registered (roles: " ^ String.concat "," (Roles.names ()) ^ ")"); exit 2 | _ -> ()) cfg.roles;
+  if check_only then (print_endline ("primal-jobs: config ok: " ^ cfg_path); exit 0);
   Random.self_init ();
   Eio_main.run @@ fun env ->
   Mirage_crypto_rng_unix.use_default ();

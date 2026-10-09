@@ -20,22 +20,28 @@ module FC = Importer.Firehose_client
 module WP = Primal_common.Worker_pool
 
 let usage () =
-  Printf.eprintf "usage: %s <config.json>   run the importer with settings from the JSON config file\n%!"
-    Sys.argv.(0)
+  Printf.eprintf "usage: %s <config.json>   run the importer with settings from the JSON config file\n       %s --check-config <config.json>   parse the config, then exit\n%!"
+    Sys.argv.(0) Sys.argv.(0)
+
+let load path =
+  try Cfg.of_json_file path with
+  | Cfg.Config_error msg ->
+      Printf.eprintf "primal-importer: config error: %s\n%!" msg;
+      exit 2
+  | Sys_error msg ->
+      Printf.eprintf "primal-importer: %s\n%!" msg;
+      exit 2
 
 let () =
   (* Config is read entirely from the JSON file named on the command line (required). Parsing runs
      before Eio_main.run — it does not need the Eio env. *)
   let cfg =
     match Sys.argv with
-    | [| _; path |] when String.length path > 0 && path.[0] <> '-' -> (
-        try Cfg.of_json_file path with
-        | Cfg.Config_error msg ->
-            Printf.eprintf "primal-importer: config error: %s\n%!" msg;
-            exit 2
-        | Sys_error msg ->
-            Printf.eprintf "primal-importer: %s\n%!" msg;
-            exit 2)
+    | [| _; "--check-config"; path |] ->
+        ignore (load path);
+        print_endline ("primal-importer: config ok: " ^ path);
+        exit 0
+    | [| _; path |] when String.length path > 0 && path.[0] <> '-' -> load path
     | _ ->
         usage ();
         exit 2

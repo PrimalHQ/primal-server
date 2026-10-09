@@ -9,8 +9,14 @@ module F = Primal_fetcher
 let log fmt = Printf.ksprintf (fun s -> Printf.printf "%s [primal-fetcher] %s\n%!" (Procinfo.timestamp ()) s) fmt
 
 let () =
-  let cfg_path = match Sys.argv with [| _; p |] -> p | _ -> prerr_endline "usage: primal_fetcherd <config.json>"; exit 2 in
+  let cfg_path, check_only =
+    match Sys.argv with
+    | [| _; "--check-config"; p |] -> (p, true)
+    | [| _; p |] -> (p, false)
+    | _ -> prerr_endline "usage: primal_fetcherd <config.json>\n       primal_fetcherd --check-config <config.json>   parse the config, then exit"; exit 2
+  in
   let cfg = try F.Config.of_json_file cfg_path with F.Config.Config_error m -> prerr_endline ("primal-fetcher: config error: " ^ m); exit 2 in
+  if check_only then (print_endline ("primal-fetcher: config ok: " ^ cfg_path); exit 0);
   Random.self_init ();
   Eio_main.run @@ fun env ->
   Mirage_crypto_rng_unix.use_default ();
