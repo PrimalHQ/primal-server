@@ -456,9 +456,13 @@ Imports produce in-DB notifications, mirroring Julia `notification` / `notificat
   `push_notification_sent`) are published by the pushgateway fiber inside the importer's job
   group (first published after the first send), so Julia-era queries like
   `time() - push_notification_latest` keep working unchanged.
-  **Not ported:** the Julia TCP intake (port 20000) and its `"wallet-transaction"` type — the
-  wallet server keeps talking to the Julia cache server. The token-registration helpers parse and
-  verify input; registration itself stays with the Julia app server.
+  The Julia TCP intake (`PushNotifications.PORT`, 20000+N) is `lib/push_intake.ml`, listening on
+  each of `push_intake_ports` at `push_intake_host` (`[]` = off; only with push notifications on):
+  one JSON object per line from the wallet server, logged to `t_push_notifications_log`, and its
+  `"wallet-transaction"` type rendered as Julia did (sats received / payment received /
+  transaction confirmed, the `WALLET_TRANSACTIONS` setting, the
+  `show_wallet_push_notifications_above_sats` threshold, the follows-only rule) into the same
+  buffer. Token registration is native in the API (`update_push_notification_token`).
 
 ---
 

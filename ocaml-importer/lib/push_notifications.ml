@@ -29,9 +29,8 @@
      in-flight batch is dropped on restart (as in Julia, where the drained batch is lost when
      transmission dies).
 
-   Not ported (per scope decision): the TCP intake server (Julia PORT=20000) and the
-   "wallet-transaction" notification type it carries — the wallet server keeps talking to the
-   Julia cache server. *)
+   The TCP intake server (Julia PORT=20000) and the "wallet-transaction" notification type it
+   carries are Push_intake, which renders into this module's buffer. *)
 
 open Eio.Std
 module CS = Cache_storage
@@ -448,6 +447,41 @@ let render (est : CS.est) ~(recipient : string) ~(ntype : int) ~(args : CS.notif
 (* {1 The entry point called from Cache_storage_ext.notification} (Julia
    PushNotifications.notification(est, n) — importer-generated types only). *)
 
+(* One payload per registered device token of [recipient] (Julia's notification_tokens self-join
+   computes a shared-token pubkey count, but the multi-account title prefix that used it is
+   commented out — the row set reduces to a plain group by). *)
+let enqueue_for_tokens (est : CS.est) ~(recipient : string) ~(title : string) ~(body : string)
+    ~(extra : (string * Yojson.Safe.t) list) : unit =
+  let rows =
+    try
+      Postgres.query est.CS.mem_dbh
+        "select platform, token, environment from notification_tokens \
+         where pubkey = decode($1,'hex') group by platform, token, environment"
+        [ hexp recipient ]
+    with
+    | Eio.Cancel.Cancelled _ as e -> raise e
+    | _ -> []
+  in
+  List.iter
+    (function
+      | [ Some platform; Some token; environment ] ->
+          (* environment is NULL for almost every token row; the sender then defaults to
+             "production" (main.rs unwrap_or), so omit the field when absent. *)
+          let payload =
+            `Assoc
+              ((match environment with Some env -> [ ("environment", `String env) ] | None -> [])
+              @ [
+                  ("platform", `String platform);
+                  ("token", `String token);
+                  ("title", `String title);
+                  ("body", `String body);
+                  ("data", `Assoc [ ("extra", `Assoc extra) ]);
+                ])
+          in
+          enqueue { platform; payload }
+      | _ -> ())
+    rows
+
 let notification (est : CS.est) ~(recipient : string) ~(created_at : int) ~(ntype : int)
     ~(args : CS.notif_arg list) : unit =
   (* Julia logs every incoming notification before any check. *)
@@ -508,40 +542,7 @@ let notification (est : CS.est) ~(recipient : string) ~(created_at : int) ~(ntyp
             @
             match conversation_id with Some c -> [ ("conversation_id", `String c) ] | None -> []
           in
-          (* one payload per registered device token (Julia's notification_tokens self-join
-             computes a shared-token pubkey count, but the multi-account title prefix that used
-             it is commented out — the row set reduces to a plain group by). *)
-          let rows =
-            try
-              Postgres.query est.CS.mem_dbh
-                "select platform, token, environment from notification_tokens \
-                 where pubkey = decode($1,'hex') group by platform, token, environment"
-                [ hexp recipient ]
-            with
-            | Eio.Cancel.Cancelled _ as e -> raise e
-            | _ -> []
-          in
-          List.iter
-            (function
-              | [ Some platform; Some token; environment ] ->
-                  (* environment is NULL for almost every token row; the sender then defaults to
-                     "production" (main.rs unwrap_or), so omit the field when absent. *)
-                  let payload =
-                    `Assoc
-                      ((match environment with
-                       | Some env -> [ ("environment", `String env) ]
-                       | None -> [])
-                      @ [
-                          ("platform", `String platform);
-                          ("token", `String token);
-                          ("title", `String r.title);
-                          ("body", `String r.body);
-                          ("data", `Assoc [ ("extra", `Assoc extra) ]);
-                        ])
-                  in
-                  enqueue { platform; payload }
-              | _ -> ())
-            rows
+          enqueue_for_tokens est ~recipient ~title:r.title ~body:r.body ~extra
         end
 
 (* {1 Sender subprocess + transmission fiber} *)

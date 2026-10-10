@@ -28,6 +28,8 @@ type t = {
   push_notification_sender_bin : string; (* the push-notification-sender subprocess binary *)
   push_notifications_period : float; (* seconds between transmission batches (Julia PERIOD) *)
   push_notifications_log : bool; (* dump sender request/response JSON to stdout (Julia LOG) *)
+  push_intake_host : string; (* Push_intake: the wallet server's notification line protocol (Julia PushNotifications.PORT) *)
+  push_intake_ports : int list; (* [] = off; Julia's were 20000+N on each node that loaded the importer config *)
   cs : Cache_storage.config;
   cache_db : Postgres.conninfo; (* the importer's :p0 (cache) DB — was PG* *)
   membership_db : Postgres.conninfo; (* the importer's :membership DB — was PGMEMBERSHIP* *)
@@ -130,6 +132,11 @@ let from_env () : t =
            Filename.concat (up 5 Sys.executable_name) "push-notification-sender/target/release/push-notification-sender");
     push_notifications_period = float_env "IMPORTER_PUSH_NOTIFICATIONS_PERIOD" 5.0;
     push_notifications_log = bool_env "IMPORTER_PUSH_NOTIFICATIONS_LOG" false;
+    push_intake_host = Option.value (getenv "IMPORTER_PUSH_INTAKE_HOST") ~default:"0.0.0.0";
+    push_intake_ports =
+      (match getenv "IMPORTER_PUSH_INTAKE_PORTS" with
+      | None | Some "" -> []
+      | Some s -> List.map (fun p -> int_of_string (String.trim p)) (String.split_on_char ',' s));
     cs =
       {
         Cache_storage.verification_enabled = bool_env "IMPORTER_VERIFY" true;
@@ -231,6 +238,8 @@ let of_json (j : Yojson.Safe.t) : t =
     push_notification_sender_bin = rstr j "push_notification_sender_bin";
     push_notifications_period = rfloat j "push_notifications_period";
     push_notifications_log = rbool j "push_notifications_log";
+    push_intake_host = rstr j "push_intake_host";
+    push_intake_ports = List.map U.to_int (U.to_list (field j "push_intake_ports"));
     cs =
       {
         Cache_storage.verification_enabled = rbool j "verification_enabled";

@@ -311,6 +311,11 @@ let () =
             ~broadcast_timeout:cfg.relay_broadcast_timeout
             ~poll_votes_enabled:cfg.poll_vote_import_enabled ());
       (fun () ->
+        if cfg.push_notifications_enabled && cfg.push_intake_ports <> [] then
+          Importer.Push_intake.run ~net ~host:cfg.push_intake_host ~ports:cfg.push_intake_ports
+            ~est:(make_est ()) ~reconnect_est:(fun est -> reconnect_est est)
+            ~default_settings_file:cfg.default_settings_file ());
+      (fun () ->
         if cfg.push_notifications_enabled then
           Importer.Push_notifications.run ~proc_mgr ~clock ~stats ~cache_db:cfg.cache_db
             ~sender_bin:cfg.push_notification_sender_bin ~period:cfg.push_notifications_period ());
