@@ -152,32 +152,24 @@ let rebroadcast_loop (t : t) ~clock : unit =
             subs)
   done
 
-(* network stats from the importer's HTTP /api (App.NETWORK_STATS_URL), every netstats period *)
-let netstats_loop (t : t) ~net ~clock ~(url : string) ~(period : float) : unit =
-  let host, port, path =
-    match Http.parse_url url with Some u -> (u.Http.host, u.Http.port, u.Http.path) | None -> failwith ("network_stats_url: " ^ url)
-  in
+(* network stats (Netstats: the importer's HTTP /api or its stats file), every netstats period *)
+let netstats_loop (t : t) ~net ~clock ~(cfg : Config.t) : unit =
   while true do
-    Eio.Time.sleep clock period;
+    Eio.Time.sleep clock cfg.netstats_period_s;
     let subs = snapshot t (function Net_stats -> true | _ -> false) in
     if subs <> [] then
       guard "net_stats" (fun () ->
-          let status, body =
-            Http.plain_request ~net ~clock ~timeout:5.0 ~meth:"GET" ~body:{|["network_stats",{}]|} ~host ~port ~path ()
-          in
-          if status <> 200 then failwith (Printf.sprintf "network_stats: HTTP %d" status);
-          match Yojson.Safe.from_string body with
-          | `List [ _; content ] ->
-              let msg = Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.net_stats); ("content", content) ]) in
+          match Netstats.content ~net ~clock cfg with
+          | Some content ->
+              let msg = Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.net_stats); ("content", `String content) ]) in
               List.iter (fun s -> push s msg) subs
-          | _ -> failwith "network_stats: unexpected answer")
+          | None -> ())
   done
 
-let run (t : t) ~net ~clock ~(network_stats_url : string option) ~(netstats_period : float) : unit =
+let run (t : t) ~net ~clock ~(cfg : Config.t) : unit =
   Switch.run @@ fun sw ->
   Fiber.fork_daemon ~sw (fun () -> counts_loop t ~clock; `Stop_daemon);
   Fiber.fork_daemon ~sw (fun () -> rebroadcast_loop t ~clock; `Stop_daemon);
-  (match network_stats_url with
-  | Some url -> Fiber.fork_daemon ~sw (fun () -> netstats_loop t ~net ~clock ~url ~period:netstats_period; `Stop_daemon)
-  | None -> log "network_stats_url not set: net_stats subscriptions stay silent");
+  if Netstats.configured cfg then Fiber.fork_daemon ~sw (fun () -> netstats_loop t ~net ~clock ~cfg; `Stop_daemon)
+  else log "neither network_stats_url nor network_stats_file is set: net_stats subscriptions stay silent";
   Fiber.await_cancel ()

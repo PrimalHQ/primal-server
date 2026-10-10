@@ -14,7 +14,7 @@ let service ~(lifecycle : Lifecycle.t) ~(stats : Stats.t) ~(cfg : Config.t) ~(li
         ("servername", `String cfg.servername);
         ("public_ws_port", `Int cfg.public_ws_port);
         ("cache_ws_port", (match cfg.cache_ws_port with Some p -> `Int p | None -> `Null));
-        ("upstream", `String cfg.upstream_julia_ws);
+        ("upstream", (match cfg.upstream_julia_ws with Some u -> `String u | None -> `Null));
         ("connections", `Int (Conn.count ()));
         ( "live_subscriptions",
           let a, f, c = Live_events.stats live in

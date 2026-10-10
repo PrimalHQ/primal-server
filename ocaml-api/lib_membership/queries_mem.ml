@@ -159,7 +159,9 @@ let set_notification_settings (c : Db.membership Db.conn) ~pubkey (settings : (s
   ignore [%pgsql dbh "delete from notification_settings where pubkey = $pubkey"];
   List.iter (fun (typ, enabled) -> ignore [%pgsql dbh "insert into notification_settings (pubkey, type, enabled) values ($pubkey, $typ, $enabled)"]) settings
 
-(* app.jl update_push_notification_token *)
+(* app.jl update_push_notification_token. The inserts skip an existing row: two registrations of one
+   token racing (both delete, then both insert) made the second fail on the primary key, which only
+   Julia's retry of the forwarded request hid. *)
 let delete_notification_tokens (c : Db.membership Db.conn) ~(platform : string) ~(token : string) : unit =
   let dbh = Db.raw c in
   ignore [%pgsql dbh "delete from notification_tokens where platform = $platform and token = $token"]
@@ -168,7 +170,7 @@ let insert_notification_token (c : Db.membership Db.conn) ~(platform : string) ~
   let dbh = Db.raw c in
   ignore
     [%pgsql dbh
-      "insert into notification_tokens (platform, token, pubkey, added_at, environment, event_from_user) values ($platform, $token, $pubkey, now(), $?environment, $event_json::jsonb)"]
+      "insert into notification_tokens (platform, token, pubkey, added_at, environment, event_from_user) values ($platform, $token, $pubkey, now(), $?environment, $event_json::jsonb) on conflict do nothing"]
 
 (* app.jl update_push_notification_token_for_nip46 *)
 let delete_monitoring_tokens (c : Db.membership Db.conn) ~(platform : string) ~(token : string) : unit =
@@ -182,7 +184,7 @@ let insert_monitoring_token (c : Db.membership Db.conn) ~(platform : string) ~(t
     [%pgsql dbh
       "insert into monitoring_notification_tokens (platform, token, service_pubkey, relays, added_at, environment, event_from_user, client_pubkeys, scope) \
        values ($platform, $token, $service_pubkey, $relays_json::jsonb, now(), $?environment, $event_json::jsonb, \
-               array(select decode(x::text, 'hex') from jsonb_array_elements_text($client_pubkeys_json::jsonb) x), $scope)"]
+               array(select decode(x::text, 'hex') from jsonb_array_elements_text($client_pubkeys_json::jsonb) x), $scope) on conflict do nothing"]
 
 (* app.jl get_queued_events_for_nip46: take the queued requests of a remote signer *)
 let take_queued_nip46_events (c : Db.membership Db.conn) ~service_pubkey : string list =

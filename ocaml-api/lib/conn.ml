@@ -1,7 +1,10 @@
 (* One client WebSocket connection of the cache API, in the ws-connector shape (connection.rs /
-   router.rs): a paired upstream WebSocket to the Julia CacheServer is opened per client; requests
-   the native dispatcher (Funcall) does not handle are forwarded verbatim and every upstream frame is
-   relayed back verbatim; an idle timer closes both sides.
+   router.rs): a paired upstream WebSocket to the Julia CacheServer is opened per client, on its
+   first request the native dispatcher (Funcall) does not handle; such requests are forwarded
+   verbatim and every upstream frame is relayed back verbatim; an idle timer closes both sides.
+   Without an upstream (upstream_julia_ws null, or its connect fails) such a request is answered
+   like Julia answers one it cannot serve: NOTICE "unknown api request" for a funcall name the
+   dispatcher does not know, NOTICE "error" otherwise, then EOSE.
 
    Exactly like ws-connector, `set_primal_protocol` is NOT forwarded: the zlib flag only applies to
    natively answered requests, and proxied responses arrive in whatever form the upstream sends.
@@ -147,7 +150,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
   with_registry (fun () -> Hashtbl.replace registry id c);
   Stats.incr stats.connections;
   Stats.incr stats.accepted;
-  let tls, host, port, path = Config.upstream cfg in
+  let upstream = Config.upstream cfg in
   Fun.protect
     ~finally:(fun () ->
       with_registry (fun () -> Hashtbl.remove registry id);
@@ -158,19 +161,6 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
       try session.ws_close () with _ -> ())
     (fun () ->
       Switch.run @@ fun sw ->
-      (* Upstream first (ws-connector connects the backend before serving the client). *)
-      (match
-         Eio.Time.with_timeout clock cfg.upstream_connect_timeout_s (fun () ->
-             Ok (Ws_client.connect ~tls ~sw ~net ~clock ~host ~port ~path ()))
-       with
-      | Ok b -> c.backend <- Some b
-      | Error `Timeout ->
-          Stats.incr stats.backend_failures;
-          failwith "upstream connect timeout"
-      | exception e ->
-          Stats.incr stats.backend_failures;
-          raise e);
-      let backend = Option.get c.backend in
       let touch () = c.last_msg <- Unix.gettimeofday () in
       (* Requests of one connection. ws-connector and Julia answer them strictly in order, so one
          slow feed delays everything the page asks for next on that socket (a profile header behind
@@ -185,9 +175,71 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
       let concurrency = max 1 cfg.request_concurrency in
       let slots = Eio.Semaphore.make concurrency in
       let backend_lock = Eio.Mutex.create () in
-      let forward s =
-        Eio.Mutex.use_rw ~protect:true backend_lock (fun () -> Ws_client.send_text backend s);
-        Stats.incr stats.proxied
+      (* resolved when the upstream closes: the client connection ends with it, as with ws-connector
+         (the client reconnects; subscriptions Julia served are gone with its socket) *)
+      let backend_gone, backend_gone_r = Promise.create () in
+      let backend_loop backend () =
+        let rec loop () =
+          if c.closing then ()
+          else
+            match Ws_client.recv_frame backend with
+            | `Closed -> ()
+            | `Text s ->
+                touch ();
+                session.ws_send_text s;
+                Stats.incr stats.backend_frames;
+                Stats.incr stats.sent;
+                loop ()
+            | `Binary b ->
+                touch ();
+                session.ws_send_binary b;
+                Stats.incr stats.backend_frames;
+                Stats.incr stats.sent;
+                loop ()
+        in
+        (try loop () with Eio.Cancel.Cancelled _ as e -> raise e | End_of_file -> () | exn -> log "connection %d: upstream: %s" c.id (Printexc.to_string exn));
+        ignore (Promise.try_resolve backend_gone_r ());
+        `Stop_daemon
+      in
+      (* under backend_lock *)
+      let connected_backend () : Ws_client.t option =
+        match (c.backend, upstream) with
+        | (Some _ as b), _ -> b
+        | None, None -> None
+        | None, Some (tls, host, port, path) -> (
+            match
+              Eio.Time.with_timeout clock cfg.upstream_connect_timeout_s (fun () ->
+                  Ok (Ws_client.connect ~tls ~sw ~net ~clock ~host ~port ~path ()))
+            with
+            | Ok b ->
+                c.backend <- Some b;
+                Fiber.fork_daemon ~sw (backend_loop b);
+                Some b
+            | Error `Timeout ->
+                Stats.incr stats.backend_failures;
+                log "connection %d: upstream connect timeout" c.id;
+                None
+            | exception (Eio.Cancel.Cancelled _ as e) -> raise e
+            | exception e ->
+                Stats.incr stats.backend_failures;
+                log "connection %d: upstream connect: %s" c.id (Printexc.to_string e);
+                None)
+      in
+      (* ~connect:false: only over an upstream this connection already opened (a CLOSE of a
+         subscription the upstream never saw is not worth a connect) *)
+      let send_backend ?(connect = true) (send : Ws_client.t -> unit) : bool =
+        Eio.Mutex.use_rw ~protect:true backend_lock (fun () ->
+            match if connect then connected_backend () else c.backend with
+            | Some b -> send b; Stats.incr stats.proxied; true
+            | None -> false)
+      in
+      let forward s (p : Protocol.incoming) =
+        match p with
+        | Protocol.Req { subid; funcall; _ } ->
+            if not (send_backend (fun b -> Ws_client.send_text b s)) then
+              let n = match Option.map Funcall.of_string funcall with Some (Funcall.Proxied _) -> "unknown api request" | _ -> "error" in
+              respond c stats ~subid ~notices:[ n ] []
+        | _ -> ignore (send_backend ~connect:false (fun b -> Ws_client.send_text b s))
       in
       let handle_parsed s (p : Protocol.incoming) =
         let handled =
@@ -203,7 +255,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
         | Protocol.Req { funcall = Some fc; subid; _ } when (not handled) && cfg.log_not_handled ->
             log "not handled: %s sub_id=%s" fc subid
         | _ -> ());
-        if not handled then forward s
+        if not handled then forward s p
       in
       let client_loop () =
         let rec loop () =
@@ -214,8 +266,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
             | `Binary b ->
                 touch ();
                 Stats.incr stats.recv;
-                Eio.Mutex.use_rw ~protect:true backend_lock (fun () -> Ws_client.send_binary backend b);
-                Stats.incr stats.proxied;
+                ignore (send_backend ~connect:false (fun be -> Ws_client.send_binary be b));
                 loop ()
             | `Text s ->
                 touch ();
@@ -256,27 +307,6 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
         in
         loop ()
       in
-      let backend_loop () =
-        let rec loop () =
-          if c.closing then ()
-          else
-            match Ws_client.recv_frame backend with
-            | `Closed -> ()
-            | `Text s ->
-                touch ();
-                session.ws_send_text s;
-                Stats.incr stats.backend_frames;
-                Stats.incr stats.sent;
-                loop ()
-            | `Binary b ->
-                touch ();
-                session.ws_send_binary b;
-                Stats.incr stats.backend_frames;
-                Stats.incr stats.sent;
-                loop ()
-        in
-        loop ()
-      in
       (* ws-connector: every 3 s, close when idle for >= (0.95..1.0) * idle_timeout (the timeout
          itself comes from wsconnvars, re-read each tick). *)
       let idle_loop () =
@@ -295,7 +325,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
         in
         loop ()
       in
-      (try Fiber.any [ client_loop; backend_loop; idle_loop ]
+      (try Fiber.any [ client_loop; (fun () -> Promise.await backend_gone); idle_loop ]
        with
        | Eio.Cancel.Cancelled _ as e -> raise e
        | End_of_file -> ()

@@ -234,7 +234,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `cache_ws_port` | `8817` or `null` | the Julia CacheServer port (8800+N): the same WebSocket service for health probes (`monitor-cache-server.sh`) and cross-node calls; `null` while a Julia node holds it |
 | `admin_host` / `admin_port` | `"127.0.0.1"` / `14006` | admin HTTP (below) |
 | `num_domains` | `4` | worker domains; each runs an accept loop on the shared SO_REUSEPORT socket |
-| `upstream_julia_ws` | `"ws://127.0.0.1:8817"` | fallback proxy target for everything not handled natively |
+| `upstream_julia_ws` | `"ws://127.0.0.1:8817"` or `null` | fallback proxy target for everything not handled natively, connected on a connection's first such request; `null` (or a failed connect): NOTICE `"unknown api request"` for a funcall name the API does not know, `"error"` otherwise, then EOSE (Julia's answers) |
 | `upstream_connect_timeout_s` | `10.0` | |
 | `idle_connection_timeout_s` | `600.0` | close a client idle for 0.95–1.0 × this (ws-connector parity) |
 | `ws_max_message_bytes` | `1048576` | inbound message cap (close 1009) |
@@ -253,6 +253,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `live_events_enabled` | `true` | run the live-event distributor on the main domain |
 | `wsconnvars_poll_s` | `1.0` | poll period of the `wsconnvars` table (idle timeout, logging knobs) |
 | `network_stats_url` | `"http://127.0.0.1:14018/api"` or `null` | `App.NETWORK_STATS_URL`: where `net_stats` pushes are fetched from (the importer node's HTTP `/api`) |
+| `network_stats_file` | `"/home/pr/var/primalserver/primalnode18/cache/db/stats.json"` or `null` | without `network_stats_url`: `network_stats` and the `net_stats` pushes read the importer's persisted stats dict directly (what the Julia node owning it answered) |
 | `netstats_period_s` | `2.0` | `1 / CacheServerHandlers.NETSTATS_RATE` |
 | `trending_blocked_domains` | `["bchnostr.com"]` | `App.TRENDING_BLOCKED_DOMAINS`: nip05 domains hidden from trending/explore |
 | `search_api_url` | `"http://<search-host>:14017/api"` or `null` | `App.search` forwards the call to this HTTP `/api` (null: NOTICE error) |
@@ -265,7 +266,9 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `dvm_requester_seckey` | hex or `null` | `App.DVM_REQUESTER_KEYPAIR`: signs the kind-5300 job requests (null: `dvm_feed` live path answers NOTICE error) |
 | `internal_http_port` | `14096` (14017 at cutover) | InternalServices router (14000+N) |
 | `moderation_http_port` | `24096` (24017 at cutover) | `/purge-media`, `/pre-sign-urls` (24000+N) |
-| `upstream_julia_http` | `"http://127.0.0.1:14017/api"` or `null` | HTTP `/api` forwards funcalls that are still proxied (and `server_name`) there |
+| `upstream_julia_http` | `"http://127.0.0.1:14017/api"` or `null` | HTTP `/api` forwards funcalls that are still proxied (and `server_name` when `http_server_name` is null) there; `log_not_handled` logs each with the client address |
+| `replicate_to` | `["ws://192.168.40.7:8831"]` or `[]` | app.jl `REPLICATE_TO_SERVERS`: after a native `set_notifications_seen`, `reset_directmsg_count` or `reset_directmsg_counts` (not itself `replicated`), the same request with `"replicated": true` goes to each of these WebSockets, fire and forget (2 s), so the other cache hosts' unread counters follow |
+| `http_server_name` | `{"server": 34, "node": 31}` or `null` | HTTP `/api` `server_name`: Julia's `{server, node}` answer of the node this API replaces |
 | `index_dirs` | `{"primal.net": "/var/www/dev.primal.net", ...}` | Host -> directory of the web app's index.html (preview_handler); other hosts answer 404 |
 | `url_shortening_root_url` | `"https://m.primal.net"` | `InternalServices.URL_SHORTENING_ROOT_URL` |
 | `download_proxies` | `[]` | `Media.DOWNLOAD_PROXIES` for `/link-preview` (`"null"` = direct); empty disables previews, as in Julia |

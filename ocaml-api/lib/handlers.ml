@@ -760,8 +760,9 @@ let event_zaps_by_satszapped (ctx : ctx) (kw : Kw.t) : outcome =
             Handled
               (messages (dedup @ [ range_msg ~order_by:"amount_sats" (List.map (fun (z : Queries.zap_row) -> (hex z.zap_receipt_id, z.amount_sats)) zaps) ])))
 
-(* app.jl long_form_content_feed as a direct funcall (Julia: usepgfuncs + apply_humaness_check) *)
-let long_form_content_feed_funcall (ctx : ctx) (kw : Kw.t) : outcome =
+(* app.jl long_form_content_feed as a direct funcall (Julia: usepgfuncs + apply_humaness_check); from
+   multi_kind_mega_feed_directive without the humaness check (its own default) *)
+let long_form_content_feed_funcall ?(apply_humaness_check = true) (ctx : ctx) (kw : Kw.t) : outcome =
   let limit = Kw.int kw "limit" ~default:20 in
   if limit > 1000 then julia_error
   else
@@ -776,7 +777,7 @@ let long_form_content_feed_funcall (ctx : ctx) (kw : Kw.t) : outcome =
       (messages
          (with_cache ctx (fun c ->
               Queries.long_form_content_feed c ~pubkey ~notes ~topic ~curation ~minwords ~limit ~since ~until ~offset
-                ~user_pubkey ~apply_humaness_check:true)))
+                ~user_pubkey ~apply_humaness_check)))
 
 (* events without extended_response (app.jl events): ids, or the stored events oldest first *)
 let events_plain (ctx : ctx) (kw : Kw.t) : outcome =
@@ -1503,6 +1504,7 @@ let set_notifications_seen (ctx : ctx) (kw : Kw.t) : outcome =
   | Ok e ->
       with_membership ctx (fun m -> Queries_mem.set_notifications_seen m ~pubkey:e.Nostr.pubkey ~seen_until:e.Nostr.created_at);
       with_cache ctx (fun c -> Queries.reset_notification_counts c ~pubkey:e.Nostr.pubkey);
+      Replicate.push "set_notifications_seen" ~keys:[ "event_from_user" ] kw;
       Handled empty
 
 (* {2 push subscriptions} (answered with EOSE; the Broadcasts loops push the values) *)
@@ -2048,35 +2050,12 @@ let explore_people (ctx : ctx) (kw : Kw.t) : outcome =
 let explore_topics (ctx : ctx) (_ : Kw.t) : outcome =
   Handled (messages (with_cache ctx (fun c -> Queries.cache_messages c ~key:"precalculated_analytics_explore_topics")))
 
-(* est.commons.stats[:users] of app_ext.jl explore_legend_counts is the network_stats "users" *)
-let network_stats_users (ctx : ctx) ~net : int option =
-  match ctx.cfg.network_stats_url with
-  | None -> None
-  | Some url -> (
-      match Http.parse_url url with
-      | None -> None
-      | Some u -> (
-          match
-            Http.plain_request ~net ~clock:ctx.clock ~timeout:5.0 ~meth:"GET" ~body:{|["network_stats",{}]|} ~host:u.Http.host ~port:u.Http.port
-              ~path:u.Http.path ()
-          with
-          | 200, body -> (
-              match Yojson.Safe.from_string body with
-              | `List [ _; `String content ] -> (
-                  match Yojson.Safe.from_string content with
-                  | `Assoc f -> ( match List.assoc_opt "users" f with Some (`Int n) -> Some n | _ -> None)
-                  | _ -> None)
-              | _ -> None)
-          | _ -> None
-          | exception _ -> None))
-
-
 let explore_legend_counts (ctx : ctx) (kw : Kw.t) : outcome =
   let pubkey = Kw.hex32_exn kw "pubkey" in
   let follows, inner, outer = with_cache ctx (fun c -> Queries.legend_counts c ~pubkey) in
   (* est.commons.stats[:users]: the importer's network_stats "users" (the API node's own counter
      only counts what that node imported) *)
-  let all_users = match !net_ref with Some net -> network_stats_users ctx ~net | None -> None in
+  let all_users = match !net_ref with Some net -> Netstats.users ~net ~clock:ctx.clock ctx.cfg | None -> None in
   Handled
     (messages
        [
@@ -2468,6 +2447,23 @@ let rec mega_feed_directive ?(depth = 0) (ctx : ctx) (kw : Kw.t) : outcome =
                 | exception _ -> Handled empty)
             | _ -> Handled empty))
 
+(* the specification of an advanced-feeds.json entry {"id", "specification"} *)
+let advanced_feed_specification (ctx : ctx) (id : string) : string option =
+  match Files.read_opt (cm_file ctx "advanced-feeds.json") with
+  | Some txt -> (
+      match Yojson.Safe.from_string txt with
+      | `List feeds ->
+          List.find_map
+            (function
+              | `Assoc f when List.assoc_opt "id" f = Some (`String id) -> (
+                  match List.assoc_opt "specification" f with Some (`String sp) -> Some sp | _ -> None)
+              | _ -> None)
+            feeds
+      | _ -> None
+      | exception _ -> None)
+  | None -> None
+
+(* app.jl multi_kind_mega_feed_directive: with kinds, the spec id picks the feed (and gets the kinds) *)
 let multi_kind_mega_feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
   match parse_spec kw with
   | `Missing -> Not_handled
@@ -2485,7 +2481,21 @@ let multi_kind_mega_feed_directive (ctx : ctx) (kw : Kw.t) : outcome =
           | "global-trending" -> mega_explore ctx kwargs ~timeframe:"trending" ~created_after:(now () - (Kw.int s "hours" ~default:24 * 3600)) ~kinds:kinds_l ()
           | "all-notes" -> mega_explore ctx kwargs ~timeframe:"latest" ~created_after:0 ~kinds:kinds_l ()
           | "most-zapped" -> mega_explore ctx kwargs ~timeframe:"mostzapped" ~created_after:(now () - (Kw.int s "hours" ~default:24 * 3600)) ~grouped:true ~kinds:kinds_l ()
-          | _ -> multi_kind_mega_feed_directive_basic ctx kw)
+          | "latest" | "feed" -> multi_kind_mega_feed_directive_basic ctx kw
+          | _ -> (
+              (* the spec's fields under the request's (Julia: skwa..., kwargs...); [kinds] is a named
+                 argument there, so only the branches that name it get it *)
+              let spec_fields = Kw.fields (Kw.remove (Kw.remove s "id") "kind") in
+              let rest = Kw.remove kwargs "kinds" in
+              let with_spec = Kw.merge (`Assoc spec_fields) (Kw.fields rest) in
+              match id with
+              | "advsearch" -> advanced_search ctx (Kw.set with_spec "kinds" kinds)
+              | "nostr-reads-feed" -> advanced_search_query ctx rest ~query:"kind:30023 scope:myfollowsinteractions minwords:100 features:summary"
+              | _ -> (
+                  match advanced_feed_specification ctx id with
+                  | Some sp -> mega_feed_directive ctx (Kw.set rest "spec" (`String sp))
+                  | None when List.mem 30023 kinds_l -> long_form_content_feed_funcall ~apply_humaness_check:false ctx with_spec
+                  | None -> mega_feed_directive ctx (Kw.remove kw "kinds"))))
       | _ -> mega_feed_directive ctx kw)
 
 (* app_ext.jl advanced_feed: mega_feed_directive with spec=specification *)
@@ -2619,6 +2629,7 @@ let reset_directmsg_count (ctx : ctx) (kw : Kw.t) : outcome =
               Queries.reset_directmsg_count c ~receiver:e.Nostr.pubkey ~sender ~by;
               Queries.reset_directmsg_count c ~receiver:e.Nostr.pubkey ~sender:None ~by
           | None -> ());
+      Replicate.push "reset_directmsg_count" ~keys:[ "event_from_user"; "sender" ] kw;
       Handled empty
 
 let reset_directmsg_counts (ctx : ctx) (kw : Kw.t) : outcome =
@@ -2626,6 +2637,7 @@ let reset_directmsg_counts (ctx : ctx) (kw : Kw.t) : outcome =
   | Error _ -> julia_error
   | Ok e ->
       with_cache ctx (fun c -> Queries.reset_directmsg_counts c ~receiver:e.Nostr.pubkey);
+      Replicate.push "reset_directmsg_counts" ~keys:[ "event_from_user" ] kw;
       Handled empty
 
 (* {2 zaps} *)
@@ -2990,21 +3002,14 @@ let client_config (ctx : ctx) (_ : Kw.t) : outcome =
   Handled (messages [ content_msg Kind.show_primal_support (file_json_content (cm_file ctx "client-config.json") ~default:"null") ])
 
 let network_stats (ctx : ctx) (_ : Kw.t) : outcome =
-  match ctx.cfg.network_stats_url with
+  match !net_ref with
   | None -> Not_handled
-  | Some url -> (
-      match (Http.parse_url url, !net_ref) with
-      | Some u, Some net -> (
-          match
-            Http.plain_request ~net ~clock:ctx.clock ~timeout:5.0 ~meth:"GET" ~body:{|["network_stats",{}]|} ~host:u.Http.host ~port:u.Http.port
-              ~path:u.Http.path ()
-          with
-          | 200, body -> (
-              match Yojson.Safe.from_string body with
-              | `List [ _; content ] -> Handled (messages [ Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.net_stats); ("content", content) ]) ])
-              | _ -> julia_error)
-          | _ -> julia_error)
-      | _ -> Not_handled)
+  | Some net -> (
+      match Netstats.content ~net ~clock:ctx.clock ctx.cfg with
+      | None -> Not_handled
+      | Some content -> Handled (messages [ Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.net_stats); ("content", `String content) ]) ])
+      | exception (Eio.Cancel.Cancelled _ as e) -> raise e
+      | exception _ -> julia_error)
 
 (* {2 articles} *)
 

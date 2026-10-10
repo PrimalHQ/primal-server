@@ -441,7 +441,8 @@ let collect_metadata (ctx : ctx) (hexes : string list) : Yojson.Safe.t =
   else
     Handlers.with_cache ctx (fun c -> `Assoc (List.map (fun (k, e) -> (k, Yojson.Safe.from_string e)) (Queries.metadata_events_json c ~pubkeys_json:(Handlers.hex_list_json hexes))))
 
-let forward_to_julia (ctx : ctx) (body : string) : resp =
+let forward_to_julia (ctx : ctx) ?(peer = "") ?(fc = "") (body : string) : resp =
+  if ctx.cfg.log_not_handled then Printf.printf "%s [http] not handled: %s from %s\n%!" (Procinfo.timestamp ()) fc peer;
   match (ctx.cfg.upstream_julia_http, !Handlers.net_ref) with
   | Some url, Some net -> (
       match Http.parse_url url with
@@ -457,14 +458,20 @@ let api (ctx : ctx) (r : req) : resp =
       match Yojson.Safe.from_string r.body with
       | `List (`String fc :: rest) -> (
           let kwargs = match rest with (`Assoc _ as kw) :: _ -> kw | _ -> `Assoc [] in
+          let forward () = forward_to_julia ctx ~peer:r.peer ~fc r.body in
           match Funcall.of_string fc with
-          | Funcall.Proxied _ -> forward_to_julia ctx r.body
-          | Funcall.Server_name -> forward_to_julia ctx r.body (* Julia's App.server_name answers {server, node}; ws-connector's name is the WS answer *)
+          | Funcall.Proxied _ -> forward ()
+          | Funcall.Server_name -> (
+              (* Julia's App.server_name answers {server, node} here; ws-connector's name is the WS answer *)
+              match ctx.cfg.http_server_name with
+              | Some (server, node) ->
+                  json_resp (Yojson.Safe.to_string (`List [ `Assoc [ ("content", `String (Yojson.Safe.to_string (`Assoc [ ("server", `Int server); ("node", `Int node) ]))) ] ]))
+              | None -> forward ())
           | f -> (
               match Funcall.dispatch ctx f kwargs with
               | Response.Handled res -> json_resp ("[" ^ String.concat "," res.messages ^ "]")
               | Response.Notice n -> json_resp (Yojson.Safe.to_string (`Assoc [ ("error", `String n) ]))
-              | Response.Not_handled -> forward_to_julia ctx r.body))
+              | Response.Not_handled -> forward ()))
       | _ -> Text (500, "error"))
 
 let suggestions (ctx : ctx) : resp =

@@ -16,7 +16,10 @@ let usage () =
 let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : unit =
   let cfg_path, check_only = match argv with [| _; "--check-config"; p |] -> (p, true) | [| _; p |] -> (p, false) | _ -> usage () in
   let cfg =
-    try Config.of_json_file cfg_path
+    try
+      let c = Config.of_json_file cfg_path in
+      Replicate.configure c.replicate_to;
+      c
     with Config.Config_error m ->
       prerr_endline ("primal-api: config error: " ^ m);
       exit 2
@@ -33,7 +36,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
   let stop = Lifecycle.stop lifecycle in
   let stats = Stats.create () in
   log "pid %d: config %s, servername %s, upstream %s" (Unix.getpid ()) cfg_path cfg.servername
-    cfg.upstream_julia_ws;
+    (Option.value cfg.upstream_julia_ws ~default:"none");
 
   (* The public WebSocket service: any GET with an Upgrade header becomes a Conn session; a plain
      GET (health probes, browsers) gets a text banner like HTTP.jl did. *)
@@ -113,8 +116,12 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
       Fiber.fork_daemon ~sw:msw (fun () ->
           Live_events.run live ~net ~clock ~stats cfg.cache_db;
           `Stop_daemon);
+    if cfg.replicate_to <> [] then
+      Fiber.fork_daemon ~sw:msw (fun () ->
+          Replicate.run ~net ~clock ();
+          `Stop_daemon);
     Fiber.fork_daemon ~sw:msw (fun () ->
-        Broadcasts.run bc ~net ~clock ~network_stats_url:cfg.network_stats_url ~netstats_period:cfg.netstats_period_s;
+        Broadcasts.run bc ~net ~clock ~cfg;
         `Stop_daemon);
     Fiber.fork_daemon ~sw:msw (fun () ->
         if cfg.status_interval_s > 0. then Stats.report_loop ~clock ~interval:cfg.status_interval_s stats;
