@@ -154,6 +154,5 @@ let run_once ~(cfg : Config.t) ~(api_cfg : Primal_api.Config.t) ~net ~clock ~pro
 
 let run ~(cfg : Config.t) ~net ~clock ~proc_mgr ~(stop : unit Promise.t) : unit =
   let api_cfg = Primal_api.Config.of_json_file cfg.api_config_path in
-  Primal_api_db.Db.init ~cache_db:cfg.cache_db ~membership_db:cfg.membership_db ~cache_size:40 ~membership_size:4;
-  H.net_ref := Some net;
+  Api_context.init ~cfg ~net;
   Periodic.run ~clock ~stop ~period:cfg.analytics_period_s ~label:"analytics" (fun () -> run_once ~cfg ~api_cfg ~net ~clock ~proc_mgr)

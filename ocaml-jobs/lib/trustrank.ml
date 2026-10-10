@@ -184,7 +184,21 @@ let run_make ~(cfg : Config.t) ~(stop : unit Promise.t) : unit =
       log "ranked %d pubkeys (%.0fs)" (Array.length rows) (Unix.gettimeofday () -. t0);
       let live = cfg.trustrank_target_table = "pubkey_trustrank" in
       import dbh ~table:cfg.trustrank_target_table ~live rows;
-      log "%s %s (%.0fs)" (if live then "swapped into" else "written to") cfg.trustrank_target_table (Unix.gettimeofday () -. t0))
+      log "%s %s (%.0fs)" (if live then "swapped into" else "written to") cfg.trustrank_target_table (Unix.gettimeofday () -. t0);
+      (* the other databases that read pubkey_trustrank but have no follow graph of their own get the
+         same ranks (Julia: import_trustrank per TARGET_SERVERS entry); one failing does not stop the rest *)
+      List.iter
+        (fun (ci : Postgres.conninfo) ->
+          if not (Promise.is_resolved stop) then
+            try
+              let t1 = Unix.gettimeofday () in
+              let x = Postgres.connect ~statement_timeout_ms:0 ~application_name:"primal-jobs-trustrank" ci in
+              Fun.protect ~finally:(fun () -> try Postgres.close x with _ -> ()) (fun () -> import x ~table:cfg.trustrank_target_table ~live rows);
+              log "%s on %s:%d/%s (%.0fs)" cfg.trustrank_target_table ci.host ci.port ci.database (Unix.gettimeofday () -. t1)
+            with
+            | Eio.Cancel.Cancelled _ as e -> raise e
+            | e -> log "extra target %s:%d/%s: %s" ci.host ci.port ci.database (Printexc.to_string e))
+        cfg.trustrank_extra_targets)
 
 let run ~(cfg : Config.t) ~(stop : unit Promise.t) ~clock : unit =
   (* Julia sleeps one period before the first run *)

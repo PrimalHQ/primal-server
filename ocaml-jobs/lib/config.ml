@@ -4,10 +4,11 @@ exception Config_error of string
 
 module U = Yojson.Safe.Util
 
-type role = Dvm_checker | Pg_listener | Trustrank | Analytics | Dag | Rebroadcast | Failover | Media | Blossom | Ext of string (* a role the private extensions register (Roles) *)
+type role = Dvm_checker | Dvm_provider | Pg_listener | Trustrank | Analytics | Dag | Rebroadcast | Failover | Media | Blossom | Ext of string (* a role the private extensions register (Roles) *)
 
 let role_of_string = function
   | "dvm_checker" -> Dvm_checker
+  | "dvm_provider" -> Dvm_provider
   | "pg_listener" -> Pg_listener
   | "trustrank" -> Trustrank
   | "analytics" -> Analytics
@@ -18,7 +19,7 @@ let role_of_string = function
   | "blossom" -> Blossom
   | s -> Ext s
 
-let string_of_role = function Dvm_checker -> "dvm_checker" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics" | Dag -> "dag" | Rebroadcast -> "rebroadcast" | Failover -> "failover" | Media -> "media" | Blossom -> "blossom" | Ext s -> s
+let string_of_role = function Dvm_checker -> "dvm_checker" | Dvm_provider -> "dvm_provider" | Pg_listener -> "pg_listener" | Trustrank -> "trustrank" | Analytics -> "analytics" | Dag -> "dag" | Rebroadcast -> "rebroadcast" | Failover -> "failover" | Media -> "media" | Blossom -> "blossom" | Ext s -> s
 
 type t = {
   roles : role list;
@@ -36,6 +37,11 @@ type t = {
   dvm_parallel : int; (* asyncmap ntasks 8 *)
   dvm_randomized_delays : bool;
   dvm_log : bool;
+  (* dvm_provider (dvm_service_provider.jl) *)
+  dvm_provider_keypair_salt : string option; (* raw bytes; PRIMAL_DVM_KEYPAIR_SALT: each feed's key is sha256(salt ‖ feed id) *)
+  dvm_provider_relays : string list; (* RELAY_URLS: connected for job requests, and where answers and announcements go *)
+  dvm_provider_announce_created_at : int; (* created_at of the announcement events (bumped when a feed or the relay list changes) *)
+  dvm_provider_dry_run : bool; (* log announcements and answers, publish and record nothing *)
   (* pg_listener (cache_storage_pg_listener.jl) *)
   pg_listener_rate_limit_s : int; (* RATE_LIMIT_PERIOD 3600 *)
   pg_listener_log : bool;
@@ -45,6 +51,7 @@ type t = {
   trustrank_alpha : float; (* 0.85 *)
   trustrank_target_table : string; (* "pubkey_trustrank" = live swap; anything else = shadow table *)
   trustrank_run_at_start : bool; (* Julia waits one period first *)
+  trustrank_extra_targets : Postgres.conninfo list; (* TrustRankMaker.TARGET_SERVERS beyond the local DB: the same live swap there *)
   (* analytics (App.precalculate_analytics) *)
   api_config_path : string; (* primal-api-config.json: scored_content runs with the API's settings *)
   analytics_period_s : float; (* 600 *)
@@ -106,6 +113,13 @@ let of_json (j : Yojson.Safe.t) : t =
     dvm_parallel = rint j "dvm_parallel";
     dvm_randomized_delays = rbool j "dvm_randomized_delays";
     dvm_log = rbool j "dvm_log";
+    dvm_provider_keypair_salt =
+      (match rstr_opt j "dvm_provider_keypair_salt" with
+      | None -> None
+      | Some h -> ( match Hex_util.decode_opt h with Some b when b <> "" -> Some b | _ -> raise (Config_error "dvm_provider_keypair_salt: expected hex")));
+    dvm_provider_relays = rlist j "dvm_provider_relays";
+    dvm_provider_announce_created_at = rint j "dvm_provider_announce_created_at";
+    dvm_provider_dry_run = rbool j "dvm_provider_dry_run";
     pg_listener_rate_limit_s = rint j "pg_listener_rate_limit_s";
     pg_listener_log = rbool j "pg_listener_log";
     trustrank_period_s = rfloat j "trustrank_period_s";
@@ -113,6 +127,8 @@ let of_json (j : Yojson.Safe.t) : t =
     trustrank_alpha = rfloat j "trustrank_alpha";
     trustrank_target_table = rstr j "trustrank_target_table";
     trustrank_run_at_start = rbool j "trustrank_run_at_start";
+    trustrank_extra_targets =
+      (match field j "trustrank_extra_targets" with `List l -> List.map conninfo_of_json l | _ -> raise (Config_error "trustrank_extra_targets: expected a list"));
     api_config_path = rstr j "api_config_path";
     analytics_period_s = rfloat j "analytics_period_s";
     analytics_key_suffix = rstr j "analytics_key_suffix";

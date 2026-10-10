@@ -39,6 +39,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
           Fun.protect ~finally:(fun () -> ignore (Atomic.fetch_and_add running (-1))) @@ fun () ->
           (match role with
           | Config.Dvm_checker -> Dvm_checker.run ~cfg ~net ~clock ~stop
+          | Config.Dvm_provider -> Dvm_provider.run ~cfg ~net ~clock ~stop
           | Config.Pg_listener -> Pg_listener.run ~cfg ~net ~clock ~stop
           | Config.Trustrank -> Trustrank.run ~cfg ~stop ~clock
           | Config.Analytics -> Analytics.run ~cfg ~net ~clock ~proc_mgr ~stop
