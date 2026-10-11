@@ -22,7 +22,10 @@ let cloudflare_purge (ctx : ctx) ~zone_id ~api_key (file_url : string) : unit =
   | None -> log "cloudflare purge %s failed" file_url
 
 (* InternalServices.purge_media_ *)
-let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(reason : string option) ~(extra : (string * Pgj.t) list) ~(block_all_uploads : bool) ~(clear_cache : bool) ?(s3_backup = true) () : unit =
+(* storage lookups of one purged URL at a time *)
+let purge_parallelism = 8
+
+let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(reason : string option) ~(extra : (string * Pgj.t) list) ~(block_all_uploads : bool) ~(clear_cache : bool) ?(s3_backup = true) ?(late = false) () : unit =
   let cfg = ctx.cfg in
   let media_block_id = uuid4 () in
   let mb = { surl; files = []; media_urls = []; thumbnail_urls = []; short_urls = []; blossom_urls = []; upload_urls = []; extra; reason; pubkey = pubkey_hex } in
@@ -35,45 +38,58 @@ let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(rea
       let _, path_ext = url_parts url in
       let path, _ = splitext path_ext in
       let kh = match String.rindex_opt path '/' with Some i -> String.sub path (i + 1) (String.length path - i - 1) | None -> path in
+      (* Every distinct place the URL's file can be: each local file (the three forms; path
+         entries with the same parent dir reach the same file) and each S3 provider, for <h><ext>
+         only (the only form media_store puts on S3; the key is the URL path, whichever entry
+         names the provider). Looked up concurrently: one at a time, the 33 S3 round trips per URL
+         of the old entry x form loop took a 14-URL purge past 150 s. *)
+      let targets = Hashtbl.create 16 in
+      let order = ref [] in
+      let add k t = if not (Hashtbl.mem targets k) then (Hashtbl.replace targets k (); order := t :: !order) in
       List.iter
-        (fun p ->
-          List.iter
-            (fun (mp : Media_config.path_entry) ->
-              let provider_label = match mp with Media_config.Local { host; _ } -> host | Media_config.S3 { provider; _ } -> provider in
-              (match mp with
-              | Media_config.Local { host; path = root } -> (
-                  let filepath = parent_dir root ^ p in
-                  try
-                    let exists = try ignore (Unix.lstat filepath); true with _ -> false in
-                    if exists then begin
-                      let parts = String.split_on_char '/' filepath in
-                      let n = List.length parts in
-                      let dst_root = String.concat "/" (List.filteri (fun i _ -> i < n - 6) parts) in
-                      let dst_dir = dst_root ^ "/cdn-hidden" in
-                      (try Unix.mkdir dst_dir 0o755 with _ -> ());
-                      let dst = dst_dir ^ "/" ^ Filename.basename filepath in
-                      mb.files <- `Assoc [ ("mp", `List [ `String "local"; `String host; `String root ]); ("p", `String p); ("filepath", `String filepath); ("dst", `String dst) ] :: mb.files;
-                      Sys.rename filepath dst
-                    end
-                  with e -> log "local purge %s: %s" filepath (Printexc.to_string e))
-              | Media_config.S3 { provider = name; _ } -> (
-                  match Media_config.find_s3 cfg name with
-                  | Some prov -> (
-                      let key = if String.length p > 0 && p.[0] = '/' then String.sub p 1 (String.length p - 1) else p in
-                      try
-                        if S3.check ~net:ctx.net ~clock:ctx.clock prov key then begin
-                          mb.files <- `Assoc [ ("mp", `List [ `String "s3"; `String name ]); ("p", `String p) ] :: mb.files;
-                          (match (s3_backup, prov.S3.bucket2) with true, Some b2 -> ignore (S3.copy ~net:ctx.net ~clock:ctx.clock prov ~source_bucket:prov.bucket ~source_key:key ~destination_bucket:b2 ~destination_key:key) | _ -> ());
-                          ignore (S3.delete ~net:ctx.net ~clock:ctx.clock prov key)
-                        end;
-                        match (cfg.cloudflare_cache, prov.S3.domain) with
-                        | Some (zone_id, api_key), Some domain when name = "cloudflare" || name = "cloudflare2" -> cloudflare_purge ctx ~zone_id ~api_key ("https://" ^ domain ^ p)
-                        | _ -> ()
-                      with e -> log "s3 purge %s %s: %s" name p (Printexc.to_string e))
-                  | None -> log "purge: unknown s3 provider %s" name));
-              ignore (q ctx "update media_storage set media_block_id = $3::uuid where storage_provider = $1 and h = $2" [ Some provider_label; Some kh; Some media_block_id ]))
-            (all_path_entries cfg))
-        [ path; path ^ ".key"; path_ext ];
+        (fun (mp : Media_config.path_entry) ->
+          match mp with
+          | Media_config.Local { host; path = root } ->
+              List.iter (fun p -> let filepath = parent_dir root ^ p in add ("local:" ^ filepath) (`Local (host, root, p, filepath))) [ path; path ^ ".key"; path_ext ]
+          | Media_config.S3 { provider = name; _ } -> add ("s3:" ^ name) (`S3 (name, path_ext)))
+        (all_path_entries cfg);
+      let purge_target = function
+        | `Local (host, root, p, filepath) -> (
+            try
+              let exists = try ignore (Unix.lstat filepath); true with _ -> false in
+              if exists then begin
+                let parts = String.split_on_char '/' filepath in
+                let n = List.length parts in
+                let dst_root = String.concat "/" (List.filteri (fun i _ -> i < n - 6) parts) in
+                let dst_dir = dst_root ^ "/cdn-hidden" in
+                (try Unix.mkdir dst_dir 0o755 with _ -> ());
+                let dst = dst_dir ^ "/" ^ Filename.basename filepath in
+                mb.files <- `Assoc [ ("mp", `List [ `String "local"; `String host; `String root ]); ("p", `String p); ("filepath", `String filepath); ("dst", `String dst) ] :: mb.files;
+                Sys.rename filepath dst
+              end
+            with e -> log "local purge %s: %s" filepath (Printexc.to_string e))
+        | `S3 (name, p) -> (
+            match Media_config.find_s3 cfg name with
+            | Some prov -> (
+                let key = if String.length p > 0 && p.[0] = '/' then String.sub p 1 (String.length p - 1) else p in
+                try
+                  if S3.check ~net:ctx.net ~clock:ctx.clock prov key then begin
+                    mb.files <- `Assoc [ ("mp", `List [ `String "s3"; `String name ]); ("p", `String p) ] :: mb.files;
+                    (match (s3_backup, prov.S3.bucket2) with true, Some b2 -> ignore (S3.copy ~net:ctx.net ~clock:ctx.clock prov ~source_bucket:prov.bucket ~source_key:key ~destination_bucket:b2 ~destination_key:key) | _ -> ());
+                    ignore (S3.delete ~net:ctx.net ~clock:ctx.clock prov key)
+                  end;
+                  match (cfg.cloudflare_cache, prov.S3.domain) with
+                  | Some (zone_id, api_key), Some domain when name = "cloudflare" || name = "cloudflare2" -> cloudflare_purge ctx ~zone_id ~api_key ("https://" ^ domain ^ p)
+                  | _ -> ()
+                with e -> log "s3 purge %s %s: %s" name p (Printexc.to_string e))
+            | None -> log "purge: unknown s3 provider %s" name)
+      in
+      Eio.Fiber.List.iter ~max_fibers:purge_parallelism purge_target (List.rev !order);
+      (* the media_storage rows of every storage the entries name *)
+      let labels = List.sort_uniq compare (List.map (function Media_config.Local { host; _ } -> host | Media_config.S3 { provider; _ } -> provider) (all_path_entries cfg)) in
+      Eio.Fiber.List.iter ~max_fibers:purge_parallelism
+        (fun label -> ignore (q ctx "update media_storage set media_block_id = $3::uuid where storage_provider = $1 and h = $2" [ Some label; Some kh; Some media_block_id ]))
+        labels;
       update_mb ()
     end
   in
@@ -84,6 +100,14 @@ let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(rea
     mb.blossom_urls <- surl :: mb.blossom_urls;
     let sha_hex = match Hex_util.decode_opt spath with Some s when String.length s = 32 -> spath | _ -> fail "blossom url without a sha256 path: %s" surl in
     let clear_cache = ref clear_cache in
+    (* late: the uploads are already blocked (their media_block stays); purged is what the upload's
+       import has written since: its storage copies, variants and thumbnails *)
+    if late then begin
+      List.iter (fun path -> let u = cfg.upload_url_root ^ path in mb.upload_urls <- u :: mb.upload_urls; purge u) (col1 (qm ctx "select path from media_uploads where sha256 = decode($1,'hex') group by path" [ Some sha_hex ]));
+      List.iter (fun u -> mb.media_urls <- u :: mb.media_urls; purge u) (col1 (q ctx "select media_url from media_storage where sha256 = decode($1,'hex')" [ Some sha_hex ]));
+      ignore (q ctx "update media_storage set media_block_id = $1::uuid where sha256 = decode($2,'hex')" [ Some media_block_id; Some sha_hex ])
+    end
+    else
     (match pubkey_hex with
     | Some pk ->
         ignore (qm ctx "update media_uploads set media_block_id = $3::uuid where sha256 = decode($1,'hex') and pubkey = decode($2,'hex')" [ Some sha_hex; Some pk; Some media_block_id ]);
@@ -101,7 +125,16 @@ let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(rea
         ignore (qm ctx "update media_uploads set media_block_id = $2::uuid where sha256 = decode($1,'hex')" [ Some sha_hex; Some media_block_id ]));
     if !clear_cache then begin
       List.iter (fun u -> mb.media_urls <- u :: mb.media_urls; purge u) (col1 (q ctx "select media_url from media_1_16fa35f2dc where orig_sha256 = decode($1,'hex') and media_url like '%/cache/%'" [ Some sha_hex ]));
-      ignore (q ctx "update media_storage set media_block_id = $1::uuid where sha256 = decode($2,'hex') and media_url like '%/cache/%'" [ Some media_block_id; Some sha_hex ])
+      ignore (q ctx "update media_storage set media_block_id = $1::uuid where sha256 = decode($2,'hex') and media_url like '%/cache/%'" [ Some media_block_id; Some sha_hex ]);
+      (* video thumbnails of the upload and of its variants *)
+      List.iter
+        (fun u -> mb.thumbnail_urls <- u :: mb.thumbnail_urls; purge u)
+        (col1
+           (q ctx
+              "select distinct thumbnail_url from video_thumbnails where video_url = $1 \
+               or video_url in (select url from media_1_16fa35f2dc where orig_sha256 = decode($2,'hex')) \
+               or video_url in (select media_url from media_1_16fa35f2dc where orig_sha256 = decode($2,'hex'))"
+              [ Some surl; Some sha_hex ]))
     end;
     if block_all_uploads then begin
       ignore (qm ctx "update media_uploads set media_block_id = $2::uuid where sha256 = decode($1,'hex')" [ Some sha_hex; Some media_block_id ]);
@@ -123,6 +156,22 @@ let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(rea
     List.iter (fun u -> mb.thumbnail_urls <- u :: mb.thumbnail_urls; purge u) (col1 (q ctx "select thumbnail_url from video_thumbnails where video_url = $1" [ Some surl ]))
   end;
   update_mb ()
+
+(* Every upload of [sha_hex] is blocked (deleted by its uploader, or blocked by moderation). *)
+let sha256_blocked (ctx : ctx) (sha_hex : string) : bool =
+  match qm ctx "select bool_and(media_block_id is not null) from media_uploads where sha256 = decode($1,'hex')" [ Some sha_hex ] with
+  | [ Some "t" ] :: _ -> true
+  | _ -> false
+
+(* What the import of an upload wrote after the upload was deleted or blocked: its copies on the
+   upload providers, its variants, its video thumbnails. The import runs for seconds to minutes
+   after the upload, and a purge only finds what exists when it looks. *)
+let purge_late_writes (ctx : ctx) ~(sha_hex : string) ~(ext : string) : unit =
+  match ctx.cfg.blossom_hosts with
+  | host :: _ ->
+      purge_media ctx ~pubkey_hex:None ~surl:(Printf.sprintf "https://%s/%s%s" host sha_hex ext) ~reason:(Some "written by the import after the block")
+        ~extra:[] ~block_all_uploads:false ~clear_cache:true ~late:true ()
+  | [] -> log "purge_late_writes %s: no blossom host configured" sha_hex
 
 (* {1 nodes} *)
 let pubkey_arg (v : Pgj.t) : string option = match Pgj.as_hex_id v with Some h -> Some h | None -> ( match v with `String s when String.length s = 64 -> Some s | _ -> ( match Pgj.read_vec_u8 ~dir:"/nonexistent" v with Some b when String.length b = 32 -> Some (Hex_util.encode b) | _ -> None))

@@ -101,6 +101,15 @@ let import_upload_3 (ctx : ctx) (n : node) : Pgj.t =
   (* the CDN variants *)
   if (not blocked) && String.length data < 10 * 1024 * 1024 && List.mem (T.url_ext burl) [ ".jpg"; ".png"; ".gif"; ".mp4"; ".mov"; ".webp" ] then
     (match pn ctx ~mod_:"PrimalServer.DB" ~func:"import_media_pn" ~args:(Pgj.tuple [ Pgj.cache_storage; `Null; `String burl; Pgj.all_variants ]) ~kwargs:(`Assoc []) with _, Ok _ -> () | _, Error m -> log "import_upload_3 %s: import_media_pn: %s" burl m);
+  (* deleted or blocked while this import ran: a purge of that time missed what was written since *)
+  (let sha_hex = Hex_util.encode sha256 in
+   try
+     if Nodes_moderation.sha256_blocked ctx sha_hex then begin
+       log "import_upload_3 %s: blocked during the import, purging what it wrote" burl;
+       elog ctx n [ ("step", `String "blocked:purge_late_writes") ];
+       Nodes_moderation.purge_late_writes ctx ~sha_hex ~ext:(T.url_ext burl)
+     end
+   with exn -> log "import_upload_3 %s: purge_late_writes: %s" burl (Printexc.to_string exn));
   `Null
 
 let register () = register ~mod_:"PrimalServer.App" ~func:"import_upload_3" import_upload_3
