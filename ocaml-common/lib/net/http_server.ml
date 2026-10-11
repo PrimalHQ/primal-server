@@ -462,6 +462,13 @@ let inflight_connections () : int = Atomic.get inflight
 
 (* Handle one accepted connection to completion (HTTP keep-alive requests, or a WS session). *)
 let handle_connection (svc : service) ~clock (flow : _ Eio.Net.stream_socket) (client : Eio.Net.Sockaddr.stream) : unit =
+  (* TCP_NODELAY: a reply is several small writes (EVENTs, then EOSE); with Nagle the last one waited
+     for the client's delayed ACK, ~40 ms on every short request *)
+  (match Eio_unix.Resource.fd_opt flow with
+  | Some fd -> (
+      try Eio_unix.Fd.use_exn "nodelay" fd (fun u -> Unix.setsockopt u Unix.TCP_NODELAY true)
+      with Unix.Unix_error _ | Eio.Io _ -> ())
+  | None -> ());
   Atomic.incr inflight;
   let peer = string_of_sockaddr client in
   Fun.protect
