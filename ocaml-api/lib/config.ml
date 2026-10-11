@@ -36,6 +36,8 @@ type t = {
   status_interval_s : float; (* status line period (0 = off) *)
   log_handled : bool;
   log_not_handled : bool;
+  pushgateway : (string * int * string * float) option;
+      (* host, port, job, period_s: request metrics pushed as the Julia cache nodes did; null = off *)
   (* Phase 3: native funcalls *)
   cache_db : Postgres.conninfo; (* 127.0.0.1:54017/primal1 *)
   membership_db : Postgres.conninfo; (* the membership Postgres (Julia :membership) *)
@@ -118,6 +120,11 @@ let of_json (j : Yojson.Safe.t) : t =
     status_interval_s = rfloat j "status_interval_s";
     log_handled = rbool j "log_handled";
     log_not_handled = rbool j "log_not_handled";
+    pushgateway =
+      (match field j "pushgateway" with
+      | `Null -> None
+      | `Assoc _ as o -> Some (U.to_string (field o "host"), U.to_int (field o "port"), U.to_string (field o "job"), U.to_number (field o "period_s"))
+      | _ -> raise (Config_error "pushgateway: expected {host, port, job, period_s} or null"));
     cache_db = conninfo_of_json (field j "cache_db");
     membership_db = conninfo_of_json (field j "membership_db");
     cache_pool_size = rint j "cache_pool_size";

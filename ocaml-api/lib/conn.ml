@@ -100,6 +100,7 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
           else Funcall.dispatch ctx f kwargs)
     in
     let elapsed = Unix.gettimeofday () -. t0 in
+    (match outcome with Response.Not_handled -> () | _ -> Stats.record_request stats elapsed);
     (match outcome with
     | Response.Handled r ->
         respond c stats ~subid r.messages;

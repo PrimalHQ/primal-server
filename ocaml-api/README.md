@@ -242,6 +242,7 @@ Binaries: `_build/default/ocaml-api/bin/primal_apid.exe <config.json>` (the daem
 | `ws_send_stall_s` | `15.0` | a frame not flushed within this closes the socket (WSConnUnblocker parity) |
 | `drain_grace_s` / `drain_ws_max_s` | `30.0` / `900.0` | rolling restart: idle WS closed at once, active after grace, all by the hard deadline |
 | `status_interval_s` | `10.0` | status line period (0 = off) |
+| `pushgateway` | `{"host": "127.0.0.1", "port": 9091, "job": "primal-api", "period_s": 15.0}` or `null` | push `cache_max_request_duration` (the period's longest natively answered request, s) and `cache_requests_per_second` there every `period_s`, as the Julia cache nodes did; a draining generation stops pushing |
 | `log_handled` / `log_not_handled` | `false` | per-request log lines (ws-connector `--log-handled` / `--log-not-handled`) |
 | `request_concurrency` | `8` on the stage host | REQs of one connection handled at once. `1` = strictly in order like ws-connector and Julia, where one slow feed delays every later answer on that socket (a profile header waited 10 s behind the reads feed). >1 runs REQs in fibers (semaphore-bounded; `set_primal_protocol`, CLOSE and forwarded messages stay in order). |
 | `anon_feed_cache_s` | `30.0` on the stage host | `mega_feed_directive` / `multi_kind_mega_feed_directive` pages answered for the anonymous default pubkey are reused for this long (`0` = off; one computation per key, concurrent misses wait for it; `/status` shows hits/misses/entries). Every logged-out visitor asks the identical feeds on every route. |

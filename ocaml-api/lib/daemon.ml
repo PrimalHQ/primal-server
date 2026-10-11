@@ -126,6 +126,12 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
     Fiber.fork_daemon ~sw:msw (fun () ->
         if cfg.status_interval_s > 0. then Stats.report_loop ~clock ~interval:cfg.status_interval_s stats;
         `Stop_daemon);
+    (match cfg.pushgateway with
+    | Some (host, port, job, period) ->
+        Fiber.fork_daemon ~sw:msw (fun () ->
+            Stats.push_loop ~net ~clock ~period ~host ~port ~job ~active:(fun () -> not (Promise.is_resolved stop)) stats;
+            `Stop_daemon)
+    | None -> ());
     Lifecycle.serving lifecycle;
     Fiber.all
       ([

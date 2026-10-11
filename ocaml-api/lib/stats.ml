@@ -13,6 +13,8 @@ type t = {
   idle_closed : int Atomic.t;
   live_events : int Atomic.t; (* events run through the live-event distributor *)
   errors : int Atomic.t;
+  requests : int Atomic.t; (* requests answered natively since the last pushgateway push *)
+  max_request_us : int Atomic.t; (* their longest duration (µs), reset by the push *)
 }
 
 let create () =
@@ -20,12 +22,22 @@ let create () =
     connections = Atomic.make 0; accepted = Atomic.make 0; recv = Atomic.make 0; sent = Atomic.make 0;
     handled = Atomic.make 0; proxied = Atomic.make 0; backend_frames = Atomic.make 0;
     backend_failures = Atomic.make 0; idle_closed = Atomic.make 0; live_events = Atomic.make 0;
-    errors = Atomic.make 0;
+    errors = Atomic.make 0; requests = Atomic.make 0; max_request_us = Atomic.make 0;
   }
 
 let incr = Atomic.incr
 let decr = Atomic.decr
 let get = Atomic.get
+
+(* One request answered natively in [elapsed_s]: counted, and the period's maximum raised. *)
+let record_request (t : t) (elapsed_s : float) : unit =
+  Atomic.incr t.requests;
+  let us = int_of_float (elapsed_s *. 1e6) in
+  let rec raise_max () =
+    let cur = Atomic.get t.max_request_us in
+    if us > cur && not (Atomic.compare_and_set t.max_request_us cur us) then raise_max ()
+  in
+  raise_max ()
 
 (* Prometheus text exposition for the admin /metrics endpoint. *)
 let metrics_text ?(extra = []) (t : t) : string =
@@ -63,4 +75,23 @@ let report_loop ~clock ~(interval : float) (t : t) : unit =
       (Procinfo.fmt_bytes (Procinfo.read_rss_bytes ()))
       (Procinfo.fmt_bytes (Procinfo.heap_bytes ()))
       (Phases.stuck_summary ~min_age:30.0 ())
+  done
+
+(* Every [period] seconds, push the Julia cache node's request metrics (PushGatewayExporter in
+   cache_server_handlers_ext.jl): cache_max_request_duration (s, the period's longest request) and
+   cache_requests_per_second, then reset both. Typed counter, as Julia's set! did: the pushgateway
+   rejects a name whose type differs from the other jobs' series. A generation that is draining ([active] false) stops
+   pushing, so it doesn't overwrite the serving generation's values. Push failures are logged. *)
+let push_loop ~net ~clock ~(period : float) ~host ~port ~job ~(active : unit -> bool) (t : t) : unit =
+  while active () do
+    Eio.Time.sleep clock period;
+    let n = Atomic.exchange t.requests 0 and max_us = Atomic.exchange t.max_request_us 0 in
+    if active () then
+      try
+        Pushgateway.set_values ~net ~clock ~host ~port ~job
+          [
+            ("cache_max_request_duration", "counter", Printf.sprintf "%.6f" (float_of_int max_us /. 1e6));
+            ("cache_requests_per_second", "counter", Printf.sprintf "%.3f" (float_of_int n /. period));
+          ]
+      with exn -> Printf.printf "[api] pushgateway %s:%d: %s\n%!" host port (Printexc.to_string exn)
   done
