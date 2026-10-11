@@ -688,7 +688,8 @@ let notification (est : CS.est) (recipient : string) (notif_created_at : int) (n
       [%pgsql dbh
         "insert into pubkey_notifications_1_e5459ab9dd (pubkey, created_at, type, arg1, arg2, arg3, arg4) \
          values ($recipient, $created_at, $ntype64, $arg1, $?arg2, $?arg3, $?arg4)"];
-    notification_counter_update est recipient ntype args
+    notification_counter_update est recipient ntype args;
+    Stats.notification_stored ()
   end
 
 (* Julia notifications_cb (cache_storage_ext.jl:808). [e] is the post whose deferred hooks fired;

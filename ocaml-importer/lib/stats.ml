@@ -85,6 +85,13 @@ let push_sent t (n : int) =
 let push_sent_total t = Atomic.get t.push_sent
 let push_latest t = Atomic.get t.push_latest
 
+(* Unix time of the last stored notification (0 = none since start), the Julia notification_latest
+   metric source (cache_storage_ext.jl: set after the pubkey_notifications insert). Module-level, not
+   in [t]: it is stamped by Cache_storage_ext.notification on the worker domains, which have no [t]. *)
+let notification_latest_t = Atomic.make 0
+let notification_stored () = Atomic.set notification_latest_t (int_of_float (Unix.time ()))
+let notification_latest () = Atomic.get notification_latest_t
+
 (* Record one job's queue wait (seconds between submit and dequeue); the reporter prints and
    resets the per-interval maximum, so a queue that is "full but flowing" (small waits) is
    distinguishable from one that is backing up. *)

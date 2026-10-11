@@ -70,6 +70,13 @@ let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval :
           ]
       end
     in
+    (* Julia notification_latest (time of the last stored notification); like push_notification_latest,
+       only once there is one, so "time() - notification_latest" doesn't alarm on a since-boot zero. *)
+    let metrics =
+      match Stats.notification_latest () with
+      | 0 -> metrics
+      | latest -> metrics @ [ ("notification_latest", "gauge", latest) ]
+    in
     (try Pushgateway.set_many ~net ~clock ~host ~port ~job metrics with
     | Eio.Cancel.Cancelled _ as e -> raise e
     | exn -> Printf.eprintf "pushgateway: %s\n%!" (Printexc.to_string exn));
