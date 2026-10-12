@@ -268,7 +268,9 @@ type sql = { text : string; params : string option list; orderby_key : string }
 
 let hex_param (raw : string) = "\\x" ^ Hex_util.encode raw
 
-let to_sql ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list) : sql =
+(* [interactions]: reads_interactions is complete (migration 2007 and its backfill), so the reads
+   scope can test it before probing basic_tags *)
+let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list) : sql =
   let expr = match expr with Or _ | And _ -> expr | o -> And [ o ] in
   let params = ref [] and np = ref 0 in
   let p (v : string) = incr np; params := Some v :: !params; Printf.sprintf "$%d" !np in
@@ -350,6 +352,19 @@ let to_sql ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list)
           cond (Printf.sprintf "not exists (select 1 from basic_tags btpt where btpt.id = %s.id and btpt.kind in (1, 1068, 6969, 20, 34235, 34236, 1111) and btpt.tag = 'e' and btpt.arg3 = 'root' limit 1)" adv)
       | Scope "myfollows" -> follows_cte "scope_pks"; cond (Printf.sprintf "%s = scope_pks.pubkey" pk_col)
       | Scope "mynetwork" -> network_cte "scope_pks"; cond (Printf.sprintf "%s = scope_pks.pubkey" pk_col)
+      | Scope "myfollowsinteractions" when interactions && kind = 30023 ->
+          (* as below, but an article reaches the basic_tags probe only if one of the follows has a
+             reads_interactions row for it (a hashed set read once per query): a viewer following
+             few accounts walked ~340 k articles with a basic_tags probe each, 9 s on cold pages.
+             The probe stays the verifier, so the rows match the query below exactly. *)
+          cond
+            (Printf.sprintf
+               "(%s = %s \
+                or %s in (select pf2.pubkey from pubkey_followers pf2 where pf2.follower_pubkey = %s) \
+                or (%s in (select ri.eid from reads_interactions ri where ri.pubkey in (select pf4.pubkey from pubkey_followers pf4 where pf4.follower_pubkey = %s)) \
+                    and exists (select 1 from basic_tags btscopeint2 where btscopeint2.arg1 = %s and btscopeint2.kind in (1, 6, 7) and btscopeint2.tag = 'e' \
+                                and btscopeint2.pubkey in (select pf3.pubkey from pubkey_followers pf3 where pf3.follower_pubkey = %s))))"
+               pk_col (pb user_pubkey) pk_col (pb user_pubkey) id_col (pb user_pubkey) id_col (pb user_pubkey))
       | Scope "myfollowsinteractions" ->
           (* Julia's three branches, cheapest first: the viewer, the follows as a hashed set read once
              per query (an `in` under `or` hashes; a correlated `exists` probes the index per row),
@@ -519,6 +534,16 @@ let run ~(dbh : Postgres.dbh) ~(user_pubkey : string) ~(expr : op) ~(has_orderby
   let t = ref until and dt = ref 3600 in
   let want = limit + offset in
   let orderby_key = ref "created_at" in
+  (* reads_interactions is used once its backfill has finished (migration 2007); read before the
+     transaction, so a database without the table answers false instead of aborting it *)
+  let interactions =
+    List.exists (function Scope "myfollowsinteractions" -> true | _ -> false) (ops expr)
+    &&
+    match Postgres.query dbh "select ready from reads_interactions_state" [] with
+    | [ [ Some "t" ] ] -> true
+    | _ -> false
+    | exception e -> if Postgres.is_connection_error e then raise e else false
+  in
   (* Julia reads each window through a no-scroll cursor and stops after enough rows: the planner
      then picks a fast-start plan (the GIN index first), where a LIMIT query over a wide window
      bitmap-scans the whole created_at range. A statement timeout ends the search with what it has. *)
@@ -531,7 +556,7 @@ let run ~(dbh : Postgres.dbh) ~(user_pubkey : string) ~(expr : op) ~(has_orderby
       try
         while List.length !res < want && since <= !t && Unix.gettimeofday () < deadline do
           let s, u = if has_orderby then (since, !t) else (!t - !dt, !t) in
-          let sql = to_sql ~user_pubkey expr ~since:s ~until:u ~kinds in
+          let sql = to_sql ~interactions ~user_pubkey expr ~since:s ~until:u ~kinds in
           orderby_key := sql.orderby_key;
           let budget_ms = int_of_float ((deadline -. Unix.gettimeofday ()) *. 1000.) in
           if budget_ms <= 0 then raise Exit;

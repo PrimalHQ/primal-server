@@ -249,6 +249,19 @@ let test_anon_cache () =
   Alcotest.(check bool) "other funcall" false (Anon_cache.cacheable Funcall.Scored (kw {|{"selector":"trending_4h"}|}));
   Alcotest.(check string) "key order-insensitive" (Anon_cache.key Funcall.Mega_feed_directive (kw {|{"limit":20,"spec":"x"}|})) (Anon_cache.key Funcall.Mega_feed_directive (kw {|{"spec":"x","limit":20}|}));
   Alcotest.(check bool) "key distinguishes offset" true (Anon_cache.key Funcall.Mega_feed_directive (kw {|{"spec":"x","offset":0}|}) <> Anon_cache.key Funcall.Mega_feed_directive (kw {|{"spec":"x","offset":1}|}));
+  Alcotest.(check bool) "anonymous explore" true (Anon_cache.cacheable Funcall.Explore (kw {|{"timeframe":"trending","scope":"global","created_after":1791714000}|}));
+  Alcotest.(check bool) "logged-in explore" false (Anon_cache.cacheable Funcall.Explore (kw {|{"timeframe":"trending","user_pubkey":"88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079"}|}));
+  Alcotest.(check bool) "user_infos" true (Anon_cache.cacheable Funcall.User_infos (kw {|{"pubkeys":["88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079"]}|}));
+  Alcotest.(check bool) "user_infos key keeps the pubkeys" true
+    (Anon_cache.key Funcall.User_infos (kw {|{"pubkeys":["aa"]}|}) <> Anon_cache.key Funcall.User_infos (kw {|{"pubkeys":["bb"]}|}));
+  Alcotest.(check bool) "scored_users_24h for anyone" true (Anon_cache.cacheable Funcall.Scored_users_24h (kw {|{"user_pubkey":"88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079"}|}));
+  Alcotest.(check string) "explore created_after to the minute"
+    (Anon_cache.key Funcall.Explore (kw {|{"timeframe":"trending","created_after":1791714000,"offset":10}|}))
+    (Anon_cache.key Funcall.Explore (kw {|{"timeframe":"trending","created_after":1791714059,"offset":10}|}));
+  Alcotest.(check bool) "explore next minute" true
+    (Anon_cache.key Funcall.Explore (kw {|{"timeframe":"trending","created_after":1791714059}|}) <> Anon_cache.key Funcall.Explore (kw {|{"timeframe":"trending","created_after":1791714060}|}));
+  Alcotest.(check string) "scored_users_24h key ignores the viewer" (Anon_cache.key Funcall.Scored_users_24h (kw {|{}|}))
+    (Anon_cache.key Funcall.Scored_users_24h (kw {|{"user_pubkey":"88cc134b1a65f54ef48acc1df3665063d3ea45f04eab8af4646e561c5ae99079"}|}));
   let calls = ref 0 in
   let compute () = incr calls; Response.Handled (Response.messages [ "m" ]) in
   let r1 = Anon_cache.lookup ~ttl:60.0 ~key:"k1" ~compute in

@@ -3327,18 +3327,28 @@ let note_mentions (ctx : ctx) (kw : Kw.t) : outcome =
 
 (* {1 Phase 4e: the remaining readers} *)
 
+(* When the search node cannot be reached (connect failure or timeout), the answer is NOTICE error
+   either way; for [search_down_s] after such a failure it is given at once instead of after the
+   connect timeout (~3 s per request while the node was down), then the next request tries again. *)
+let search_down_s = 300.0
+let search_down_until : float Atomic.t = Atomic.make 0.0
+
 (* app_ext.jl search: Julia forwards the call over HTTP to another node's /api *)
 let search (ctx : ctx) (kw : Kw.t) : outcome =
   match (ctx.cfg.search_api_url, !net_ref) with
   | Some url, Some net -> (
       match Http.parse_url url with
       | None -> julia_error
+      | Some _ when Unix.gettimeofday () < Atomic.get search_down_until -> julia_error
       | Some u -> (
           let body = Yojson.Safe.to_string (`List [ `String "search"; kw ]) in
           match Http.plain_request ~net ~clock:ctx.clock ~timeout:20.0 ~meth:"GET" ~body ~host:u.Http.host ~port:u.Http.port ~path:u.Http.path () with
           | 200, resp -> ( match Yojson.Safe.from_string resp with `List msgs -> Handled (messages (List.map Yojson.Safe.to_string msgs)) | _ -> julia_error)
           | _ -> julia_error
-          | exception _ -> julia_error))
+          | exception (Eio.Cancel.Cancelled _ as e) -> raise e
+          | exception _ ->
+              Atomic.set search_down_until (Unix.gettimeofday () +. search_down_s);
+              julia_error))
   | _ -> julia_error
 
 let explore_media (ctx : ctx) (kw : Kw.t) : outcome = mega_feed_directive ctx (Kw.set kw "spec" (`String {|{"id":"explore-media"}|}))

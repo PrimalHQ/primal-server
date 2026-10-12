@@ -155,15 +155,23 @@ let basic_tags_node (r : run) =
   process_segments r ~cov:(T.cov T.basic_tags) ~step:day (fun est t1 t2 ->
       let dbh = est.CS.dbh in
       let t1 = i64 t1 and t2 = i64 t2 in
+      (* the new kind 1/6/7 `e` tags that point at a stored article version also go to
+         reads_interactions (migration 2007; the reads feed's candidate set) *)
       ignore
         [%pgsql dbh
-          "insert into basic_tags_6_62c3d17c2f (id, pubkey, created_at, kind, tag, arg1, arg3, imported_at) \
-           select * from ( \
-             select id, pubkey, created_at, kind, t->>0 as tag, decode(t->>1, 'hex') as arg1, coalesce(t->>3, '') as arg3, imported_at from ( \
-               select id, pubkey, created_at, kind, jsonb_array_elements(tags) as t, imported_at from event \
-               where imported_at >= $t1 and imported_at <= $t2 and jsonb_array_length(tags) < 50 \
-             ) a where t->>0 in ('p', 'P', 'e') and length(t->>1) = 64 and t->>1 ~* '^[0-9a-f]{64}' \
-           ) b on conflict do nothing"])
+          "with ins as ( \
+             insert into basic_tags_6_62c3d17c2f (id, pubkey, created_at, kind, tag, arg1, arg3, imported_at) \
+             select * from ( \
+               select id, pubkey, created_at, kind, t->>0 as tag, decode(t->>1, 'hex') as arg1, coalesce(t->>3, '') as arg3, imported_at from ( \
+                 select id, pubkey, created_at, kind, jsonb_array_elements(tags) as t, imported_at from event \
+                 where imported_at >= $t1 and imported_at <= $t2 and jsonb_array_length(tags) < 50 \
+               ) a where t->>0 in ('p', 'P', 'e') and length(t->>1) = 64 and t->>1 ~* '^[0-9a-f]{64}' \
+             ) b on conflict do nothing \
+             returning pubkey, kind, tag, arg1) \
+           insert into reads_interactions (pubkey, eid) \
+           select distinct ins.pubkey, ins.arg1 from ins \
+           where ins.tag = 'e' and ins.kind in (1, 6, 7) and exists (select 1 from reads_versions_12_b537d4df66 rv where rv.eid = ins.arg1) \
+           on conflict do nothing"])
 
 let zap_receipts_node (r : run) =
   process_segments r ~cov:(T.cov T.zap_receipts) ~step:day (fun est t1 t2 ->
@@ -238,7 +246,14 @@ let reads_node (r : run) =
                   [%pgsql dbh
                     "update reads_12_68c6bbfccd set latest_created_at = $created_at, latest_eid = $eid, words = $words, lang = $lang, lang_prob = $lang_prob, image = $image, summary = $summary \
                      where pubkey = $pubkey and identifier = $identifier"]);
-          ignore [%pgsql dbh "insert into reads_versions_12_b537d4df66 (pubkey, identifier, eid) values ($pubkey, $identifier, $eid) on conflict do nothing"])
+          ignore [%pgsql dbh "insert into reads_versions_12_b537d4df66 (pubkey, identifier, eid) values ($pubkey, $identifier, $eid) on conflict do nothing"];
+          (* the kind 1/6/7 `e` tags that reached this version before it was stored (migration 2007) *)
+          ignore
+            [%pgsql dbh
+              "insert into reads_interactions (pubkey, eid) \
+               select distinct bt.pubkey, bt.arg1 from basic_tags_6_62c3d17c2f bt \
+               where bt.arg1 = $eid and bt.tag = 'e' and bt.kind in (1, 6, 7) \
+               on conflict do nothing"])
         rows);
   (* phase 2: zaps *)
   process_segments r ~cov:(T.cov T.reads ^ "/2") ~step (fun est t1 t2 ->

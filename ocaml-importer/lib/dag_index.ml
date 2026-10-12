@@ -21,16 +21,24 @@ let i64 = Int64.of_int
 let import_basic_tags (est : CS.est) (e : Nostr.t) : unit =
   let dbh = est.CS.dbh in
   let id = e.id in
+  (* the new kind 1/6/7 `e` tags that point at a stored article version also go to
+     reads_interactions (migration 2007; the reads feed's candidate set) *)
   ignore
     [%pgsql dbh
-      "insert into basic_tags_6_62c3d17c2f (id, pubkey, created_at, kind, tag, arg1, arg3, imported_at) \
-       select * from ( \
-         select id, pubkey, created_at, kind, t->>0 as tag, decode(t->>1, 'hex') as arg1, \
-                coalesce(t->>3, '') as arg3, imported_at from ( \
-           select id, pubkey, created_at, kind, jsonb_array_elements(tags) as t, imported_at \
-           from event where id = $id and jsonb_array_length(tags) < 50 \
-         ) a where t->>0 in ('p', 'P', 'e') and length(t->>1) = 64 and t->>1 ~* '^[0-9a-f]{64}' \
-       ) b on conflict do nothing"]
+      "with ins as ( \
+         insert into basic_tags_6_62c3d17c2f (id, pubkey, created_at, kind, tag, arg1, arg3, imported_at) \
+         select * from ( \
+           select id, pubkey, created_at, kind, t->>0 as tag, decode(t->>1, 'hex') as arg1, \
+                  coalesce(t->>3, '') as arg3, imported_at from ( \
+             select id, pubkey, created_at, kind, jsonb_array_elements(tags) as t, imported_at \
+             from event where id = $id and jsonb_array_length(tags) < 50 \
+           ) a where t->>0 in ('p', 'P', 'e') and length(t->>1) = 64 and t->>1 ~* '^[0-9a-f]{64}' \
+         ) b on conflict do nothing \
+         returning pubkey, kind, tag, arg1) \
+       insert into reads_interactions (pubkey, eid) \
+       select distinct ins.pubkey, ins.arg1 from ins \
+       where ins.tag = 'e' and ins.kind in (1, 6, 7) and exists (select 1 from reads_versions_12_b537d4df66 rv where rv.eid = ins.arg1) \
+       on conflict do nothing"]
 
 (* DAG.parse_zap_receipt (dag.jl:1847) + import_zap_receipts insert for one receipt. *)
 let import_zap_receipt (est : CS.est) (e : Nostr.t) : unit =

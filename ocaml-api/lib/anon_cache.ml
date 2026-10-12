@@ -2,9 +2,10 @@
 
    Every logged-out visitor asks the same questions (the webapp requests the home and reads feeds
    with Handlers.primal_pubkey on every route), and each one re-ran the windowed search; here the
-   first answer within [ttl] seconds is reused. Only mega_feed_directive /
-   multi_kind_mega_feed_directive with user_pubkey = the primal pubkey (or none) are eligible, and
-   only Handled outcomes without live-event registrations are stored. Concurrent misses for one key
+   first answer within [ttl] seconds is reused. Eligible: mega_feed_directive /
+   multi_kind_mega_feed_directive / explore with user_pubkey = the primal pubkey (or none), and the
+   viewer-independent scored_users_24h and user_infos (see [cacheable]); only Handled outcomes
+   without live-event registrations are stored. Concurrent misses for one key
    wait for the first computation (one promise per key) instead of piling onto the database; if it
    fails or is cancelled the waiters compute for themselves. Shared across domains (Stdlib mutex,
    held only for table operations). *)
@@ -31,8 +32,16 @@ let anonymous (kw : Kw.t) : bool =
       | Some _ -> false)
   | _ -> false
 
+(* Also the logged-out explore pages (the client pages the 24 h global trending by offset; each page
+   re-ran a 0.4 s grouped event_stats query, 311 times in 30 min on one cache host), and two
+   funcalls whose answer does not depend on the viewer at all: scored_users_24h, and user_infos,
+   which the webapp's recommended-users panel asks for the same ten profiles on every page load
+   (18 k of 19 k calls in 30 min on one cache host, a fifth of its request time). *)
 let cacheable (f : Funcall.t) (kw : Kw.t) : bool =
-  match f with Funcall.Mega_feed_directive | Funcall.Multi_kind_mega_feed_directive -> anonymous kw | _ -> false
+  match f with
+  | Funcall.Mega_feed_directive | Funcall.Multi_kind_mega_feed_directive | Funcall.Explore -> anonymous kw
+  | Funcall.Scored_users_24h | Funcall.User_infos -> true
+  | _ -> false
 
 let rec canon (j : Yojson.Safe.t) : Yojson.Safe.t =
   match j with
@@ -40,7 +49,16 @@ let rec canon (j : Yojson.Safe.t) : Yojson.Safe.t =
   | `List l -> `List (List.map canon l)
   | v -> v
 
-let key (f : Funcall.t) (kw : Kw.t) : string = Funcall.to_string f ^ " " ^ Yojson.Safe.to_string (canon kw)
+(* The key's arguments: explore's created_after ("now - 24 h" from each client) to the minute, so
+   one answer serves every client within the TTL; scored_users_24h without its unused user_pubkey. *)
+let key_kw (f : Funcall.t) (kw : Kw.t) : Kw.t =
+  match (f, kw) with
+  | Funcall.Explore, `Assoc l ->
+      `Assoc (List.map (function "created_after", `Int t -> ("created_after", `Int (t - (t mod 60))) | kv -> kv) l)
+  | Funcall.Scored_users_24h, `Assoc l -> `Assoc (List.remove_assoc "user_pubkey" l)
+  | _ -> kw
+
+let key (f : Funcall.t) (kw : Kw.t) : string = Funcall.to_string f ^ " " ^ Yojson.Safe.to_string (canon (key_kw f kw))
 
 let sweep now =
   if Hashtbl.length table > max_entries then
