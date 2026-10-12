@@ -314,6 +314,11 @@ let to_sql ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list)
      orderby := adv ^ ".created_at"
    end);
   if kinds <> [] then cond (Printf.sprintf "%s.kind IN (%s)" adv (String.concat ", " (List.map pi kinds)));
+  (* The event id and author the per-row checks test. For reads they are the reads row's own
+     (latest_eid is the advsearch id, pubkey its author), so the planner can reject a read while
+     scanning reads by published_at, before the advsearch lookup (a 158 GB table, ~10 buffers per
+     probe): the reads feed scanned 170 k reads per request and spent 1.5-9 s in those probes. *)
+  let id_col, pk_col = if kind = 30023 then ("reads.latest_eid", "reads.pubkey") else (adv ^ ".id", adv ^ ".pubkey") in
   (match List.find_map (function OrderBy f -> Some f | _ -> None) top with
   | Some "interactions" ->
       let es = t "event_stats" in
@@ -329,11 +334,11 @@ let to_sql ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list)
   | Some "score2" -> ()
   | Some f -> raise (Parse_error ("unsupported orderby " ^ f))
   | None -> ());
-  cond (Printf.sprintf "NOT EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'event' AND target = %s.id AND blocked LIMIT 1)" adv);
+  cond (Printf.sprintf "NOT EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'event' AND target = %s AND blocked LIMIT 1)" id_col);
   cond
     (Printf.sprintf
-       "NOT EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = %s.id AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)"
-       adv);
+       "NOT EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = %s AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)"
+       id_col);
   List.iter
     (function
       | RepliesToKind k ->
@@ -343,24 +348,28 @@ let to_sql ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list)
           cond (Printf.sprintf "btrtk.tag = 'e' and btrtk.arg1 = esrtk.id and esrtk.kind = %s" (pi k))
       | PostType "root" ->
           cond (Printf.sprintf "not exists (select 1 from basic_tags btpt where btpt.id = %s.id and btpt.kind in (1, 1068, 6969, 20, 34235, 34236, 1111) and btpt.tag = 'e' and btpt.arg3 = 'root' limit 1)" adv)
-      | Scope "myfollows" -> follows_cte "scope_pks"; cond (Printf.sprintf "%s.pubkey = scope_pks.pubkey" adv)
-      | Scope "mynetwork" -> network_cte "scope_pks"; cond (Printf.sprintf "%s.pubkey = scope_pks.pubkey" adv)
+      | Scope "myfollows" -> follows_cte "scope_pks"; cond (Printf.sprintf "%s = scope_pks.pubkey" pk_col)
+      | Scope "mynetwork" -> network_cte "scope_pks"; cond (Printf.sprintf "%s = scope_pks.pubkey" pk_col)
       | Scope "myfollowsinteractions" ->
+          (* Julia's three branches, cheapest first: the viewer, the follows as a hashed set read once
+             per query (an `in` under `or` hashes; a correlated `exists` probes the index per row),
+             then the interaction probe, which only rows authored outside the follows reach *)
           cond
             (Printf.sprintf
-               "(exists (with scope_pks as (select pf2.pubkey from pubkey_followers pf2 where pf2.follower_pubkey = %s) select 1 from basic_tags btscopeint2, scope_pks where btscopeint2.kind in (1, 6, 7) and btscopeint2.pubkey = scope_pks.pubkey and btscopeint2.tag = 'e' and btscopeint2.arg1 = %s.id) \
-                or exists (with scope_pks2 as (select pf2.pubkey from pubkey_followers pf2 where pf2.follower_pubkey = %s) select 1 from scope_pks2 where %s.pubkey = scope_pks2.pubkey) \
-                or (%s.pubkey = %s))"
-               (pb user_pubkey) adv (pb user_pubkey) adv adv (pb user_pubkey))
+               "(%s = %s \
+                or %s in (select pf2.pubkey from pubkey_followers pf2 where pf2.follower_pubkey = %s) \
+                or exists (select 1 from basic_tags btscopeint2 where btscopeint2.arg1 = %s and btscopeint2.kind in (1, 6, 7) and btscopeint2.tag = 'e' \
+                           and btscopeint2.pubkey in (select pf3.pubkey from pubkey_followers pf3 where pf3.follower_pubkey = %s)))"
+               pk_col (pb user_pubkey) pk_col (pb user_pubkey) id_col (pb user_pubkey))
       | Scope "mynetworkinteractions" ->
           cond
             (Printf.sprintf
-               "exists (select 1 from basic_tags btscopeint2 where btscopeint2.kind in (1, 6, 7) and btscopeint2.tag = 'e' and btscopeint2.arg1 = %s.id and \
+               "exists (select 1 from basic_tags btscopeint2 where btscopeint2.kind in (1, 6, 7) and btscopeint2.tag = 'e' and btscopeint2.arg1 = %s and \
                 (exists (select 1 from pubkey_followers pf1 where pf1.follower_pubkey = %s and pf1.pubkey = btscopeint2.pubkey limit 1) \
                  or exists (select 1 from pubkey_followers pf2, pubkey_followers pf3 where pf2.follower_pubkey = %s and pf3.follower_pubkey = pf2.pubkey and pf3.pubkey = btscopeint2.pubkey limit 1)))"
-               adv (pb user_pubkey) (pb user_pubkey))
-      | Scope "notmyfollows" -> follows_cte "scope_pks"; cond (Printf.sprintf "not exists (select 1 from scope_pks where scope_pks.pubkey = %s.pubkey)" adv)
-      | Scope "mutedbyothers" -> ignore (t "cmr_pubkeys_scopes scope_cmrpks"); cond (Printf.sprintf "%s.pubkey = scope_cmrpks.pubkey" adv)
+               id_col (pb user_pubkey) (pb user_pubkey))
+      | Scope "notmyfollows" -> follows_cte "scope_pks"; cond (Printf.sprintf "not exists (select 1 from scope_pks where scope_pks.pubkey = %s)" pk_col)
+      | Scope "mutedbyothers" -> ignore (t "cmr_pubkeys_scopes scope_cmrpks"); cond (Printf.sprintf "%s = scope_cmrpks.pubkey" pk_col)
       | Scope "mynotifications" ->
           let pn = t "pubkey_notifications" in
           cond (Printf.sprintf "%s.pubkey = %s" pn (pb user_pubkey));

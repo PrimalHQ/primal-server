@@ -707,7 +707,15 @@ let scored_rows l = List.filter_map (function Some pk, Some eid, Some v -> Some 
 
 
 (* group_by_pubkey (explore_global_trending / mostzapped): the best event per author among the
-   top authors, with Julia's trending hiding inside the grouping *)
+   top authors, with Julia's trending hiding inside the grouping.
+   The p-tag mute check here and in scored_global is a scalar subquery over the event's own tags
+   (bt.id) with the viewer's trending mutes read once: as `not exists (... cmr, basic_tags ...)` the
+   planner joined from the mutes to every tag naming a muted pubkey (bt.arg1): the 24 h grouped
+   trending on the stage host took 3.5-45 s for a viewer with 7 trending mutes (now 1.2-2.3 s) and
+   6.4 s with 113 (now 2-3.2 s), same rows. The `cardinality(...) > 0` gate is a one-time filter (no
+   mutes: no tag is read), and the `is null` guard lets a custom plan drop the check for anonymous
+   requests as the old form did (0.27 s; the subquery's cost estimate otherwise steers it to a
+   26 M-row score bitmap). A generic plan of the old form took 9.7 s anonymous, this one 0.75 s. *)
 let scored_global_grouped (c : Db.cache Db.conn) ~(field : scored_field) ~created_after ~user_pubkey ~n ~offset ~gm_mode ~kinds_json : scored_row list =
   let dbh = Db.raw c in
   let created_after = i64 created_after and n = i64 n and offset = i64 offset in
@@ -719,7 +727,7 @@ let scored_global_grouped (c : Db.cache Db.conn) ~(field : scored_field) ~create
              where es.created_at > 0 and $created_after <= es.created_at and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
                and not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
        and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
-       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
              group by es.author_pubkey order by maxfield desc limit $n offset $offset) \
            select a.author_pubkey, es.event_id, es.created_at from a, event_stats es \
            where a.author_pubkey = es.author_pubkey and a.maxfield = es.created_at and es.created_at > 0 and $created_after <= es.created_at \
@@ -732,7 +740,7 @@ let scored_global_grouped (c : Db.cache Db.conn) ~(field : scored_field) ~create
              where es.score > 0 and $created_after <= es.created_at and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
                and not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
        and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
-       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
              group by es.author_pubkey order by maxfield desc limit $n offset $offset) \
            select a.author_pubkey, es.event_id, es.score from a, event_stats es \
            where a.author_pubkey = es.author_pubkey and a.maxfield = es.score and es.score > 0 and $created_after <= es.created_at \
@@ -745,7 +753,7 @@ let scored_global_grouped (c : Db.cache Db.conn) ~(field : scored_field) ~create
              where es.satszapped > 0 and $created_after <= es.created_at and ($?kinds_json::text is null or exists (select 1 from events ek where ek.id = es.event_id and ek.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8)))) \
                and not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
        and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
-       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
              group by es.author_pubkey order by maxfield desc limit $n offset $offset) \
            select a.author_pubkey, es.event_id, es.satszapped from a, event_stats es \
            where a.author_pubkey = es.author_pubkey and a.maxfield = es.satszapped and es.satszapped > 0 and $created_after <= es.created_at \
@@ -775,7 +783,7 @@ let scored_global (c : Db.cache Db.conn) ~(field : scored_field) ~created_after 
            select es.author_pubkey, es.event_id, es.created_at from top_candidates es \
            where not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
        and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
-       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
            order by es.created_at desc limit $n offset $offset"]
     | Score ->
         [%pgsql dbh
@@ -788,7 +796,7 @@ let scored_global (c : Db.cache Db.conn) ~(field : scored_field) ~created_after 
            select es.author_pubkey, es.event_id, es.score from top_candidates es \
            where not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
        and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
-       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
            order by es.score desc limit $n offset $offset"]
     | Satszapped ->
         [%pgsql dbh
@@ -801,7 +809,7 @@ let scored_global (c : Db.cache Db.conn) ~(field : scored_field) ~created_after 
            select es.author_pubkey, es.event_id, es.satszapped from top_candidates es \
            where not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
        and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
-       and not exists (select 1 from cmr_pubkeys_scopes cmr, basic_tags bt where bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = cmr.pubkey and cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending' limit 1) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
            order by es.satszapped desc limit $n offset $offset"]
     )
 
@@ -1412,20 +1420,19 @@ let wide_net_notes (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset :
 (* {1 Phase 4e} *)
 
 (* app.jl get_dvm_feeds / get_featured_dvm_feeds: NIP-89 handler events of content-discovery DVMs
-   whose feed was fetched successfully in the last hour (dvm_feeds.updated_at is naive local time) *)
+   whose feed was fetched successfully in the last hour (dvm_feeds.updated_at is naive local time).
+   Julia joined the event_tags view (every tag of every kind-31990 event: 2.3 M events, 3-23 s); the
+   same rows come from the few fresh dvm_feeds rows, their pubkeys' 31990 events ((pubkey, kind,
+   identifier) index) and a look at those events' own tags (4 ms). *)
 let dvm_feed_eids (c : Db.cache Db.conn) ~(featured : bool) ~(kind : string option) : string list =
   let dbh = Db.raw c in
-  (if featured then
-     [%pgsql dbh
-       "select distinct encode(pre.event_id, 'hex') from parametrized_replaceable_events pre, event_tags et, dvm_feeds df, events es \
-        where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' \
-          and df.pubkey = pre.pubkey and df.updated_at >= now()::timestamp - interval '1 hour' and df.ok \
-          and (case when $?kind::text is null then true else df.kind = $?kind end) and es.id = pre.event_id"]
-   else
-     [%pgsql dbh
-       "select distinct encode(pre.event_id, 'hex') from parametrized_replaceable_events pre, event_tags et, dvm_feeds df \
-        where et.kind = 31990 and pre.event_id = et.id and et.tag = 'k' and et.arg1 = '5300' \
-          and df.pubkey = pre.pubkey and df.updated_at >= now()::timestamp - interval '1 hour' and df.ok"])
+  let kind = if featured then kind else None in
+  [%pgsql dbh
+    "select distinct encode(pre.event_id, 'hex') from dvm_feeds df, parametrized_replaceable_events pre, events es \
+     where df.updated_at >= now()::timestamp - interval '1 hour' and df.ok \
+       and (case when $?kind::text is null then true else df.kind = $?kind end) \
+       and pre.pubkey = df.pubkey and pre.kind = 31990 and es.id = pre.event_id and es.kind = 31990 \
+       and exists (select 1 from jsonb_array_elements(es.tags) t where t->>0 = 'k' and t->>1 = '5300')"]
   |> List.filter_map Fun.id
 
 let dvm_likes (c : Db.cache Db.conn) ~pubkey ~(identifier : string) : int64 =

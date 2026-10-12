@@ -576,46 +576,54 @@ let contact_list (ctx : ctx) (kw : Kw.t) : outcome =
               | exception _ -> [])
           | [] -> []
         in
-        let found = List.filter_map (fun m -> match kind_and_pubkey m with Some 0, Some pk -> Some (String.lowercase_ascii pk) | _ -> None) msgs in
+        (* each message parsed once: a 1700-follow list is ~3700 messages and 7 MB of JSON, which
+           the per-step re-parsing read four to five times over (~1 s of the request) *)
+        let parsed =
+          List.map (fun m -> (m, match Yojson.Safe.from_string m with `Assoc f -> Some f | _ -> None | exception _ -> None)) msgs
+        in
+        let kind_of f = match List.assoc_opt "kind" f with Some (`Int k) -> Some k | _ -> None in
+        let found =
+          List.filter_map
+            (fun (_, f) ->
+              match f with
+              | Some f -> ( match (kind_of f, List.assoc_opt "pubkey" f) with Some 0, Some (`String pk) -> Some (String.lowercase_ascii pk) | _ -> None)
+              | None -> None)
+            parsed
+        in
         (* the SQL user_infos emits media/preview for a meta_data pointer whose event is gone
            (purged); Julia's in-memory path never reaches those: keep only extras of emitted events *)
-        let md_ids =
-          List.filter_map
-            (fun m ->
-              match Yojson.Safe.from_string m with
-              | `Assoc f -> (
-                  match (List.assoc_opt "kind" f, List.assoc_opt "id" f) with
-                  | Some (`Int 0), Some (`String id) -> Some (String.lowercase_ascii id)
-                  | _ -> None)
-              | _ -> None
-              | exception _ -> None)
-            msgs
-        in
-        let extra_of_known_event m =
-          match kind_and_pubkey m with
-          | Some k, _ when k = Kind.media_metadata || k = Kind.link_metadata || k = Kind.media_hls_urls -> (
-              match Yojson.Safe.from_string m with
-              | `Assoc f -> (
-                  match List.assoc_opt "content" f with
-                  | Some (`String c) -> (
-                      match Yojson.Safe.from_string c with
-                      | `Assoc cf -> (
-                          match List.assoc_opt "event_id" cf with
-                          | Some (`String id) -> List.mem (String.lowercase_ascii id) md_ids
-                          | _ -> true)
-                      | _ -> true
-                      | exception _ -> true)
-                  | _ -> true)
+        let md_ids = Hashtbl.create 1024 in
+        List.iter
+          (fun (_, f) ->
+            match f with
+            | Some f -> (
+                match (List.assoc_opt "kind" f, List.assoc_opt "id" f) with
+                | Some (`Int 0), Some (`String id) -> Hashtbl.replace md_ids (String.lowercase_ascii id) ()
+                | _ -> ())
+            | None -> ())
+          parsed;
+        let extra_of_known_event f =
+          match List.assoc_opt "content" f with
+          | Some (`String c) -> (
+              match Yojson.Safe.from_string c with
+              | `Assoc cf -> ( match List.assoc_opt "event_id" cf with Some (`String id) -> Hashtbl.mem md_ids (String.lowercase_ascii id) | _ -> true)
               | _ -> true
               | exception _ -> true)
           | _ -> true
         in
-        let keep m =
-          match kind_and_pubkey m with
-          | Some k, _ when k = Kind.user_scores || k = Kind.user_follower_counts -> false
-          | _ -> extra_of_known_event m
+        let msgs =
+          List.filter_map
+            (fun (m, f) ->
+              match f with
+              | None -> Some m
+              | Some f -> (
+                  match kind_of f with
+                  | Some k when k = Kind.user_scores || k = Kind.user_follower_counts -> None
+                  | Some k when k = Kind.media_metadata -> if extra_of_known_event f then Some (strip_null_mt m) else None
+                  | Some k when k = Kind.link_metadata || k = Kind.media_hls_urls -> if extra_of_known_event f then Some m else None
+                  | _ -> Some m))
+            parsed
         in
-        let msgs = List.filter keep msgs |> List.map strip_null_mt in
         Handled
           (messages
              (msgs @ counts_msg Kind.user_scores (follower_counts c (List.sort_uniq compare found))
