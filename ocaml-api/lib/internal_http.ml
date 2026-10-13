@@ -567,7 +567,10 @@ let service ~(cfg : Config.t) ~clock : Http_server.service =
             else Raw (302, [ ("location", url); no_store ], ""))) };
       { meth = `GET; pattern = [ Lit "link-preview" ]; handler = (fun r -> guard (fun () ->
             let url = match query_param r "u" with Some u -> u | None -> raise Not_found in
-            json_resp (preview_json (fetch_resource_metadata ctx url)))) };
+            (* an empty preview (no proxy gave a title) is not cached: nginx keeps serving the last
+               good one *)
+            let p = fetch_resource_metadata ctx url in
+            if p.p_title = "" then Raw (200, no_store :: api_headers, preview_json p) else json_resp (preview_json p))) };
       { meth = `GET; pattern = [ Lit "url-shortening" ]; handler = (fun r -> guard (fun () ->
             let url = match query_param r "u" with Some u -> u | None -> raise Not_found in
             Raw (200, [ ("content-type", "application/text") ], url_shortening ctx url))) };
