@@ -1,18 +1,16 @@
 # CLAUDE.md — ocaml-fetcher
 
-The relay fetcher + firehose daemon (`primal_fetcherd`); see `README.md` and `../ocaml-plan.md` §8.
+The relay fetcher + firehose daemon (`primal_fetcherd`); `README.md` has the design, config keys and endpoints.
 
-- Build/test from any project dir with the shared flake:
-  `nix develop "path:$(git rev-parse --show-toplevel)/ocaml-common" -c dune build @all`
+- Build/test with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/ocaml-common" -c dune build @all`
   (`dune test ocaml-fetcher`). `_build/` is at the repo root.
-- **Always use `./rebuild-restart-fetcher.sh` after code changes** (stop-then-start: one fetcher per
-  state directory). The script prints the log path; status:
+- Run it locally with `selfhost/primal.sh` (`restart` after a rebuild). Status:
   `curl -s http://127.0.0.1:<admin_port>/status`; `/relays` lists every relay with its state.
-- Config is the JSON file the restart script passes (`PRIMAL_FETCHER_CONFIG`), every key required (README table).
-  The shadow and production configs differ only in ports, directories and the pushgateway job.
-- The per-relay state directory names and the archive line format are contracts with the Julia
-  code that consumed/produced them (`Resume`, `Julia_json`, `Processor`): change them only together
-  with `maintanance.sh` / `pg-dedup-archive-funcs.sql` and the importer.
-- `bin/firehose_tap.exe HOST PORT SECONDS` is the comparison tool (lines, EVENTs, distinct ids
-  per second) — run it against two firehoses at once to compare fetchers.
+- Config: one JSON file, the sole argument; `--check-config` validates it. The relay lists are
+  `relays/` (or `relays_file`), plus the relays the importer records in `fetcher_relays`.
+- The per-relay state directory names and the archive line format are read back by the fetcher itself
+  (`Resume`, `Processor`) and by archive consumers: change them only together.
+- `bin/firehose_tap.exe HOST PORT SECONDS` counts lines, EVENTs and distinct ids per second of a firehose;
+  run it against two firehoses at once to compare fetchers. `watchdog.sh` restarts a stalled fetcher.
 - Never point two fetchers at the same `state_dir`/`archive_dir`.
+- This repo is public: no deployment details (hosts, IPs, internal ports, paths) in files or commit messages.

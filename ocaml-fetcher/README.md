@@ -1,170 +1,309 @@
-# ocaml-fetcher — the relay fetcher and firehose (`primal_fetcherd`)
+# ocaml-fetcher: primal-fetcher (`primal_fetcherd`)
 
-OCaml 5 / Eio port of the Julia fetcher process (`start_fetcher.jl`): `fetching.jl`
-(`Fetching`), `firehose_server.jl` (`FirehoseServer`) and the message archive of
-`DB.DeduplicatedEventStorage` (`cache_storage.jl`), as one daemon configured by one JSON file.
-Phase 7 of `../ocaml-plan.md` (§8 there).
+The relay fetcher. It keeps a WebSocket subscription open to every known Nostr relay, verifies and
+deduplicates the events they send, and streams each new event once to its subscribers (the
+importers) over the firehose, a line-oriented TCP server. Optionally it archives every new event
+to daily log files. One process, configured by one JSON file; OCaml 5 / Eio.
+
+The earlier Julia implementation is in the git tag `julia-final`.
 
 ## What it does
 
-| Julia | here |
-| --- | --- |
-| `Fetching.load_relays` (relays-active.txt verbatim; relays.txt, relays-paid.txt, relays-mined-from-events.txt, relays-mined-from-contact-lists.txt through `sanitize_valid_relay_url`), `start_fetcher.jl`'s extra relay | `Relay_set.load_files`, `Relay_url` (URIs.jl semantics: lowercase host, default port dropped, `normpath` + trailing slashes stripped, `.onion`/IPv6/localhost dropped, a query or fragment drops the url). The set is identical to Julia's for the current files (`bin/relays_dump.exe` vs `Fetching.relays`). |
-| `Fetching.start_relays_from_db`: `fetcher_relays` polled every 1 s (`updated_at >=` previous poll), urls > 300 chars / unparsable / private IPv4 skipped | `Relay_set.db_poller` |
-| `nostr_fetch_events` per relay: connect (30 s), REQ `{since}` and REQ `{since, authors 00..ff}`, read, `since = min(now, max(since, created_at-1))`, backoff 1 s doubling to 300 s (1 s again after a connection that produced messages), SOCKS5 proxy (`socks5h`, remote DNS) | `Relay_conn` fiber per relay, spread over `num_domains` domains by url hash; `Ws_client` with 30 s connect and read timeouts |
-| envelope `[time(), {func, runid, relay_url, timeout, proxy, event, …}, m]` for started / connected / request / event / exception / sleep | `Julia_json.envelope`, the timestamp in Julia's Float64 repr (`1.791140507318978e9`) |
-| `latest_timestamp` per relay under `$STORAGE/primalnode$N/fetcher/<url with non-alphanumerics → _>/`, saved at most every 5 s | `Resume`: same path and escaping, tmp + rename; all saved at stop |
-| `DeduplicatedEventStorage`: id seen before → skipped (`seenearly`); else parse, verify (`created_at < now+300`, id, signature), append to `dedup/messages/YYYY/MM/DD.log` (UTC day of created_at), remember, broadcast | `Processor` on its own domain: `Dedup` (in-memory ids for `dedup_keep_s`, 6 h, replacing the 256 SQLite shards), `Archive` (same files, line per event, files closed after 2 min idle), `Firehose.broadcast` |
-| `Fetching.message_processors[:firehose_server]`: every raw relay message also broadcast | `firehose_forward_raw` (see "Deviations") |
-| `FirehoseServer` on `127.0.0.1:9000+N`: `STREAM-NEW-EVENTS` subscribers, `Channel(20_000)` drop-when-full, `bye` at stop | `Firehose`: per-subscriber bounded queue, batched writes, `bye` at stop; other lines ignored |
-| `PushGatewayExporter` job `fetcher<N>`: `fetcher_message_count`, `fetcher_exception_count`, `fetcher_chars_received`, `fetcher_chars_sent` every 15 s; `dedup/stats.json` | the same metrics (+ `fetcher_relays_total/connected`, `fetcher_new_events`, `fetcher_firehose_dropped`, `fetcher_rss_bytes`); `stats.json` keys `seen`, `seenearly`, `parseerr`, `verifyerr`, `any` continue from the Julia totals |
-| `Fetching.fetch` ad-hoc REQ fan-out | not ported (off in production) |
+### The relay set
+
+At start the relay URLs come from files, then the set grows from the cache DB:
+
+- `relays_dir` (normally this directory's [`relays/`](relays)): `relays-active.txt` is taken
+  verbatim; `relays.txt`, `relays-paid.txt`, `relays-mined-from-events.txt` and
+  `relays-mined-from-contact-lists.txt` are sanitised first (below). `relays_file`, when set,
+  replaces all of them (one URL per line, verbatim).
+- `extra_relays` are appended.
+- With `cache_db` set, the `fetcher_relays` table is polled every `relays_db_poll_s` for rows whose
+  `updated_at` is at or after the previous poll. URLs over 300 characters, unparsable ones and those
+  whose host is a literal private or loopback IPv4 address are skipped.
+
+Sanitising (`Relay_url.sanitize_valid`): only the first line of the value is used; the host is
+lowercased and stripped of spaces and of a trailing dot, the scheme lowercased, the default port
+(`ws` 80, `wss` 443) dropped, `.` and `..` path segments resolved and trailing slashes removed.
+URLs are dropped when empty, ending in `.onion`, carrying a query or fragment, having an IPv6
+literal host, `localhost` or `127.0.0.1`, or a scheme other than `ws`/`wss`.
+
+A relay is identified by its sanitised URL, so `wss://x/` and `wss://x` are one relay; the
+first spelling seen is the one connected to and names its resume file. Per host (`host[:port]`)
+the root URL is always kept, plus at most `max_paths_per_host` other paths in discovery order (files
+first, so the curated lists win); further variants are skipped and counted in `relays_capped`.
+Relays are never removed while the process runs.
+
+### Relay connections
+
+Every relay is one fiber; relays are spread over `num_domains` OCaml domains by URL hash. Each
+fiber loops:
+
+1. Connect (WebSocket, TLS for `wss`) within `timeout_s`, through the SOCKS5 `proxy` unless the
+   URL is in `no_proxy_relays`. The proxy resolves host names (`socks5h` behaviour). Relays that
+   have never delivered a message first take one of `connect_concurrency` connection slots per
+   domain, so reconnecting live relays never queue behind dead ones.
+2. Send two REQs: `{"since": S}` and `{"since": S, "authors": ["00", ..., "ff"]}`. When `req_kinds`
+   is set and the relay's host is not in `req_kinds_exempt_hosts`, both carry
+   `"kinds": req_kinds`.
+3. Read until the connection closes, fails, or is silent for `timeout_s`.
+4. Sleep, then reconnect. The delay starts at `base_delay_s`, doubles after every connection that
+   produced no message, and is reset to `base_delay_s` after one that did. It is capped at
+   `max_delay_s`, or at `dead_relay_max_delay_s` for relays that have never delivered a message.
+
+A `CLOSED` answer to a kinds-filtered REQ is answered by re-sending that REQ without the filter,
+once. When it is the plain REQ that was refused, the relay stays unfiltered for its later
+connections too (counted in `kinds_fallbacks`). Every `CLOSED` counts in `closed_msgs`.
+
+`S` (the relay's `since`) starts from the relay's resume file, else `fetcher_since`, else the
+current time. Every event moves it to `min(now, max(S, created_at - 1))`.
+
+### Processing
+
+With `firehose_forward_raw` false (the normal setting), a relay fiber first looks for the event id
+and `created_at` in the raw message text; an id already in the dedup set is counted as `seenearly`
+and dropped without parsing. Everything else goes, as an envelope line (below), to one processor
+fiber on its own domain (queue of 100,000 lines; overflow is counted in `processor_queue_full`).
+For each `EVENT` the processor:
+
+1. skips ids already in the dedup set (`seenearly`);
+2. parses the event (`parseerr` on failure) and drops it silently when `created_at` is 300 s or
+   more in the future;
+3. checks id and signature (`verifyerr`);
+4. counts it (`any`), appends the line to the archive, records the id in the dedup set, credits
+   the relay with a "first" when no other relay delivered it before (and its kind is in
+   `req_kinds`, when that is set), and broadcasts the line on the firehose.
+
+With `firehose_forward_raw` true, every line a relay fiber produces (connection events, `EOSE`,
+duplicates) is also broadcast, and new events go out twice.
+
+The dedup set is in memory: ids seen within the last `dedup_keep_s` seconds, pruned at most once a
+minute. An event delivered again after that window is processed again (archived and sent a second
+time; the importer ignores events it already has).
+
+### Envelope lines
+
+Firehose and archive lines are JSON arrays `[ts, meta, m]`:
+
+- `ts`: the time the line was produced, a float in shortest round-trip form with an exponent
+  (`1.791140507318978e9`);
+- `meta`: `func` (`"nostr_fetch_events"`), `runid` (a UUID per relay fiber), `relay_url`, `timeout`,
+  `proxy` (the proxy URL or `null`), `event`, plus per-event fields;
+- `m`: the payload.
+
+| `event` | `m` | extra `meta` fields |
+|---|---|---|
+| `started` | `null` | |
+| `connected` | `{"since": S}` | |
+| `request` | `{"query": <the REQ>}` | |
+| `event` | the relay message, parsed (`["EVENT", subid, {...}]`, `["EOSE", ...]`, ...) | |
+| `kinds_fallback` | the `CLOSED` message | |
+| `exception` | the error text | `subfunc` (`websocket`, `parsing`, `downstream`), `printout` |
+| `sleep` | `null` | `delay`, `msg_cnt` |
+
+With `firehose_forward_raw` false only `event` lines carrying a new verified `EVENT` reach the
+firehose and the archive. The importer and any archive reader depend on this format.
+
+### The firehose
+
+TCP server on `firehose_host:firehose_port`. A client that sends the line `STREAM-NEW-EVENTS`
+receives every broadcast line, newline-terminated, written in batches of up to 512 lines. Each
+subscriber has a queue of `firehose_queue` lines; when it is full, lines for that subscriber are
+dropped and counted in `firehose_dropped`. Other input lines are logged and ignored; an empty line
+or EOF ends the session. At stop every client gets `bye` and is disconnected.
+
+### The archive
+
+With `archive_enabled`, each new event's envelope line is appended to
+`<archive_dir>/messages/YYYY/MM/DD.log`, by the UTC day of the event's `created_at`. Files are opened
+in append mode, written line by line, and closed after 2 minutes without writes. Archive write
+errors are logged and counted (`archive_errors`); they do not stop the firehose. With `req_kinds`
+set, the archive holds only what the filtered REQs return.
+
+### Resume files
+
+`<state_dir>/<url>/latest_timestamp` holds a relay's `since` as decimal text. The directory name is
+the URL with every character outside `[A-Za-z0-9]` replaced by `_`
+(`wss://relay.damus.io` -> `wss___relay_damus_io`). A file is written (temp file + rename) at most
+every 5 s per relay while events arrive, when the relay's fiber ends, and for every changed relay at
+stop.
+
+### Counters and `stats.json`
+
+`<archive_dir>/stats.json` is rewritten every `metrics_period_s` and at stop, whether or not the
+archive is enabled. Its counters `seen`, `seenearly`, `parseerr`, `verifyerr` and `any` are
+cumulative across restarts: the values found at start are the baseline and this run's counts are
+added. Other keys in the file are kept as they are.
+
+## Configuration
+
+`primal_fetcherd <config.json>` reads one JSON object. **Every key is required**; where `null` is
+listed, it is allowed. `primal_fetcherd --check-config <config.json>` parses the config, prints
+`config ok` and exits 0; a config error exits 2 with the message.
+
+| Key | Type | Meaning | Usual value |
+|---|---|---|---|
+| `node_idx` | int | Instance number, shown in the log and `/status` | |
+| `admin_host`, `admin_port` | string, int | Admin HTTP listener | `127.0.0.1` |
+| `firehose_host`, `firehose_port` | string, int | Firehose listener | `127.0.0.1` |
+| `state_dir` | string | Directory of the per-relay resume files | |
+| `archive_dir` | string | Archive root; also holds `stats.json` | |
+| `archive_enabled` | bool | Write the message archive | |
+| `relays_dir` | string | Directory of the `relays-*.txt` files | this directory's `relays/` |
+| `relays_file` | string or null | A single relay list used instead of `relays_dir`, verbatim | `null` |
+| `extra_relays` | string list | Relay URLs added to the file set (e.g. an internal relay) | |
+| `no_proxy_relays` | string list | URLs connected directly even when `proxy` is set | |
+| `proxy` | string or null | SOCKS5 proxy for relay connections, `socks5h://host:port` or `socks5://host:port` (port defaults to 1080) | |
+| `fetcher_since` | int or null | `since` for relays without a resume file; `null` = now | `null` |
+| `timeout_s` | number | Connect timeout and read-silence timeout | 30 |
+| `base_delay_s` | number | First reconnect delay | 1 |
+| `max_delay_s` | number | Reconnect delay cap for relays that have delivered | 300 |
+| `dead_relay_max_delay_s` | number | Reconnect delay cap for relays that never delivered a message | 3600 |
+| `connect_concurrency` | int | Simultaneous connection attempts per domain, for relays that never delivered | 256 |
+| `cache_db` | object or null | `{host, port, user, database}` of the cache DB for `fetcher_relays` polling; `null` disables polling | |
+| `relays_db_poll_s` | number | `fetcher_relays` poll period | 1 |
+| `pushgateway` | object or null | `{host, port, job}` of a Prometheus Pushgateway; `null` disables pushing | |
+| `metrics_period_s` | number | Pushgateway push, `stats.json` write and dedup pruning period | 15 |
+| `num_domains` | int | Domains the relay connections are spread over | 8 |
+| `dedup_keep_s` | int | Dedup window | 21600 |
+| `firehose_forward_raw` | bool | Also broadcast every raw relay line (see Processing) | `false` |
+| `firehose_queue` | int | Per-subscriber queue length, in lines | 20000 |
+| `max_paths_per_host` | int | Non-root URL variants kept per host; -1 = unlimited | 2 |
+| `req_kinds` | int list or null | `kinds` filter for the REQs; `null` = unfiltered | |
+| `req_kinds_exempt_hosts` | string list | Hosts (`host[:port]`) whose REQs stay unfiltered, so kinds outside `req_kinds` still arrive through them | |
+| `log_connections` | bool | Reserved, unused | `false` |
+
+`req_kinds` has to be a positive list because a Nostr filter cannot express kind ranges. Exempting a
+few large relays keeps rare and new kinds arriving.
+
+## Operation
+
+### Running
+
+- Run one fetcher per `state_dir`/`archive_dir`, and restart it stop-then-start: two processes on
+  the same directories would overwrite each other's resume files and archive events twice.
+- Every relay is a socket: raise the open-file limit (production uses 262144).
+- Set `MALLOC_ARENA_MAX=2`. With the glibc default the many domains fragment the malloc arenas and
+  RSS roughly doubles at tens of thousands of connections. WebSocket read buffers shrink back after
+  a frame over 64 KB.
+- Logs go to stdout, one line per message with a timestamp and a component tag (`[primal-fetcher]`,
+  `[relays]`, `[processor]`, `[firehose]`, `[lifecycle]`). Every 10 s a summary line:
+  `relays P/C/T (providing|connected|total) connecting N waiting N | msgs N/s new N/s | seenearly N
+  parseerr N verifyerr N | fh subs N dropped N | qlen N dedup N | rss X | wsbuf X/N`.
+
+### Stopping
+
+SIGTERM, SIGINT, SIGUSR1 or `POST /stop` start the stop: `/readyz` turns 503, the relay fibers end
+their loops and firehose clients get `bye`. After 3 s the changed resume files and `stats.json` are
+written, the archive files closed, and the process exits 0.
+
+### Admin HTTP (`admin_host:admin_port`)
+
+| Endpoint | Answer |
+|---|---|
+| `GET /healthz` | `ok` |
+| `GET /readyz` | 200 `ready` while serving, else 503 with the state |
+| `GET /status` | JSON: pid, state, uptime, relays (`total`, `connected`, `waiting`, `providing`), rates since the previous `/status` call, all counters, `dedup_size`, `firehose_subscribers`, `rss_bytes`, `heap_bytes`, `ws_clients`, `ws_read_buffers_bytes` |
+| `GET /relays` | JSON array, one object per relay, sorted by messages: `url`, `host`, `firsts`, `filtered`, `connected`, `waiting`, `delay`, `messages`, `exceptions`, `since`, `last_exception` |
+| `GET /tasks` | Per-domain phase report (what each domain is doing) |
+| `POST /gc` | Runs `Gc.compact`; answers the heap size before and after, and RSS |
+| `POST /stop` | Starts the stop |
+
+`firsts` on `/relays` is the number of events a relay delivered before any other relay: the measure
+for deciding which relays and URL variants are worth keeping.
+
+### Metrics
+
+With `pushgateway` set, every `metrics_period_s` the process pushes (one POST to
+`/metrics/job/<job>`):
+
+| Metric | Type, meaning |
+|---|---|
+| `fetcher_message_count` | counter: messages received from relays |
+| `fetcher_exception_count` | counter: connection and parse errors |
+| `fetcher_chars_received`, `fetcher_chars_sent` | counter: message bytes received, REQ bytes sent |
+| `fetcher_relays_total`, `fetcher_relays_connected` | gauge |
+| `fetcher_new_events` | counter: new verified events (`any`) |
+| `fetcher_firehose_dropped` | counter |
+| `fetcher_rss_bytes` | gauge |
+
+### Watchdog (`watchdog.sh`)
+
+An external liveness check, run every 2 minutes by a systemd user timer. It reads `admin_port` from
+the config, fetches `/status` (15 s timeout) and compares `counters.message_count` with the previous
+run's. After two consecutive failures (no answer, or the count has not moved) it runs
+`systemctl --user restart primal-ocaml-fetcher.service`. It is external because a stalled process
+can stop answering on its admin port as well.
+
+| Variable | Meaning |
+|---|---|
+| `PRIMAL_FETCHER_CONFIG` | the fetcher's config (default `primal-fetcher-config.json` in `$PRIMAL_CONFIG_DIR`) |
+| `PRIMAL_FETCHER_ADMIN` | the `/status` URL, overriding the one built from `admin_port` |
+| `PRIMAL_VAR_DIR` | where `fetcher-watchdog.state` and `fetcher-watchdog.log` are written |
+
+It needs `bash`, `curl` and `python3` on `PATH`; a systemd timer unit has to set `PATH` explicitly.
+
+### Tools
+
+- `firehose_tap HOST PORT SECONDS [IDS_FILE]`: subscribes to a firehose for the given time and
+  prints lines/s, EVENTs/s, distinct event ids, contributing relays, the top kinds and the counts of
+  other line types; with `IDS_FILE`, writes the distinct ids. Run it against two firehoses at once to
+  compare them.
+- `relays_dump CONFIG`: prints the relay set the config loads from files (before the per-host cap
+  and the DB poll), one URL per line.
+
+## Relay lists (`relays/`)
+
+| File | Treatment |
+|---|---|
+| `relays-active.txt` | verbatim, loaded first |
+| `relays.txt` | sanitised |
+| `relays-paid.txt` | sanitised |
+| `relays-mined-from-events.txt` | sanitised |
+| `relays-mined-from-contact-lists.txt` | sanitised |
+
+Order matters for the per-host cap: earlier files claim a host's path slots first. A URL listed in
+several files is loaded once.
 
 ## Layout
 
 ```
-lib/config.ml       the JSON config (every key required)
-lib/relay_url.ml    URIs.jl-equivalent sanitising
-lib/relay_set.ml    relay files, fetcher_relays poller, dispatch to domains
-lib/relay_conn.ml   the per-relay loop and the envelope
-lib/processor.ml    dedup → verify → archive → firehose
-lib/dedup.ml        time-bounded id set
-lib/archive.ml      messages/YYYY/MM/DD.log writer
-lib/firehose.ml     the STREAM-NEW-EVENTS server
-lib/resume.ml       latest_timestamp files
-lib/stats.ml        counters, stats.json
-lib/julia_json.ml   Julia Float64 repr for the envelope timestamp
-lib/admin.ml        /healthz /readyz /status /relays /tasks, POST /gc /stop
-bin/primal_fetcherd.ml   the daemon
-bin/firehose_tap.ml      subscribe to a firehose and count (comparison tool)
-bin/relays_dump.ml       print the relay set a config loads
-rebuild-restart-fetcher.sh   build + stop-then-start as systemd --user unit primal-ocaml-fetcher
+bin/primal_fetcherd.ml   the daemon: domains, processor, firehose, poller, metrics, stop
+bin/firehose_tap.ml      firehose client that counts what arrives
+bin/relays_dump.ml       prints the relay set loaded from files
+lib/config.ml            the JSON config
+lib/relay_url.ml         URL parsing, sanitising, host keys
+lib/relay_set.ml         relay files, per-host cap, fetcher_relays poller, dispatch to domains
+lib/relay_conn.ml        the per-relay loop, REQs, kinds fallback, envelope lines
+lib/processor.ml         dedup, verify, archive, firsts, firehose broadcast
+lib/dedup.ml             time-bounded event-id set
+lib/archive.ml           messages/YYYY/MM/DD.log writer
+lib/firehose.ml          the STREAM-NEW-EVENTS server
+lib/resume.ml            latest_timestamp files
+lib/stats.ml             counters, stats.json
+lib/julia_json.ml        float formatting of the envelope timestamp
+lib/admin.ml             admin HTTP
+relays/                  relay lists
+test/test_fetcher.ml     unit tests
+watchdog.sh              external liveness check
 ```
 
-## Configuration
+Shared code (WebSocket client, SOCKS5, Postgres, Nostr verification, HTTP server, lifecycle, the
+Pushgateway client) is in `../ocaml-common` (library `primal_common`).
 
-| key | meaning (Julia) |
-| --- | --- |
-| `node_idx` | PRIMALSERVER_NODE_IDX |
-| `admin_host`, `admin_port` | admin HTTP |
-| `firehose_host`, `firehose_port` | FirehoseServer HOST/PORT (127.0.0.1, 9000+N) |
-| `state_dir` | Fetching.EVENTS_DATA_DIR (`$STORAGE/primalnode$N/fetcher`) |
-| `archive_dir`, `archive_enabled` | DeduplicatedEventStorage rootdirectory (`$STORAGE/primalnode$N/dedup`) |
-| `relays_dir`, `relays_file` | directory of the relays-*.txt files; PRIMALSERVER_RELAYS override |
-| `extra_relays`, `no_proxy_relays` | `push!(Fetching.relays, "ws://<internal-relay-host>:7777")`, `.proxy = nothing` |
-| `proxy` | PRIMALSERVER_PROXY (`socks5h://host:port` or null) |
-| `fetcher_since` | PRIMALSERVER_FETCHER_SINCE (null = now) for relays without a resume file |
-| `timeout_s`, `base_delay_s`, `max_delay_s` | TIMEOUT 30, BASE_DELAY 1, MAX_DELAY 300 |
-| `dead_relay_max_delay_s` | backoff cap for relays that never delivered a message (3600) |
-| `connect_concurrency` | simultaneous connection attempts per domain (256) |
-| `cache_db`, `relays_db_poll_s` | fetcher_relays polling (null disables) |
-| `pushgateway`, `metrics_period_s` | `{host, port, job}` (job `fetcher<N>`), 15 |
-| `num_domains` | domains for relay connections (8) |
-| `dedup_keep_s` | in-memory dedup window (21600) |
-| `firehose_forward_raw` | also forward every raw relay message (Julia behaviour; false in production here) |
-| `firehose_queue` | per-subscriber queue (20000) |
-| `log_connections` | reserved |
-| `max_paths_per_host` | relay-set control: non-root url variants kept per host (2; -1 = unlimited). The root url of a host is always kept. |
-| `req_kinds` | relay-set control: the `kinds` array put in both REQs sent to a relay (null = unfiltered REQs, the Julia behaviour) |
-| `req_kinds_exempt_hosts` | hosts (`host[:port]`) whose REQs stay unfiltered, so kinds outside `req_kinds` still arrive through them |
+## Build and test
 
-### Relay-set controls (2026-10-08)
+From anywhere in the repo, with the shared dev shell:
 
-Measured on the stage host before these: 63k known urls on 17k hosts, 16.6k connected, 42-58k
-messages/s of which 98.5 % duplicates; 94 % of all messages came from hosts with five or more
-url variants (per-user haven paths, prisms, random suffixes mined from contact lists and relay
-lists — one host with 105 paths alone delivered 45 %), each variant a full duplicate stream; and
-92 % of the unique events were kinds the importer rejects (ephemeral 2xxxx). Three controls:
+    nix develop "path:$(git rev-parse --show-toplevel)/ocaml-common" -c dune build @all
+    nix develop "path:$(git rev-parse --show-toplevel)/ocaml-common" -c dune test ocaml-fetcher
 
-- **Per-host cap** (`max_paths_per_host`): urls are keyed by their sanitised form, so `wss://x/`
-  and `wss://x` are one relay, and a host keeps its root url plus at most N other paths, in
-  discovery order (the curated relays-*.txt files come first). Skipped urls count in
-  `relays_capped`. Some multi-path hosts are genuinely different streams (haven `/outbox` vs
-  `/inbox`), hence 2 rather than 0.
-- **Firsts counter**: the processor attributes every event it accepts first to the relay that
-  delivered it (`firsts` on the admin `/relays` page, per url). This is the quality signal for
-  choosing which variants and which relays to keep; nothing acts on it yet.
-- **Kinds filter** (`req_kinds`, `req_kinds_exempt_hosts`): a Nostr filter cannot express the
-  importer's accepted ranges (1xxxx, 3xxxx), so `req_kinds` is a positive list (the importer's
-  fixed kinds plus every range kind seen with volume on the stage host plus the NIP-defined
-  ones) sent to every relay except the exempt hosts (the large aggregators and the internal relay),
-  which stay unfiltered so rare and new kinds still arrive. A relay answering CLOSED to the
-  filtered REQ is re-subscribed unfiltered once (`kinds_fallbacks`; `closed_msgs` counts all
-  CLOSEDs). The raw archive is no longer complete for the filtered relays.
+`_build/` is at the repository root; the binaries are
+`_build/default/ocaml-fetcher/bin/{primal_fetcherd,firehose_tap,relays_dump}.exe`.
 
-## Deviations from the Julia fetcher (deliberate)
+The fetcher has no `[%pgsql]` statements, but `dune build @all` builds the whole workspace, whose
+other projects do: point `PGHOST`/`PGPORT` at a database created from `ocaml-common/schema/`
+(see `ocaml-common/schema/README.md`).
 
-- **Julia never ran most of its relays.** `HTTP.ConnectionPool.default_connection_limit[] = 10000`
-  capped the whole process at 10k connections; with ~61k relays (files + `fetcher_relays`) the
-  other tasks waited on the pool, so the Julia firehose carried events from ~320 relays and a
-  few reconnects per minute. This fetcher connects to every relay. To keep that from flooding the
-  SOCKS proxy with the attempts of ~55k dead relays, attempts are limited per domain
-  (`connect_concurrency`) and a relay that has never delivered a message backs off to
-  `dead_relay_max_delay_s` (1 h) instead of 300 s. Relays that have delivered keep Julia's schedule.
-- **The firehose carries each new verified event once** (`firehose_forward_raw: false`). The Julia
-  wiring broadcast every raw relay message AND every new event a second time; with every relay
-  connected that raw stream is ~25k lines/s (90 % duplicates), i.e. ten times what the Julia
-  fetcher sent, for the same ~600–700 distinct events/s. The importers only act on new EVENTs, so
-  `cache_any` is unchanged; `recv` on the importer drops and `rej`/`dup` go to ~0.
-- Dedup is a 6 h in-memory window, not the all-time SQLite set: an event re-sent after 6 h is
-  archived twice and reaches the importer again (rejected there by `ON CONFLICT`).
-- The firehose ignores non-`STREAM-NEW-EVENTS` lines instead of dispatching them (the fetcher's
-  Julia server had no processors registered).
-- `Ws_client` now shrinks its read buffer after a frame over 64 KB (otherwise each long-lived
-  connection kept its largest frame's buffer forever).
-
-## Shadow comparison and cutover (the stage host, 2026-10-04)
-
-Shadow run (port 9027, own state/archive dirs, `since = now`) next to the Julia fetcher,
-`firehose_tap` on both for the same 180 s:
-
-| | Julia 9017 | OCaml 9027 |
-| --- | --- | --- |
-| lines/s to the firehose | 2330 | 601 |
-| distinct event ids/s | 557 | 601 |
-| relays contributing | 272 | 1613 |
-| ids only on this side | 12127 (a sample: 1–12 h old re-fetches from stale resume points, 453 seen earlier by the shadow) | 20022 |
-| relays connected | ~8000 fds (mostly idle) | 15500 |
-| RSS / CPU | 5.7 GB / ~1 core | 3.5 GB / ~3.5 cores at ~50k relay msgs/s |
-
-Cutover at 20:02: `m1_fetcher.sh` loop and the Julia process stopped, the daemon started on 9017
-with the production state and archive dirs (it resumed from Julia's `latest_timestamp` files; the
-OCaml importer reconnected within a second). `stats.json` continues the Julia totals.
-
-**Rollback:** `systemctl --user stop primal-ocaml-fetcher`, then in the `primal-server` dir
-`PRIMALSERVER_PROXY=socks5h://<socks-proxy-host>:1080 bash ../m1_fetcher.sh` (the proxy variable was in
-the old shell's environment, not in the script); it resumes from the same resume files.
-
-## Incident 2026-10-05 and the watchdog
-
-At 00:52:37 UTC every relay connection through the SOCKS proxy (`<socks-proxy-host>:1080`) went silent at
-once (messages 32k/s → 7/s within 30 s, "connected" unchanged: half-open TCP). From 00:53:05 to
-04:52:20 the whole process was frozen: no stats lines, the admin port did not answer, the importer
-received nothing. It resumed by itself, then reconnected slowly (16.6k → 4.8k relays by 06:00, the
-rest in the dead-relay backoff), with RSS at 10.8 GB (2.6 GB after a fresh start). Restarted at 08:08.
-Root cause still open; suspects are a stop-the-world GC blocked by a domain stuck in a blocking
-call, and the memory growth. Because the admin port froze too, the guard is external:
-`watchdog.sh` runs from the transient user timer `primal-fetcher-watchdog` every 2 minutes and
-restarts the unit after two consecutive checks where `/status` does not answer or
-`message_count` has not moved (log `$PRIMAL_VAR_DIR/fetcher-watchdog.log`).
-
-## Memory (2026-10-05)
-
-With 16.6k relay connections the process sat at 7.5 GB RSS of which only 2.1 GB was OCaml heap.
-The WebSocket read buffers (Bigarrays, now accounted as `ws_read_buffers_bytes` / `ws_clients` in
-`/status` and `wsbuf` on the stats line) are a small part: 21 KB per connection, 353 MB in all.
-The rest was glibc malloc arena fragmentation across the 9 domains: restarted with
-`MALLOC_ARENA_MAX=2` the same 16.6k connections cost 3.6 GB RSS (1.4 GB outside the heap), so
-`rebuild-restart-fetcher.sh` now sets it by default (`PRIMAL_MALLOC_ARENA_MAX` overrides). Per
-connection: about 130 KB of heap (TLS engine state, fibers, parsed frames) plus 90 KB outside it.
-Whether the remaining figure grows at a constant connection count is still to be measured over a
-day (the overnight 10.8 GB was seen after a reconnect storm, not at steady state).
-
-## Operating
-
-- `./rebuild-restart-fetcher.sh` — build + restart (unit `primal-ocaml-fetcher`,
-  `LimitNOFILE=262144`, `MemoryMax=12G`).
-- `curl -s http://127.0.0.1:<admin_port>/status` — relays (providing|connected|total), rates,
-  counters, dedup size, RSS/heap; `/relays` per relay; `POST /gc` compacts and reports.
-- Rollback to Julia: stop the unit, start `m1_fetcher.sh` again (it resumes from the same
-  `latest_timestamp` files).
+The tests cover URL sanitising, private-host detection, the envelope timestamp format, resume
+directory names and the fast id/`created_at` extraction.

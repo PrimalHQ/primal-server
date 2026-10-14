@@ -1,477 +1,366 @@
 # primal-importer
 
-An OCaml 5 / Eio reimplementation of the core **event-import pipeline** of the Primal
-Nostr cache server (the Julia `primal-server/src/cache_storage.jl` import path, started by
-`start_media_importer.jl`). It reads fetched Nostr events from a firehose, verifies and
-parses them, and writes them into PostgreSQL via inline `[%pgsql]` queries that are
-**type-checked against the live schema at compile time**.
+OCaml 5 / Eio daemon that imports Nostr events from the fetcher's firehose into the Primal cache
+DB. It verifies each event, stores it, and maintains the derived tables: stats, followers,
+notifications, scores and replaceable events. All SQL is inline `[%pgsql]`, type-checked against a
+cache DB schema at compile time. Shared modules are in `../ocaml-common` (`primal_common`). This
+library (`primal_importer`) is also linked by `ocaml-jobs`. The earlier Julia implementation is in
+git tag `julia-final`.
 
-Module and function names mirror the Julia source so the two codebases navigate the same
-way (`import_event`, `import_contact_list`, `event_pubkey_action`, `ext_text_note`, …).
-
-The generic modules (Postgres adapter, Nostr, bech32, secp256k1, HTTP/DNS/SOCKS5 clients,
-pushgateway, worker pool, phase slots, filterlist) live in `../ocaml-common` (library
-`primal_common`) and are shared with the other OCaml daemons of `../ocaml-plan.md`; this project
-holds only the importer itself. It is Eio-native (no Lwt). Unit tests for the shared modules are in
-`../ocaml-common/test`.
-
----
-
-## Building and the dev shell
-
-Everything runs inside the shared `../ocaml-common` Nix flake (one dune workspace rooted at the
-repo root, so `_build/` is `../_build`):
+## Running
 
 ```sh
-P=$(git rev-parse --show-toplevel)/ocaml-importer
-
-nix develop "path:$P/../ocaml-common"                       # interactive dev shell
-nix develop "path:$P/../ocaml-common" -c dune build @all    # build everything
-nix develop "path:$P/../ocaml-common" -c dune test          # unit tests live in ../ocaml-common/test
-nix develop "path:$P/../ocaml-common" -c dune exec bin/main.exe   # run a binary
+main.exe <config.json>                  # run
+main.exe --check-config <config.json>   # parse the config, print "config ok", exit 0
 ```
 
-The dev shell exports the `PG*` variables (see below). By default they point the `[%pgsql]`
-ppx — and the binaries at runtime — at the **live `primal1` database** (compile-time schema
-checking and runtime now both use the live DB). `dune build` *fails* if any inline SQL does
-not match that live schema.
-
-### Reference DB (occasional, for tests)
-
-A standalone reference DB (`primal_importer_ref`) is no longer required for the build — it
-is only used occasionally for tests. There is no bundled schema file; instead it is rebuilt
-as a **schema-only clone of the live `primal1` public schema** (the importer's inline SQL
-targets primal1's base tables by name, so the reference DB must mirror that schema). It takes
-**no arguments**; the connection is **hardcoded** (`pg_dump` from `primal1` into
-`primal_importer_ref`, both on `127.0.0.1:54017`, user `pr`) and cannot be overridden:
-
-```sh
-nix develop "path:$P/../ocaml-common" -c sql/refdb-setup.sh
-```
-
-Each run **drops and recreates** the reference DB, then clones only primal1's `public` schema
-with `--no-subscriptions --no-publications` — so it pulls in none of primal1's replication
-config, extensions, or other schemas (`pg_cron`/`age`/`plv8`/…), just the tables/types the
-importer needs. The target is always the reference DB, so it can never clobber the live source
-(read-only via `pg_dump`). No data is copied.
-
-### Resetting the reference DB to schema-only
-
-Binaries that import real data (`bin/importcheck`, …) can be pointed at the reference DB to
-keep test data out of the live DB. To clear it back to schema-only (every table truncated,
-schema preserved so `dune build` still type-checks), run the explicit counterpart of the
-setup script:
-
-```sh
-nix develop "path:$P/../ocaml-common" -c sql/refdb-truncate.sh
-```
-
-It takes **no arguments**. The connection is **hardcoded** to `primal_importer_ref` on
-`127.0.0.1:54017` (user `pr`) and cannot be overridden — not even via `PG*` env vars (the
-dev shell points those at the live DB; the script passes its connection to `psql` explicitly).
-It can therefore *only* ever truncate the reference DB and can never touch a live/production DB
-(e.g. `primal1`, `primal`). It never drops or alters the schema.
-
----
-
-## Configuration (JSON file)
-
-`bin/main` (the importer) reads **all** of its settings from a single JSON config file passed
-as its sole command-line argument; the environment is **not** consulted at runtime. The file
-lives at `$PRIMAL_CONFIG_DIR/primal-importer-config.json` (outside the repo — it is a
-deployment artifact); `rebuild-restart-importer.sh` passes that path automatically (override with
-`IMPORTER_CONFIG`). Edit the file directly to change a setting, then restart.
-
-The JSON keys mirror the variables below with the `IMPORTER_`/`PRIMALSERVER_` prefixes dropped
-(e.g. `IMPORTER_WORKERS` → `num_workers`, `PRIMALSERVER_FIREHOSE_HOST` → `firehose_host`,
-`IMPORTER_VERIFY` → `verification_enabled`); the DB connections become the nested `cache_db` /
-`membership_db` objects (`{host, port, user, database}`); and the derive-only inputs (`NODE_IDX`,
-`PRIMALSERVER_REPORT_NODE_IDX`, `PRIMALSERVER_STORAGE_PATH`) are not stored — their resolved
-outputs (`firehose_port`, `pushgateway_job`, `pushgateway_stats_file`) appear directly. `proxy`
-and `humaness_threshold` are `null` when unset; pubkey lists are lowercase-hex string arrays.
-Every key is **required** — the file is authoritative, so a missing key is an error rather than a
-silent fallback. The defaults below are the values `bin/main` shipped with (also encoded in
-`Config.from_env`, which the dev tools read); use them to author or repair the file by hand.
-
-The **dev tools** (`bin/compare`, etc.) still read the environment (`PG*` / `COMPARE_*`); only
-`bin/main` is config-file driven. The tables below give each option's env name (as read by the
-dev tools) and default. Binaries that take positional CLI arguments are noted in the per-binary
-section.
-
-### Database connections
-
-The importer talks to up to three logical databases. On a single-box staging setup they
-can all be the same Postgres — the membership and compare connections **default to the
-cache connection**, so only the `PG*` set is required.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `PGHOST` | `127.0.0.1` | Cache / local DB host (Julia `:p0`). The DB the importer writes to. |
-| `PGPORT` | `54017` | Cache DB port. |
-| `PGUSER` | `pr` | Cache DB user. |
-| `PGDATABASE` | `primal1` | Cache DB name; the **live** DB used for both compile-time `[%pgsql]` checks and runtime (dev shell sets this). The code fallback when unset is `primal_importer_ref`. |
-| `PGMEMBERSHIPHOST` | `<membership-db-host>` (dev shell); code fallback `= PGHOST` | Membership DB host (Julia `:membership`): `filterlist`, `human_override`, and the notification-gate tables `app_settings` / `notification_settings` (see [Notifications](#notifications)). The dev shell sets this to the real membership DB so the serving-layer notification gates are active; the code fallback when unset is the cache connection. |
-| `PGMEMBERSHIPPORT` | `5432` (dev shell); fallback `= PGPORT` | Membership DB port. |
-| `PGMEMBERSHIPUSER` | `primal` (dev shell); fallback `= PGUSER` | Membership DB user. |
-| `PGMEMBERSHIPDATABASE` | `primal` (dev shell); fallback `= PGDATABASE` | Membership DB name. |
-| `COMPARE_HOST` | `<julia-host>` | Remote DB host for `bin/compare` (the Julia importer's Postgres). |
-| `COMPARE_PORT` | = `PGPORT` | Remote DB port. |
-| `COMPARE_USER` | = `PGUSER` | Remote DB user. |
-| `COMPARE_DATABASE` | = `PGDATABASE` | Remote DB name (e.g. `primal1` on the Julia box). |
-
-### Importer runtime (used by `bin/main`)
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `NODE_IDX` (or `PRIMALSERVER_NODE_IDX`) | `17` | Node index; only used to derive the default firehose port. |
-| `PRIMALSERVER_FIREHOSE_HOST` | `127.0.0.1` | Firehose TCP host. |
-| `PRIMALSERVER_FIREHOSE_PORT` | `9000 + NODE_IDX` (→ `9017`) | Firehose TCP port. |
-| `IMPORTER_WORKERS` | `4` | Number of worker **domains** (parallel import lanes). |
-| `IMPORTER_QUEUE_CAPACITY` | `10000` | Bounded firehose→workers queue size (backpressure; never drops). |
-| `IMPORTER_VERIFY` | `true` | Verify each event's BIP340 signature before import. |
-| `VERIFY_ZAPPERS` | `true` | Verify zap receipts via LNURL (see proxy below). When `false`, all zappers pass. |
-| `PRIMALSERVER_PROXY` | *(none)* | SOCKS5 proxy for LNURL egress, e.g. `socks5h://<socks-proxy-host>:1080` (a bare `host:port` also works). `socks5h://` resolves DNS at the proxy. |
-| `IMPORTER_DISABLE_TRUSTRANK` | `false` | When `true`, seed `pubkey_trustrank = 1.0` for every new pubkey so `ext_is_human` is true for everyone (use when no TrustRankMaker feeds this DB). |
-| `IMPORTER_HUMANESS_THRESHOLD` | *(computed)* | `ext_is_human` passes when `pubkey_trustrank.rank >` this threshold. Unset, it is computed once at startup as the rank of the 50,000th-highest-ranked pubkey in `pubkey_trustrank` (mirroring Julia `TrustRank.load`; `0.0` if the table is empty). Set it to pin an explicit override. |
-| `IMPORTER_IMPORT_REPORTING` | `false` | Process NIP-56 kind-1984 reports into the membership `filterlist`. |
-| `IMPORTER_REPORTING_WHITELIST` | *(empty)* | Comma-separated **hex** pubkeys allowed to file reports (only honored when `IMPORTER_IMPORT_REPORTING=true`). |
-| `IMPORTER_EVENT_SYNC` | `true` | Enable the event syncer (pull recent events from peer nodes into the import queue — see [Event syncer](#event-syncer)). |
-| `IMPORTER_EVENT_SYNC_REMOTES` | `<peer-host-1>,<peer-host-2>,...` | Comma-separated peer Postgres hosts to pull from (same port/credentials as the local cache DB). |
-| `IMPORTER_EVENT_SYNC_INTERVAL` | `60` | Seconds between sync cycles. |
-| `IMPORTER_EVENT_SYNC_OVERLAP` | `600` | Seconds of lookback behind the local max `created_at` each cycle (the 10-minute self-healing window). |
-| `event_sync_backfill` (JSON only) | `null` | One-off gap repair: `{remote, from_ts, to_ts, batch, state_file}` replays the peer's `event` table with `imported_at` in `[from_ts, to_ts)` into the import queue (keyset pagination on `(imported_at, id)`, batches submitted in `created_at` order, bounded by the worker queue; progress in `state_file`, resumes on restart; the fiber ends when the range is done). Used on the stage host 2026-10-06 for the 2026-07-10..09-30 gap from the Julia host. Set back to `null` afterwards. |
-
-The backfill surfaced two importer issues, both fixed on 2026-10-06: `pubkey_directmsgs_cnt` upkeep raced between workers (duplicate counter rows, multi-row updates deadlocking, every worker stalled on one hot receiver) and is now a single upsert over the unique index of migration `1001_pubkey_directmsgs_cnt_unique.sql`; and the DAG runner needed bounded windows (see ocaml-jobs/README.md).
-| `IMPORTER_PUSHGATEWAY` | `true` | Publish the cumulative imported-event count (`cache_any`) to a Prometheus pushgateway (see [Pushgateway](#pushgateway)). |
-| `IMPORTER_PUSHGATEWAY_HOST` | `127.0.0.1` | Pushgateway host. |
-| `IMPORTER_PUSHGATEWAY_PORT` | `9091` | Pushgateway port. |
-| `IMPORTER_PUSHGATEWAY_JOB` | `primalnode<report-node>` | Pushgateway `job` label (Prometheus exposes it as `exported_job`). |
-| `IMPORTER_STATS_FILE` | `<storage>/primalnode<report-node>/cache/db/stats.json` | Julia stats file the `cache_any` total is loaded from and persisted to. |
-| `IMPORTER_PUSHGATEWAY_INTERVAL` | `15` | Seconds between pushes. |
-| `IMPORTER_PUSH_NOTIFICATIONS` | `false` | Deliver device push notifications (APNS/FCM) via the sender subprocess (see [Push notifications](#notifications)). |
-| `IMPORTER_PUSH_NOTIFICATION_SENDER_BIN` | `<parent repo>/push-notification-sender/target/release/push-notification-sender` (resolved relative to the binary) | The push-notification-sender binary (JSON lines over stdin/stdout). |
-| `IMPORTER_PUSH_NOTIFICATIONS_PERIOD` | `5` | Seconds between push transmission batches (Julia `PERIOD`). |
-| `IMPORTER_PUSH_NOTIFICATIONS_LOG` | `false` | Dump each sender request/response JSON to stdout (Julia `LOG`). |
-| `PRIMALSERVER_REPORT_NODE_IDX` | `18` | Reporting node identity for the two defaults above (distinct from the firehose node `NODE_IDX`). |
-| `PRIMALSERVER_STORAGE_PATH` | `$PRIMAL_VAR_DIR` | Storage root for the default `IMPORTER_STATS_FILE`. |
-
-Booleans accept `1/true/yes/on` and `0/false/no/off`.
-
-### Phase 1 importer completion (ocaml-plan.md §7)
-
-| JSON key | Default (env for dev tools) | Purpose |
-|---|---|---|
-| `import_listener_enabled` | `false` (`IMPORTER_IMPORT_LISTENER`) | Serve the typed import line protocol (below) that replaces the Julia FirehoseServer `EVAL`/`EXPR` channel for the API's `import_events`. |
-| `import_listener_host` / `import_listener_port` | `0.0.0.0` / `12000+report_node` | Bind address. While the Julia importer node still owns `12000+N`, production uses another port (12118) and the Julia API's `App.IMPORT_EVENTS_LINE_SERVER[] = (host, port)` points at it. |
-| `expire_scores_enabled` | `false` (`IMPORTER_EXPIRE_SCORES`) | Run Julia's `expire_scores` every 60 s (score24h decay via `score_expiry`). Enable only after the Julia node's `CacheStorage.periodic` is stopped (`Main.cache_storage.periodic_task_running[] = false`), otherwise both decrement. |
-| `scheduled_hooks_enabled` | `true` (`IMPORTER_SCHEDULED_HOOKS`) | Run the `scheduled_hooks` drain (hashtag score expiry). Same double-run caveat with the Julia node. |
-| `content_moderation_rules_enabled` | `true` | On mute/allow-list events (kinds 10000, 30000 `mute`/`mutelists`/`allowlist`) of Primal app users, recompute the `cmr_*` tables and notify live-event subscribers (`primal_events`, kind 11000001). |
-| `default_settings_file` | `null` | `content-moderation/default-settings.json`, deep-merged under each user's app settings (Julia `ext_user_get_settings`). |
-| `relay_broadcast_timeout` | `15.0` | Per-relay budget when re-broadcasting a reply's thread parents to the author's relays (Julia `broadcast_reply`). |
-| `poll_vote_import_enabled` | `true` | Julia `DAG.POLL_VOTE_IMPORT_ENABLED` for the per-event poll-stats indexer. |
-| `download_media` | `false` (`IMPORTER_DOWNLOAD_MEDIA`) | Julia `DOWNLOAD_MEDIA`: queue `import_media_pn` + `import_media_fast_pn` processing nodes for every image/video URL of a human author's note (content URLs, `imeta` urls of picture/video events, long-form `image` tags, video `url`/`thumb`/`image` tags), and re-queue a note's media on every reaction to it. On only on the media host, whose jobs daemon (media role) executes the nodes; the node ids are Julia's, so an existing node is reset to pending as `@pnd` did. |
-| `download_previews` | `false` (`IMPORTER_DOWNLOAD_PREVIEWS`) | Julia `DOWNLOAD_PREVIEWS`: queue `import_preview_pn` (link preview) nodes for the other URLs. Media host only. |
-
-Also always on since Phase 1 (no key): `update_user_search` on metadata changes, the ws-importer
-table writes (`live_event_participants` with participant-proof verification, `follow_lists`,
-`zap_receipt_invoices`, `live_event_pubkey_filterlist`, `pg_notify('cache_storage', …)` for live
-events), `add_human_override` on listener imports.
-
-#### Import line protocol (`lib/import_listener.ml`)
-
-Newline-delimited JSON over TCP, one reply line per request line:
-
-```
-["EVENT", "<subid>", {event}]   -> ["OK", "<id hex>", "imported" | "duplicate" | "rejected" | "error"]
-["IMPORT", [{event}, ...]]      -> ["OK", {"imported": n, "duplicates": n, "rejected": n, "errors": n}]
-anything else                   -> ["NOTICE", "unsupported message"]
-```
-
-Each event is signature-verified and imported synchronously (own connection pair, one request at a
-time), then the per-event DAG indexers run (`lib/dag_index.ml`: `basic_tags`, `zap_receipts`,
-`poll_stats`/`poll_user_votes`, `event_mentions`) and, for text notes, the thread root/reply
-targets are re-broadcast to the author's relays (`Relay_broadcast`). This is exactly what the Julia
-`import_events` path remote-evaluated in the importer node, minus the code execution.
-
-
-> **Note on trustrank-gated data.** `og_zap_receipts`, the `replies` stat counter, and the
-> per-event score require trustrank data (`pubkey_trustrank`), which is produced by the
-> separate Julia TrustRankMaker. A bare reference DB has none, so those stay empty even
-> though zap verification itself works — set `IMPORTER_DISABLE_TRUSTRANK=true` to exercise
-> those paths locally.
-
----
-
-## Binaries
-
-Build any of them with `dune build bin/<name>.exe` and run with
-`nix develop "path:$P/../ocaml-common" -c dune exec bin/<name>.exe [args]` (or run the built artifact
-directly: `_build/default/bin/<name>.exe [args]`). `bin/main` takes a required JSON config
-path (see [Configuration](#configuration-json-file)); the dev tools read their DB connection
-and config from the environment variables above.
-
-### `main` — the importer
-
-The production entry point. Takes the JSON config file as its sole argument (see
-[Configuration](#configuration-json-file)). Wires the firehose client, the spam
-detector, the LNURL zapper verifier, the worker-domain pool, the [event syncer](#event-syncer),
-and a periodic scheduled-hooks runner (which claims due `scheduled_hooks` rows in batches with
-`DELETE .. RETURNING`, folding the per-hashtag score decrements together — draining the table in
-one unbounded select/execute/delete could never commit progress once the backlog reached
-millions of rows), then imports forever (reconnecting to the firehose on
-drop). Imports also produce in-DB [notifications](#notifications). It prints a one-line
-per-second stats summary:
-
-```
-[importer <wall-clock> up <uptime>] recv/imp/dup/rej/err rates | q <depth>/<cap> <pct> qw <max queue wait> |
-  busy <n>/<workers> | lnurl <ok>/<fail>/<timeout> per second |
-  zap <verified>/<retried>/<unverified>/<dropped> cumulative | tot <imported> | rss/heap | r=<firehose reconnects>
-```
-
-plus, when any long-lived fiber has been in one non-idle phase for over 30 s, a trailing
-`| STUCK w3:https:tls 45s, …` naming the fiber and phase (workers `w0..wN`, `firehose`,
-`event-syncer`, `sched-hooks`; phases include `spam-check`, `import`, `https:dns/connect/tls/read`,
-`db-reconnect`, `submit`). Eio cannot dump suspended fibers' stacks, so this phase registry
-(`lib/stats.ml`) is the visibility mechanism. Guard rails against the failure modes we've hit:
-LNURL zapper verification runs **off the import critical path** on a dedicated 4-domain pool
-(`lib/zap_verifier.ml`, fibers `zv0..zv3`) with a url→pubkey cache and a per-host circuit
-breaker — import workers enqueue and move on (the bounded queue drops, never blocks, under
-overload). A verification that *fails* is retried rather than dropped: fetch failures, breaker
-cooldowns and a not-yet-imported kind-0 all go on a delayed retry list
-(`retry_backoff = 90/420/1800/5400 s`, capped at `retry_max` pending), because the receipt is
-already stored and nothing downstream would ever revisit it — an uncounted zap is permanent.
-Only an endpoint that answers and disowns the receipt author is final, and only a verified zap
-whose DB apply throws is dropped without retry (re-running the half-applied autocommitted
-statements would double-count sats). Every LNURL fetch is bounded end-to-end (DNS→read, 10 s;
-slow fetches over 5 s are logged), every DB connection gets `statement_timeout = 30s` and
-`application_name = 'primal-ocaml-importer'` (see `Postgres.connect`), and a **stall watchdog**
-exits the process (for systemd's `Restart=always`) if workers are busy but nothing completes for
-180 s, dumping all fiber phases first. The pushgateway fiber also publishes
-`importer_queue_depth`, `importer_busy_workers`, `importer_errors_total` and
-`importer_lnurl_{ok,fail,timeout}_total` and
-`importer_zap_{verified,retry,unverified,dropped}_total` alongside `cache_any`
-(`importer_zap_dropped_total` is the alertable one — those zaps stay uncounted).
-
-During development, don't run this by hand — use `rebuild-restart-importer.sh` (see
-[Development loop](#development-loop)) so a fresh build is always the one running and you can
-watch the live DB.
-
-```sh
-# run the importer with all settings from the JSON file (firehose, workers, DBs, proxy, …)
-nix develop "path:$P/../ocaml-common" -c dune exec bin/main.exe -- $PRIMAL_CONFIG_DIR/primal-importer-config.json
-
-# to change a setting (e.g. explicit firehose port, LNURL proxy, trustrank seeding), edit the JSON
-# file — proxy: "socks5h://<socks-proxy-host>:1080", disable_trustrank: true, firehose_port: 9017 — and
-# restart.
-```
-
-> Writes to the cache DB (`PG*`), which defaults to the reference DB. After live runs
-> against the real firehose, truncate it back to schema-only.
-
-### `compare [window_seconds] [margin_seconds]` — parity check
-
-Diffs recent rows between the **local** cache DB (`PG*`) and a **remote** DB (`COMPARE_*`,
-the Julia importer). Windows on each event's `created_at` in `[now-window, now-margin]`
-(intrinsic and identical across both importers; the margin skips the leading edge where
-one side may still be catching up). Reports per-table local/remote counts plus
-only-local / only-remote / mismatch with sample diffs.
-
-- `window_seconds` — default `3600`
-- `margin_seconds` — default `60`
-
-```sh
-# compare the last 7 minutes (excluding the most recent minute) against primal1
-COMPARE_HOST=<julia-host> COMPARE_DATABASE=primal1 \
-nix develop "path:$P/../ocaml-common" -c dune exec bin/compare.exe 420 60
-```
-
-Tables compared: `events`, `event_stats` (likes…satszapped; score/score24h excluded as
-time-decayed), `pubkey_events`, `event_replies`, `event_pubkey_actions`, `meta_data`,
-`contact_lists`, `og_zap_receipts`, `parametrized_replaceable_events`.
-
-### `zapcheck [N]` — LNURL zapper verification check
-
-Exercises `Lnurl.verify` against the most recent `N` real kind-9735 zap receipts in the DB
-pointed to by `PG*` (point these at a DB that has metadata + zaps, e.g. the Julia box).
-Uses `PRIMALSERVER_PROXY` for egress. Reports how many verified.
-
-- `N` — default `20`
-
-```sh
-PGHOST=<julia-host> PGDATABASE=primal1 \
-PRIMALSERVER_PROXY=socks5h://<socks-proxy-host>:1080 \
-nix develop "path:$P/../ocaml-common" -c dune exec bin/zapcheck.exe 20
-```
-
-### `importcheck [path-to-events.jsonl]` — replay events from a file
-
-Imports events (one JSON event object per line) into the cache DB through the full
-`import_event` path (signature verification on). Reports `imported/total` and the resulting
-`events` row count.
-
-- `path` — default `test/events.jsonl`
-
-```sh
-nix develop "path:$P/../ocaml-common" -c dune exec bin/importcheck.exe /path/to/events.jsonl
-```
-
-### `dbcheck` — adapter smoke test
-
-Connects to the cache DB with the Eio-native PGOCaml adapter and runs `select 1`. No args.
-Use it to confirm DB connectivity / credentials.
-
-```sh
-nix develop "path:$P/../ocaml-common" -c dune exec bin/dbcheck.exe
-```
-
-### `scorecheck` — score_event_cb firing check
-
-Imports a synthetic note and a like from a trusted pubkey and asserts that
-`event_stats.score` / `score24h` / `score_expiry` land. No args. Writes and cleans up test
-rows in the cache DB (verification disabled so synthetic unsigned events are accepted).
-
-```sh
-nix develop "path:$P/../ocaml-common" -c dune exec bin/scorecheck.exe
-```
-
-### `phase8check` — filterlist / scheduled-hook / reporting check
-
-Focused checks: membership→local `filterlist` write/read roundtrip, a due
-`expire_hashtag_score_cb` decrementing a hashtag score, and a whitelisted kind-1984 report
-blocking the reported pubkey/event. No args. Uses the cache DB for both roles and cleans up
-after itself.
-
-```sh
-nix develop "path:$P/../ocaml-common" -c dune exec bin/phase8check.exe
-```
-
----
-
-## Development loop
-
-`rebuild-restart-importer.sh` (repo: `ocaml-importer/`) is the standard way to run `main`
-while developing: it rebuilds everything with dune and, **only if the build succeeds**,
-(re)starts `main.exe` as a transient systemd `--user` service (`primal-ocaml-importer.service`) in
-its own cgroup, replacing any importer already running from this project's binary. The service has
-a 10G `MemoryMax` and auto-restarts on any exit, including an OOM `SIGKILL`. stdout+stderr
-(including the per-second stats line and `event_syncer:` lines) are appended to
-`$PRIMAL_VAR_DIR/ocaml-importer.log` (truncated once at the manual restart, then appended
-across auto-restarts); the pid and the log/status/stop commands are printed to stderr. Inspect or
-stop it with `systemctl --user status|stop primal-ocaml-importer`.
-
-```sh
-./rebuild-restart-importer.sh
-# tail -f $PRIMAL_VAR_DIR/ocaml-importer.log
-```
-
-**Use it after any change to importer code or SQL.** Because `main` writes to the live `primal1`
-DB, keeping a freshly-built `main` always running lets you verify in real time that a change
-produces the right rows — edit, `./rebuild-restart-importer.sh`, then watch the log and query the
-DB (e.g. `event`, `event_stats_1_1b380f4869`, `pubkey_notifications_1_e5459ab9dd`). To change a
-runtime setting (proxy, worker count, sync remotes, …), edit the JSON config file
-(`$PRIMAL_CONFIG_DIR/primal-importer-config.json`, or the path in `$IMPORTER_CONFIG`) and re-run
-the script — `main.exe` reads every setting from that file and does not consult the environment at
-runtime.
-
-## Event syncer
-
-On a timer (`IMPORTER_EVENT_SYNC_INTERVAL`, default 60 s) `main` pulls the most recent events
-from each peer node's `event` table (`IMPORTER_EVENT_SYNC_REMOTES`) and feeds them into the same
-import queue as the firehose, so events any single node missed still land locally. Each cycle the
-lower bound is `min(now, local max created_at) − IMPORTER_EVENT_SYNC_OVERLAP` (default 10 min): a
-fixed lookback behind the newest event already held. Re-importing already-seen events is cheap and
-safe (`store_event` is an atomic `ON CONFLICT` claim, so they count as duplicates), which makes
-the sync self-healing across restarts and firehose gaps. The window query is index-backed
-(`event(created_at)`), and queue backpressure throttles the pull to the workers' import rate.
-Mirrors Julia's `EventSyncer`. Disable with `IMPORTER_EVENT_SYNC=false`.
-
-## Pushgateway
-
-On a timer (`IMPORTER_PUSHGATEWAY_INTERVAL`, default 15 s) `main` POSTs the counter `cache_any` to a
-Prometheus pushgateway under `job=primalnode<report-node>`
-(`http://IMPORTER_PUSHGATEWAY_HOST:IMPORTER_PUSHGATEWAY_PORT/metrics/job/<job>`, default
-`127.0.0.1:9091`), matching the Grafana panel
-`rate(cache_any{exported_job="primalnode18"}[$__rate_interval])`.
-
-`cache_any` is the always-increasing total of imported events. To stay monotonic across the Julia →
-OCaml cutover and across restarts, it is **persisted in the same `stats.json` Julia uses**
-(`src/cache_storage.jl` `load_stats`/`save_stats`; `est.commons.stats[:any]`, surfaced as
-`cache_any` by `App.network_stats`). On startup `main` reads the `"any"` baseline from
-`IMPORTER_STATS_FILE`; each cycle it publishes `baseline + (events imported this session)` and
-writes that total back to the file (atomic tmp + rename, other keys preserved verbatim). Reloading
-our own last write as the next baseline means restarts neither reset nor double-count. Because it is
-a monotonic counter, Prometheus derives the import rate via `rate()`.
-
-The **reporting node** (`PRIMALSERVER_REPORT_NODE_IDX`, default 18) is intentionally separate from
-the **firehose node** (`NODE_IDX`, default 17): on this box only the node-17 firehose (port 9017)
-exists, but the importer replaces the production node-18 Julia importer, so its metrics/stats are
-published as node 18.
-
-Pushes and file writes are best-effort — a failure (gateway down/timeout, unwritable file) is
-logged and skipped, never fatal (Julia uses `retry=false` under `errormonitor`). Mirrors Julia's
-`PushGatewayExporter.set!` (`src/pushgateway_exporter.jl`). Disable with `IMPORTER_PUSHGATEWAY=false`.
+Every setting comes from the JSON file; the environment is not read. A config error exits 2.
+
+- **Supervision:** run it with automatic restart (systemd `Restart=always`). Two watchdogs exit 1
+  after dumping every fiber's phase:
+  - workers are busy but no job has completed for 180 s;
+  - all four zap verifiers have been stuck for 600 s (e.g. a DNS lookup that never returns).
+- **Shutdown:** there is no signal handler; SIGTERM ends the process at once. The worker queue,
+  pending zap retries and unsent pushes are lost. On start, the event syncer re-pulls from peers
+  starting `event_sync_overlap` seconds before the local maximum `imported_at`; re-imports count
+  as duplicates.
+- **Logs:** stdout/stderr. One status line per second:
+  `recv/imp/dup/rej/err` per second, queue depth and max queue wait, busy workers, LNURL ok/fail/timeout,
+  zap verified/retry/unverified/dropped (cumulative), pushes sent, total imported, RSS/heap,
+  firehose reconnects. A `STUCK` suffix names fibers that have been in one non-idle phase over 30 s
+  (`w0..`, `zv0..`, `firehose`, `event-syncer`, `backfill`, `sched-hooks`).
+- **No admin port.** Metrics go to a Prometheus pushgateway.
+- **DB connections:** each fiber or domain that queries has its own cache-DB and membership-DB
+  connections. Each connection has `statement_timeout = 30s` and
+  `application_name = 'primal-ocaml-importer'`. On a lost connection a fiber retries every 2 s. The
+  job that hit the error is not retried; the event syncer brings it back if a peer imported it.
+
+Fibers and domains:
+
+| | Does |
+|---|---|
+| firehose reader | Connects to `firehose_host:firehose_port` and sends `STREAM-NEW-EVENTS\n`. It reads lines `[ts, {"relay": ..}, ["EVENT", subid, event]]` onto the worker queue and reconnects 1 s after EOF or an empty line. |
+| `num_workers` domains | Take jobs from a queue of `queue_capacity`. A full queue blocks the producer; nothing is dropped. Each runs the spam detector on firehose lines, then `import_event`. |
+| 4 zap-verifier domains | LNURL verification of zap receipts, off the import path. |
+| event syncer / backfill | Feed peer events into the same queue. |
+| hooks loop, every 60 s | Due `scheduled_hooks`, then `expire_scores`. |
+| import listener | Synchronous imports for the API. |
+| push sender / push intake | Device push notifications. |
+| pushgateway, reporter | Metrics; the status line and stall watchdog. |
+
+## Import pipeline
+
+`import_event`:
+
+1. **Gates.** A failure counts as `rejected`:
+   - with `verification_enabled`: `created_at` < now + 300 and a valid BIP340 signature;
+   - not in `deleted_events`;
+   - an accepted kind;
+   - the author not import-blocked in the filterlist.
+
+   Unparsable firehose lines and lines over 2,000,000 bytes are rejected too.
+2. **Claim.** `insert into event ... on conflict (id) do nothing returning id`. If no row comes
+   back the event is a `duplicate` and nothing else runs, so side effects happen once across
+   workers.
+3. **Common writes:**
+   - `event_created_at`;
+   - for a new pubkey: `pubkey_ids`, `pubkey_followers_cnt` and `pubkey_zapped` (zero rows), and
+     `pubkey_trustrank` = 1.0 if `disable_trustrank`;
+   - `pubkey_events` (with `is_reply`) for kinds 1, 6, 20, 1068, 6969, 34235 and 34236;
+   - an `event_stats` row for the note kinds 1, 20, 1068, 1111, 6969, 30023, 34235 and 34236.
+4. **Per-kind dispatch** (below).
+5. **Replaceable events:** kinds 10000–19999 go to `replaceable_events`; 30000–39999 with a `d` tag
+   go to `parametrized_replaceable_events`.
+6. **Deferred hooks:** this event's `event_hooks` rows run, then are deleted.
+
+Steps 4–6 log exceptions (`import_event: <step>: ...`). The event stays imported and isn't retried.
+
+**Accepted kinds:** 0–7, 20, 1018, 1068, 1111, 1311, 1984, 6969, 9735, 9802, 10000–19999, and
+30000–39999 except 30382/30383. Kinds without a branch below are only stored.
+
+The SQL writes the version-hashed base tables (e.g. `event_stats_1_1b380f4869` behind the view
+`event_stats`); the names here are the logical ones.
+
+| Kind | Handling |
+|---|---|
+| 0 metadata | If newer: `meta_data`, `user_search` (human authors; `to_tsvector('simple', ..)` per name field), `pubkey_ln_address` from `lud16`. |
+| 3 contacts | If newer: `contact_lists` and the change in `pubkey_followers`. For a trusted author, also `pubkey_followers_cnt` and NEW_USER_FOLLOWED_YOU. Always: the author's relays (kind-10002 `r` tags, else the contact list's relay map) are upserted into `fetcher_relays`. |
+| 1, 20, 1068, 6969, 1111 | Spam content-hash check. Mentioned events get a YOUR_POST_WAS_MENTIONED_IN_POST hook and, if the note isn't hidden, `reposts` +1 and a repost score. Media queueing. Hashtags (kind 1, human authors): `event_hashtags`, `hashtags.score` +1, and a scheduled −1 after 4 h. For a reply: the parent is the last `reply`-marked `e`/`a` tag, else the first `root`, else the last unmarked one. It writes `event_replies`, `event_pubkey_actions.replied`, `event_thread_parents`, the parent's `replies` (trusted author, not hidden) and a reply score. Then the reply notifications. |
+| 4 DM | Unless the sender is hidden: `pubkey_directmsgs`, and upserts of `pubkey_directmsgs_cnt` for `(receiver, NULL)` and `(receiver, sender)` (needs the unique index `(receiver, sender) NULLS NOT DISTINCT`). NEW_DIRECT_MESSAGE. |
+| 5 deletion | `e` tags of the author's own events: `deleted_events` and a delete from `event`. For a repost, `reposted`, its action ref and `reposts` are reverted. `a` tags: the addressed event and its `parametrized_replaceable_events` row, and for 30023 its `reads`/`reads_versions` rows. |
+| 6 repost | First `e` tag: `reposts` +1 (not hidden), `event_pubkey_actions.reposted`, repost score, YOUR_POST_WAS_REPOSTED. |
+| 7 reaction | Each `e` tag. Content empty or starting with `+`, 🤙 or ❤ counts as a like: `likes` +1 (not hidden), `event_pubkey_actions.liked`, like score, and the target's media re-queued. YOUR_POST_WAS_LIKED for any reaction. |
+| 9735 zap | `zap_receipt_invoices` (needs receiver, sender and a bolt11). The amount comes from the `lnbc` bolt11; it must be positive and ≤ 1,100,000 sats, with `description` and `p` tags. After verification: `zaps` +1, `event_pubkey_actions.zapped`, zap score. If the sender (the description's pubkey) is human, also `satszapped`, `og_zap_receipts`, YOUR_POST_WAS_ZAPPED and `pubkey_zapped`. |
+| 9802 highlight | YOUR_POST_WAS_HIGHLIGHTED on each `e`/`a` target. |
+| 1984 report | With `import_reporting`, from a `reporting_whitelist` pubkey: `spam`/`impersonation` `p` and `e` tags (and the reported event's author) are blocked in the membership filterlist. |
+| 10000 mute list | `mute_list`; content-moderation rules. |
+| 10002 relays | `relay_list_metadata` if newer; `fetcher_relays`. |
+| 10003 bookmarks | If newer: `bookmarks`, `pubkey_bookmarks`; YOUR_POST_WAS_BOOKMARKED for new `e` tags. |
+| 10555 | `live_event_pubkey_filterlist` replaced. |
+| 30000 lists | `d` = `mute` → `mute_list_2`, `mutelists` → `mute_lists`, `allowlist` → `allow_list` (each followed by content-moderation rules); any other `d` → `parameterized_replaceable_list`. |
+| 30023 long-form | Media queueing (content URLs, `image` tags). |
+| 30311 live event | Status `live`: the hosts (`p` tags with role `host`, participant proof valid or absent) replace `live_event_participants`; `ended`: removed. Then `pg_notify('cache_storage', {"type":"live_event",..})`. |
+| 34235/34236 video | Media queueing (content, `imeta` urls, `url`/`thumb`/`image` tags). |
+| 39089 follow pack | `follow_lists` for the `d` identifier, replaced. |
+
+- **Mentions** come from kinds 1, 6 and 30023: `#[n]` references, `e`/`a` tags marked `mention`
+  (an `a` resolves to the current event), and NIP-19 references in the content.
+- **Hidden** means spam-blocked in the cache DB's `filterlist`. Blocks are written to the
+  membership DB's filterlist.
+- **Human:** the membership `human_override` row if there is one, else `pubkey_trustrank.rank` above
+  the threshold. The threshold is `humaness_threshold`, or computed at startup as the rank of the
+  50,000th-ranked pubkey (0.0 if the table is empty) and logged.
+- **Trusted:** rank > 0. It gates follower counts, `replies` and notification counters.
+
+`pubkey_trustrank` comes from the jobs daemon's TrustRank; on a DB without it, set
+`disable_trustrank`.
+
+**Deferred hooks and scores.** Stat bumps, scores and notifications for an event not stored yet
+wait in `event_hooks` (`event_stats_cb`, `score_event_cb`, `notifications_cb`) until it arrives.
+
+`score_event_cb`: base like 1, repost 7, zap 5, reply 1/5/10 by the scored event's content length
+(≤ 20, ≤ 100, longer); increment `1e10 * base / 91` for a human initiator, else 0, and 0 if the
+initiator already has more than one action of that kind on the event. A positive increment adds to
+`score`; an engagement under 24 h old also adds to `score24h` with a `score_expiry` row due 24 h
+after it.
+
+The hooks loop runs two jobs; exactly one importer per cache DB may enable each.
+`expire_scores_enabled` subtracts the due `score_expiry` sums from `score24h` and deletes those
+rows. `scheduled_hooks_enabled` claims due `scheduled_hooks` with `DELETE .. RETURNING` (20,000 per
+batch, up to 50 batches per round) and sums the hashtag decrements (`expire_hashtag_score_cb`, the
+only kind) per hashtag.
+
+**Spam detection** (firehose lines only; the event is imported either way) clusters signed kind-1
+notes of 3+ words by authors with under 50 followers: over 90% shared words and a word count within
+10%. Every 1200 s the authors of clusters with ≥ 10 notes are blocked as spam in the membership
+filterlist. A note that matches such a cluster is blocked at once, its author too (flushed at most
+every 10 s), and its content SHA-256 goes into `spam_note_content_hash`. A later kind-1 note with a
+stored hash gets its author blocked, unless the author is unblocked or has 50+ followers.
+
+**Media queueing** happens only with `download_media` / `download_previews`, on the host where the
+jobs daemon's media role runs. It covers content URLs of authors with rank > 0 or a human
+override, and inserts a pending `processing_nodes` row (an existing node is reset to pending):
+
+| URL | Nodes |
+|---|---|
+| image: `.png .gif .jpg .jpeg .webp` | `import_media_pn` (all variants), `import_media_fast_pn` |
+| video: `.mp4 .mov .3gp` | `import_media_pn` (original), `import_media_fast_pn` |
+| other (`download_previews`) | `import_preview_pn` |
+
+## Zap verification
+
+Receipts by `trusted_zappers`, and all receipts when `verify_zappers` is false, are applied
+immediately. The rest go to a queue of 2,048 (new jobs are dropped at 2,000) for the four verifier
+domains:
+
+- **Check:** the URL comes from the zapped user's kind-0 (`lud16` `name@domain` →
+  `https://domain/.well-known/lnurlp/name`, else `lud06`). It is fetched through `proxy` (SOCKS5,
+  the proxy resolves the host), 10 s limit, fetches over 5 s logged. Verified if the response's
+  `nostrPubkey` is the receipt's author.
+- **Cache:** answers 1 h, failures and answers without a pubkey 10 min; a host is skipped for 5 min
+  after 3 consecutive failures.
+- **Outcomes:** deferred (no kind-0 yet, fetch failed, host skipped) is retried after 90 s, 7 min,
+  30 min and 90 min (at most 20,000 pending); a wrong or missing pubkey is final; a verified zap
+  whose DB writes fail is dropped, never retried, so nothing counts twice. Give-ups count in
+  `importer_zap_dropped_total`.
 
 ## Notifications
 
-Imports produce in-DB notifications, mirroring Julia `notification` / `notifications_cb` /
-`import_reply_notifications` (`src/cache_storage_ext.jl`, `src/notifications.jl`):
+Notifications are stored in `pubkey_notifications`. `pubkey_notification_cnts.type<N>` is bumped
+when the recipient and every pubkey argument are trusted; a type without a column is logged.
 
-- Rows land in `pubkey_notifications_1_e5459ab9dd` (per-type counters in
-  `pubkey_notification_cnts_1_d78f6fcade`, bumped only for trusted users).
-- Types wired: follow (`NEW_USER_FOLLOWED_YOU`), reactions (`YOUR_POST_WAS_LIKED`), reposts,
-  zaps, replies + reply-to-reply + mentions (via `import_reply_notifications`, including thread
-  chains from `thread_view_parent_posts`), post-mentioned-in-post, highlights, bookmarks, and
-  DMs. Deferred types fire through the `Notifications_cb` event hook once the referenced post is
-  present.
-- Gating reproduces the full Julia `notification()` filter set. Always-on: skip self-notifications
-  and references to hidden events, drop `USER_UNFOLLOWED_YOU`. The **serving-layer gates** —
-  recipient must be a Primal app user (`app_settings`), `notification_settings` per-type enable,
-  mute-list (event/pubkey/hashtag/word), hellthread mention cap, and the
-  `only_show_*_from_users_i_follow` / `include_deep_replies` settings (via `app_settings` +
-  `pubkey_followers`) — read tables that live only in the membership DB. They are queried **raw**
-  (`Postgres.query`, not `[%pgsql]`, since `app_settings` is absent from primal1) and the whole set
-  is **gated on `app_settings` being present** in the membership connection, detected once at
-  startup (`init_notification_gating`; the banner logs `gates ON/OFF`). The dev shell points
-  `mem_dbh` at the real membership DB (`PGMEMBERSHIP*` in `flake.nix`), so the gates are **ON** by
-  default and notifications track the Julia importer (the recipient gate alone collapses repost
-  notifications from ~12× the Julia rate down to ~1×). Pointed at primal1 instead (no
-  `app_settings`), the gates go inert and the importer over-generates (notifications for every
-  recipient, not just app users).
-- **Side effect:** with `mem_dbh` on the real membership DB, the spam detector writes its
-  `filterlist` blocks (comment-tagged `spam-detector: …`) and `import_reporting` writes there too —
-  i.e. the importer contributes to the production membership filterlist, as the Julia importer does.
-- **Push notifications** (`lib/push_notifications.ml`) port the Julia `PushNotifications` module
-  (`primal-net-server/src/push_notifications.jl`): every stored, non-blocked notification is (when
-  `push_notifications_enabled`) rendered into a device push — per-user `pushNotifications`
-  settings (membership `app_settings`, defaults all-true), display names/avatars from kind-0
-  metadata (`mdpubkey`, with the membership `filterlist` block check and cached-media image
-  upgrade), event summaries with `nostr:`/`#[i]` refs resolved and URLs stripped, content images
-  via `video_thumbnails`/`media`, and one payload per device token from membership
-  `notification_tokens`. A main-domain fiber owns the **sender subprocess**
-  (`push_notification_sender_bin`, the Rust push-notification-sender speaking JSON lines): every
-  `push_notifications_period` seconds it drains the cross-domain buffer, batches by 50, groups by
-  platform, sends, and logs both directions to `t_push_notifications_log`. When idle it pings the
-  sender (`{"type":"ping"}`) and respawns it on failure (replacing Julia's blind
-  restart-if-quiet-for-180s monitor). Send metrics (`push_notification_latest`,
-  `push_notification_sent`) are published by the pushgateway fiber inside the importer's job
-  group (first published after the first send), so Julia-era queries like
-  `time() - push_notification_latest` keep working unchanged.
-  The Julia TCP intake (`PushNotifications.PORT`, 20000+N) is `lib/push_intake.ml`, listening on
-  each of `push_intake_ports` at `push_intake_host` (`[]` = off; only with push notifications on):
-  one JSON object per line from the wallet server, logged to `t_push_notifications_log`, and its
-  `"wallet-transaction"` type rendered as Julia did (sats received / payment received /
-  transaction confirmed, the `WALLET_TRANSACTIONS` setting, the
-  `show_wallet_push_notifications_above_sats` threshold, the follows-only rule) into the same
-  buffer. Token registration is native in the API (`update_push_notification_token`).
+Types: NEW_USER_FOLLOWED_YOU, YOUR_POST_WAS_ZAPPED / LIKED / REPOSTED / REPLIED_TO /
+MENTIONED_IN_POST / HIGHLIGHTED / BOOKMARKED, YOU_WERE_MENTIONED_IN_POST, REPLY_TO_REPLY and
+NEW_DIRECT_MESSAGE.
 
----
+**Always dropped:** USER_UNFOLLOWED_YOU, self-notifications, a hidden event argument, a non-human
+initiator. **Recipient gates**, on when the membership DB has `app_settings` (checked at startup,
+logged as gates ON/OFF), drop it when:
 
-## Notes
+- the recipient isn't an app user;
+- a mention's event mentions over 10 pubkeys (`ignore_events_with_too_many_mentions`, default on);
+- the recipient's kind-10000 mute list matches (`e`, `p`, `t`, `word`);
+- `notificationsAdditional` says so: `only_show_reactions_from_users_i_follow` (default off),
+  `only_show_dm_notifications_from_users_i_follow` (default on), `include_deep_replies` (default
+  on, for REPLY_TO_REPLY);
+- `notification_settings.enabled = false` for the type.
 
-- `main`, `importcheck`, `scorecheck`, and `phase8check` **write** to the cache DB, which by
-  default (`PGDATABASE`) is now the **live `primal1` DB**. Point `PG*` at the reference DB
-  (`primal_importer_ref`) for test runs you don't want landing in the live DB, then reset it
-  with `sql/refdb-truncate.sh` (see *Resetting the reference DB to schema-only* above).
-- The unit tests (`dune test`) cover pure logic only (NIP-01 event id, BIP340 schnorr,
-  bech32 lud06 / NIP-19, real-event vectors) and need no database beyond the compile-time
-  schema check.
+**Replies** (notes and comments):
+
+- the parent's author gets YOUR_POST_WAS_REPLIED_TO;
+- each `p` mention gets YOU_WERE_MENTIONED_IN_POST;
+- REPLY_TO_REPLY goes to the ancestors' authors (thread chain from `thread_view_parent_posts`, 3–15
+  events) and to the pubkeys the ancestors mention (2–15 events), skipping pubkeys this event has
+  already notified.
+
+**Device push** (`push_notifications_enabled`): each notification that passes the gates is logged
+to `t_push_notifications_log` and, unless over 30 min old, rendered according to the recipient's
+`pushNotifications` settings (NEW_FOLLOWS, ZAPS, REACTIONS, REPOSTS, REPLIES, MENTIONS,
+DIRECT_MESSAGES; default on). A push whose initiator is filterlist-blocked or has no kind-0 name is
+dropped. One payload is queued per membership `notification_tokens` row.
+
+A fiber runs `push_notification_sender_bin` (JSON lines on stdin/stdout). Every
+`push_notifications_period` seconds it sends the queue in chunks of 50 per platform
+(`{"type":"push_notifications","platform":..,"notifications":[..]}`), waits up to 10 s per response
+and logs it as `notification_result`; after 60 s idle it sends `{"type":"ping"}`. Any failure
+respawns the sender after 1 s and loses the batch in flight. `push_notifications_log` echoes the
+traffic to stdout.
+
+**Push intake** (with push on and `push_intake_ports` non-empty) listens on each port at
+`push_intake_host` for one JSON object per line, with no reply. Each line is logged to
+`t_push_notifications_log`; lines over 30 min old are dropped. Only `wallet-transaction` is
+handled (`pubkey`, `created_at`, `amount_sats`, `tx_network`, `tx_state`, `tx_type`, `note`, optional
+counterparty `pubkey_2`), as "N sats received", "Payment received" or "Transaction confirmed". It
+is sent if:
+
+- the receiver's `WALLET_TRANSACTIONS` push setting is on;
+- the amount is above `show_wallet_push_notifications_above_sats` (the user's, else
+  `default_settings_file`'s, else 1);
+- the follows-only option allows the counterparty.
+
+**Content moderation rules** (`content_moderation_rules_enabled`): when an app user changes a kind
+10000 list or a kind 30000 `mute`/`mutelists`/`allowlist` list:
+
+- their `cmr_*` tables are recomputed (`Cmr` in ocaml-common) from their settings, merged over
+  `default_settings_file` (re-read when its mtime changes);
+- each live event they host gets a kind 11000001 `a`-tag event on `pg_notify('primal_events', ..)`.
+
+## Import listener
+
+With `import_listener_enabled`: newline-delimited JSON over TCP, one reply per line.
+
+```
+["EVENT", "<subid>", {event}]  -> ["OK", "<id hex>", "imported" | "duplicate" | "rejected" | "error"]
+["IMPORT", [{event}, ...]]     -> ["OK", {"imported": n, "duplicates": n, "rejected": n, "errors": n}]
+anything else                  -> ["NOTICE", "unsupported message" | "invalid event" | "invalid json"]
+```
+
+Requests are served one at a time. For each event:
+
+1. `human_override` upsert (source `import_events`) in the membership DB;
+2. `import_event`;
+3. the per-event DAG indexers (`lib/dag_index.ml`):
+   - `basic_tags`, plus `reads_interactions` for kind 1/6/7 `e` tags on stored article versions;
+   - `zap_receipts`;
+   - `poll_stats`/`poll_user_votes` (with `poll_vote_import_enabled`);
+   - `event_mentions`;
+4. for kind 1, the `root`/`reply` targets are sent in the background to the author's relays,
+   through `proxy`, with `relay_broadcast_timeout` per relay.
+
+## Event syncer
+
+With `event_sync_enabled`, the syncer pulls each peer in `event_sync_remotes` (its connection is
+`cache_db` with that host) by `imported_at`:
+
+- It starts at min(now, local max `imported_at`) − `event_sync_overlap`, then follows each peer's
+  highest `imported_at` seen; up to 200,000 rows per pull.
+- A cycle's events are queued in `created_at` order (parents first). The next cycle comes after
+  1 s if a pull was full, else after `event_sync_interval`. A failing peer is reconnected next
+  cycle.
+- Synced events skip signature verification and the spam detector.
+
+`event_sync_backfill` (normally `null`) replays one peer's rows with `imported_at` in
+`[from_ts, to_ts)`, in pages of `batch` keyed on `(imported_at, id)`. Each page waits for the queue
+to be under half full, and the cursor is saved to `state_file` after each, so a restart resumes;
+errors retry after 30 s. After `backfill: done`, set the key back to `null`.
+
+## Metrics
+
+Every `pushgateway_interval` seconds the importer POSTs to `/metrics/job/<pushgateway_job>`:
+
+| Metric | |
+|---|---|
+| `cache_any` (counter) | Events imported, ever: the `"any"` value of `pushgateway_stats_file` at start plus this run's imports, written back each cycle (atomically, other keys kept), so restarts don't reset it. |
+| `importer_queue_depth`, `importer_busy_workers` | Gauges. |
+| `importer_errors_total` | Exceptions while processing jobs. |
+| `importer_lnurl_{ok,fail,timeout}_total` | LNURL fetches. |
+| `importer_zap_{verified,retry,unverified,dropped}_total` | `dropped`: zaps that stay uncounted. |
+| `push_notification_latest`, `push_notification_sent` | After the first push; `sent` counts since the previous POST. |
+| `notification_latest` | Time of the last stored notification (after the first). |
+
+Push and file errors are logged and skipped.
+
+## Configuration
+
+One JSON object. **Every key is required**; *nullable* keys take `null`. Unknown keys are
+ignored. Pubkeys are 64-char hex; entries that don't decode are dropped. In parentheses: the
+values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `firehose_host`, `firehose_port` | string, int | The fetcher's firehose. |
+| `num_workers`, `queue_capacity` | int | Worker domains (4); worker queue size (10000). |
+| `verification_enabled` | bool | Check `created_at` and signatures (firehose and listener). |
+| `cache_db`, `membership_db` | object | `{host, port, user, database}`; no password key. |
+| `proxy` | string, nullable | SOCKS5 for LNURL and relay broadcasts: `socks5h://h:p`, `socks5://h:p` or `h:p`. Ignored without a valid port. |
+| `verify_zappers` | bool | LNURL-verify zap receipts. |
+| `trusted_zappers` | pubkey[] | Receipt authors that skip verification. |
+| `disable_trustrank` | bool | New pubkeys get rank 1.0 (everyone human). |
+| `humaness_threshold` | number, nullable | Fixed threshold; `null` = computed at startup. |
+| `import_reporting`, `reporting_whitelist` | bool, pubkey[] | Act on kind-1984 reports from these pubkeys. |
+| `download_media`, `download_previews` | bool | Queue media / preview processing nodes. |
+| `event_sync_enabled`, `event_sync_remotes` | bool, string[] | Event syncer; peer cache-DB hosts. |
+| `event_sync_interval`, `event_sync_overlap` | number, int | Seconds between cycles (60); initial lookback (600). |
+| `event_sync_backfill` | object, nullable | `{remote, from_ts, to_ts, batch, state_file}`. |
+| `scheduled_hooks_enabled`, `expire_scores_enabled` | bool | One importer per cache DB. |
+| `content_moderation_rules_enabled` | bool | Recompute `cmr_*` on list changes. |
+| `default_settings_file` | string, nullable | The app's `default-settings.json`. |
+| `import_listener_enabled`, `import_listener_host`, `import_listener_port` | bool, string, int | Host `0.0.0.0`, `127.0.0.1`/`localhost` or an IP. |
+| `relay_broadcast_timeout` | number | Seconds per relay (15). |
+| `poll_vote_import_enabled` | bool | Poll indexers in the listener. |
+| `push_notifications_enabled` | bool | Device push. |
+| `push_notification_sender_bin` | string | The push-notification-sender binary. |
+| `push_notifications_period`, `push_notifications_log` | number, bool | Seconds between batches (5); echo the sender traffic. |
+| `push_intake_host`, `push_intake_ports` | string, int[] | Intake listeners; `[]` = off. |
+| `pushgateway_enabled`, `pushgateway_host`, `pushgateway_port` | bool, string, int | |
+| `pushgateway_job` | string | `job` label (`exported_job` in Prometheus). |
+| `pushgateway_stats_file` | string | JSON file holding the `cache_any` total. |
+| `pushgateway_interval` | number | Seconds (15). |
+
+## Layout
+
+- `bin/main.ml`: the daemon (config, fibers, reconnects). The other `bin/` files are dev tools.
+- `lib/cache_storage.ml`: `import_event`, per-kind dispatch, event and scheduled hooks,
+  `expire_scores`. `lib/cache_storage_ext.ml`: what dispatch calls (humanness, mentions, hashtags,
+  media, zaps, scores, notifications and gates, reports, live events, lists, moderation rules).
+- `lib/config.ml`, `firehose_client.ml`, `dag_index.ml`, `import_listener.ml`, `event_syncer.ml`,
+  `spam_detection.ml`, `zap_verifier.ml`, `lnurl.ml`, `push_notifications.ml`, `push_intake.ml`,
+  `pushgateway_run.ml`: the parts named above. `lib/stats.ml`: counters, status line, watchdog.
+- `sql/`: scratch-DB scripts. `test/events.jsonl`: sample events.
+
+## Build and test
+
+One dune workspace for the repo (`_build/` at its root), built from `ocaml-common`'s flake:
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+nix develop path:$PWD/ocaml-common -c dune build @all       # fails on any [%pgsql] mismatch
+nix develop path:$PWD/ocaml-common -c dune build ocaml-importer/bin/main.exe
+nix develop path:$PWD/ocaml-common -c dune test             # workspace tests; none in ocaml-importer
+```
+
+- **`[%pgsql]` checks** need a DB with the cache schema at `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`.
+  Build one from `ocaml-common/schema/cache.sql` and `ocaml-common/sql/migrate.sh` (see
+  `ocaml-common/schema/README.md`). A query that needs a new table, column or unique index needs
+  its migration applied there first.
+- **Membership tables** (`app_settings`, `notification_settings`, `notification_tokens`) are read
+  with raw `Postgres.query`, so they are unchecked.
+- **Tests:** `ocaml-importer` has no unit tests; `dune test` covers ocaml-common's shared modules.
+
+**Dev tools.** They connect with `PG*` and use that DB for the membership tables too, except
+`zapbackfill`, which takes the cache-DB host as an argument and the membership DB from
+`PGMEMBERSHIP*`. `importcheck`, `scorecheck`, `phase8check` and `zapbackfill` (without `-n`) write.
+
+| Tool | |
+|---|---|
+| `dbcheck` | Connect, `select 1`. |
+| `importcheck [file.jsonl]` | Imports one event per line (default `test/events.jsonl`); prints counts. |
+| `scorecheck` | Synthetic note and like from a trusted pubkey; checks `score`, `score24h`, `score_expiry`; cleans up. |
+| `phase8check` | Filterlist write/read, a due hashtag-expiry hook, a whitelisted report; cleans up. |
+| `zapcheck [N]` | LNURL-verifies the last N zap receipts in the DB; proxy from `PRIMALSERVER_PROXY`. |
+| `zapbackfill <host> <from> <to> [-n] [-e]` | Re-applies zap effects for receipts imported in a window. It skips receipts already in `og_zap_receipts`. `-n`: dry run; `-e`: only receipts that dedup can decide. Read the header first: replays can double-count. |
+| `lnurlprobe [rounds] [url ...]` | Times the DNS, connect, TLS, write and read phases of an LNURL fetch. |
+| `compare [window] [margin]` | Diffs recent rows per table between the `PG*` DB and `COMPARE_*`. |
+
+A scratch cache DB for these tools is made from `ocaml-common/schema/cache.sql` (`selfhost/primal.sh init`
+creates one).
