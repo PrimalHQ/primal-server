@@ -59,6 +59,29 @@ let resolve ~net ~clock ~sw ~host ~port : Eio.Net.Sockaddr.stream =
               `Tcp (eip, port)
           | Error (`Msg m) -> failwith (Printf.sprintf "http: cannot resolve %s:%d: %s" host port m)))
 
+(* Whether [ip] is a public unicast address, for connections whose target comes from untrusted
+   input. IPv4: not unspecified, private (RFC 1918), CGNAT, loopback, link-local, IETF/benchmark/
+   documentation, multicast or reserved. IPv6: only global unicast (2000::/3) outside documentation;
+   loopback, unique-local, link-local and v4-mapped addresses are all outside it. *)
+let is_public_ip (ip : Eio.Net.Ipaddr.v4v6) : bool =
+  let s = (ip :> string) in
+  let b i = Char.code s.[i] in
+  match String.length s with
+  | 4 ->
+      let a = b 0 and c = b 1 and d = b 2 in
+      not
+        (a = 0 || a = 10 || a = 127 || a >= 224
+        || (a = 100 && c land 0xc0 = 64)
+        || (a = 169 && c = 254)
+        || (a = 172 && c land 0xf0 = 16)
+        || (a = 192 && c = 168)
+        || (a = 192 && c = 0 && (d = 0 || d = 2))
+        || (a = 198 && c land 0xfe = 18)
+        || (a = 198 && c = 51 && d = 100)
+        || (a = 203 && c = 0 && d = 113))
+  | 16 -> b 0 land 0xe0 = 0x20 && not (b 0 = 0x20 && b 1 = 0x01 && b 2 = 0x0d && b 3 = 0xb8)
+  | _ -> false
+
 (* De-chunk an HTTP/1.1 chunked body. *)
 let dechunk (s : string) : string =
   let buf = Buffer.create (String.length s) in

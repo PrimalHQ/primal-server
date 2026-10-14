@@ -24,14 +24,46 @@ let url_ext (u : string) : string =
 
 (* {1 HTTP} *)
 
-(* one GET/HEAD over Http's connection helpers with a large body cap and redirects *)
+(* [host] is [domain] or one of its subdomains: a match on the parsed host, never a substring of
+   the URL (a query string could supply that), and only for plain hostname characters. *)
+let host_under (domains : string list) (host : string) : bool =
+  let h = String.lowercase_ascii host in
+  h <> ""
+  && String.for_all (function 'a' .. 'z' | '0' .. '9' | '.' | '-' -> true | _ -> false) h
+  && List.exists (fun d -> h = d || String.ends_with ~suffix:("." ^ d) h) domains
+
+(* Primal's own hosts: downloads from them go direct first (no proxy), and they and the nodes get
+   the long timeout *)
+let direct_domains = [ "primal.net" ]
+let long_timeout_domains = [ "primal.net"; "primalnode.net" ]
+let url_host_under (domains : string list) (url : string) : bool = match Http.parse_url url with Some u -> host_under domains u.Http.host | None -> false
+
+exception Refused of string
+
+(* The connection for one request. A direct one to a host that is not Primal's (no proxies
+   configured, or a redirect away from a Primal host) must resolve to a public address, which is
+   then the one connected to: the URL and every Location come from untrusted input, and the media
+   host sits on the internal network. *)
+let connect (ctx : Procgraph.ctx) ~sw ~proxy (u : Http.url) : Http.conn =
+  match proxy with
+  | None when not (host_under direct_domains u.host) -> (
+      Phases.phase "https:dns";
+      match Http.resolve ~net:ctx.net ~clock:ctx.clock ~sw ~host:u.host ~port:u.port with
+      | `Tcp (ip, _) as addr when Http.is_public_ip ip ->
+          Phases.phase "https:connect";
+          (Eio.Net.connect ~sw ctx.net addr :> Http.conn)
+      | _ -> raise (Refused (Printf.sprintf "%s: not a public address" u.host)))
+  | _ -> Http.two_way_of_proxy ~sw ~net:ctx.net ~clock:ctx.clock ~proxy ~host:u.host ~port:u.port
+
+(* one GET/HEAD over Http's connection helpers with a large body cap and redirects; raises
+   [Refused] for a hop [connect] refuses *)
 let fetch (ctx : Procgraph.ctx) ?proxy ~(timeout : float) ~(meth : string) ?(headers = []) ?(max_body = max_download) (url : string) : Http.response option =
   let one (u : Http.url) : Http.response option =
     try
       Switch.run @@ fun sw ->
       match
         Eio.Time.with_timeout ctx.clock timeout (fun () ->
-            let tcp = Http.two_way_of_proxy ~sw ~net:ctx.net ~clock:ctx.clock ~proxy ~host:u.host ~port:u.port in
+            let tcp = connect ctx ~sw ~proxy u in
             let flow = if u.scheme = "https" then Http.tls_wrap ~host:u.host tcp else (tcp :> Eio.Flow.two_way_ty r) in
             let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("User-Agent", user_agent) :: headers in
             let req = Printf.sprintf "%s %s HTTP/1.1\r\n%s\r\n" meth u.path (String.concat "" (List.map (fun (k, v) -> k ^ ": " ^ v ^ "\r\n") hdrs)) in
@@ -42,7 +74,7 @@ let fetch (ctx : Procgraph.ctx) ?proxy ~(timeout : float) ~(meth : string) ?(hea
       | Ok r -> Some r
       | Error `Timeout -> None
     with
-    | Eio.Cancel.Cancelled _ as e -> raise e
+    | (Eio.Cancel.Cancelled _ | Refused _) as e -> raise e
     | _ -> None
   in
   let rec go url n =
@@ -58,34 +90,37 @@ let fetch (ctx : Procgraph.ctx) ?proxy ~(timeout : float) ~(meth : string) ?(hea
 let shuffle (l : 'a list) : 'a list = let a = Array.of_list l in let n = Array.length a in for i = n - 1 downto 1 do let j = Random.int (i + 1) in let t = a.(i) in a.(i) <- a.(j); a.(j) <- t done; Array.to_list a
 
 (* Media.download: the requested proxy, or the configured proxies in random order (direct first
-   for primal hosts); HEAD size check; 180 s for primal hosts; 2 s between attempts *)
+   for primal hosts); HEAD size check; 180 s for primal hosts; 2 s between attempts. A direct
+   attempt [connect] refuses moves on to the next proxy. *)
 let download (ctx : Procgraph.ctx) ?proxy ?timeout ?range (url : string) : string =
   let cfg = ctx.cfg in
-  let timeout = if contains url ".primal.net" || contains url ".primalnode.net" then 180.0 else Option.value timeout ~default:cfg.download_timeout_s in
+  let timeout = if url_host_under long_timeout_domains url then 180.0 else Option.value timeout ~default:cfg.download_timeout_s in
   let proxies : (string * int) option list =
     match proxy with
     | Some p -> [ p ]
     | None ->
         let ps = shuffle (List.filter_map Media_config.parse_proxy cfg.proxies) |> List.map (fun p -> Some p) in
-        if (contains url ".primal.net" || contains url ".primaldata.s3" || contains url ".primaldata.fsn1") && not (List.mem None ps) then None :: ps else if ps = [] then [ None ] else ps
+        if url_host_under direct_domains url && not (List.mem None ps) then None :: ps else if ps = [] then [ None ] else ps
   in
   let last_err = ref "download failed" in
   let result = ref None in
   List.iter
     (fun p ->
       if !result = None then begin
-        (if range = None then
-           match fetch ctx ?proxy:p ~timeout ~meth:"HEAD" ~max_body:(1 lsl 20) url with
-           | Some r -> (
-               match List.assoc_opt "content-length" r.Http.resp_headers with
-               | Some cl -> ( match int_of_string_opt (String.trim cl) with Some n when n > max_download -> Procgraph.fail "File size %d bytes exceeds maximum allowed size of 2GB" n | _ -> ())
-               | None -> ())
-           | None -> ());
-        let headers = match range with Some (a, b) -> [ ("Range", Printf.sprintf "bytes=%d-%d" (max 0 (a - 1)) (max 0 (b - 1))) ] | None -> [] in
-        (match fetch ctx ?proxy:p ~timeout ~meth:"GET" ~headers url with
-        | Some r when r.status >= 200 && r.status < 300 -> result := Some r.body
-        | Some r -> last_err := Printf.sprintf "HTTP %d" r.status
-        | None -> last_err := "request failed or timed out");
+        (try
+           (if range = None then
+              match fetch ctx ?proxy:p ~timeout ~meth:"HEAD" ~max_body:(1 lsl 20) url with
+              | Some r -> (
+                  match List.assoc_opt "content-length" r.Http.resp_headers with
+                  | Some cl -> ( match int_of_string_opt (String.trim cl) with Some n when n > max_download -> Procgraph.fail "File size %d bytes exceeds maximum allowed size of 2GB" n | _ -> ())
+                  | None -> ())
+              | None -> ());
+           let headers = match range with Some (a, b) -> [ ("Range", Printf.sprintf "bytes=%d-%d" (max 0 (a - 1)) (max 0 (b - 1))) ] | None -> [] in
+           match fetch ctx ?proxy:p ~timeout ~meth:"GET" ~headers url with
+           | Some r when r.status >= 200 && r.status < 300 -> result := Some r.body
+           | Some r -> last_err := Printf.sprintf "HTTP %d" r.status
+           | None -> last_err := "request failed or timed out"
+         with Refused m -> last_err := "refused: " ^ m);
         if !result = None then Eio.Time.sleep ctx.clock 2.0
       end)
     proxies;
