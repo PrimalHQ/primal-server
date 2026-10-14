@@ -48,7 +48,7 @@ type t = {
   media_url_root : string; (* "https://media.primal.net" *)
   tmp_dir : string;
   proxies : string list; (* socks5[h]://host:port, rotated for downloads *)
-  metadata_proxy : string option; (* link-preview.py argument *)
+  metadata_proxy : string option; (* link previews (import_preview_pn); None or "null" = direct *)
   download_timeout_s : float;
   strip_image_metadata : bool;
   s3_providers : S3.provider list;
@@ -60,8 +60,6 @@ type t = {
   ai_timeout_s : float;
   blossom_host : string; (* media_import_2 returns BLOSSOM_HOST/<file> *)
   ffmpeg_remote_host : string option;
-  python_path : string; (* for link-preview.py *)
-  link_preview_script : string;
   scheduler_period_s : float;
   worker_domains : int; (* domains executing nodes (the scheduler claims on its own); default 8 *)
   worker_pool_size : int; (* cache-DB connections per worker domain; default 8 (membership: 3) *) (* 1 *)
@@ -118,8 +116,6 @@ let of_json (j : Yojson.Safe.t) : t =
     ai_timeout_s = rfloat j "ai_timeout_s";
     blossom_host = rstr j "blossom_host";
     ffmpeg_remote_host = rstr_opt j "ffmpeg_remote_host";
-    python_path = rstr j "python_path";
-    link_preview_script = rstr j "link_preview_script";
     scheduler_period_s = rfloat j "scheduler_period_s";
     worker_domains = (match field_opt j "worker_domains" with Some (`Int n) when n >= 1 -> n | _ -> 8);
     worker_pool_size = (match field_opt j "worker_pool_size" with Some (`Int n) when n >= 1 -> n | _ -> 8);

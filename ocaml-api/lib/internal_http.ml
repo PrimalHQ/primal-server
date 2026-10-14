@@ -295,92 +295,12 @@ let og_page (index_html : string) (m : mels) : string =
   | i -> String.sub doc 0 i ^ metas ^ String.sub doc i (String.length doc - i)
   | exception Not_found -> doc ^ metas
 
-(* {1 Link preview} (replaces link-preview.py) *)
-
-let decode_entities (s : string) : string =
-  let re = Str.regexp {|&\(amp\|lt\|gt\|quot\|apos\|#[0-9]+\|#x[0-9a-fA-F]+\);|} in
-  Str.global_substitute re
-    (fun m ->
-      match Str.matched_group 1 m with
-      | "amp" -> "&" | "lt" -> "<" | "gt" -> ">" | "quot" -> "\"" | "apos" -> "'"
-      | e ->
-          let code = if e.[1] = 'x' || e.[1] = 'X' then int_of_string ("0" ^ String.sub e 1 (String.length e - 1)) else int_of_string (String.sub e 1 (String.length e - 1)) in
-          let b = Buffer.create 4 in
-          Buffer.add_utf_8_uchar b (Uchar.of_int code);
-          Buffer.contents b)
-    s
-
-(* the attributes of every <tag ...> in [html], lowercase names, entity-decoded values *)
-let tag_attrs (html : string) (tag : string) : (string * string) list list =
-  let re = Str.regexp_case_fold ("<" ^ tag ^ "[ \t\r\n][^>]*>") in
-  let attr_re = Str.regexp "\\([a-zA-Z_:][-a-zA-Z0-9_:.]*\\)\\(\\([ \t\r\n]*=[ \t\r\n]*\\)\\(\"[^\"]*\"\\|'[^']*'\\|[^ \t\r\n\"'>]+\\)\\)?" in
-  let rec collect pos acc =
-    match Str.search_forward re html pos with
-    | exception Not_found -> List.rev acc
-    | i ->
-        let whole = Str.matched_string html in
-        let inner = String.sub whole (String.length tag + 1) (String.length whole - String.length tag - 2) in
-        let rec attrs p acc =
-          match Str.search_forward attr_re inner p with
-          | exception Not_found -> List.rev acc
-          | j ->
-              (* read every group before decode_entities: Str's match state is global *)
-              let mlen = String.length (Str.matched_string inner) in
-              let name = String.lowercase_ascii (Str.matched_group 1 inner) in
-              let raw = try Some (Str.matched_group 4 inner) with Not_found -> None in
-              let value = match raw with Some v -> let v = if String.length v >= 2 && (v.[0] = '"' || v.[0] = '\'') then String.sub v 1 (String.length v - 2) else v in decode_entities v | None -> "" in
-              attrs (j + max 1 mlen) ((name, value) :: acc)
-        in
-        collect (i + String.length whole) (attrs 0 [] :: acc)
-  in
-  collect 0 []
-
-type preview = { mimetype : string; p_title : string; p_image : string; p_description : string; icon_url : string }
-
-let parse_preview ~(url : string) (html : string) : preview =
-  let head = match Str.search_forward re_head_end html 0 with i -> String.sub html 0 i | exception Not_found -> html in
-  let title = ref "" and image = ref "" and description = ref "" in
-  List.iter
-    (fun a ->
-      match (List.assoc_opt "rel" a, List.assoc_opt "href" a) with
-      | Some rel, Some href when String.split_on_char ' ' (String.trim rel) |> List.filter (fun s -> s <> "") = [ "icon" ] -> image := Http.urljoin url href
-      | _ -> ())
-    (tag_attrs head "link");
-  List.iter
-    (fun a ->
-      match (List.assoc_opt "property" a, List.assoc_opt "name" a, List.assoc_opt "content" a) with
-      | Some p, _, Some c -> (
-          match p with
-          | "og:title" -> title := c
-          | "og:image" -> image := Http.urljoin url c
-          | "og:description" -> description := c
-          | "twitter:title" -> title := c
-          | "twitter:description" -> description := c
-          | "twitter:image:src" -> image := Http.urljoin url c
-          | _ -> ())
-      | None, Some n, Some c -> (
-          match n with
-          | "description" -> description := c
-          | "og:title" -> title := c
-          | "og:image" -> image := Http.urljoin url c
-          | "og:description" -> description := c
-          | "twitter:title" -> title := c
-          | "twitter:description" -> description := c
-          | "twitter:image:src" -> image := Http.urljoin url c
-          | _ -> ())
-      | _ -> ())
-    (tag_attrs head "meta");
-  { mimetype = "text/html"; p_title = !title; p_image = !image; p_description = !description; icon_url = "" }
-
-let empty_preview = { mimetype = ""; p_title = ""; p_image = ""; p_description = ""; icon_url = "" }
-
-let preview_json (p : preview) : string =
-  Yojson.Safe.to_string (`Assoc [ ("mimetype", `String p.mimetype); ("title", `String p.p_title); ("image", `String p.p_image); ("description", `String p.p_description); ("icon_url", `String p.icon_url) ])
+(* {1 Link preview} *)
 
 (* Media.fetch_resource_metadata: each download proxy in random order until one yields a title *)
-let fetch_resource_metadata (ctx : ctx) (url : string) : preview =
+let fetch_resource_metadata (ctx : ctx) (url : string) : Link_preview.t =
   match !Handlers.net_ref with
-  | None -> empty_preview
+  | None -> Link_preview.empty
   | Some net ->
       let proxies = Array.of_list ctx.cfg.download_proxies in
       for i = Array.length proxies - 1 downto 1 do
@@ -396,13 +316,13 @@ let fetch_resource_metadata (ctx : ctx) (url : string) : preview =
             let s = List.fold_left (fun s pre -> if String.starts_with ~prefix:pre s then String.sub s (String.length pre) (String.length s - String.length pre) else s) p [ "socks5h://"; "socks5://" ] in
             match String.rindex_opt s ':' with Some i -> ( match int_of_string_opt (String.sub s (i + 1) (String.length s - i - 1)) with Some port -> Some (String.sub s 0 i, port) | None -> None) | None -> None
         in
-        match Http.request ~net ~clock:ctx.clock ?proxy ~timeout:10.0 ~headers:[ ("User-Agent", "WhatsApp/2") ] url with
-        | Some r when r.Http.status >= 200 && r.status < 300 -> Some (parse_preview ~url r.body)
+        match Http.request ~net ~clock:ctx.clock ?proxy ~timeout:10.0 ~headers:[ ("User-Agent", Link_preview.user_agent) ] url with
+        | Some r when r.Http.status >= 200 && r.status < 300 -> Some (Link_preview.parse ~url r.body)
         | _ -> None
       in
       let rec go = function
-        | [] -> empty_preview
-        | p :: rest -> ( match try_one p with Some pv when pv.p_title <> "" -> pv | _ -> go rest)
+        | [] -> Link_preview.empty
+        | p :: rest -> ( match try_one p with Some pv when pv.Link_preview.title <> "" -> pv | _ -> go rest)
       in
       go (Array.to_list proxies)
 
@@ -570,7 +490,7 @@ let service ~(cfg : Config.t) ~clock : Http_server.service =
             (* an empty preview (no proxy gave a title) is not cached: nginx keeps serving the last
                good one *)
             let p = fetch_resource_metadata ctx url in
-            if p.p_title = "" then Raw (200, no_store :: api_headers, preview_json p) else json_resp (preview_json p))) };
+            if p.Link_preview.title = "" then Raw (200, no_store :: api_headers, Link_preview.to_json p) else json_resp (Link_preview.to_json p))) };
       { meth = `GET; pattern = [ Lit "url-shortening" ]; handler = (fun r -> guard (fun () ->
             let url = match query_param r "u" with Some u -> u | None -> raise Not_found in
             Raw (200, [ ("content-type", "application/text") ], url_shortening ctx url))) };

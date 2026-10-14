@@ -11,6 +11,7 @@
   (:standard -w -33-26-27))
  (libraries
   unix
+  str
   threads.posix
   eio
   eio.unix

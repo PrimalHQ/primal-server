@@ -226,10 +226,10 @@ let test_internal_http () =
   Alcotest.(check bool) "image cached" true (Primal_api.Handlers.has_sub out "og:image\" content=\"https://primal.net/media-cache?u=https%3A%2F%2Fx%2Fy.jpg\"");
   Alcotest.(check bool) "twitter image raw" true (Primal_api.Handlers.has_sub out "twitter:image\" content=\"https://x/y.jpg\"/></head>");
   let html = "<html><head><link rel=\"icon\" href=\"/fav.ico\"><meta property=\"og:title\" content=\"T &amp; U\"><meta name=\"description\" content='D'><meta property=\"og:image\" content=\"img/p.png\"></head><body><meta property=\"og:title\" content=\"ignored\"></body></html>" in
-  let p = I.parse_preview ~url:"https://ex.com/a/b.html" html in
-  Alcotest.(check string) "title" "T & U" p.I.p_title;
-  Alcotest.(check string) "description" "D" p.I.p_description;
-  Alcotest.(check string) "image joined" "https://ex.com/a/img/p.png" p.I.p_image;
+  let p = Link_preview.parse ~url:"https://ex.com/a/b.html" html in
+  Alcotest.(check string) "title" "T & U" p.Link_preview.title;
+  Alcotest.(check string) "description" "D" p.Link_preview.description;
+  Alcotest.(check string) "image joined" "https://ex.com/a/img/p.png" p.Link_preview.image;
   Alcotest.(check string) "urljoin abs" "https://ex.com/x" (Http.urljoin "https://ex.com/a/b" "/x")
 
 let test_p_tags () =

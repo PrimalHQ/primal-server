@@ -57,7 +57,7 @@ let connect (ctx : Procgraph.ctx) ~sw ~proxy (u : Http.url) : Http.conn =
 
 (* one GET/HEAD over Http's connection helpers with a large body cap and redirects; raises
    [Refused] for a hop [connect] refuses *)
-let fetch (ctx : Procgraph.ctx) ?proxy ~(timeout : float) ~(meth : string) ?(headers = []) ?(max_body = max_download) (url : string) : Http.response option =
+let fetch (ctx : Procgraph.ctx) ?proxy ~(timeout : float) ~(meth : string) ?(ua = user_agent) ?(headers = []) ?(max_body = max_download) (url : string) : Http.response option =
   let one (u : Http.url) : Http.response option =
     try
       Switch.run @@ fun sw ->
@@ -65,7 +65,7 @@ let fetch (ctx : Procgraph.ctx) ?proxy ~(timeout : float) ~(meth : string) ?(hea
         Eio.Time.with_timeout ctx.clock timeout (fun () ->
             let tcp = connect ctx ~sw ~proxy u in
             let flow = if u.scheme = "https" then Http.tls_wrap ~host:u.host tcp else (tcp :> Eio.Flow.two_way_ty r) in
-            let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("User-Agent", user_agent) :: headers in
+            let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("User-Agent", ua) :: headers in
             let req = Printf.sprintf "%s %s HTTP/1.1\r\n%s\r\n" meth u.path (String.concat "" (List.map (fun (k, v) -> k ^ ": " ^ v ^ "\r\n") hdrs)) in
             Eio.Flow.copy_string req (flow :> _ Eio.Flow.sink);
             let r = Eio.Buf_read.of_flow (flow :> _ Eio.Flow.source) ~max_size:(max_body + (1 lsl 20)) in
@@ -268,22 +268,20 @@ let ffmpeg_resize_to_file (ctx : Procgraph.ctx) ~(input : string) ~(filters : st
       r.stderr
 
 (* {1 link preview} *)
-type resource_metadata = { mimetype : string; title : string; description : string; image : string; icon_url : string }
-let empty_metadata = { mimetype = ""; title = ""; description = ""; image = ""; icon_url = "" }
+type resource_metadata = Link_preview.t
 
+(* Media.fetch_resource_metadata: one GET through [metadata_proxy] (direct when unset or "null",
+   then [connect]'s public-address rule applies); an unparseable proxy gives no preview rather
+   than a direct fetch *)
 let fetch_resource_metadata (ctx : Procgraph.ctx) (url : string) : resource_metadata =
-  let proxy = Option.value ctx.cfg.metadata_proxy ~default:"null" in
-  if not (Sys.file_exists ctx.cfg.link_preview_script) then empty_metadata
-  else
-    let r = Proc.run ~proc_mgr:ctx.proc_mgr ~clock:ctx.clock ~timeout:20.0 [ "timeout"; "10"; "nice"; ctx.cfg.python_path; ctx.cfg.link_preview_script; url; proxy ] in
-    if r.status <> 0 then empty_metadata
-    else
-      match Yojson.Safe.from_string r.stdout with
-      | `Assoc f ->
-          let g k = match List.assoc_opt k f with Some (`String s) -> s | _ -> "" in
-          { mimetype = g "mimetype"; title = g "title"; description = g "description"; image = g "image"; icon_url = g "icon_url" }
-      | _ -> empty_metadata
-      | exception _ -> empty_metadata
+  let proxy = match ctx.cfg.metadata_proxy with None | Some "null" -> Some None | Some s -> Option.map Option.some (Media_config.parse_proxy s) in
+  match proxy with
+  | None -> Link_preview.empty
+  | Some proxy -> (
+      match fetch ctx ?proxy ~timeout:10.0 ~meth:"GET" ~ua:Link_preview.user_agent ~max_body:(15 * 1024 * 1024) url with
+      | Some r when r.Http.status >= 200 && r.status < 300 -> Link_preview.parse ~url r.body
+      | _ -> Link_preview.empty
+      | exception Refused _ -> Link_preview.empty)
 
 (* {1 AI hosts} *)
 let post_json (ctx : Procgraph.ctx) ~(timeout : float) (url : string) (body : Pgj.t) : Pgj.t option =
