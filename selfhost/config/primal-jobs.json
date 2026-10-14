@@ -1,0 +1,70 @@
+{
+  "roles": [
+    "trustrank",
+    "analytics",
+    "dag"
+  ],
+  "admin_host": "127.0.0.1",
+  "admin_port": @JOBS_ADMIN_PORT@,
+  "cache_db": {
+    "host": "127.0.0.1",
+    "port": @PG_PORT@,
+    "user": "@PG_USER@",
+    "database": "primal1"
+  },
+  "membership_db": {
+    "host": "127.0.0.1",
+    "port": @PG_PORT@,
+    "user": "@PG_USER@",
+    "database": "primal_membership_ref"
+  },
+  "relay_proxy": null,
+  "dvm_relays": [
+    "wss://nostr.bitcoiner.social/",
+    "wss://relay.nostr.bg/",
+    "wss://nostr.mom/",
+    "wss://nos.lol/",
+    "wss://relay.primal.net"
+  ],
+  "dvm_requester_seckey": "@DVM_SECKEY@",
+  "dvm_requester_pubkey": "532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb",
+  "dvm_check_period_s": 600.0,
+  "dvm_timeout_s": 30.0,
+  "dvm_parallel": 8,
+  "dvm_randomized_delays": true,
+  "dvm_log": false,
+  "dvm_provider_keypair_salt": null,
+  "dvm_provider_relays": [
+    "wss://relay.damus.io",
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.snort.social",
+    "wss://strfry.iris.to"
+  ],
+  "dvm_provider_announce_created_at": 1789689600,
+  "dvm_provider_dry_run": false,
+  "pg_listener_rate_limit_s": 3600,
+  "pg_listener_log": false,
+  "trustrank_period_s": 3600.0,
+  "trustrank_iterations": 20,
+  "trustrank_alpha": 0.85,
+  "trustrank_target_table": "pubkey_trustrank",
+  "trustrank_run_at_start": true,
+  "trustrank_extra_targets": [],
+  "api_config_path": "@VAR@/config/primal-api.json",
+  "analytics_period_s": 600.0,
+  "analytics_key_suffix": "",
+  "ollama_host": null,
+  "gaming_report_command": null,
+  "dag_period_s": 5.0,
+  "dag_tasks": 2,
+  "dag_dry_run": false,
+  "dag_since": 1672531200,
+  "dag_poll_votes_enabled": true,
+  "dag_log": false,
+  "dag_dry_run_window_s": 0,
+  "dag_statement_timeout_s": 600,
+  "pushgateway": null,
+  "membership_discovery_url": null,
+  "media": null
+}

@@ -5,8 +5,6 @@
   "admin_host": "127.0.0.1",
   "admin_port": @API_ADMIN_PORT@,
   "num_domains": 2,
-  "upstream_julia_ws": null,
-  "upstream_connect_timeout_s": 10.0,
   "idle_connection_timeout_s": 600.0,
   "ws_max_message_bytes": 1048576,
   "ws_outbound_queue": 256,
@@ -44,7 +42,6 @@
   "trending_blocked_domains": [
     "bchnostr.com"
   ],
-  "search_api_url": null,
   "primal_dvm_pubkeys": [
     "21786bd1281cd916406554751c6c3570ada111f2f92839db934fe26c79340932",
     "2915505220948bd3335183f9cdc85f5f9158c5fd8326f9c0227561654fb1fed7",
@@ -89,7 +86,6 @@
   "dvm_requester_seckey": null,
   "internal_http_port": @API_HTTP_PORT@,
   "moderation_http_port": @API_MODERATION_PORT@,
-  "upstream_julia_http": null,
   "http_server_name": null,
   "replicate_to": [],
   "index_dirs": {},

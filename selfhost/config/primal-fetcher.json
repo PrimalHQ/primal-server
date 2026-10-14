@@ -29,7 +29,6 @@
   "dedup_keep_s": 21600,
   "firehose_forward_raw": false,
   "firehose_queue": 20000,
-  "log_connections": false,
   "dead_relay_max_delay_s": 3600,
   "connect_concurrency": 64,
   "max_paths_per_host": 2,

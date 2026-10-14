@@ -24,7 +24,7 @@ One dune workspace:
 | `ocaml-jobs/` | `primal-jobs`: DAG runner, TrustRank, analytics, DVM checker, rebroadcasting; the media role (processing graph, uploads, Blossom) |
 | `selfhost/` | `primal.sh`, PostgreSQL (`postgres.nix`), config templates, content files and relay list for a private server (below) |
 
-Each directory has a `README.md` with the details. `ocaml-plan.md` is the record of the port.
+Each directory has a `README.md` with the details.
 
 ### Self-hosting a private Primal server
 
@@ -32,12 +32,18 @@ Each directory has a `README.md` with the details. `ocaml-plan.md` is the record
 [nix](https://nixos.org/download) (with flakes) and keeps all its state in `var/`, which git ignores:
 
     selfhost/primal.sh init     # PostgreSQL 16 in var/pg, the cache and membership DBs, configs in var/config
-    selfhost/primal.sh build    # builds primal-fetcher, primal-importer and primal-api into var/bin
-    selfhost/primal.sh start    # starts PostgreSQL and the three daemons in the background
+    selfhost/primal.sh build    # builds primal-fetcher, -importer, -api and -jobs into var/bin
+    selfhost/primal.sh start    # starts PostgreSQL and the four daemons in the background
 
 Then open a Primal app and, under network settings, set the caching service to
-`ws://127.0.0.1:8801`. Other commands: `status`, `stop`, `restart`, `logs [fetcher|importer|api]`,
-`psql`. `init` is safe to re-run: it applies new migrations and rewrites the configs.
+`ws://127.0.0.1:8801`. Other commands: `status`, `stop`, `restart`, `logs [fetcher|importer|api|jobs]`,
+`psql`, `bootstrap`. `init` is safe to re-run: it applies new migrations, adds new seeds and rewrites
+the configs.
+
+The first `start` also bootstraps the follow graph, which takes about two minutes. It fetches the
+seed accounts' profiles and follow lists from the relays, then the profiles of everyone they follow,
+then the follow lists of the 1000 most followed (`selfhost/bootstrap.py`, through the importer's
+import listener). TrustRank then ranks them, and the importer restarts once to pick up the ranks.
 
 What runs:
 
@@ -47,6 +53,7 @@ What runs:
 | `primal-fetcher` | subscribes to the relays in `selfhost/relays.txt`, adds the ones it learns from relay lists, and serves the new events as a firehose | 8820 (admin 8821) |
 | `primal-importer` | imports the firehose into the cache DB: events, profiles, follows, reactions, zaps, notifications, counters | 8830 (import listener) |
 | `primal-api` | the WebSocket API the apps use, plus internal HTTP (link previews, nostr.json) | 8801 (HTTP 8802, 8803, admin 8811) |
+| `primal-jobs` | TrustRank (user scores, from the seeds in `selfhost/trust-seeds.txt`), trending and explore feeds, and the DAG's derived tables (search, mentions, articles, zaps) | admin 8840 |
 
 Settings, as environment variables:
 - `PRIMAL_LISTEN_HOST=0.0.0.0` serves the API to other machines. Put TLS in front of it with a reverse proxy.
@@ -55,13 +62,19 @@ Settings, as environment variables:
 - `PRIMAL_VAR` moves the state directory.
 
 The configs come from the templates in `selfhost/config/` and are written to `var/config/`, where
-every key can be changed. Each daemon's README lists the keys. The minimal setup leaves out what
-needs more infrastructure:
-- the jobs daemon (`ocaml-jobs`: trending, scores, DVM feeds, media);
-- media and S3;
+every key can be changed. Each daemon's README lists the keys. The setup leaves out what needs more
+infrastructure:
+- the media pipeline and S3;
+- DVM feeds;
 - proxies;
 - push notifications;
 - metrics.
+
+TrustRank spreads trust from the seed accounts over the follow graph; it runs when primal-jobs
+starts and then hourly. An event's score counts the reactions, replies, reposts and zaps of
+accounts TrustRank ranks above the humaness threshold, so scores and the trending feeds fill in within
+minutes of the first start. The explore and trending
+feeds are recomputed every 10 minutes.
 
 The first `build` downloads the OCaml toolchain and takes a few minutes. Events start arriving
 within seconds of `start`.
