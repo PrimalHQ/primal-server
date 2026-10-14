@@ -2,10 +2,10 @@
    inline with [%pgsql] exactly where the Julia code calls [exe(est.table, @sql("..."), ...)].
    The connection [est.dbh] is leased once per event by the caller (Worker_pool / main).
 
-   Phase 1 = core storage path; Phase 2 (this) = full per-kind dispatch + helpers.
-   ext_* hooks, notifications, the dyn tables (relay_list_metadata / bookmarks / ...),
-   LNURL zapper verification and relay fetching are stubbed here and land in Phase 3-5
-   (each marked with a TODO). *)
+   This module has the core storage path and the per-kind dispatch; the ext_* hooks
+   (notifications, scores, media, live events, moderation rules, ...) are in Cache_storage_ext,
+   reached through the [ext] registry, and LNURL zapper verification is in Zap_verifier. Julia's
+   relay fetching of missing events is not done by the importer. *)
 
 module PGOCaml = Postgres.PGOCaml
 module Notif = Notifications
@@ -37,7 +37,7 @@ let default_config =
 
 (* [dbh] is the cache DB (Julia :p0); [mem_dbh] is the membership DB (Julia :membership),
    where the filterlist / human_override tables live. At compile time both type-check against
-   the same reference DB. *)
+   the same schema DB. *)
 (* [dbh]/[mem_dbh] are mutable so a worker can swap in fresh connections after Postgres drops them
    (restart / network reset) without rebuilding the whole est — see [reconnect_est] in main.ml. Each
    per-event query reads [est.dbh] afresh, so the swap takes effect on the next event. *)
@@ -119,9 +119,10 @@ let no_ext =
 let ext = ref no_ext
 let set_ext h = ext := h
 
-(* LNURL zapper verification (Julia cache_storage.jl:1265-1294). Provided by [Lnurl] and wired
-   in main.ml (it needs Eio net/clock/proxy, not available in [est]). Default: reject — so when
-   no verifier is wired and VERIFY_ZAPPERS is on, only trusted_zappers pass. *)
+(* Synchronous LNURL zapper verification (Julia cache_storage.jl:1265-1294), used only when no
+   [zap_verifier_submit] pool is wired (the daemon wires Zap_verifier; zapbackfill sets this one,
+   since a verifier needs Eio net/clock/proxy, not available in [est]). Default: reject — so
+   without either and with verify_zappers on, only trusted_zappers pass. *)
 let zapper_verifier : (est -> zapped_pk:string -> zap_receipt:Nostr.t -> bool) ref =
   ref (fun _ ~zapped_pk:_ ~zap_receipt:_ -> false)
 
@@ -258,8 +259,7 @@ let incr_event_stat (est : est) (event_id : string) (prop : string) (increment :
 
 (* {1 event_hooks} (Julia event_hook / event_hook_execute; funcall stored as JSON)
 
-   Typed deferred call. event_stats_cb is executed; notifications_cb is stored only and
-   fired in Phase 3 (kept as raw JSON so nothing is lost). *)
+   Typed deferred call, stored as JSON in event_hooks until the event it waits for is imported. *)
 type hook_call =
   | Event_stats_cb of string * int
   | Score_event_cb of { initiator : string; scored_at : int; action : string; increment : int }
@@ -318,9 +318,9 @@ let fire_event_hooks (est : est) (e : Nostr.t) : unit =
     rows;
   ignore [%pgsql dbh "delete from event_hooks where event_id = $id"]
 
-(* schedule_hook (Julia cache_storage.jl): defer a funcall to run after [execute_at]. Past-due
-   hooks run their executor immediately (we have none wired yet) else are persisted; a separate
-   periodic runner fires scheduled_hooks (TODO). *)
+(* schedule_hook (Julia cache_storage.jl): defer a funcall to run after [execute_at]. A past-due
+   hook is dropped (Julia ran it at once); the others are persisted in scheduled_hooks, which
+   [run_scheduled_hooks] fires. *)
 let schedule_hook (est : est) ~(execute_at : int) (funcall : Yojson.Safe.t) : unit =
   if execute_at <= Utils.current_time () then ()
   else begin
@@ -841,7 +841,7 @@ let handle_note_reply (est : est) (e : Nostr.t) : unit =
       (!ext).ext_reply est e parent
   | None -> ());
   (!ext).import_reply_notifications est e
-  (* Phase 5: fetch_missing_events (relay fetcher, out of importer scope) *)
+  (* Julia's fetch_missing_events (a relay fetcher) is not done by the importer. *)
 
 let handle_reaction (est : est) (e : Nostr.t) : unit =
   List.iter
@@ -1156,7 +1156,8 @@ let dispatch_kind (est : est) (e : Nostr.t) : unit =
   else if k = Nostr.kind_reporting then begin
     if est.cfg.import_reporting then (!ext).import_reporting est e
   end
-  (* follow_pack -> media (out of scope). *)
+  (* Julia also queued a follow pack's image tags for media import (import_follow_list_media,
+     with DOWNLOAD_MEDIA); not ported. *)
 
 (* {1 import_event} (Julia 1046-1434) *)
 
@@ -1194,7 +1195,7 @@ let import_event (est : est) (e : Nostr.t) : import_result =
     if 30000 <= e.kind && e.kind < 40000 then
       guard "parametrized_replaceable" (fun () -> store_parametrized_replaceable_event est e);
     guard "event_hooks" (fun () -> fire_event_hooks est e);
-    (* TODO Phase 3: ext_event *)
+    (* (Julia's ext_event, called here, is a no-op.) *)
     Imported
   end
 

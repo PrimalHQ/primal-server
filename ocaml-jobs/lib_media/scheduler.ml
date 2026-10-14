@@ -1,7 +1,7 @@
-(* processing_graph_execution_scheduler.rs + .jl: every second, for every func this executor
-   handles, claim pending nodes (oldest first) up to the func's concurrency; stuck nodes
-   (started, unfinished, under 2 days old) reset at start; stats every 60 s;
-   `refresh materialized view concurrently pn_time_for_pubkeys` every 600 s.
+(* Ported from processing_graph_execution_scheduler.rs + .jl: every [scheduler_period_s], for
+   every func this executor handles, claim pending nodes (oldest first) up to the func's
+   concurrency; stuck nodes (started, unfinished, under 2 days old) reset at start; stats every 60 s;
+   `refresh materialized view concurrently pn_time_for_pubkeys` every [refresh_matview_period_s].
 
    Execution happens on [cfg.worker_domains] worker domains (the Rust executor ran on a
    multi-threaded runtime; on one domain the synchronous file writes and sha256 of large

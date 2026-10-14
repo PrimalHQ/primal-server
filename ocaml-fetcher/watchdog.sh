@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# systemd timer units get a minimal PATH without bash: install the timer with
-#   -p "Environment=PATH=$HOME/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin"   (bash and python3; the 2026-10-05 install lacked it and never ran).
 # External liveness watchdog for primal-fetcher: the daemon's admin /status must answer and its
-# message counter must move. Two consecutive failures (checks run every 2 minutes) restart the unit.
-# Why external: on 2026-10-05 00:53–04:52 the whole process froze (every domain, the admin port
-# included) after the SOCKS proxy died, so no in-process watchdog could have fired.
-#   install (user timer, every 2 min):
-#     systemd-run --user --unit=primal-fetcher-watchdog --on-calendar='*:0/2' --description='primal-fetcher watchdog' \
-#       <checkout>/ocaml-fetcher/watchdog.sh
-#   PRIMAL_FETCHER_ADMIN  admin status URL (default from the config's admin_port)
+# message counter must move. Two consecutive failures (checks run every 2 minutes) restart the
+# fetcher's systemd user unit (primal-ocaml-fetcher.service). It is external because a stalled
+# process can stop answering on its admin port as well (a dead SOCKS proxy once froze every
+# domain, the admin port included), and then no in-process watchdog could fire.
+#
+# Install as a systemd user timer every 2 minutes, e.g.
+#   systemd-run --user --unit=primal-fetcher-watchdog --on-calendar='*:0/2' \
+#     --description='primal-fetcher watchdog' \
+#     -p "Environment=PATH=$HOME/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin" \
+#     -p "Environment=PRIMAL_FETCHER_CONFIG=/path/to/primal-fetcher-config.json" \
+#     <checkout>/ocaml-fetcher/watchdog.sh
+# A timer unit gets a minimal PATH: set one that has bash, curl and python3, or the check never runs.
+#
+# Environment:
+#   PRIMAL_FETCHER_CONFIG  the fetcher's config (only admin_port is read)
+#   PRIMAL_FETCHER_ADMIN   admin status URL (default from the config's admin_port)
+#   PRIMAL_CONFIG_DIR      where the config is looked up when PRIMAL_FETCHER_CONFIG is unset
+#   PRIMAL_VAR_DIR         where fetcher-watchdog.state and fetcher-watchdog.log are written
 set -u
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-# Deployment layout (every script in this repo): the daemons' JSON configs live outside the checkout
-# in PRIMAL_CONFIG_DIR (default: two directories above the repo root, i.e. next to the parent repo);
-# logs, pid and state files in PRIMAL_VAR_DIR (default $HOME/var/primalserver).
+# Defaults when the environment sets nothing: the config in PRIMAL_CONFIG_DIR (default two
+# directories above the repo root), the state and log in PRIMAL_VAR_DIR (default $HOME/var/primalserver).
 CONFIG_DIR="${PRIMAL_CONFIG_DIR:-$(cd -- "$ROOT/../.." && pwd -P)}"
 VAR_DIR="${PRIMAL_VAR_DIR:-$HOME/var/primalserver}"
 CONFIG="${PRIMAL_FETCHER_CONFIG:-$CONFIG_DIR/primal-fetcher-config.json}"

@@ -1,13 +1,12 @@
-(* primalctl replay: parity measurement over a request corpus (ocaml-plan.md §12, the gate of
-   cutover A). Every line of the corpus is a request-log record {t, funcall, kwargs, ws, subid}
-   (the ws-connector --log-request / primal-api request_log format). Each selected request is sent
-   to server A (the production ws-connector) and server B (the shadow) and the two answers are
-   compared as multisets of canonical messages: JSON with sorted keys, strings that are themselves
-   JSON canonicalised too (the content of synthetic kinds), integral floats as integers — the same
-   rule as the scratch wscompare.py harness, so numbers are comparable.
+(* primalctl replay: parity measurement over a request corpus. Every line of the corpus is a
+   request-log record {t, funcall, kwargs, ws, subid} (the primal-api request_log format, which
+   ws-connector's --log-request wrote too). Each selected request is sent to server A (e.g. the
+   running build) and server B (e.g. a new one) and the two answers are compared as multisets of
+   canonical messages: JSON with sorted keys, strings that are themselves JSON canonicalised too
+   (the content of synthetic kinds), integral floats as integers, so numbers are comparable.
 
-   Only read-only funcalls are replayed; by default only the natively answered ones (the gate),
-   --all adds the proxied ones. Writers (set_*, update_*, import_*, reset_*, broadcast_events, ...)
+   Only read-only funcalls are replayed; by default only the ones primal-api knows, --all adds the
+   other names in the corpus. Writers (set_*, update_*, import_*, reset_*, broadcast_events, ...)
    are never replayed. *)
 
 open Eio.Std

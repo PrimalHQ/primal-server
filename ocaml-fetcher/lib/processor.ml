@@ -1,11 +1,12 @@
-(* What start_fetcher.jl wired behind Fetching.message_processors, in their SortedDict order:
+(* Ported from what Julia's start_fetcher.jl wired behind Fetching.message_processors, in order:
    1. :deduped_storage — DB.import_msg_into_storage into the DeduplicatedEventStorage: an EVENT
       whose id was seen before is skipped (seenearly); otherwise the event is parsed and verified
-      (created_at < now + 300, id and signature), appended to messages/YYYY/MM/DD.log, remembered,
+      (created_at < now + 300, id and signature), appended to the archive (archive_enabled), remembered,
       and handed to the storage's own :firehose_server processor (broadcast once);
    2. :firehose_server — the raw message broadcast to the firehose, whatever it is.
-   So a new verified event reaches the firehose twice and every other line once, exactly as the
-   Julia fetcher did; firehose_forward_raw=false drops step 2. One fiber on its own domain. *)
+   So with firehose_forward_raw a new verified event reaches the firehose twice and every other
+   line once (as the Julia fetcher did); firehose_forward_raw=false (the normal setting) drops
+   step 2. One fiber on its own domain. *)
 
 open Eio.Std
 

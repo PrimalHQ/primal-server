@@ -1,4 +1,4 @@
-; Background jobs (ocaml-plan.md §9): one role = one fiber running the loop its Julia module ran.
+; Background jobs: one role = one fiber running its loop (each ported from a Julia module).
 ; [%pgsql] is checked against the cache DB (primal1); membership statements live in lib_membership.
 (library
  (name primal_jobs)

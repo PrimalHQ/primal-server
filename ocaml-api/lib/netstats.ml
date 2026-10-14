@@ -2,8 +2,8 @@
    counters (users, pubkeys, pubnotes, reactions, reposts, any, zaps, satszapped). Two sources:
    - network_stats_url (App.NETWORK_STATS_URL): another node's HTTP /api answering network_stats;
    - network_stats_file: the importer's persisted stats dict (src/cache_storage.jl save_stats, the
-     <storage>/primalnode<N>/cache/db/stats.json the OCaml importer keeps "any" in), read here the way
-     the Julia node owning it answered from est.commons.stats.
+     stats.json the OCaml importer keeps "any" in), read here the way the Julia node that owned it
+     answered from est.commons.stats.
    The URL wins when both are set. *)
 
 let keys = [ "users"; "pubkeys"; "pubnotes"; "reactions"; "reposts"; "any"; "zaps"; "satszapped" ]

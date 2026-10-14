@@ -1,5 +1,5 @@
-(* primal-fetcher: the relay fetcher + firehose daemon (ocaml-plan.md §8), replacing
-   start_fetcher.jl. Relay connections run as fibers spread over num_domains domains; one
+(* primal-fetcher: the relay fetcher + firehose daemon (ported from Julia's start_fetcher.jl).
+   Relay connections run as fibers spread over num_domains domains; one
    processor domain dedups, verifies, archives and broadcasts; the firehose server, the
    fetcher_relays poller, the metrics pusher and the admin HTTP run on the main domain. *)
 

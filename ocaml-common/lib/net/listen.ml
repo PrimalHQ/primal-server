@@ -1,8 +1,8 @@
 (* Listening sockets shared across domains.
 
    A daemon binds each port ONCE (SO_REUSEADDR | SO_REUSEPORT, so a replacement generation can bind
-   the same port during a rolling restart, see ocaml-plan.md §6) and then imports a dup of the fd
-   into every worker domain; each domain runs its own accept loop and the kernel balances incoming
+   the same port during a rolling restart) and then imports a dup of the fd into every worker
+   domain; each domain runs its own accept loop and the kernel balances incoming
    connections across them. Eio sockets are domain-bound, which is why the raw fd is shared instead
    of an Eio listening socket. *)
 

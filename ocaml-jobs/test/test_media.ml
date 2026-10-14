@@ -94,7 +94,7 @@ let download_refuses_private () =
       (`Assoc
         ([ ("proxies", `List []); ("metadata_proxy", `Null); ("strip_image_metadata", `Bool false); ("log", `Bool false); ("s3_providers", `List []); ("hls_providers", `List []);
            ("media_paths", paths); ("media_paths_2", paths); ("cloudflare_cache", `Null); ("blossom_hosts", `List []); ("ffmpeg_remote_host", `Null); ("user_content_purger_api", `Null); ("execute_funcs", `Null) ]
-        @ List.map s [ "binary_data_cache_dir"; "media_path"; "media_path_2"; "media_url_root"; "tmp_dir"; "ai_host"; "blossom_host"; "upload_url_root" ]
+        @ List.map s [ "binary_data_cache_dir"; "media_url_root"; "tmp_dir"; "ai_host"; "blossom_host"; "upload_url_root" ]
         @ List.map n [ "download_timeout_s"; "hls_processing_timeout_s"; "ai_timeout_s"; "scheduler_period_s"; "max_concurrent_per_name"; "julia_duty_concurrency"; "refresh_matview_period_s" ]))
   in
   let ci = { Postgres.host = "127.0.0.1"; port = 1; user = ""; database = "" } in

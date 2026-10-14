@@ -1,6 +1,6 @@
-(* The "media" sub-object of primal-jobs-config.json: primal-media.config.json's media/scheduler/
-   tasks sections plus the Julia-side settings (Media.MEDIA_PATHS etc.). Every key required unless
-   noted (null allowed where the Rust struct had Option). *)
+(* The "media" sub-object of the jobs config (merged from the Rust primal-media config's
+   media/scheduler/tasks sections and the Julia media settings, Media.MEDIA_PATHS etc.). Every key
+   required unless noted; null where marked option. Unknown keys are ignored. *)
 
 exception Config_error of string
 
@@ -43,8 +43,6 @@ type hls_provider = {
 
 type t = {
   binary_data_cache_dir : string; (* ProcessingGraph.BINARY_DATA_CACHE_DIR *)
-  media_path : string; (* Media.MEDIA_PATH *)
-  media_path_2 : string;
   media_url_root : string; (* "https://media.primal.net" *)
   tmp_dir : string;
   proxies : string list; (* socks5[h]://host:port, rotated for downloads *)
@@ -60,12 +58,12 @@ type t = {
   ai_timeout_s : float;
   blossom_host : string; (* media_import_2 returns BLOSSOM_HOST/<file> *)
   ffmpeg_remote_host : string option;
-  scheduler_period_s : float;
+  scheduler_period_s : float; (* claim period *)
   worker_domains : int; (* domains executing nodes (the scheduler claims on its own); default 8 *)
-  worker_pool_size : int; (* cache-DB connections per worker domain; default 8 (membership: 3) *) (* 1 *)
-  max_concurrent_per_name : int; (* Rust tasks.max_concurrent_per_name 200 *)
-  julia_duty_concurrency : int; (* import_upload_3 / block_media / purge_media_: 10 *)
-  refresh_matview_period_s : float; (* 600 *)
+  worker_pool_size : int; (* cache-DB connections per worker domain; default 8 (membership: 3) *)
+  max_concurrent_per_name : int; (* running-node limit per func (Rust tasks.max_concurrent_per_name) *)
+  julia_duty_concurrency : int; (* running-node limit of import_upload_3 / block_media / purge_media_ (the funcs Julia used to run; the name is kept for the configs) *)
+  refresh_matview_period_s : float; (* pn_time_for_pubkeys refresh period *)
   cloudflare_cache : (string * string) option; (* zone_id, api_key for purge *)
   blossom_hosts : string list; (* purge_media_: ["blossom.primal.net", "blossom-dev.primal.net"] *)
   upload_url_root : string; (* "https://_media.primal.net" *)
@@ -99,8 +97,6 @@ let default_execute_funcs = [ "import_media_fast_pn"; "import_media_fast_pn_2"; 
 let of_json (j : Yojson.Safe.t) : t =
   {
     binary_data_cache_dir = rstr j "binary_data_cache_dir";
-    media_path = rstr j "media_path";
-    media_path_2 = rstr j "media_path_2";
     media_url_root = rstr j "media_url_root";
     tmp_dir = rstr j "tmp_dir";
     proxies = rstrlist j "proxies";

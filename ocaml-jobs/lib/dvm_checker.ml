@@ -1,4 +1,4 @@
-(* dvm_feed_checker.jl: every 10 minutes, for each content-discovery DVM (kind-31990 handler with a
+(* Ported from Julia's dvm_feed_checker.jl: every [dvm_check_period_s], for each content-discovery DVM (kind-31990 handler with a
    k=5300 tag seen in the last 90 days), run the NIP-90 request App.dvm_feed runs (usecache=false)
    with the requester key, and upsert dvm_feeds(pubkey, identifier, updated_at, results, kind,
    personalized, ok). The results are the ids of the first 20 notes/articles (created_at desc) of

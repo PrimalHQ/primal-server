@@ -2,7 +2,7 @@
 
 ; Shared foundation for every Primal OCaml daemon (importer, api, fetcher, jobs). Modules are
 ; flat (Postgres, Nostr, Http, ...) regardless of the subdirectory they live in. Consumers add
-; `-open Primal_common` to their flags so moved-from-importer code keeps compiling unchanged.
+; `-open Primal_common` to their flags and use the modules unqualified.
 ; warnings 33/26/27 are triggered by pgocaml_ppx-generated code for inline [%pgsql].
 (library
  (name primal_common)

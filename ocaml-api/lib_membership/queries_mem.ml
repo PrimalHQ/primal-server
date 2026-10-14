@@ -20,7 +20,7 @@ let human_override_upsert (c : Db.membership Db.conn) ~pubkey ~(source : string)
       "insert into human_override (pubkey, is_human, added_at, source) values ($pubkey, true, now(), $source) \
        on conflict (pubkey) do update set is_human = true, source = $source"]
 
-(* {1 Phase 3b} *)
+(* {1 The app.jl funcalls} *)
 
 (* app_ext.jl get_app_subsettings: the stored settings as JSON text *)
 let app_subsettings (c : Db.membership Db.conn) ~pubkey ~(subkey : string) : string option =
@@ -96,7 +96,7 @@ let rebroadcast_status (c : Db.membership Db.conn) ~pubkey : rebroadcast option 
       Some { started_at; finished_at; event_idx_intermediate; event_count; status; kinds_json }
   | [] -> None
 
-(* {1 Phase 4c} *)
+(* {1 The long tail} *)
 
 (* est.app_settings[pubkey]: the settings event JSON *)
 let app_settings_event (c : Db.membership Db.conn) ~pubkey : string option =
@@ -130,7 +130,7 @@ let report (c : Db.membership Db.conn) ~pubkey ~typ ~id ~now : unit =
   let typ = Int64.of_int typ and now = Int64.of_int now in
   ignore [%pgsql dbh "insert into reported (pubkey, type, id, created_at) values ($pubkey, $typ, $id, $now) on conflict do nothing"]
 
-(* {1 Phase 4d} *)
+(* {1 Advanced search} *)
 
 (* dag.jl search: a paying member (tier != 'free') is exempt from the pas:1 limit cap *)
 let is_paying (c : Db.membership Db.conn) ~pubkey : bool =
@@ -142,7 +142,7 @@ let list_pubkeys (c : Db.membership Db.conn) ~(list : string) : string list =
   let dbh = Db.raw c in
   [%pgsql dbh "select encode(pubkey, 'hex') from lists where list = $list"] |> List.filter_map Fun.id
 
-(* {1 Phase 4f} *)
+(* {1 Settings and the remaining writes} *)
 
 (* set_app_settings: est.app_settings[pubkey] = e, then created_at/event_id *)
 let upsert_app_settings (c : Db.membership Db.conn) ~pubkey ~(value : string) ~created_at ~event_id : unit =
@@ -193,7 +193,7 @@ let take_queued_nip46_events (c : Db.membership Db.conn) ~service_pubkey : strin
   ignore [%pgsql dbh "delete from monitoring_request_queue where service_pubkey = $service_pubkey"];
   rows
 
-(* {1 Phase 5: InternalServices} *)
+(* {1 InternalServices (the internal HTTP port)} *)
 
 (* nostr_json_query_by_name *)
 let verified_pubkeys_by_name (c : Db.membership Db.conn) ~(name : string) : string list =
@@ -221,7 +221,7 @@ let short_url_target (c : Db.membership Db.conn) ~(path : string) : string optio
   let dbh = Db.raw c in
   match [%pgsql dbh "select url from short_urls where path = $path and media_block_id is null limit 1"] with u :: _ -> Some u | [] -> None
 
-(* {1 Phase 5b: purge_media_} *)
+(* {1 purge_media_} *)
 
 let media_block_insert (c : Db.membership Db.conn) ~(id : string) ~(d : string) : unit =
   let dbh = Db.raw c in
@@ -265,7 +265,7 @@ let short_urls_set_block (c : Db.membership Db.conn) ~(path : string) ~(ext : st
   let dbh = Db.raw c in
   ignore [%pgsql dbh "update short_urls set media_block_id = $block::uuid where path = $path and ext = $ext"]
 
-(* {1 Phase 5c: Blossom} *)
+(* {1 Blossom} *)
 
 type upload = { up_mimetype : string; up_created_at : int64; up_path : string; up_size : int64; up_sha256 : string option; up_pubkey : string }
 

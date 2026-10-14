@@ -1,7 +1,7 @@
-(* The registration points the private extensions (primal-net-server/ocaml-ext, ocaml-plan.md
-   §11.1) fill at startup, before the daemon serves: extra funcalls (dispatched for names the
-   public catalogue proxies), extra HTTP routes on the internal (14000+N) and moderation (24000+N)
-   ports, and the "ext" object of the config file. Append-once: a duplicate or a public name is a
+(* The registration points the private extensions (primal-net-server/ocaml-ext) fill at startup,
+   before the daemon serves: extra funcalls (dispatched for names that are not in the public
+   catalogue), extra HTTP routes on the internal and moderation ports, and the "ext" object of the
+   config file. Append-once: a duplicate or a public name is a
    startup failure. *)
 
 type funcall = { handler : Handlers.ctx -> Kw.t -> Response.outcome; moderate : bool }

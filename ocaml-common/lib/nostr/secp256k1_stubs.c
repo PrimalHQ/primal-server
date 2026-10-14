@@ -1,5 +1,5 @@
-/* Minimal C stubs binding libsecp256k1's BIP340 Schnorr verification, mirroring the
-   Julia FFI in primal-server/src/secp256k1.jl (Secp256k1.verify).
+/* Minimal C stubs binding libsecp256k1: BIP340 Schnorr verification (mirroring the Julia FFI
+   in src/secp256k1.jl, Secp256k1.verify), BIP340 signing, x-only pubkey derivation and ECDH.
 
    Nostr signatures are BIP340 Schnorr over an x-only (32-byte) public key, with a
    64-byte signature over the 32-byte event-id hash. The ECDSA-only `secp256k1` opam

@@ -1,19 +1,19 @@
-(* The Primal cache WebSocket protocol framing (ocaml-plan.md §1.2), byte-compatible with the Julia
-   CacheServer and ws-connector:
+(* The Primal cache WebSocket protocol framing, byte-compatible with what the Julia CacheServer and
+   ws-connector sent:
 
      client:  ["REQ", subid, {"cache": [funcall, kwargs]}, ...]   ["CLOSE", subid]
      server:  ["EVENT", subid, msg]* ["EOSE", subid]
               zlib mode: one BINARY frame zlib(["EVENTS", subid, [msg, ...]]) then text ["EOSE", subid]
               ["NOTICE", subid, text]
 
-   Messages are kept as JSON TEXT (never re-parsed/re-serialized) so what the DB or the upstream
-   produced is what the client gets. *)
+   Messages are kept as JSON TEXT (never re-parsed/re-serialized) so what the DB produced is what
+   the client gets. *)
 
 type incoming =
   | Req of { subid : string; funcall : string option; kwargs : Yojson.Safe.t; raw : string }
       (** a REQ whose first filter is a {"cache": [funcall, kwargs]} (funcall None: another filter) *)
   | Close of string
-  | Other of string  (** anything else (forwarded verbatim by the proxy) *)
+  | Other of string  (** anything else (ignored) *)
 
 let parse (text : string) : incoming =
   match Yojson.Safe.from_string text with

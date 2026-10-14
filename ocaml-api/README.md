@@ -31,7 +31,7 @@ server:  ["EVENT", subid, msg]* ["NOTICE", subid, text]* ["EOSE", subid]
   with EOSE and switches the connection: each later answer is one binary frame
   `zlib(["EVENTS", subid, [msg, ...]])` followed by text NOTICEs and `["EOSE", subid]`. Push
   subscription updates stay plain text `EVENT` frames.
-- **Errors** (without an upstream, see below). A funcall name primal-api does not know is answered `NOTICE "unknown api request"` +
+- **Errors.** A funcall name primal-api does not know is answered `NOTICE "unknown api request"` +
   EOSE. A known funcall whose handler fails (bad kwargs, DB error, 15 s wait for a pool connection)
   gets `NOTICE "error"` + EOSE; some handlers answer `NOTICE "error"` deliberately for invalid input
   (e.g. `limit > 1000`).
@@ -69,15 +69,6 @@ server:  ["EVENT", subid, msg]* ["NOTICE", subid, text]* ["EOSE", subid]
 - Any GET without an `Upgrade` header gets the text `Primal cache API Websocket endpoint`. Any path
   upgrades.
 
-### Upstream fallback (normally off)
-
-`upstream_julia_ws` / `upstream_julia_http` name a server that answers what primal-api does not
-handle. With a WebSocket upstream set, a connection opens its own upstream socket on its first
-unhandled REQ; that REQ and later non-REQ frames are forwarded verbatim and every upstream frame is
-relayed back verbatim (zlib applies only to locally answered requests; `set_primal_protocol` is never
-forwarded). When the upstream closes, the client connection closes too. With both keys `null`
-(the normal setup) unhandled requests get the NOTICEs above.
-
 ## Funcalls
 
 The catalogue is the closed variant `Funcall.t` in `lib/funcall.ml` (146 names). `Funcall.dispatch`
@@ -112,8 +103,8 @@ Behaviour worth knowing:
 - **In-process caches:** `trending_hashtags_4h` and `trending_images_4h` 10 min,
   `trending_hashtags_7d` 4 h, the 24 h trending score percentiles used by `minscore:`/`maxscore:`
   10 min. Files under `content_moderation_root` are re-read only when their mtime changes.
-- `search` is forwarded over HTTP to `search_api_url` (20 s timeout); after a connect failure it
-  answers `NOTICE "error"` at once for 5 min.
+- `search` (and the `search` spec of `mega_feed_directive`) answers `NOTICE "error"`: Julia
+  forwarded it to a separate search node, which no longer exists.
 - `broadcast_events` / `broadcast_reply` publish to every relay concurrently (through `relay_proxy`)
   and answer when one relay accepts, or after 15 s, with the replies received so far.
 - `dvm_feed` answers a non-personalized feed from the DVM results already in the cache DB
@@ -161,7 +152,7 @@ fills the `Extensions` registry (`lib/extensions.ml`):
 
 | Route | What |
 |---|---|
-| `GET`/`POST /api` | body `["funcall", {kwargs}]`; answers a JSON array of messages, or `{"error": text}` for a NOTICE. Unhandled requests go to `upstream_julia_http` if set, else `500`. `server_name` answers `{server, node}` from `http_server_name`. |
+| `GET`/`POST /api` | body `["funcall", {kwargs}]`; answers a JSON array of messages, or `{"error": text}` for a NOTICE. Unknown and unhandled funcalls get `500 error`. `server_name` answers `{server, node}` from `http_server_name`. |
 | `POST /collect_metadata` | body: list of hex pubkeys → their kind-0 events |
 | `GET /.well-known/nostr.json?name=` | NIP-05 from the membership DB's verified names |
 | `GET /media-upload?u=`, `GET /media-cache?u=&s=&a=` | 302 to the media URL if it is a known/allowed host, else 404 |
@@ -185,7 +176,8 @@ fills the `Extensions` registry (`lib/extensions.ml`):
 ## Configuration
 
 One JSON file, given as the only argument. Every key below is **required** (use `null`, `[]` or
-`{}` where allowed); only `ext` may be absent. `primal_apid --check-config <file>` parses it (and
+`{}` where allowed); only `ext` may be absent. Keys not listed are ignored, so a config that still
+carries a removed key keeps loading. `primal_apid --check-config <file>` parses it (and
 runs the extensions' `init`), prints `config ok` and exits 0; a bad config exits 2 with the reason.
 
 Listeners and process:
@@ -204,7 +196,7 @@ Listeners and process:
 | `drain_grace_s` | float | after a drain signal: time for connections to finish before the remaining WebSockets are closed |
 | `drain_ws_max_s` | float | further time allowed for closing them before the process exits |
 | `log_handled` | bool | log a line per locally answered request (funcall, subid, ms) |
-| `log_not_handled` | bool | log a line per request primal-api could not answer (and per HTTP forward) |
+| `log_not_handled` | bool | log a line per request primal-api could not answer (WebSocket and HTTP `/api`) |
 | `pushgateway` | `{host, port, job, period_s}` \| null | push `cache_max_request_duration` (longest request of the period, s) and `cache_requests_per_second` every `period_s`; a draining generation stops pushing |
 | `request_log` | path \| null | JSONL request log (see Operation) |
 
@@ -220,10 +212,7 @@ WebSocket behaviour:
 | `request_concurrency` | int | REQs of one connection handled at once (1 = in order) |
 | `anon_feed_cache_s` | float | TTL of the anonymous feed cache (0 = off) |
 | `live_events_enabled` | bool | run the live-event distributor |
-| `upstream_julia_ws` | ws URL \| null | WebSocket fallback upstream |
-| `upstream_connect_timeout_s` | float | its connect timeout |
-| `upstream_julia_http` | http URL \| null | `/api` fallback upstream |
-| `http_server_name` | `{server, node}` \| null | `server_name` answer over HTTP `/api` (null: forwarded upstream) |
+| `http_server_name` | `{server, node}` \| null | `server_name` answer over HTTP `/api` (null: `500 error`) |
 | `replicate_to` | list of ws URLs | other APIs that get replicated counter resets |
 
 Databases (`{host, port, user, database}`; every pooled connection has a 30 s `statement_timeout`):
@@ -246,7 +235,6 @@ Content and services:
 | `network_stats_url` | http URL \| null | HTTP `/api` answering `network_stats` (the importer's); wins over the file |
 | `network_stats_file` | path \| null | the importer's `stats.json`, read directly |
 | `netstats_period_s` | float | `net_stats` push period |
-| `search_api_url` | http URL \| null | where `search` is forwarded (null: `NOTICE "error"`) |
 | `import_events_line_server` | `{host, port}` \| null | the importer's import listener for `import_events` |
 | `relay_proxy` | `socks5h://host:port` \| null | SOCKS5 proxy for relay connections, DVM requests and S3 calls |
 | `dvm_relays` | list of ws URLs | relays for DVM job requests |
@@ -288,8 +276,8 @@ port is shared too, so check the pid), then signal the old one with `SIGUSR1`.
 |---|---|
 | `GET /healthz` | `ok` |
 | `GET /readyz` | 200 `ready` while serving, else 503 with the state (`starting`, `draining`, `stopped`) |
-| `GET /status` | JSON: `pid`, `state`, `uptime_s`, `servername`, ports, `upstream`, `connections`, live and broadcast subscription counts, `inflight_http`, `anon_feed_cache` (hits, misses, waits, entries, ttl), `rss_bytes` |
-| `GET /metrics` | Prometheus text: `primal_api_connections`, `_accepted_total`, `_recv_total`, `_sent_total`, `_handled_total`, `_proxied_total`, `_backend_frames_total`, `_backend_failures_total`, `_idle_closed_total`, `_live_events_total`, `_errors_total`, `_rss_bytes`, `_ready`, `_inflight_http` |
+| `GET /status` | JSON: `pid`, `state`, `uptime_s`, `servername`, ports, `connections`, live and broadcast subscription counts, `inflight_http`, `anon_feed_cache` (hits, misses, waits, entries, ttl), `rss_bytes` |
+| `GET /metrics` | Prometheus text: `primal_api_connections`, `_accepted_total`, `_recv_total`, `_sent_total`, `_handled_total`, `_idle_closed_total`, `_live_events_total`, `_errors_total`, `_rss_bytes`, `_ready`, `_inflight_http` |
 | `GET /tasks` | the fiber phase registry (what each slot is doing) |
 | `POST /drain` | start a drain |
 
@@ -312,7 +300,7 @@ logged as `filter:events`). The file is not rotated.
 
 ```sh
 primalctl req <ws-url> <funcall> ['{kwargs}'] [--zlib]   # one request, frames printed until EOSE, then the duration
-primalctl status|metrics|drain [<admin-url>]               # the admin endpoints (pass the URL of your admin port)
+primalctl status|metrics|drain [<admin-url>]               # the admin endpoints (default: the selfhost admin port, http://127.0.0.1:8811)
 primalctl replay <corpus.jsonl> --a <ws-url> --b <ws-url> [--only f1,f2] [--all]
                  [--per-funcall N] [--workers K] [--timeout S] [--report diffs.jsonl]
 primalctl advsearch-sql <user-hex> '<query>' <since> <until> [kinds]   # one advanced-search window's SQL, params inlined
@@ -336,7 +324,7 @@ one over the same data. Always pass `--a` and `--b`; the defaults are leftovers.
 | `bin/primalctl.ml`, `bin/replay.ml` | operator CLI, replay comparison |
 | `lib/daemon.ml` | startup, listeners, domains, background loops, drain controller |
 | `lib/config.ml` | config parsing |
-| `lib/conn.ml` | one client WebSocket: dispatch, concurrency, upstream fallback, idle timer, drain registry |
+| `lib/conn.ml` | one client WebSocket: dispatch, concurrency, idle timer, drain registry |
 | `lib/protocol.ml` | REQ/CLOSE parsing; EVENT, NOTICE, EOSE and zlib EVENTS framing |
 | `lib/funcall.ml` | funcall catalogue and dispatcher |
 | `lib/handlers.ml` | one function per funcall |

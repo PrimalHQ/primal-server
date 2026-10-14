@@ -1,8 +1,8 @@
-(* InternalServices on 14000+N (primal-server/internal_services.jl), route for route:
+(* The internal HTTP port, InternalServices (primal-server/internal_services.jl) route for route:
    /collect_metadata, /.well-known/nostr.json, /media-upload, /media-cache, /link-preview,
    /url-shortening, /url-lookup/*, /spam, /api, /api/suggestions(_2), and the catch-all
    preview_handler that serves the web app's index.html with OpenGraph tags for the path.
-   Julia's handler errors are a plain 500 "error"; the HTML is rewritten textually (Julia went
+   Handler errors are a plain 500 "error", as in Julia; the HTML is rewritten textually (Julia went
    through libxml2, which added an XML prolog and self-closed every tag) — the OpenGraph and
    twitter meta elements come out identical. *)
 
@@ -369,37 +369,30 @@ let collect_metadata (ctx : ctx) (hexes : string list) : Yojson.Safe.t =
   else
     Handlers.with_cache ctx (fun c -> `Assoc (List.map (fun (k, e) -> (k, Yojson.Safe.from_string e)) (Queries.metadata_events_json c ~pubkeys_json:(Handlers.hex_list_json hexes))))
 
-let forward_to_julia (ctx : ctx) ?(peer = "") ?(fc = "") (body : string) : resp =
+(* a funcall /api does not answer (unknown, an extension's, or Not_handled): 500 error *)
+let not_handled (ctx : ctx) ~(peer : string) ~(fc : string) : resp =
   if ctx.cfg.log_not_handled then Printf.printf "%s [http] not handled: %s from %s\n%!" (Procinfo.timestamp ()) fc peer;
-  match (ctx.cfg.upstream_julia_http, !Handlers.net_ref) with
-  | Some url, Some net -> (
-      match Http.parse_url url with
-      | Some u -> (
-          match Http.plain_request ~net ~clock:ctx.clock ~timeout:30.0 ~meth:"POST" ~body ~host:u.Http.host ~port:u.port ~path:u.path () with
-          | 200, resp -> json_resp resp
-          | _ -> Text (500, "error"))
-      | None -> Text (500, "error"))
-  | _ -> Text (500, "error")
+  Text (500, "error")
 
 let api (ctx : ctx) (r : req) : resp =
   guard (fun () ->
       match Yojson.Safe.from_string r.body with
       | `List (`String fc :: rest) -> (
           let kwargs = match rest with (`Assoc _ as kw) :: _ -> kw | _ -> `Assoc [] in
-          let forward () = forward_to_julia ctx ~peer:r.peer ~fc r.body in
+          let not_handled () = not_handled ctx ~peer:r.peer ~fc in
           match Funcall.of_string fc with
-          | Funcall.Proxied _ -> forward ()
+          | Funcall.Other _ -> not_handled ()
           | Funcall.Server_name -> (
-              (* Julia's App.server_name answers {server, node} here; ws-connector's name is the WS answer *)
+              (* Julia's App.server_name answered {server, node} here; ws-connector's name is the WS answer *)
               match ctx.cfg.http_server_name with
               | Some (server, node) ->
                   json_resp (Yojson.Safe.to_string (`List [ `Assoc [ ("content", `String (Yojson.Safe.to_string (`Assoc [ ("server", `Int server); ("node", `Int node) ]))) ] ]))
-              | None -> forward ())
+              | None -> not_handled ())
           | f -> (
               match Funcall.dispatch ctx f kwargs with
               | Response.Handled res -> json_resp ("[" ^ String.concat "," res.messages ^ "]")
               | Response.Notice n -> json_resp (Yojson.Safe.to_string (`Assoc [ ("error", `String n) ]))
-              | Response.Not_handled -> forward ()))
+              | Response.Not_handled -> not_handled ()))
       | _ -> Text (500, "error"))
 
 let suggestions (ctx : ctx) : resp =

@@ -1,5 +1,5 @@
-(* The job loop every Julia module ran: run, sleep [period], repeat, until [stop]; an exception is
-   logged and the loop continues (ocaml-plan.md §4.6). *)
+(* The job loop (as every Julia module ran it): run, sleep [period], repeat, until [stop]; an
+   exception is logged and the loop continues. *)
 
 open Eio.Std
 

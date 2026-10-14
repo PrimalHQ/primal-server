@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Versioned SQL migration runner for the Primal OCaml daemons — the single owner of
-# public.schema_migrations (the Rust and Erlang tools that used the name are gone or going).
+# public.schema_migrations (a table of that name left by another tool: see --take-over).
 #
 #   sql/migrate.sh [--dry-run | --status | --record VERSION | --take-over] [MIGRATIONS_DIR]
 #
 # Applies every MIGRATIONS_DIR/NNNN_name.sql (lexical order) not yet recorded, each file with
 # `psql -v ON_ERROR_STOP=1 -f` — statement by statement, no wrapping transaction, so
 # `create index concurrently` works. Every file runs under PGOPTIONS lock_timeout (default 5s so
-# DDL fails fast instead of queueing behind a long query while the old daemons still serve); a
+# DDL fails fast instead of queueing behind a long query while the running daemons serve); a
 # file that needs longer declares it in a header comment:   -- lock_timeout: 120s
 #
 #   --dry-run          list the pending files, apply nothing
@@ -17,9 +17,9 @@
 #                      is renamed to schema_migrations_legacy_<date> instead of aborting
 #
 # The connection comes from the standard PG* variables (the dev shell points them at the local
-# primal1). Run it on every host against that host's own database, BEFORE `dune build`: the
-# [%pgsql] checks need the schema. The media host builds against the stage host's schema, so the
-# stage host migrates first. Version prefixes are per-project ranges (migrations/README.md).
+# primal1). Apply a migration to the database the [%pgsql] checks use before building code that
+# needs it (the checks see only what that database has), and to each database the daemons run on.
+# Version prefixes are per-project ranges (migrations/README.md).
 set -euo pipefail
 
 mode=apply; record_version=""; take_over=0

@@ -198,7 +198,7 @@ let () =
   Printf.printf "primal-importer: push notifications %s\n%!"
     (if cfg.push_notifications_enabled then "ON (" ^ cfg.push_notification_sender_bin ^ ")" else "OFF");
 
-  (* Phase 1 importer completion (ocaml-plan.md §7.1). *)
+  (* Content moderation rules, scheduled hooks / expire_scores, import listener. *)
   Importer.Cache_storage_ext.default_settings_file := cfg.default_settings_file;
   Importer.Cache_storage_ext.content_moderation_rules_enabled := cfg.content_moderation_rules_enabled;
   Printf.printf

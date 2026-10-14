@@ -1,4 +1,4 @@
-; The relay fetcher (ocaml-plan.md §8): fetching.jl + firehose_server.jl + the deduplicated
+; The relay fetcher, ported from Julia's fetching.jl + firehose_server.jl + the deduplicated
 ; message archive of DeduplicatedEventStorage, as one daemon.
 (library
  (name primal_fetcher)

@@ -1,6 +1,6 @@
-(* The API daemon (ocaml-plan.md §5): the public WebSocket port served from N domains (one accept
+(* The API daemon: the public WebSocket port served from N domains (one accept
    loop each on a shared SO_REUSEPORT socket), the internal/moderation HTTP ports, admin
-   HTTP on 127.0.0.1, rolling-restart drain (§6). bin/primal_apid.ml and the private
+   HTTP on 127.0.0.1, rolling-restart drain. bin/primal_apid.ml and the private
    ocaml-ext/bin call [run]; the latter registers its extensions in [init]. *)
 
 open Eio.Std
@@ -35,8 +35,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
   let lifecycle = Lifecycle.create ~sw ~clock () in
   let stop = Lifecycle.stop lifecycle in
   let stats = Stats.create () in
-  log "pid %d: config %s, servername %s, upstream %s" (Unix.getpid ()) cfg_path cfg.servername
-    (Option.value cfg.upstream_julia_ws ~default:"none");
+  log "pid %d: config %s, servername %s" (Unix.getpid ()) cfg_path cfg.servername;
 
   (* The public WebSocket service: any GET with an Upgrade header becomes a Conn session; a plain
      GET (health probes, browsers) gets a text banner like HTTP.jl did. *)
@@ -54,7 +53,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
       ~membership_size:cfg.membership_pool_size
   in
   let ws_handler (r : Http_server.req) : Http_server.resp =
-    if is_upgrade r then Http_server.Ws (None, fun session -> Conn.run ~net ~clock cfg stats live bc session)
+    if is_upgrade r then Http_server.Ws (None, fun session -> Conn.run ~clock cfg stats live bc session)
     else Http_server.Text (200, "Primal cache API Websocket endpoint\n")
   in
   let public_svc =

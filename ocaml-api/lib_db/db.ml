@@ -1,4 +1,4 @@
-(* Per-domain PostgreSQL pools (ocaml-plan.md §4.2). PGOCaml connections are domain-bound, so every
+(* Per-domain PostgreSQL pools. PGOCaml connections are domain-bound, so every
    worker domain owns its own pools; a request runs on the domain that accepted its connection and
    leases from that domain's pools. Phantom tags keep cache and membership handles apart at the type
    level: a membership query cannot be run on a cache lease.

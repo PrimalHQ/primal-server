@@ -1,9 +1,8 @@
 (* Dev tool: exercise LNURL zapper verification (Lnurl.verify) against real zap receipts, to
    confirm the SOCKS5 + TLS + HTTP egress path actually works on a networked host.
 
-   Point PG* at a DB that holds metadata + kind-9735 events (e.g. the Julia importer's:
-     PGHOST=<julia-host> PGDATABASE=primal1), and set PRIMALSERVER_PROXY to the same SOCKS5 proxy
-   the Julia importer uses. For each recent zap receipt we take the receipt author as the expected
+   Point PG* at a cache DB that holds metadata + kind-9735 events, and set PRIMALSERVER_PROXY to
+   the SOCKS5 proxy the importer uses. For each recent zap receipt we take the receipt author as the expected
    LNURL nostrPubkey and the receipt's `p` tag as the zapped user, look up that user's lnurl-pay
    endpoint, fetch it, and check the advertised nostrPubkey matches — exactly Lnurl.verify. *)
 open Eio.Std

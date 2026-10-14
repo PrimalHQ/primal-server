@@ -1,4 +1,4 @@
-(* Focused check of the score_event_cb firing path (Phase 3): import a note, then a like to it
+(* Focused check of the score_event_cb firing path: import a note, then a like to it
    from a trusted (human) pubkey, and confirm event_stats.score / score24h / score_expiry land.
    Verification is disabled so we can use synthetic (unsigned) events. *)
 open Eio.Std

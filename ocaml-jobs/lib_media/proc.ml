@@ -1,4 +1,4 @@
-(* External tools (file, ffprobe, ffmpeg, magick, exiftool, python, ssh) under Eio.Process: stdin
+(* External tools (file, identify, ffprobe, ffmpeg, magick, exiftool, ssh) with posix_spawn: stdin
    from a string, stdout/stderr captured, a deadline (SIGKILL past it), LD_LIBRARY_PATH stripped
    from the child's environment (the nix dev shell's libraries must not leak into system tools).
    A child that stops reading stdin early (file(1) after ~7 MiB) is not an error: the write

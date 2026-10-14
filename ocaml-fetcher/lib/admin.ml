@@ -1,4 +1,4 @@
-(* Admin HTTP on 127.0.0.1: health, readiness, a status page with the Fetching.mon numbers
+(* Admin HTTP on admin_host:admin_port: health, readiness, a status page with the Fetching.mon numbers
    (providing|waiting|total relays, per-second rates) and the dedup/firehose counters. *)
 
 open Http_server

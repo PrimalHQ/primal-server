@@ -1,7 +1,7 @@
 (* "Instant" DAG indexers for a single just-imported event, mirroring what the Julia API's
    import_events path runs inside the importer node right after import (app.jl:1954-1965):
    DAG.import_basic_tags, import_zap_receipts, import_poll_votes and import_event_mentions for
-   that event's imported_at window. The periodic DAG runner (dag_runner.jl, Phase 6 in OCaml)
+   that event's imported_at window. The jobs daemon's periodic DAG runner (Julia dag_runner.jl)
    covers the same tables for everything else; these per-event versions exist so an event a user
    just posted through the API is searchable/threaded immediately instead of after the next
    DAG segment.

@@ -1,7 +1,6 @@
-(* Per-relay resume point: <state_dir>/<escaped url>/latest_timestamp, the file Julia's
-   update_fetchers! reads at start and its Throttle(period=5) safe_save writes — same escaping
-   (every char outside [a-zA-Z0-9] becomes '_'), so the first OCaml start resumes where Julia
-   stopped. *)
+(* Per-relay resume point: <state_dir>/<escaped url>/latest_timestamp, every char outside
+   [a-zA-Z0-9] escaped as '_' (the layout of Julia's update_fetchers! / safe_save, which the
+   existing state directories have). *)
 
 let okchar c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 let relay_dir ~state_dir (url : string) : string = state_dir ^ "/" ^ String.map (fun c -> if okchar c then c else '_') url

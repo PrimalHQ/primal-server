@@ -1,4 +1,4 @@
-(* Smoke-test the Eio-native PGOCaml adapter against the reference DB. *)
+(* Smoke-test the Eio-native PGOCaml adapter against the PG* DB. *)
 open Eio.Std
 module Pg = Primal_common.Postgres
 

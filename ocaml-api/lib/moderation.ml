@@ -2,12 +2,10 @@
    to every funcall answer before sending (hidden/deleted events, the viewer's content-moderation
    rules per funcall scope, and the synthetic kinds that carry pubkeys in their content).
 
-   Funcalls that Julia answers through SQL functions taking the viewer's pubkey
-   (app_funcalls_with_pgfuncs with ENABLE_PGFUNCS) skip this filter in Julia; the Phase 3a
-   handlers are those, so the dispatcher applies [filter] only to the Phase 3b funcalls.
-
-   Julia's rules for NOTIFICATION and DIRECTMSG_COUNTS messages are not ported here: the funcalls
-   that emit them (get_notifications, get_directmsg_contacts) are still proxied. *)
+   Funcalls that Julia answered through SQL functions taking the viewer's pubkey
+   (app_funcalls_with_pgfuncs with ENABLE_PGFUNCS) skipped this filter in Julia; the dispatcher
+   runs those (and the writes) with ~moderate:false. NOTIFICATION and DIRECTMSG_COUNTS messages
+   get their own rules below. *)
 
 type scope = Content | Trending | No_scope
 

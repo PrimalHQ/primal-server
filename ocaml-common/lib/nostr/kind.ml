@@ -1,4 +1,4 @@
-(* Primal's synthetic event kinds (ocaml-plan.md §4.3): the one table for app.jl:134-198,
+(* Primal's synthetic event kinds: the one table for Julia's app.jl:134-198,
    app_ext.jl:71-98, app_media.jl:16-17 and the sql/app.sql c_* constants. Three numbers are used
    twice by the Julia code and clients depend on both meanings; they are kept and marked. *)
 
@@ -98,8 +98,8 @@ let live_event_moderation_changed = 11_000_001
 
 (* {1 private kinds}
 
-   The private extensions (ocaml-plan.md §11.1 Nostr.Kind.register_private) register their response
-   kinds here at startup; a kind already registered under another name is a startup failure. The
+   The private extensions register their response kinds here at startup
+   ([register_private]); a kind already registered under another name is a startup failure. The
    public kinds above are not in the table (several of them collide by design). *)
 let private_kinds : (string, int) Hashtbl.t = Hashtbl.create 32
 

@@ -1,10 +1,11 @@
-(* App.precalculate_analytics (app_ext.jl:672): every 10 minutes the sixteen explore selectors
-   (trending / gm_trending / classic_trending / mostzapped × 24h/12h/4h/1h) are computed through
+(* Ported from Julia's App.precalculate_analytics: every [analytics_period_s] the sixteen explore
+   selectors (trending / gm_trending / classic_trending / mostzapped × 24h/12h/4h/1h) are computed through
    the API's scored_content (the primal_api library, with the API's own config), filtered to the
    kinds the clients render, the notes of the gaming-detection selectors prefixed "[G] " when the
-   Ollama classifier answers yes, and stored in the cache table as precalculated_analytics_<selector>;
-   then the explore topics (hashtag counts of the last day among human-ranked authors). An
-   [analytics_key_suffix] writes shadow keys for comparison with Julia's. *)
+   Ollama classifier answers yes, and stored in the cache table as
+   precalculated_analytics_<selector><analytics_key_suffix>; then the explore topics (hashtag counts
+   of the last day among human-ranked authors). A non-empty [analytics_key_suffix] writes keys
+   besides the live ones (for comparisons). *)
 
 open Eio.Std
 module H = Primal_api.Handlers

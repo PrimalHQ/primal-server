@@ -351,7 +351,7 @@ parses it, runs the extensions' initialisation, checks that every role is known,
 
 **Every top-level key is required**, including those of roles the instance does not run (give
 them inert values, e.g. a zero key for `dvm_requester_pubkey`). Exceptions: `dag_statement_timeout_s`
-(default 30), `media`, `blossom` and `ext` may be absent. A conninfo is
+(default 30), `media`, `blossom` and `ext` may be absent. Unknown keys are ignored. A conninfo is
 `{"host", "port", "user", "database"}`.
 
 | Key | Type | Used by | Meaning |
@@ -406,7 +406,6 @@ Every key is required unless marked optional.
 | Key | Type | Meaning |
 |---|---|---|
 | `binary_data_cache_dir` | string | binary cache of node arguments; shared by the `media` and `blossom` processes |
-| `media_path`, `media_path_2` | string | required, currently unused |
 | `media_url_root` | string | URL root of local storage |
 | `tmp_dir` | string | scratch files (ffmpeg output, sandbox bind) |
 | `proxies` | string list | SOCKS5 proxies for downloads, `socks5[h]://host:port` |
@@ -425,7 +424,7 @@ Every key is required unless marked optional.
 | `worker_domains` | int, optional | worker domains (default 8) |
 | `worker_pool_size` | int, optional | cache-DB connections per worker domain (default 8) |
 | `max_concurrent_per_name` | int | running-node limit per func |
-| `julia_duty_concurrency` | int | running-node limit of `import_upload_3`, `block_media`, `purge_media_` |
+| `julia_duty_concurrency` | int | running-node limit of `import_upload_3`, `block_media`, `purge_media_` (the funcs the Julia nodes used to run; the key keeps its name) |
 | `refresh_matview_period_s` | number | `pn_time_for_pubkeys` refresh period (usually 600) |
 | `cloudflare_cache` | object or null | `{zone_id, api_key}` for cache purges |
 | `blossom_hosts` | string list | host names whose URLs `purge_media_` treats as Blossom blobs |

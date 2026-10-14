@@ -1,6 +1,5 @@
-(* Admin HTTP on 127.0.0.1 (ocaml-plan.md §5.6): health/readiness for the load balancer and the
-   restart script, the fiber phase registry (the pgwire `tasks` replacement), Prometheus metrics,
-   and a programmatic drain. *)
+(* Admin HTTP on 127.0.0.1: health/readiness for the load balancer and the service manager, the
+   fiber phase registry (`tasks`), Prometheus metrics, and a programmatic drain. *)
 
 open Http_server
 
@@ -14,7 +13,6 @@ let service ~(lifecycle : Lifecycle.t) ~(stats : Stats.t) ~(cfg : Config.t) ~(li
         ("servername", `String cfg.servername);
         ("public_ws_port", `Int cfg.public_ws_port);
         ("cache_ws_port", (match cfg.cache_ws_port with Some p -> `Int p | None -> `Null));
-        ("upstream", (match cfg.upstream_julia_ws with Some u -> `String u | None -> `Null));
         ("connections", `Int (Conn.count ()));
         ( "live_subscriptions",
           let a, f, c = Live_events.stats live in

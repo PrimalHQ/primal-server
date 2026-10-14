@@ -1,4 +1,4 @@
-(* Admin HTTP on 127.0.0.1: health, readiness and a status page listing the roles. *)
+(* Admin HTTP on admin_host:admin_port: health, readiness and a status page listing the roles. *)
 
 open Http_server
 

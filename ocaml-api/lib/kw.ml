@@ -1,6 +1,6 @@
-(* Typed access to a funcall's kwargs (ocaml-plan.md §5.2). Every accessor returns an option or a
-   default; [Invalid] is raised where ws-connector returned an error for a malformed argument
-   (the dispatcher then treats the request as not handled, i.e. proxied, as ws-connector did). *)
+(* Typed access to a funcall's kwargs. Every accessor returns an option or a default; [Invalid] is
+   raised where ws-connector returned an error for a malformed argument (the dispatcher then treats
+   the request as not handled: NOTICE "error"). *)
 
 exception Invalid of string
 

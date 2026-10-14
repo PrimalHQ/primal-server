@@ -1,4 +1,4 @@
-(* Daemon lifecycle: Starting -> Serving -> Draining -> Stopped (ocaml-plan.md §4.5/§6).
+(* Daemon lifecycle: Starting -> Serving -> Draining -> Stopped.
 
    The drain protocol is the tsunami kernel's: SIGUSR1/SIGTERM/SIGINT handlers only broadcast an
    Eio.Condition (the eio-sanctioned way to wake a fiber from a signal handler); a normal fiber

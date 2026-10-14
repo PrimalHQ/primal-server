@@ -1,5 +1,6 @@
-(* Focused checks for the Phase-8 additions: filterlist write(membership)->read(local) roundtrip,
-   and the scheduled-hooks runner firing expire_hashtag_score_cb. Uses one DB for both roles. *)
+(* Focused checks: filterlist write(membership)->read(local) roundtrip, the scheduled-hooks runner
+   firing expire_hashtag_score_cb, and a whitelisted kind-1984 report. Uses one DB for both roles.
+   (Named after the porting phase that added these.) *)
 open Eio.Std
 module Pg = Primal_common.Postgres
 module CS = Importer.Cache_storage

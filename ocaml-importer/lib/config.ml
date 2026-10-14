@@ -1,5 +1,5 @@
-(* Runtime configuration from the environment, mirroring the globals set in
-   start_media_importer.jl (FirehoseClient.PORT = 9000+NODEIDX, VERIFY_ZAPPERS, Main.PROXY). *)
+(* The importer's configuration: the JSON config file the daemon reads ([of_json_file]), and
+   [from_env], the environment variant the dev tools in bin/ use. *)
 
 (* Event_syncer.backfill: pull [remote]'s events with imported_at in [from_ts, to_ts) in keyset
    batches of [batch] rows and submit them to the import queue (the normal import path, no relay
@@ -21,25 +21,24 @@ type t = {
   pushgateway_enabled : bool; (* publish the imported count to a Prometheus pushgateway *)
   pushgateway_host : string;
   pushgateway_port : int;
-  pushgateway_job : string; (* job label, Julia "primalnode<idx>" (the reporting node, see below) *)
-  pushgateway_stats_file : string; (* Julia stats.json: persists the always-increasing "any" total *)
+  pushgateway_job : string; (* job label (exported_job in Prometheus) *)
+  pushgateway_stats_file : string; (* stats.json (Julia's format): persists the always-increasing "any" total *)
   pushgateway_interval : float; (* seconds between pushes *)
   push_notifications_enabled : bool; (* device push delivery (Julia PUSH_NOTIFICATIONS_ENABLED) *)
   push_notification_sender_bin : string; (* the push-notification-sender subprocess binary *)
   push_notifications_period : float; (* seconds between transmission batches (Julia PERIOD) *)
   push_notifications_log : bool; (* dump sender request/response JSON to stdout (Julia LOG) *)
   push_intake_host : string; (* Push_intake: the wallet server's notification line protocol (Julia PushNotifications.PORT) *)
-  push_intake_ports : int list; (* [] = off; Julia's were 20000+N on each node that loaded the importer config *)
+  push_intake_ports : int list; (* [] = off *)
   cs : Cache_storage.config;
-  cache_db : Postgres.conninfo; (* the importer's :p0 (cache) DB — was PG* *)
-  membership_db : Postgres.conninfo; (* the importer's :membership DB — was PGMEMBERSHIP* *)
+  cache_db : Postgres.conninfo; (* the cache DB (Julia's :p0) *)
+  membership_db : Postgres.conninfo; (* the membership DB (Julia's :membership) *)
   humaness_threshold : float option; (* None = compute from pubkey_trustrank at startup *)
-  (* Phase 1 (ocaml-plan.md §7): importer completion *)
-  import_listener_enabled : bool; (* typed import line protocol replacing the Julia EVAL port *)
+  import_listener_enabled : bool; (* Import_listener: synchronous imports for the API's import_events *)
   import_listener_host : string;
-  import_listener_port : int; (* 12000+N once the Julia node is gone; another port meanwhile *)
-  expire_scores_enabled : bool; (* Julia CacheStorage.periodic expire_scores; enable once Julia's stops *)
-  scheduled_hooks_enabled : bool; (* run_scheduled_hooks; both runners active = double decrements *)
+  import_listener_port : int;
+  expire_scores_enabled : bool; (* Julia CacheStorage.periodic expire_scores; one importer per cache DB *)
+  scheduled_hooks_enabled : bool; (* run_scheduled_hooks; one importer per cache DB (two runners = double decrements) *)
   content_moderation_rules_enabled : bool; (* cmr_* recompute on mute/allow list changes *)
   default_settings_file : string option; (* content-moderation default-settings.json (cmr defaults) *)
   relay_broadcast_timeout : float; (* seconds per relay for reply broadcasting *)
@@ -86,12 +85,6 @@ let proxy_endpoint (t : t) : (string * int) option =
       | None -> None)
 
 let from_env () : t =
-  let node_idx = int_env "NODE_IDX" (int_env "PRIMALSERVER_NODE_IDX" 17) in
-  (* Reporting node identity for pushgateway/stats, distinct from the firehose node (node_idx).
-     On this box only the node-17 firehose (port 9017) exists, but the importer replaces the
-     production node-18 Julia importer, so its metrics/stats are published as node 18 (the Grafana
-     panel queries cache_any{exported_job="primalnode18"}). Override with PRIMALSERVER_REPORT_NODE_IDX. *)
-  let report_node = int_env "PRIMALSERVER_REPORT_NODE_IDX" 18 in
   let storage_path =
     match getenv "PRIMALSERVER_STORAGE_PATH" with
     | Some p -> p
@@ -99,7 +92,7 @@ let from_env () : t =
   in
   {
     firehose_host = Option.value (getenv "PRIMALSERVER_FIREHOSE_HOST") ~default:"127.0.0.1";
-    firehose_port = int_env "PRIMALSERVER_FIREHOSE_PORT" (9000 + node_idx);
+    firehose_port = int_env "PRIMALSERVER_FIREHOSE_PORT" 9017;
     num_workers = int_env "IMPORTER_WORKERS" 4;
     queue_capacity = int_env "IMPORTER_QUEUE_CAPACITY" 10_000;
     proxy = Option.bind (getenv "PRIMALSERVER_PROXY") normalize_proxy;
@@ -115,12 +108,12 @@ let from_env () : t =
     pushgateway_enabled = bool_env "IMPORTER_PUSHGATEWAY" true;
     pushgateway_host = Option.value (getenv "IMPORTER_PUSHGATEWAY_HOST") ~default:"127.0.0.1";
     pushgateway_port = int_env "IMPORTER_PUSHGATEWAY_PORT" 9091;
-    pushgateway_job =
-      Option.value (getenv "IMPORTER_PUSHGATEWAY_JOB")
-        ~default:(Printf.sprintf "primalnode%d" report_node);
+    (* The job and stats-file names are the Julia node's whose metrics the importer took over;
+       the dashboards query cache_any{exported_job="primalnode18"}. *)
+    pushgateway_job = Option.value (getenv "IMPORTER_PUSHGATEWAY_JOB") ~default:"primalnode18";
     pushgateway_stats_file =
       Option.value (getenv "IMPORTER_STATS_FILE")
-        ~default:(Printf.sprintf "%s/primalnode%d/cache/db/stats.json" storage_path report_node);
+        ~default:(Filename.concat storage_path "primalnode18/cache/db/stats.json");
     pushgateway_interval = float_env "IMPORTER_PUSHGATEWAY_INTERVAL" 15.0;
     push_notifications_enabled = bool_env "IMPORTER_PUSH_NOTIFICATIONS" false;
     push_notification_sender_bin =
@@ -158,7 +151,7 @@ let from_env () : t =
       | None -> None);
     import_listener_enabled = bool_env "IMPORTER_IMPORT_LISTENER" false;
     import_listener_host = Option.value (getenv "IMPORTER_IMPORT_LISTENER_HOST") ~default:"0.0.0.0";
-    import_listener_port = int_env "IMPORTER_IMPORT_LISTENER_PORT" (12000 + report_node);
+    import_listener_port = int_env "IMPORTER_IMPORT_LISTENER_PORT" 12018;
     expire_scores_enabled = bool_env "IMPORTER_EXPIRE_SCORES" false;
     scheduled_hooks_enabled = bool_env "IMPORTER_SCHEDULED_HOOKS" true;
     content_moderation_rules_enabled = bool_env "IMPORTER_CONTENT_MODERATION_RULES" true;

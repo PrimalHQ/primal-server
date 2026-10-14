@@ -1,7 +1,8 @@
 (* Relay URL sanitising, mirroring fetching.jl sanitize_uri / sanitize_valid_relay_url (URIs.jl
    semantics): lowercase host, default port dropped, path normalised and stripped of trailing
    slashes; .onion, IPv6 literals and localhost rejected. The STRING form matters: it names the
-   per-relay state directory (Resume), so it has to come out exactly as Julia's string(URI). *)
+   per-relay state directory (Resume), so it has to stay as it is (it matches Julia's string(URI),
+   which named the existing directories). *)
 
 type parts = { scheme : string; userinfo : string option; host : string; port : string option; path : string; query : string option; fragment : string option }
 

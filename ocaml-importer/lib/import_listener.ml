@@ -1,5 +1,5 @@
-(* Import listener: the typed replacement for the Julia FirehoseServer's `EVAL`/`EXPR` channel on
-   port 12000+N (ocaml-plan.md §7.2). It accepts ONLY event imports, newline-delimited JSON:
+(* Import listener: the typed replacement for the Julia FirehoseServer's `EVAL`/`EXPR` channel.
+   It accepts ONLY event imports, newline-delimited JSON:
 
      ["EVENT", <subid>, <event>]       -> ["OK", <id hex>, "imported"|"duplicate"|"rejected"]
      ["IMPORT", [<event>, ...]]        -> ["OK", {"imported":n,"duplicates":n,"rejected":n,"errors":n}]

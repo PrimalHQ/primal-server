@@ -1,6 +1,6 @@
 (* Dev tool: re-run zap-receipt processing for a past imported_at window.
 
-   During the 2026-07-15 fd-exhaustion incident (see lib/postgres.ml open_connection) kind-9735
+   During the 2026-07-15 fd-exhaustion incident (see ocaml-common's Postgres.open_connection) kind-9735
    events were still imported into [event], but every LNURL zapper verification failed with
    EMFILE, so none of their import effects were applied: no og_zap_receipts rows, no event_stats
    satszapped/zaps, no pubkey_zapped, no YOUR_POST_WAS_ZAPPED notifications. This tool replays

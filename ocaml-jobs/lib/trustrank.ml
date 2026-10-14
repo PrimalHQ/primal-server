@@ -1,10 +1,11 @@
 (* trustrank_maker.jl make_2 + TrustRank.import_trustrank: personalized PageRank over the follow
    graph, seeded at the verified users (membership verified_users.default_name), blocked
-   (spam/csam) pubkeys zeroed, alpha 0.85, 20 iterations, ranks > 0 kept, then written to
-   pubkey_trustrank_new and swapped under the live name (the dependent view recreated) — or, in
-   shadow mode, written to another table for comparison. The graph is read once through a cursor
-   from pubkey_followers (follower -> pubkey) into CSR arrays; Julia walked the contact lists from
-   the seeds, which reaches the same nodes that can hold rank. *)
+   (spam/csam) pubkeys zeroed, [trustrank_alpha], [trustrank_iterations], ranks > 0 kept, then
+   written to pubkey_trustrank_new and swapped under the live name (the dependent view recreated)
+   — or, when [trustrank_target_table] names another table, written there (for comparisons).
+   The graph is read once through a cursor from pubkey_followers (follower -> pubkey) into CSR
+   arrays; Julia walked the contact lists from the seeds, which reaches the same nodes that can
+   hold rank. *)
 
 open Eio.Std
 module PGOCaml = Postgres.PGOCaml
@@ -201,7 +202,7 @@ let run_make ~(cfg : Config.t) ~(stop : unit Promise.t) : unit =
         cfg.trustrank_extra_targets)
 
 let run ~(cfg : Config.t) ~(stop : unit Promise.t) ~clock : unit =
-  (* Julia sleeps one period before the first run *)
+  (* unless trustrank_run_at_start, the first run comes after one period (as in Julia) *)
   if not cfg.trustrank_run_at_start then (match Fiber.first (fun () -> Promise.await stop; `Stop) (fun () -> Eio.Time.sleep clock cfg.trustrank_period_s; `Tick) with `Stop -> () | `Tick -> ());
   if not (Promise.is_resolved stop) then
     Periodic.run ~clock ~stop ~period:cfg.trustrank_period_s ~label:"trustrank" (fun () ->

@@ -5,7 +5,7 @@
    sequentially), and records the coverage. An exception in a segment ends this run (the next run
    retries). The hashed output tables are the live ones (public.<name> views are the API contract);
    their presence is asserted at startup. [dag_dry_run] rolls every segment back and records no
-   coverage, so the whole pipeline can be exercised while Julia's runner still owns the tables. *)
+   coverage, so the whole pipeline can be exercised without writing anything. *)
 
 open Eio.Std
 module CS = Importer.Cache_storage

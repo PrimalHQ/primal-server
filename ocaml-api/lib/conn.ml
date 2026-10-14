@@ -1,14 +1,11 @@
-(* One client WebSocket connection of the cache API, in the ws-connector shape (connection.rs /
-   router.rs): a paired upstream WebSocket to the Julia CacheServer is opened per client, on its
-   first request the native dispatcher (Funcall) does not handle; such requests are forwarded
-   verbatim and every upstream frame is relayed back verbatim; an idle timer closes both sides.
-   Without an upstream (upstream_julia_ws null, or its connect fails) such a request is answered
-   like Julia answers one it cannot serve: NOTICE "unknown api request" for a funcall name the
-   dispatcher does not know, NOTICE "error" otherwise, then EOSE.
+(* One client WebSocket connection of the cache API (the shape of ws-connector's connection.rs /
+   router.rs): REQs go to the dispatcher (Funcall); a request it does not handle is answered the way
+   the Julia CacheServer answered one it could not serve: NOTICE "unknown api request" for a funcall
+   name the dispatcher does not know, NOTICE "error" otherwise, then EOSE. Other frames (binary,
+   non-REQ text) are ignored. An idle timer closes the connection.
 
-   Exactly like ws-connector, `set_primal_protocol` is NOT forwarded: the zlib flag only applies to
-   natively answered requests, and proxied responses arrive in whatever form the upstream sends.
-   Live-event subscriptions registered by native handlers are dropped on CLOSE and on disconnect. *)
+   `set_primal_protocol` switches the connection to zlib framing for later answers. Live-event
+   subscriptions registered by handlers are dropped on CLOSE and on disconnect. *)
 
 open Eio.Std
 
@@ -19,7 +16,6 @@ type t = {
   session : Http_server.ws_session;
   mutable use_zlib : bool;
   mutable last_msg : float;
-  mutable backend : Ws_client.t option;
   mutable closing : bool;
   mutable inflight : int; (* natively handled requests being computed right now *)
   opened_at : float;
@@ -57,11 +53,11 @@ let respond (c : t) (stats : Stats.t) ~subid ?(notices = []) (msgs : string list
   c.session.ws_send_text (Protocol.eose subid);
   Stats.incr stats.sent
 
-(* Native dispatch of one REQ. Returns true when handled (nothing is forwarded). *)
+(* Dispatch of one REQ. Returns true when handled (else the caller answers with a NOTICE). *)
 (* The non-"cache" REQ filters of the Julia CacheServer. on_client_message first rejects any REQ
    whose filters carry "kinds" or "authors" (NOTICE, then the connection is closed); then
    initial_filter_handler maps {"ids"} and {"since"/"until"} to `events` and {"search"} to the
-   `search` funcall (still proxied: `None). The live push of new events to since/idsonly
+   `search` funcall (not handled here: `None, answered NOTICE "error"). The live push of new events to since/idsonly
    subscriptions had no producer left in Julia (the importer moved out), so a since/until REQ is a
    one-shot listing. *)
 let filter_funcall (raw : string) : [ `Call of Funcall.t * Kw.t | `Reject of string | `None ] =
@@ -127,7 +123,7 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
       Stats.incr stats.handled;
       true
   | Protocol.Req { subid; funcall = Some fc; kwargs; _ } -> (
-      match Funcall.of_string fc with Funcall.Proxied s when not (Extensions.has_funcall s) -> false | f -> dispatch_and_respond ~subid ~fc f kwargs)
+      match Funcall.of_string fc with Funcall.Other s when not (Extensions.has_funcall s) -> false | f -> dispatch_and_respond ~subid ~fc f kwargs)
   | Protocol.Req { subid; funcall = None; raw; _ } -> (
       match filter_funcall raw with
       | `Call (f, kwargs) -> dispatch_and_respond ~subid ~fc:("filter:" ^ Funcall.to_string f) f kwargs
@@ -142,107 +138,46 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
       | `None -> false)
   | _ -> false
 
-let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (bc : Broadcasts.t) (session : Http_server.ws_session) : unit =
+let run ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (bc : Broadcasts.t) (session : Http_server.ws_session) : unit =
   let id = Atomic.fetch_and_add next_id 1 in
   let c =
-    { id; session; use_zlib = false; last_msg = Unix.gettimeofday (); backend = None; closing = false; inflight = 0;
+    { id; session; use_zlib = false; last_msg = Unix.gettimeofday (); closing = false; inflight = 0;
       opened_at = Unix.gettimeofday () }
   in
   with_registry (fun () -> Hashtbl.replace registry id c);
   Stats.incr stats.connections;
   Stats.incr stats.accepted;
-  let upstream = Config.upstream cfg in
   Fun.protect
     ~finally:(fun () ->
       with_registry (fun () -> Hashtbl.remove registry id);
       Live_events.unregister_conn live ~conn_id:id;
       Broadcasts.unregister_conn bc ~conn_id:id;
       Stats.decr stats.connections;
-      (match c.backend with Some b -> (try Ws_client.close b with _ -> ()) | None -> ());
       try session.ws_close () with _ -> ())
     (fun () ->
       Switch.run @@ fun sw ->
       let touch () = c.last_msg <- Unix.gettimeofday () in
-      (* Requests of one connection. ws-connector and Julia answer them strictly in order, so one
+      (* Requests of one connection. ws-connector and Julia answered them strictly in order, so one
          slow feed delays everything the page asks for next on that socket (a profile header behind
          a 9 s reads feed). With request_concurrency > 1, REQs run in their own fibers, at most that
          many at once (the semaphore makes the reader wait, so a client cannot queue unbounded work);
          set_primal_protocol (changes how later answers are framed), CLOSE (drops live subscriptions)
-         and anything forwarded verbatim stay in order on the reader. Clients key every message by
-         subid and wait for its EOSE, so interleaved answers are fine; frames of one answer are
-         queued by one fiber, and the upstream socket is written under a mutex. In-flight fibers
+         and non-REQ frames stay in order on the reader. Clients key every message by subid and wait
+         for its EOSE, so interleaved answers are fine; frames of one answer are queued by one
+         fiber. In-flight fibers
          finish after the client loop ends (the switch waits), so a closing connection still gets
          its last answers queued before the socket closes. *)
       let concurrency = max 1 cfg.request_concurrency in
       let slots = Eio.Semaphore.make concurrency in
-      let backend_lock = Eio.Mutex.create () in
-      (* resolved when the upstream closes: the client connection ends with it, as with ws-connector
-         (the client reconnects; subscriptions Julia served are gone with its socket) *)
-      let backend_gone, backend_gone_r = Promise.create () in
-      let backend_loop backend () =
-        let rec loop () =
-          if c.closing then ()
-          else
-            match Ws_client.recv_frame backend with
-            | `Closed -> ()
-            | `Text s ->
-                touch ();
-                session.ws_send_text s;
-                Stats.incr stats.backend_frames;
-                Stats.incr stats.sent;
-                loop ()
-            | `Binary b ->
-                touch ();
-                session.ws_send_binary b;
-                Stats.incr stats.backend_frames;
-                Stats.incr stats.sent;
-                loop ()
-        in
-        (try loop () with Eio.Cancel.Cancelled _ as e -> raise e | End_of_file -> () | exn -> log "connection %d: upstream: %s" c.id (Printexc.to_string exn));
-        ignore (Promise.try_resolve backend_gone_r ());
-        `Stop_daemon
-      in
-      (* under backend_lock *)
-      let connected_backend () : Ws_client.t option =
-        match (c.backend, upstream) with
-        | (Some _ as b), _ -> b
-        | None, None -> None
-        | None, Some (tls, host, port, path) -> (
-            match
-              Eio.Time.with_timeout clock cfg.upstream_connect_timeout_s (fun () ->
-                  Ok (Ws_client.connect ~tls ~sw ~net ~clock ~host ~port ~path ()))
-            with
-            | Ok b ->
-                c.backend <- Some b;
-                Fiber.fork_daemon ~sw (backend_loop b);
-                Some b
-            | Error `Timeout ->
-                Stats.incr stats.backend_failures;
-                log "connection %d: upstream connect timeout" c.id;
-                None
-            | exception (Eio.Cancel.Cancelled _ as e) -> raise e
-            | exception e ->
-                Stats.incr stats.backend_failures;
-                log "connection %d: upstream connect: %s" c.id (Printexc.to_string e);
-                None)
-      in
-      (* ~connect:false: only over an upstream this connection already opened (a CLOSE of a
-         subscription the upstream never saw is not worth a connect) *)
-      let send_backend ?(connect = true) (send : Ws_client.t -> unit) : bool =
-        Eio.Mutex.use_rw ~protect:true backend_lock (fun () ->
-            match if connect then connected_backend () else c.backend with
-            | Some b -> send b; Stats.incr stats.proxied; true
-            | None -> false)
-      in
-      let forward s (p : Protocol.incoming) =
+      (* a request the dispatcher did not handle *)
+      let not_handled (p : Protocol.incoming) =
         match p with
         | Protocol.Req { subid; funcall; _ } ->
-            if not (send_backend (fun b -> Ws_client.send_text b s)) then
-              let n = match Option.map Funcall.of_string funcall with Some (Funcall.Proxied _) -> "unknown api request" | _ -> "error" in
-              respond c stats ~subid ~notices:[ n ] []
-        | _ -> ignore (send_backend ~connect:false (fun b -> Ws_client.send_text b s))
+            let n = match Option.map Funcall.of_string funcall with Some (Funcall.Other _) -> "unknown api request" | _ -> "error" in
+            respond c stats ~subid ~notices:[ n ] []
+        | _ -> ()
       in
-      let handle_parsed s (p : Protocol.incoming) =
+      let handle_parsed (p : Protocol.incoming) =
         let handled =
           try handle_native ~clock cfg stats live bc c p
           with
@@ -256,7 +191,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
         | Protocol.Req { funcall = Some fc; subid; _ } when (not handled) && cfg.log_not_handled ->
             log "not handled: %s sub_id=%s" fc subid
         | _ -> ());
-        if not handled then forward s p
+        if not handled then not_handled p
       in
       let client_loop () =
         let rec loop () =
@@ -264,10 +199,9 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
           else
             match session.ws_recv () with
             | `Closed -> ()
-            | `Binary b ->
+            | `Binary _ ->
                 touch ();
                 Stats.incr stats.recv;
-                ignore (send_backend ~connect:false (fun be -> Ws_client.send_binary be b));
                 loop ()
             | `Text s ->
                 touch ();
@@ -289,14 +223,14 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
                       && (match Funcall.of_string fc with f when Anon_cache.cacheable f kwargs -> Anon_cache.fresh (Anon_cache.key f kwargs) | _ -> false)
                   | Protocol.Req _ -> false
                 in
-                if in_order then handle_parsed s p
+                if in_order then handle_parsed p
                 else begin
                   Eio.Semaphore.acquire slots;
                   Fiber.fork ~sw (fun () ->
                       Fun.protect
                         ~finally:(fun () -> Eio.Semaphore.release slots)
                         (fun () ->
-                          try handle_parsed s p
+                          try handle_parsed p
                           with
                           | Eio.Cancel.Cancelled _ as e -> raise e
                           | exn ->
@@ -308,7 +242,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
         in
         loop ()
       in
-      (* ws-connector: every 3 s, close when idle for >= (0.95..1.0) * idle_timeout (the timeout
+      (* as ws-connector did: every 3 s, close when idle for >= (0.95..1.0) * idle_timeout (the timeout
          itself comes from wsconnvars, re-read each tick). *)
       let idle_loop () =
         let rfactor = 0.95 +. Random.float 0.05 in
@@ -326,7 +260,7 @@ let run ~net ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (b
         in
         loop ()
       in
-      (try Fiber.any [ client_loop; (fun () -> Promise.await backend_gone); idle_loop ]
+      (try Fiber.any [ client_loop; idle_loop ]
        with
        | Eio.Cancel.Cancelled _ as e -> raise e
        | End_of_file -> ()

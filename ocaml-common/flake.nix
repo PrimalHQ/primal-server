@@ -2,7 +2,7 @@
   # The ONE OCaml toolchain for every Primal OCaml project in this repo (ocaml-common, ocaml-api,
   # ocaml-importer, ocaml-fetcher, ocaml-jobs) and for the private ocaml-ext in the parent repo.
   # OCaml 5 / Eio only (no Lwt). SQL is statically checked at compile time by the PGOCaml
-  # [%pgsql] ppx against the live database named by PG* below.
+  # [%pgsql] ppx against the database named by PG* below (created from schema/, see README.md).
   #
   # Use it from any project directory:  nix develop "path:<repo>/ocaml-common" -c dune build @all
   inputs = {
@@ -80,17 +80,18 @@
             pkgs.jq
           ] ++ ocamlLibs ++ cLibs;
 
-          # Live cache database (primal1) used for compile-time [%pgsql] schema checking of
-          # cache-DB queries (and by the dev tools at runtime). Production daemons read their
-          # connections from their JSON config file, not from these.
+          # Local cache database (primal1: schema/cache.sql plus sql/migrate.sh) used for
+          # compile-time [%pgsql] schema checking of cache-DB queries (and by the dev tools at
+          # runtime). The daemons read their connections from their JSON config file, not from these.
           PGHOST = "127.0.0.1";
           PGPORT = "54017";
           PGDATABASE = "primal1";
           PGUSER = "pr";
 
-          # Membership DB (Julia :membership). Used at runtime by the dev tools; membership-table
-          # queries are compile-time checked against the local schema-only clone
-          # primal_membership_ref (sql/membership-refdb-setup.sh) via per-directory dune env.
+          # Membership DB, used at runtime by the dev tools (Postgres.membership_conninfo);
+          # membership-table queries are compile-time checked against primal_membership_ref on the
+          # local server (schema/membership.sql or sql/membership-refdb-setup.sh) via per-directory
+          # dune env.
           # The host is deployment-specific: export PGMEMBERSHIPHOST in the environment (the code
           # falls back to PGHOST).
           PGMEMBERSHIPPORT = "5432";

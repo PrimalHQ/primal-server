@@ -1,4 +1,5 @@
-(* BIP340 Schnorr verification, mirroring Julia src/secp256k1.jl (module Secp256k1).
+(* BIP340 Schnorr verification, mirroring Julia src/secp256k1.jl (module Secp256k1), plus
+   signing, x-only pubkey derivation and the NIP-44 ECDH shared secret.
 
    Arguments are raw bytes: [msg_hash] is 32 bytes (the event id), [serialized_pubkey] is
    the 32-byte x-only pubkey, [signature] is 64 bytes. *)

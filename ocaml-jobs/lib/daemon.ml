@@ -1,5 +1,5 @@
-(* The jobs daemon (ocaml-plan.md §9): each configured role is one fiber running the loop its Julia
-   module ran; SIGTERM/SIGINT/SIGUSR1 stop the loops at their next check and the process exits.
+(* The jobs daemon: each configured role is one fiber running its loop (ported from a Julia
+   module); SIGTERM/SIGINT/SIGUSR1 stop the loops at their next check and the process exits.
    bin/primal_jobsd.ml and the private ocaml-ext/bin call [run]; the latter registers its roles in
    [init]. *)
 

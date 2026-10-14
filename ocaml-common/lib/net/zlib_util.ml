@@ -1,6 +1,6 @@
 (* zlib (RFC 1950) compress/uncompress of whole strings over camlzip. Default level 6 is what
-   flate2's Compression::default() (ws-connector) and CodecZlib (Julia) use, so the API's zlib
-   `EVENTS` frames stay byte-compatible with today's servers. *)
+   ws-connector (flate2's Compression::default()) and Julia (CodecZlib) used, so the API's zlib
+   `EVENTS` frames are byte-identical to theirs. *)
 
 let compress ?(level = 6) (s : string) : string =
   let n = String.length s in

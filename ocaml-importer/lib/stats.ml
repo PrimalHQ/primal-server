@@ -5,8 +5,8 @@
    OCaml 5 atomics give cross-domain visibility, where plain refs would race. The reporter runs on
    the main domain and only reads them.
 
-   The fiber phase-slot registry and the process-level helpers (RSS, formatting) moved to
-   primal_common (Phases, Procinfo) in Phase 0; the aliases below keep the importer's call sites
+   The fiber phase-slot registry and the process-level helpers (RSS, formatting) live in
+   primal_common (Phases, Procinfo); the aliases below keep the importer's call sites
    (Stats.phase, Stats.new_slot, ...) unchanged. *)
 
 type t = {

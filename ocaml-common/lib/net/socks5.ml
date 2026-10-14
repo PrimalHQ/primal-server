@@ -1,6 +1,7 @@
-(* Minimal SOCKS5 client (no-auth CONNECT), used to reach LNURL endpoints through
-   PRIMALSERVER_PROXY. We use ATYP=domain (the "socks5h" behaviour: the proxy resolves the
-   destination host), matching the Julia HTTP.jl proxy usage. Raises on protocol failure. *)
+(* Minimal SOCKS5 client (no-auth CONNECT), behind Http's and Ws_client's optional [proxy]
+   (LNURL endpoints, relays, media downloads). We use ATYP=domain (the "socks5h" behaviour: the
+   proxy resolves the destination host), matching the Julia HTTP.jl proxy usage. Raises on
+   protocol failure. *)
 
 open Eio.Std
 

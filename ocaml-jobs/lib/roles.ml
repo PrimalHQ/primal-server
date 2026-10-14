@@ -1,4 +1,4 @@
-(* The jobs role registry the private extensions fill (ocaml-plan.md §11.1 Jobs.Roles.register):
+(* The jobs role registry the private extensions fill (Roles.register):
    a role name in the config that is not a built-in one must be registered here before the daemon
    starts, else it is a startup failure. *)
 

@@ -1,9 +1,9 @@
-(* The relay set (files in ../relays, copied into the store by the deploy): fetching.jl load_relays (relays-active.txt verbatim; relays.txt, relays-paid.txt,
-   relays-mined-from-events.txt, relays-mined-from-contact-lists.txt sanitised), the extra relays
-   of start_fetcher.jl, and start_relays_from_db's 1 s poll of fetcher_relays (updated_at since the
-   previous poll; urls over 300 chars, unparsable, or on private IPv4 ranges skipped). New urls
-   are handed to a domain by hash; a Relay_conn starts from the relay's resume file or
-   fetcher_since. *)
+(* The relay set, as Julia's fetching.jl built it: the files in relays_dir (load_relays:
+   relays-active.txt verbatim; relays.txt, relays-paid.txt, relays-mined-from-events.txt,
+   relays-mined-from-contact-lists.txt sanitised), the extra relays, and start_relays_from_db's
+   poll of fetcher_relays every relays_db_poll_s (updated_at since the previous poll; urls over 300
+   chars, unparsable, or on private IPv4 ranges skipped). New urls are handed to a domain by hash;
+   a Relay_conn starts from the relay's resume file or fetcher_since. *)
 
 open Eio.Std
 

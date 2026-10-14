@@ -1,14 +1,11 @@
 (* Minimal RFC 6455 WebSocket CLIENT over Eio (from the tsunami kernel's api/core/ws_client.ml,
    re-pointed at this library's Http for DNS/TLS). ws:// and wss:// (~tls:true), optional SOCKS5
-   proxy, text frames; ping is answered, binary ignored. Client frames use a zero masking key
-   (spec-shaped, identity transform).
+   proxy. Pings are answered; [recv_frame] returns text and binary messages, [recv] text only.
+   Client frames use a zero masking key (spec-shaped, identity transform).
 
    recv_timeout is desync-safe: the timeout only guards the wait for the FIRST header byte
    (Buf_read.ensure consumes nothing), so a timed-out call leaves the frame stream intact for
-   subsequent reads.
-
-   Phase 7 (fetcher) will extend this with per-connection switches, server ping timers and
-   binary frames; the API's outbound relay calls (broadcast_events, dvm_feed) use it as is. *)
+   subsequent reads. *)
 
 type t = {
   flow : Eio.Flow.two_way_ty Eio.Std.r;

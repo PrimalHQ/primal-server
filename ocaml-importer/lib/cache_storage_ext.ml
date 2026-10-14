@@ -1,18 +1,11 @@
 (* ext_* hooks, mirroring Julia src/cache_storage_ext.jl.
 
    These are the "extension" callbacks the core import path (cache_storage.ml) invokes through
-   its [ext] registry: pubkey_zapped seeding, zap receipts, event scoring, hashtag indexing,
-   and the content-hash spam guard. They are registered with [Cache_storage.set_ext] by
-   [register ()] (called once at startup, from bin/main.ml).
-
-   Out of scope for the staging importer (matching the Julia importer's effective behaviour):
-   - media import (Julia gates every download on DOWNLOAD_MEDIA, off in the importer) — the
-     import_note_urls / image-tag paths are no-ops here;
-   - notifications (notifications_cb / pubkey_notifications / NotificationType) — a large
-     separate subsystem (notifications.jl); the score_event_cb and event_stats_cb hooks that
-     also feed event_stats ARE implemented;
-   - user_search FTS indexing (update_user_search) — a separate tsvector subsystem.
-   Each is marked with a TODO where it would otherwise sit. *)
+   its [ext] registry: humanness and hidden checks, mentions, hashtags, media queueing, zaps,
+   scores, notifications and their gates, user_search, reports, live events, lists, content
+   moderation rules and the content-hash spam guard. They are registered with
+   [Cache_storage.set_ext] by [register ()] (called once at startup, from bin/main.ml and the dev
+   tools). *)
 
 module CS = Cache_storage
 module PGOCaml = Postgres.PGOCaml
@@ -27,8 +20,8 @@ let current_time = Utils.current_time
 (* Julia ext_is_human's default threshold is TrustRank.humaness_threshold[], a global Ref that is
    initialised to 0.0 (trust_rank.jl:10) and recomputed by TrustRank.load as the rank of the
    50,000th-highest-ranked pubkey in pubkey_trustrank (trust_rank.jl:20:
-   first(sorted, 50000)[end][2]). load runs only in the separate TrustRankMaker process, but the
-   value it derives comes from the same shared pubkey_trustrank table — so we reproduce that
+   first(sorted, 50000)[end][2]). In Julia load ran in the separate TrustRankMaker process, but the
+   value it derives comes from the shared pubkey_trustrank table — so we reproduce that
    cutoff here directly from the table at startup (load_humaness_threshold) rather than leave it
    pinned at 0.0. The config file's [humaness_threshold], when set, is an explicit override that
    wins over the computed value. *)
@@ -143,10 +136,10 @@ let for_hashtags (e : Nostr.t) (body : string -> unit) : unit =
     done
   end
 
-(* Julia for_mentiones: collect the events/pubkeys a note mentions, yielding 2-field tags.
-   We implement the tag-derived mentions — #[N] content refs into the tag list, and a/e tags
-   carrying a 4th "mention" marker (a-tags resolved to their current event id). The bech32
-   "nostr:" content mentions (re_mention / nip19_decode) are a TODO pending bech32.ml. *)
+(* Julia for_mentiones: collect the events/pubkeys a note mentions, yielding 2-field tags:
+   #[N] content refs into the tag list, a/e tags carrying a 4th "mention" marker (a-tags resolved
+   to their current event id), and the bech32 NIP-19 content mentions (re_mention /
+   nip19_decode). *)
 let for_mentiones ?(resolve_a = true) (est : CS.est) (e : Nostr.t) (body : Nostr.tag -> unit) : unit =
   if
     e.kind = Nostr.kind_text_note
@@ -1066,8 +1059,8 @@ let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at 
       end
 
 
-(* {1 Phase 1 importer completion} (ocaml-plan.md §7.1): the Julia-only importer duties and the
-   Rust ws-importer's table writes, all per-event hooks on the import path. *)
+(* {1 Live events, follow packs, lists, moderation rules}: the Julia importer node's App-level
+   duties and the Rust ws-importer's table writes, all per-event hooks on the import path. *)
 
 let log_p1 fmt = Printf.ksprintf (fun s -> Printf.printf "[importer] %s\n%!" s) fmt
 
@@ -1177,7 +1170,7 @@ let ext_live_event (est : CS.est) (e : Nostr.t) : unit =
             [%pgsql dbh
               "delete from live_event_participants where kind = $kind and pubkey = $pubkey and identifier = $identifier"]
       | Unknown_status -> ());
-      (* report to the cache-storage listener (LIVE_EVENT_HAPPENING notifications, Phase 6) *)
+      (* for the jobs daemon's pg_listener, which sends the LIVE_EVENT_HAPPENING notifications *)
       let payload =
         Yojson.Safe.to_string
           (`Assoc

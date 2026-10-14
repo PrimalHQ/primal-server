@@ -1,6 +1,6 @@
 (* media.jl / media.rs: downloads (proxy rotation, HEAD size check, range), mime type and
    dimension probing with file(1)/identify/ffprobe/exiftool, ffmpeg variants, thumbnails, frames,
-   metadata stripping, link previews (link-preview.py). *)
+   metadata stripping, link previews (ocaml-common's Link_preview). *)
 
 open Eio.Std
 

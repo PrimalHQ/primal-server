@@ -1,7 +1,7 @@
-(* Live-event push subscriptions (ocaml-plan.md §5.4), the port of ws-connector's live importer +
-   distribution (ws-connector.rs distribute_live_event / _from_follows, primal-cache live_importer,
-   ws-importer process_event_import). The table WRITES of ws-importer live in the importer since
-   Phase 1; here only the fan-out to subscribed clients remains:
+(* Live-event push subscriptions, the port of ws-connector's live importer + distribution
+   (ws-connector.rs distribute_live_event / _from_follows, primal-cache live_importer, ws-importer
+   process_event_import). The table WRITES of ws-importer are done by the importer; here only the
+   fan-out to subscribed clients remains:
 
    - sources: a 1 s poll of `event` by imported_at (10 000-id dedup ring) plus LISTEN primal_events
      (payload = an event JSON; today only the synthetic kind-11000001 moderation pokes);

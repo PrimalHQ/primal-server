@@ -1,5 +1,5 @@
-(* Time-bounded in-memory event-id set replacing the 256 SQLite shards of deduped_events: an id
-   seen within [keep_s] is a duplicate (Julia: seenearly). Shared by every domain under a mutex. *)
+(* Time-bounded in-memory event-id set (Julia used 256 SQLite shards of deduped_events): an id
+   seen within [keep_s] is a duplicate (counted as seenearly). Shared by every domain under a mutex. *)
 
 type t = { mu : Mutex.t; tbl : (string, int) Hashtbl.t; keep_s : int; mutable last_prune : int }
 

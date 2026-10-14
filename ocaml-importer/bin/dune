@@ -1,5 +1,5 @@
 (executables
- (names main dbcheck importcheck scorecheck compare phase8check zapcheck zapbackfill lnurlprobe)
+ (names main dbcheck importcheck scorecheck phase8check zapcheck zapbackfill lnurlprobe)
  (flags
   (:standard -open Primal_common))
  (libraries

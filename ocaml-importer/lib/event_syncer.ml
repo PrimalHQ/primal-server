@@ -1,5 +1,4 @@
-(* Event syncer, mirroring the role of Julia's EventSyncer (relocated to its own process per the
-   plan). On a timer it reads recently-imported rows from each peer node's `event` table and feeds
+(* Event syncer, mirroring the role of Julia's EventSyncer. On a timer it reads recently-imported rows from each peer node's `event` table and feeds
    them into the local import queue, so events any single node missed off the firehose still land
    locally.
 

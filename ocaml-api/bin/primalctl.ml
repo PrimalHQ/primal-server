@@ -1,4 +1,4 @@
-(* primalctl: operator CLI for the OCaml daemons (ocaml-plan.md §7.3). Phase 2 subcommands:
+(* primalctl: operator CLI for primal-api. Subcommands:
 
      primalctl req <ws-url> <funcall> [kwargs-json] [--zlib]   one cache-API request, frames printed
      primalctl status [admin-url]                               GET /status of a primal-api
@@ -7,12 +7,15 @@
      primalctl replay <corpus.jsonl> [--a ws://..] [--b ws://..] [--only f1,f2] [--all]
                       [--per-funcall N] [--workers K] [--timeout S] [--report mismatches.jsonl]
                                                                 parity of B against A over a request corpus
+     primalctl advsearch-sql <user-pubkey-hex> <query> <since> <until> [kinds]
+     primalctl sign <nsec-file> <kind> <content> [tags-json]
 
-   Default admin url: http://127.0.0.1:14001. *)
+   Default admin url: the admin port of selfhost/config/primal-api.json (selfhost/primal.sh);
+   pass the url of any other deployment's admin_host:admin_port. *)
 
 open Eio.Std
 
-let default_admin = "http://127.0.0.1:14001"
+let default_admin = "http://127.0.0.1:8811"
 
 let usage () =
   prerr_endline

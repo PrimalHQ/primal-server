@@ -1,43 +1,42 @@
 (* primal-fetcher configuration: one JSON file, every key required (as the other daemons).
-   The keys replace the PRIMALSERVER_* environment of m1_fetcher.sh / start_fetcher.jl. *)
+   Unknown keys are ignored. *)
 
 exception Config_error of string
 
 module U = Yojson.Safe.Util
 
 type t = {
-  node_idx : int; (* PRIMALSERVER_NODE_IDX; firehose port 9000+N, pushgateway job fetcher<N> *)
+  node_idx : int; (* instance number, shown in the log and /status *)
   admin_host : string;
   admin_port : int;
-  firehose_host : string; (* FirehoseServer.HOST 127.0.0.1 *)
-  firehose_port : int; (* FirehoseServer.PORT 9000+N *)
-  state_dir : string; (* Fetching.EVENTS_DATA_DIR: $STORAGE/primalnode$N/fetcher — per-relay latest_timestamp *)
-  archive_dir : string; (* DeduplicatedEventStorage rootdirectory: $STORAGE/primalnode$N/dedup — messages/YYYY/MM/DD.log, stats.json *)
+  firehose_host : string;
+  firehose_port : int;
+  state_dir : string; (* per-relay resume files (<url>/latest_timestamp) *)
+  archive_dir : string; (* messages/YYYY/MM/DD.log and stats.json *)
   archive_enabled : bool;
-  relays_dir : string; (* directory of relays-active.txt, relays.txt, relays-paid.txt, relays-mined-*.txt (Fetching.load_relays) *)
-  relays_file : string option; (* PRIMALSERVER_RELAYS: use this list instead of relays_dir *)
-  extra_relays : string list; (* start_fetcher.jl: the internal relay *)
+  relays_dir : string; (* directory of relays-active.txt, relays.txt, relays-paid.txt, relays-mined-*.txt *)
+  relays_file : string option; (* a single list used instead of relays_dir *)
+  extra_relays : string list; (* appended to the file set (e.g. an internal relay) *)
   no_proxy_relays : string list; (* relays connected directly even when proxy is set *)
-  proxy : (string * int) option; (* PRIMALSERVER_PROXY socks5h://host:port *)
+  proxy : (string * int) option; (* socks5h://host:port *)
   proxy_url : string option; (* the same, verbatim, for the message envelope *)
-  fetcher_since : int option; (* PRIMALSERVER_FETCHER_SINCE; null = now *)
-  timeout_s : float; (* Fetching.TIMEOUT 30: connect and read timeout *)
-  base_delay_s : float; (* BASE_DELAY 1 *)
-  max_delay_s : float; (* MAX_DELAY 300 *)
-  dead_relay_max_delay_s : float; (* backoff cap for relays that never delivered a message (Julia: 300 — but its HTTP.jl pool cap of 10000 parked most of them) *)
-  connect_concurrency : int; (* simultaneous connection attempts per domain (Julia: implicit via the 10000-connection pool) *)
-  cache_db : Postgres.conninfo option; (* fetcher_relays polling (start_relays_from_db); null disables *)
-  relays_db_poll_s : float; (* 1 *)
-  pushgateway : (string * int * string) option; (* host, port, job (fetcher<N>) *)
-  metrics_period_s : float; (* 15 *)
+  fetcher_since : int option; (* since for relays without a resume file; null = now *)
+  timeout_s : float; (* connect and read-silence timeout *)
+  base_delay_s : float; (* first reconnect delay *)
+  max_delay_s : float; (* reconnect delay cap *)
+  dead_relay_max_delay_s : float; (* reconnect delay cap for relays that never delivered a message *)
+  connect_concurrency : int; (* simultaneous connection attempts per domain, for relays that never delivered *)
+  cache_db : Postgres.conninfo option; (* fetcher_relays polling; null disables *)
+  relays_db_poll_s : float;
+  pushgateway : (string * int * string) option; (* host, port, job *)
+  metrics_period_s : float; (* pushgateway, stats.json and dedup pruning period *)
   num_domains : int; (* relay connections are spread over this many domains by url hash *)
-  dedup_keep_s : int; (* in-memory dedup window (replaces the SQLite deduped_events shards) *)
-  firehose_forward_raw : bool; (* Fetching.message_processors[:firehose_server]: every relay message to the firehose *)
+  dedup_keep_s : int; (* in-memory dedup window *)
+  firehose_forward_raw : bool; (* every relay message to the firehose too (Processor) *)
   max_paths_per_host : int; (* relay-set control: non-root url variants kept per host (-1 = unlimited; the root url always) *)
   req_kinds : int list option; (* relay-set control: "kinds" of the REQs sent to non-exempt relays; null = unfiltered *)
   req_kinds_exempt_hosts : string list; (* hosts (host[:port]) that always get the unfiltered REQs *)
-  firehose_queue : int; (* per-subscriber bounded queue, drop when full (Julia: Channel(20_000)) *)
-  log_connections : bool;
+  firehose_queue : int; (* per-subscriber bounded queue, drop when full *)
 }
 
 let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")
@@ -94,7 +93,6 @@ let of_json (j : Yojson.Safe.t) : t =
     req_kinds = (match field j "req_kinds" with `Null -> None | `List l -> Some (List.map U.to_int l) | _ -> raise (Config_error "req_kinds: expected a list of integers or null"));
     req_kinds_exempt_hosts = rlist j "req_kinds_exempt_hosts";
     firehose_queue = rint j "firehose_queue";
-    log_connections = rbool j "log_connections";
   }
 
 let of_json_file (path : string) : t =

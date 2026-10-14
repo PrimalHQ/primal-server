@@ -23,7 +23,7 @@ let () =
   Pg.set_env ~net:(Eio.Stdenv.net env) ~sw;
   Importer.Cache_storage_ext.register ();
   let dbh = Pg.connect (Pg.cache_conninfo ()) in
-  (* staging/test: cache and membership tables share the reference DB, so reuse the handle *)
+  (* dev/test: the cache and membership tables share the PG* DB, so reuse the handle *)
   let est = { CS.cfg = CS.default_config; dbh; mem_dbh = dbh } in
   let n = ref 0 and ok = ref 0 in
   List.iter

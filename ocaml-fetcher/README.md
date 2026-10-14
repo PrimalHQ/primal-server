@@ -138,7 +138,7 @@ added. Other keys in the file are kept as they are.
 ## Configuration
 
 `primal_fetcherd <config.json>` reads one JSON object. **Every key is required**; where `null` is
-listed, it is allowed. `primal_fetcherd --check-config <config.json>` parses the config, prints
+listed, it is allowed; unknown keys are ignored. `primal_fetcherd --check-config <config.json>` parses the config, prints
 `config ok` and exits 0; a config error exits 2 with the message.
 
 | Key | Type | Meaning | Usual value |
@@ -171,7 +171,6 @@ listed, it is allowed. `primal_fetcherd --check-config <config.json>` parses the
 | `max_paths_per_host` | int | Non-root URL variants kept per host; -1 = unlimited | 2 |
 | `req_kinds` | int list or null | `kinds` filter for the REQs; `null` = unfiltered | |
 | `req_kinds_exempt_hosts` | string list | Hosts (`host[:port]`) whose REQs stay unfiltered, so kinds outside `req_kinds` still arrive through them | |
-| `log_connections` | bool | Reserved, unused | `false` |
 
 `req_kinds` has to be a positive list because a Nostr filter cannot express kind ranges. Exempting a
 few large relays keeps rare and new kinds arriving.

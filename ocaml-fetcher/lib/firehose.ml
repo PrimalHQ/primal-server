@@ -1,8 +1,7 @@
-(* firehose_server.jl: a line-oriented TCP server on 127.0.0.1:9000+N. A client that sends
-   "STREAM-NEW-EVENTS" receives every fetched message as one line; any other line is ignored
-   (the Julia server dispatched those to its message_processors, which the fetcher never had).
-   Each subscriber has a bounded queue, dropped-when-full (Julia: one Channel(20_000) and
-   broadcast_via_channel's !isfull check). On stop every client gets "bye" and is closed. *)
+(* Ported from Julia's firehose_server.jl: a line-oriented TCP server on
+   firehose_host:firehose_port. A client that sends "STREAM-NEW-EVENTS" receives every broadcast
+   line; any other line is logged and ignored. Each subscriber has a bounded queue
+   (firehose_queue), dropped when full. On stop every client gets "bye" and is closed. *)
 
 open Eio.Std
 

@@ -63,14 +63,14 @@ let test_funcall_names () =
   List.iter
     (fun n -> Alcotest.(check string) n n (to_string (of_string n)))
     [ "thread_view"; "feed"; "live_feed"; "events"; "server_name"; "something_else" ];
-  match of_string "something_else" with Proxied _ -> () | _ -> Alcotest.fail "unknown names must be Proxied"
+  match of_string "something_else" with Other _ -> () | _ -> Alcotest.fail "unknown names must be Other"
 
 let test_wants_zlib () =
   Alcotest.(check bool) "zlib" true (P.wants_zlib (`Assoc [ ("compression", `String "zlib") ]));
   Alcotest.(check bool) "none" false (P.wants_zlib (`Assoc []));
   Alcotest.(check bool) "null" false (P.wants_zlib `Null)
 
-(* {1 Phase 3b} *)
+(* {1 The app.jl funcalls} *)
 
 module M = Primal_api.Moderation
 
@@ -79,7 +79,7 @@ let test_funcall_catalogue () =
   let names = native_names () in
   List.iter (fun n -> Alcotest.(check string) n n (to_string (of_string n))) names;
   Alcotest.(check bool) "no duplicates" true (List.length (List.sort_uniq compare names) = List.length names);
-  match of_string "upload_chunk" with Proxied _ -> () | _ -> Alcotest.fail "upload_chunk is still proxied"
+  match of_string "upload_chunk" with Other _ -> () | _ -> Alcotest.fail "upload_chunk is not a public funcall"
 
 let test_nip19 () =
   let j = Yojson.Safe.to_string in
@@ -125,7 +125,7 @@ let test_event_from_user () =
   let bad = kw {|{"event_from_user":{"id":"00","pubkey":"fce7597c60d22555fd4fddb21ab4efe6cfba5dab48f9b6b95f7a02e95c8b8c76","created_at":1,"kind":1,"tags":[],"content":"","sig":"00"}}|} in
   match H.event_from_user bad with Error _ -> () | Ok _ -> Alcotest.fail "unsigned event accepted"
 
-(* {1 Phase 4a} *)
+(* {1 Notifications and the push subscriptions} *)
 
 (* DB.notif2namedtuple parity: a YOUR_POST_WAS_ZAPPED row rendered by Julia on 2026-10-04 *)
 let test_notif_json () =
@@ -162,12 +162,12 @@ let test_filter_funcall () =
   | `Reject "kinds or authors filter is not supported" -> ()
   | _ -> Alcotest.fail "kinds are rejected like Julia does");
   (match C.filter_funcall {|["REQ","s",{"cache":["feed",{}]},{"authors":["ab"]}]|} with `Reject _ -> () | _ -> Alcotest.fail "authors in any filter");
-  (match C.filter_funcall {|["REQ","s",{"search":"x"}]|} with `None -> () | _ -> Alcotest.fail "search stays proxied");
+  (match C.filter_funcall {|["REQ","s",{"search":"x"}]|} with `None -> () | _ -> Alcotest.fail "a search filter is not handled");
   match C.filter_funcall {|["REQ","s",{"since":1,"until":2,"limit":3,"idsonly":true}]|} with
   | `Call (Primal_api.Funcall.Events, kw) -> Alcotest.(check bool) "idsonly" true (Kw.bool kw "idsonly" ~default:false)
   | _ -> Alcotest.fail "since/until"
 
-(* {1 Phase 4b} *)
+(* {1 Explore / trending} *)
 
 let test_f32 () =
   Alcotest.(check string) "integer" "0.0" (H.f32_string 0.0);

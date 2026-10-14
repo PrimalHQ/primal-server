@@ -1,10 +1,11 @@
-(* One relay = one fiber running fetching.jl's nostr_fetch_events loop: connect (30 s), send the
-   two REQs ({since} and {since, authors 00..ff}), read until the connection ends or goes quiet
-   for 30 s, then back off (1 s, doubling to 300 s; 1 s again after a connection that produced
-   messages). Every step emits the Julia envelope
-   [time, {func, runid, relay_url, timeout, proxy, event, ...}, m] to the processor, so the
-   archive and the firehose carry the same lines as before. since = min(now, max(since,
-   created_at - 1)) and is persisted at most every 5 s (Resume). *)
+(* One relay = one fiber running the loop of Julia's fetching.jl nostr_fetch_events: connect
+   (timeout_s), send the two REQs ({since} and {since, authors 00..ff}), read until the connection
+   ends or goes quiet for timeout_s, then back off (base_delay_s, doubling to max_delay_s, or
+   dead_relay_max_delay_s for relays that never delivered; base_delay_s again after a connection
+   that produced messages). Every step emits the envelope
+   [time, {func, runid, relay_url, timeout, proxy, event, ...}, m] to the processor (the line
+   format the Julia fetcher wrote, which the importer and archive readers parse).
+   since = min(now, max(since, created_at - 1)) and is persisted at most every 5 s (Resume). *)
 
 open Eio.Std
 

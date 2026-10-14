@@ -133,7 +133,7 @@ let media_import_s3_2 (ctx : ctx) (k : key) ~(sha256 : string) ~(provider : stri
       insert_storage ctx ~media_url:url ~provider ~key:k ~h:(key_h k) ~ext ~mt ~size:(String.length data) ~sha256;
       url
 
-(* Media.media_import_2: every provider gets a copy (as the Julia loop does); returns
+(* Media.media_import_2: every provider gets a copy (as the Julia loop did); returns
    BLOSSOM_HOST/<file> of the first *)
 let media_import_2 (ctx : ctx) ?(media_path = `Cache) ?pubkey ?use_external (k : key) ~(sha256 : string) (fetch : unit -> string) : string =
   let external_ = match use_external with Some e -> e | None -> ( match pubkey with Some pk -> use_external_storage ctx pk | None -> true) in

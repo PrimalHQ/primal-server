@@ -135,11 +135,11 @@ let rec cleanup_binary_cache ~(dir : string) (v : t) : unit =
 
 (* {1 node ids}
 
-   Three producers hash three serialisations of the same {mod, func, args, kwargs}: Julia (NamedTuple
-   order, wrappers _ty first), the blossom server (serde_json preserve_order, as written: _ty first)
-   and Rust primal-media (serde_json BTreeMap: every object's keys sorted bytewise). jsonb loses the
-   stored order, so only the sorted form can be recomputed from a row; nodes this executor creates
-   use the sorted form, as the Rust executor it replaces did. *)
+   Stored node ids come from three serialisations of the same {mod, func, args, kwargs}: Julia's
+   (NamedTuple order, wrappers _ty first), the blossom server's (serde_json preserve_order, as
+   written: _ty first) and the retired Rust primal-media's (serde_json BTreeMap: every object's keys
+   sorted bytewise). jsonb loses the stored order, so only the sorted form can be recomputed from a
+   row; nodes this executor creates use the sorted form, as the Rust executor it replaced did. *)
 let rec sort_keys (v : t) : t = match v with `Assoc f -> `Assoc (List.sort (fun (a, _) (b, _) -> compare a b) (List.map (fun (k, x) -> (k, sort_keys x)) f)) | `List l -> `List (List.map sort_keys l) | x -> x
 let top ~mod_ ~func ~args ~kwargs : t = `Assoc [ ("mod", `String mod_); ("func", `String func); ("args", args); ("kwargs", kwargs) ]
 let node_id_sorted ~mod_ ~func ~args ~kwargs : string = sha256_hex (to_string (sort_keys (top ~mod_ ~func ~args ~kwargs)))

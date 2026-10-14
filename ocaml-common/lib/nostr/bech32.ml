@@ -1,8 +1,7 @@
-(* Bech32 / Bech32m decoding, mirroring Julia src/bech32.jl (module Bech32).
+(* Bech32 / Bech32m, mirroring Julia src/bech32.jl (module Bech32).
 
-   Used for LNURL lud06 decoding (zapper verification). The nip19 TLV decoders (nevent /
-   naddr / nprofile) used by for_mentiones content mentions are a TODO — only the generic
-   decode needed for LNURL is implemented here. *)
+   Generic decode (LNURL lud06, zapper verification), NIP-19 decode (npub / note / nprofile /
+   nevent / naddr, for content mentions) and encode (npub, note, naddr). *)
 
 let charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 let bech32m_const = 0x2bc830a3

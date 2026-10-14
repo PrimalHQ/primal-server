@@ -1,4 +1,4 @@
-(* Operator knobs polled from the `wsconnvars` table every second (ws-connector management_task /
+(* Operator knobs polled from the `wsconnvars` table every wsconnvars_poll_s (ws-connector management_task /
    ws-handlers metrics logger): idle_connection_timeout, metrics_logging_enabled,
    metrics_logging_min_request_duration, logging_enabled. Plus the request log those knobs drive:
    JSON lines {t, time, funcall, kwargs, ws, subid} for handled requests slower than the minimum,

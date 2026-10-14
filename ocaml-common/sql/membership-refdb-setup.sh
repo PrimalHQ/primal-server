@@ -5,10 +5,11 @@
 # dune directories holding membership queries set PGDATABASE=primal_membership_ref in their
 # (env ...) stanza and the ppx checks against this clone.
 #
-# Connection parameters are HARDCODED and cannot be overridden: it always clones the public schema
-# of the production membership DB (read-only via pg_dump) into primal_membership_ref on the local
-# cache Postgres. The target is dropped and recreated each run; the source is never written.
-# Schema only: no data is copied. Re-run whenever the membership schema changes.
+# The source host comes from PRIMAL_MEMBERSHIP_HOST (required); the rest is fixed: source port
+# 5432, user and database `primal` (read-only via pg_dump), target primal_membership_ref on the dev
+# shell's local Postgres (127.0.0.1:54017, user pr). The target is dropped and recreated each run;
+# the source is never written. Schema only: no data is copied. Re-run whenever the membership
+# schema changes. (schema/membership.sql is the baseline alternative to cloning a live DB.)
 set -euo pipefail
 
 FROM_HOST="${PRIMAL_MEMBERSHIP_HOST:?set PRIMAL_MEMBERSHIP_HOST to the membership Postgres host}"  FROM_PORT=5432   FROM_USER=primal  FROM_DB=primal

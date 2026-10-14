@@ -1,4 +1,5 @@
-(* primal-jobs configuration: one JSON file, every key required (as the other daemons). *)
+(* primal-jobs configuration: one JSON file, every key required (as the other daemons) unless
+   noted. Unknown keys are ignored. *)
 
 exception Config_error of string
 
@@ -49,29 +50,29 @@ type t = {
   trustrank_period_s : float; (* RUN_PERIOD 3 h *)
   trustrank_iterations : int; (* 20 *)
   trustrank_alpha : float; (* 0.85 *)
-  trustrank_target_table : string; (* "pubkey_trustrank" = live swap; anything else = shadow table *)
-  trustrank_run_at_start : bool; (* Julia waits one period first *)
+  trustrank_target_table : string; (* "pubkey_trustrank" = live swap; anything else = a standalone table *)
+  trustrank_run_at_start : bool; (* false = the first run after one period (as Julia did) *)
   trustrank_extra_targets : Postgres.conninfo list; (* TrustRankMaker.TARGET_SERVERS beyond the local DB: the same live swap there *)
   (* analytics (App.precalculate_analytics) *)
   api_config_path : string; (* primal-api-config.json: scored_content runs with the API's settings *)
   analytics_period_s : float; (* 600 *)
-  analytics_key_suffix : string; (* "" = the live cache keys; "_ocaml" = shadow keys *)
+  analytics_key_suffix : string; (* appended to the cache keys; "" = the live keys *)
   ollama_host : string option; (* App.OLLAMA_HOST; null disables gaming detection *)
   gaming_report_command : string list option; (* App.GAMING_REPORT_COMMAND argv; the report is its stdin *)
   (* dag (dag_runner.jl) *)
   dag_period_s : float; (* RUN_PERIOD 5 *)
   dag_tasks : int; (* PROCESS_SEGMENTS_TASKS 8 *)
   dag_dry_run : bool; (* roll every segment back, write no coverage *)
-  dag_since : int; (* initial since; Julia: 2023-01-01 *)
+  dag_since : int; (* earliest imported_at to process (never before 2023-01-01) *)
   dag_poll_votes_enabled : bool; (* DAG.POLL_VOTE_IMPORT_ENABLED *)
   dag_log : bool;
-  dag_dry_run_window_s : int;
+  dag_dry_run_window_s : int; (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
   dag_statement_timeout_s : int; (* per-statement limit of the DAG's connections (default 30; a backfill needs more) *)
-  pushgateway : (string * int * string) option;
-  membership_discovery_url : string option;
-  media : Primal_jobs_media.Media_config.t option;
+  pushgateway : (string * int * string) option; (* host, port, job: dag_runner_duration / dag_runner_all_ok *)
+  membership_discovery_url : string option; (* failover: the discovery document naming the membership DB server *)
+  media : Primal_jobs_media.Media_config.t option; (* the "media" object; None when absent or null *)
   blossom : Primal_jobs_media.Blossom.config option; (* the "blossom" object: the Blossom server role (needs "media" too) *)
-  ext : Yojson.Safe.t; (* the "ext" object for the private extensions; `Null when absent *) (* the "media" sub-object (ocaml-plan.md §10); null unless the media role runs *) (* Postgres.Server.tracking_url of the membership server *) (* host, port, job: dag_runner_duration / dag_runner_all_ok as PushGatewayExporter did *) (* with dag_dry_run: exercise every node once over the last N seconds (coverage ignored), then idle; 0 = coverage-based dry run *)
+  ext : Yojson.Safe.t; (* the "ext" object for the private extensions; `Null when absent *)
 }
 
 let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")

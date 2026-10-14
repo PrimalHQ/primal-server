@@ -2,8 +2,8 @@
 
    PGOCaml is functorized over a THREAD interface; we instantiate it with a NATIVE Eio
    adapter (`type 'a t = 'a`, direct style) so that DB I/O suspends the running fiber
-   instead of blocking the domain (pgocaml-eio.md, "path B"). The [%pgsql] ppx resolves
-   its generated runtime calls against the [PGOCaml] module defined here.
+   instead of blocking the domain. The [%pgsql] ppx resolves its generated runtime calls
+   against the [PGOCaml] module defined here.
 
    Eio resources are bound to the domain that created them, so connections must be created
    and used within the same domain. The worker pool therefore keeps a per-domain pool
@@ -115,13 +115,15 @@ module PGOCaml = PGOCaml_generic.Make (Eio_thread)
    must therefore expose that, or queries fail to type-check. *)
 type dbh = (string, bool) Hashtbl.t PGOCaml.t
 
-(* {1 Connection settings} (mirror Julia connection selectors :p0 / :membership) *)
+(* {1 Connection settings} (mirror Julia connection selectors :p0 / :membership)
+   For the dev tools; the daemons take their connections from their configs. *)
 
 type conninfo = { host : string; port : int; user : string; database : string }
 
 let getenv_opt = Sys.getenv_opt
 
-(* Local cache DB: the importer's :p0. Defaults follow the nix devShell PG* vars. *)
+(* Cache DB (Julia's :p0), from the PG* variables (the dev shell sets them); the fallbacks apply
+   only when they are unset. *)
 let cache_conninfo () =
   {
     host = Option.value (getenv_opt "PGHOST") ~default:"127.0.0.1";
@@ -130,7 +132,7 @@ let cache_conninfo () =
     database = Option.value (getenv_opt "PGDATABASE") ~default:"primal_importer_ref";
   }
 
-(* Membership DB: the importer's :membership (filterlist / human_override). Defaults to the
+(* Membership DB (Julia's :membership: filterlist / human_override). Defaults to the
    cache conninfo so that, on a staging box where everything lives in one DB, no extra env is
    needed; override with PGMEMBERSHIP* to point at a separate server. *)
 let membership_conninfo () =
@@ -140,19 +142,6 @@ let membership_conninfo () =
     port = (match getenv_opt "PGMEMBERSHIPPORT" with Some p -> int_of_string p | None -> c.port);
     user = Option.value (getenv_opt "PGMEMBERSHIPUSER") ~default:c.user;
     database = Option.value (getenv_opt "PGMEMBERSHIPDATABASE") ~default:c.database;
-  }
-
-(* Remote DB for verification (bin/compare.ml): the Julia importer's Postgres. Defaults to the
-   local port/credentials with only the host differing (COMPARE_HOST, required), but each field can
-   be overridden independently with COMPARE_* since the Julia box often uses a different database
-   name (e.g. primal1) than the local reference DB. *)
-let remote_conninfo () =
-  let c = cache_conninfo () in
-  {
-    host = (match getenv_opt "COMPARE_HOST" with Some h -> h | None -> failwith "COMPARE_HOST (the Julia host's Postgres) is not set");
-    port = (match getenv_opt "COMPARE_PORT" with Some p -> int_of_string p | None -> c.port);
-    user = Option.value (getenv_opt "COMPARE_USER") ~default:c.user;
-    database = Option.value (getenv_opt "COMPARE_DATABASE") ~default:c.database;
   }
 
 (* Execute one parameterless SQL statement (utility statements go through the extended

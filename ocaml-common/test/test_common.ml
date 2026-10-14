@@ -1,5 +1,4 @@
-(* Pure-logic tests for primal_common (no database beyond the compile-time schema check).
-   Moved from ocaml-importer/test/test_importer.ml in Phase 0. *)
+(* Pure-logic tests for primal_common (no database beyond the compile-time schema check). *)
 
 open Primal_common
 module N = Nostr

@@ -326,7 +326,7 @@ values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
 - `lib/config.ml`, `firehose_client.ml`, `dag_index.ml`, `import_listener.ml`, `event_syncer.ml`,
   `spam_detection.ml`, `zap_verifier.ml`, `lnurl.ml`, `push_notifications.ml`, `push_intake.ml`,
   `pushgateway_run.ml`: the parts named above. `lib/stats.ml`: counters, status line, watchdog.
-- `sql/`: scratch-DB scripts. `test/events.jsonl`: sample events.
+- `test/events.jsonl`: sample events (`importcheck`'s default input).
 
 ## Build and test
 
@@ -360,7 +360,6 @@ nix develop path:$PWD/ocaml-common -c dune test             # workspace tests; n
 | `zapcheck [N]` | LNURL-verifies the last N zap receipts in the DB; proxy from `PRIMALSERVER_PROXY`. |
 | `zapbackfill <host> <from> <to> [-n] [-e]` | Re-applies zap effects for receipts imported in a window. It skips receipts already in `og_zap_receipts`. `-n`: dry run; `-e`: only receipts that dedup can decide. Read the header first: replays can double-count. |
 | `lnurlprobe [rounds] [url ...]` | Times the DNS, connect, TLS, write and read phases of an LNURL fetch. |
-| `compare [window] [margin]` | Diffs recent rows per table between the `PG*` DB and `COMPARE_*`. |
 
 A scratch cache DB for these tools is made from `ocaml-common/schema/cache.sql` (`selfhost/primal.sh init`
 creates one).

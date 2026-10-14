@@ -1,10 +1,9 @@
-(* InternalServices on 24000+N (internal_services.jl media_moderation_handler): /purge-media
+(* The moderation HTTP port (internal_services.jl media_moderation_handler): /purge-media
    (purge_media_) and /pre-sign-urls. Media files live under the configured media paths — local
    roots moved aside into cdn-hidden/, S3 providers backed up to bucket2 and deleted, the
    Cloudflare cache purged when configured — and every table that points at a purged file gets
-   the media_block id. The API node this port was written on has no media paths and no S3
-   providers (as its Julia counterpart: MEDIA_PATHS holds bare strings there), so there a purge
-   records the block and marks the rows. *)
+   the media_block id. Without media paths and S3 providers (as on an API-only node, where Julia's
+   MEDIA_PATHS held bare strings) a purge records the block and marks the rows. *)
 
 open Http_server
 

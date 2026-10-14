@@ -176,7 +176,7 @@ let wsconnvar (c : Db.cache Db.conn) ~(name : string) : string option =
   | v :: _ -> v
   | [] -> None
 
-(* {1 Phase 3b: the Julia-era funcalls} — SQL functions written for ocaml-handlers (sql/app.sql,
+(* {1 The app.jl funcalls} — SQL functions written for ocaml-handlers (sql/app.sql,
    new_functions.sql) where they mirror app.jl, plain statements where Julia kept the logic in
    memory. Hex lists are passed as JSON text ($x::jsonb) and expanded with jsonb_array_elements_text. *)
 
@@ -466,7 +466,7 @@ let filterlist_hidden_pubkeys (c : Db.cache Db.conn) ~(pubkeys_json : string) : 
        and not exists (select 1 from filterlist fl where fl.target = decode(a::text, 'hex') and fl.target_type = 'pubkey' and not fl.blocked)"]
   |> List.filter_map Fun.id
 
-(* {1 Phase 3b, second pass} — statements written from app.jl where the ocaml-handlers SQL functions
+(* {1 The app.jl funcalls, second pass} — statements written from app.jl where the ocaml-handlers SQL functions
    were wrong (notification type 5 is YOUR_POST_WAS_REPOSTED; mentions are type 8;
    response_messages_for_post returns nothing at depth 0; response_messages_for_list's array bug). *)
 
@@ -591,7 +591,7 @@ let user_has_cmr (c : Db.cache Db.conn) ~pubkey : bool =
   | [] -> false
   | _ -> true
 
-(* {1 Phase 4a: notifications and the periodic counters} *)
+(* {1 Notifications and the periodic counters} *)
 
 type notif_row = {
   n_created_at : int64;
@@ -695,7 +695,7 @@ let directmsg_counts (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string *
      where receiver = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) and sender is null"]
   |> List.filter_map (function Some k, Some v -> Some (k, v) | _ -> None)
 
-(* {1 Phase 4b: explore / scored content} (app_ext.jl scored_content, scored_users, the explore funcalls) *)
+(* {1 Explore / scored content} (app_ext.jl scored_content, scored_users, the explore funcalls) *)
 
 type scored_field = Created_at | Score | Satszapped (* latest | popular,trending | mostzapped *)
 
@@ -1000,7 +1000,7 @@ let legend_counts (c : Db.cache Db.conn) ~pubkey : int64 * int64 * int64 =
   | (Some a, Some b, Some d) :: _ -> (a, b, d)
   | _ -> (0L, 0L, 0L)
 
-(* {1 Phase 4c: the long tail of app.jl / app_ext.jl} *)
+(* {1 The long tail of app.jl / app_ext.jl} *)
 
 let directmsgs (c : Db.cache Db.conn) ~receiver ~sender ~since ~until ~limit ~offset : (string * int64) list =
   let dbh = Db.raw c in
@@ -1381,7 +1381,7 @@ let parametrized_event_id_one (c : Db.cache Db.conn) ~pubkey ~kind ~(identifier 
   | Some e :: _ -> Some e
   | _ -> None
 
-(* {1 Phase 4d} *)
+(* {1 Advanced search and the feeds built on it} *)
 
 (* app.jl important_notes_i_might_have_missed_feed: reposts by follows in the last 24 h *)
 let important_notes (c : Db.cache Db.conn) ~user_pubkey ~reposted_after ~since ~until ~limit ~offset : (string * int64) list =
@@ -1417,7 +1417,7 @@ let wide_net_notes (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset :
      order by es.created_at desc limit $limit offset $offset"]
   |> List.filter_map (function Some id, Some t -> Some (Hex_util.encode id, t) | _ -> None)
 
-(* {1 Phase 4e} *)
+(* {1 The remaining readers} *)
 
 (* app.jl get_dvm_feeds / get_featured_dvm_feeds: NIP-89 handler events of content-discovery DVMs
    whose feed was fetched successfully in the last hour (dvm_feeds.updated_at is naive local time).
@@ -1493,7 +1493,7 @@ let score24h_of (c : Db.cache Db.conn) ~event_id : int64 option =
   let dbh = Db.raw c in
   match [%pgsql dbh "select score24h from event_stats where event_id = $event_id"] with v :: _ -> v | [] -> None
 
-(* {1 Phase 4f} *)
+(* {1 Settings and the remaining writes} *)
 
 (* app.jl invoices_to_zap_receipts: invoice -> zap receipt event JSON *)
 let invoices_zap_receipts (c : Db.cache Db.conn) ~(invoices_json : string) : (string * string) list =
@@ -1512,7 +1512,7 @@ let metadata_event_json (c : Db.cache Db.conn) ~pubkey : string option =
   let dbh = Db.raw c in
   match [%pgsql dbh "select get_event_jsonb(md.value)::text from meta_data md where md.key = $pubkey"] with Some j :: _ -> Some j | _ -> None
 
-(* {1 Phase 4g} *)
+(* {1 Relay-facing funcalls} *)
 
 let event_relay_url_one (c : Db.cache Db.conn) ~event_id : string option =
   let dbh = Db.raw c in
@@ -1528,7 +1528,7 @@ let dvm_feed_results (c : Db.cache Db.conn) ~pubkey : string option =
   | Some r :: _ -> Some r
   | _ -> None
 
-(* {1 Phase 5: InternalServices} *)
+(* {1 InternalServices (the internal HTTP port)} *)
 
 (* collect_metadata: the metadata event of every pubkey that has one *)
 let metadata_events_json (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string * string) list =
@@ -1586,7 +1586,7 @@ let media_storage_url_by_hash (c : Db.cache Db.conn) ~(h : string) : string opti
   | u :: _ -> Some u
   | [] -> None
 
-(* {1 Phase 5b: purge_media_} *)
+(* {1 purge_media_} *)
 
 let media_storage_set_block (c : Db.cache Db.conn) ~(storage_provider : string) ~(h : string) ~(block : string) : unit =
   let dbh = Db.raw c in
@@ -1613,10 +1613,10 @@ let video_thumbnails_for_video (c : Db.cache Db.conn) ~(video_url : string) : st
   let dbh = Db.raw c in
   [%pgsql dbh "select thumbnail_url from video_thumbnails where video_url = $video_url"] |> List.filter_map Fun.id
 
-(* {1 Phase 5c: Blossom} *)
+(* {1 Blossom} *)
 
 
-(* {1 Formerly proxied: bookmarks feed, plain events, the membership content funcalls} *)
+(* {1 Bookmarks feed, plain events, the membership content funcalls} *)
 
 (* (hex id, kind, created_at) of the stored events among [event_ids_json] that event_created_at
    knows (Julia's bookmarks walk reads created_at from est.event_created_at and skips the rest) *)

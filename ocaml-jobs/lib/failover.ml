@@ -1,8 +1,7 @@
-(* postgres.jl server_tracking: every second read the membership discovery document
-   ({"primal": connstr, "postgres": connstr}); when the host it names is in recovery, promote it.
-   A singleton through a Postgres advisory lock on the membership DB (the Julia nodes still run
-   their own tracker; this role stays off until they are retired). Re-pointing the daemons' pools
-   at the new primary is the connection layer's job (Tracked_server, later). *)
+(* Ported from Julia's postgres.jl server_tracking: every second read the membership discovery
+   document ({"postgres": connstr, ...}); when the server it names is in recovery, promote it.
+   A singleton through a Postgres advisory lock on the membership DB. It only promotes: no daemon
+   re-points its connection pools at the new primary. *)
 
 open Eio.Std
 module PGOCaml = Postgres.PGOCaml

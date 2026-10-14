@@ -1,8 +1,8 @@
-(* Pure-Eio DNS resolution for LNURL hosts.
+(* Pure-Eio DNS resolution for Http's outbound connections (written for LNURL hosts).
 
    [Eio.Net.getaddrinfo_stream] runs libc getaddrinfo in a systhread that Eio cannot cancel
-   mid-call, so the request timeout in Http.https_get could not bound the DNS step — and on this
-   box the nscd/nss path has been observed to hang indefinitely (the 2026-07-11 incident left 13
+   mid-call, so the request timeout in Http.https_get could not bound the DNS step — and on one
+   host the nscd/nss path has been observed to hang indefinitely (the 2026-07-11 incident left 13
    systhreads in select() for 36 h). This module resolves over ordinary Eio sockets instead:
    fully cancellable by the surrounding [Eio.Time.with_timeout], no systhreads, no nscd/nss.
 

@@ -1,10 +1,9 @@
-(* The closed set of natively handled funcall names and the exhaustive dispatcher (ocaml-plan.md
-   §5.2). Adding a constructor without a handler arm is a compile error. [Proxied] is every other
-   name: forwarded to the upstream Julia CacheServer; the constructor disappears with the proxy
-   once the whole exposed set is native. *)
+(* The closed set of funcall names and the exhaustive dispatcher. Adding a constructor without a
+   handler arm is a compile error. [Other] is every other name: a private extension's funcall
+   (Extensions) or an unknown one, answered NOTICE "unknown api request". *)
 
 type t =
-  (* Phase 3a: ws-connector parity *)
+  (* the funcalls ws-connector's Rust handlers answered *)
   | Thread_view
   | Multi_kind_thread_view
   | Scored
@@ -21,7 +20,7 @@ type t =
   | Live_events_from_follows
   | Find_live_events
   | Events
-  (* Phase 3b: the Julia-era catalogue *)
+  (* profiles, lists, reads, app settings (app.jl / app_ext.jl) *)
   | User_profile
   | User_profile_followed_by
   | Contact_list
@@ -54,7 +53,7 @@ type t =
   | Get_recommended_users
   | Get_suggested_users
   | Membership_media_management_stats
-  (* Phase 4a *)
+  (* notifications and the push subscriptions *)
   | Get_notifications
   | Set_notifications_seen
   | Notification_counts
@@ -64,7 +63,7 @@ type t =
   | Net_stats
   | Rebroadcasting_status
   | Notifications
-  (* Phase 4b *)
+  (* explore / trending *)
   | Explore
   | Explore_global_trending_24h
   | Explore_global_mostzapped_4h
@@ -77,7 +76,7 @@ type t =
   | Explore_people
   | Explore_topics
   | Explore_legend_counts
-  (* Phase 4c *)
+  (* the long tail *)
   | Get_directmsgs
   | Get_directmsg_contacts
   | Reset_directmsg_count
@@ -118,11 +117,11 @@ type t =
   | Feed_directive_2
   | Enrich_feed_events
   | Note_mentions
-  (* Phase 4d *)
+  (* advanced search *)
   | Advanced_search
   | Advanced_feed
   | Parse_advanced_search_query
-  (* Phase 4e *)
+  (* the remaining readers *)
   | Search
   | Explore_media
   | Get_advanced_feeds
@@ -134,7 +133,7 @@ type t =
   | Get_dvm_feeds
   | Get_featured_dvm_feeds
   | Dvm_feed_info
-  (* Phase 4f *)
+  (* settings and the remaining writes *)
   | Set_app_settings
   | Search_filterlist
   | Update_push_notification_token
@@ -144,11 +143,11 @@ type t =
   | Invoices_to_zap_receipts
   | Import_events
   | Import_poll_vote_event
-  (* Phase 4g *)
+  (* relay-facing funcalls *)
   | Broadcast_events
   | Broadcast_reply
   | Dvm_feed
-  (* 2026-10-06: the membership content funcalls that were forwarded to Julia *)
+  (* the membership content funcalls *)
   | Membership_content_stats
   | Membership_recovery_contact_lists
   | Membership_recover_contact_list
@@ -160,7 +159,7 @@ type t =
   | Membership_premium_leaderboard
   | Membership_media_management_uploads
   | Membership_media_management_delete
-  | Proxied of string
+  | Other of string
 
 let names : (string * t) list =
   [
@@ -312,11 +311,11 @@ let names : (string * t) list =
     ("dvm_feed", Dvm_feed);
   ]
 
-let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Proxied s
+let of_string (s : string) : t = match List.assoc_opt s names with Some f -> f | None -> Other s
 
 let to_string (f : t) : string =
   match f with
-  | Proxied s -> s
+  | Other s -> s
   | f -> ( match List.find_opt (fun (_, g) -> g = f) names with Some (n, _) -> n | None -> assert false)
 
 let native_names () : string list = List.map fst names @ Extensions.funcall_names ()
@@ -324,9 +323,10 @@ let native_names () : string list = List.map fst names @ Extensions.funcall_name
 let log fmt = Printf.ksprintf (fun s -> Printf.printf "%s [dispatch] %s\n%!" (Procinfo.timestamp ()) s) fmt
 
 (* Run one funcall. Handler exceptions (malformed kwargs, DB errors, pool timeouts) become
-   [Not_handled], as ws-handlers' error responses did: the upstream answers instead.
-   [moderate]: apply Julia's content_moderation_filtering_2 to the answer (the Phase 3b funcalls;
-   the 3a ones are those Julia exempts because their SQL functions take the viewer's pubkey). *)
+   [Not_handled] (as ws-handlers' error responses did), which the caller answers with NOTICE "error".
+   [moderate]: apply Julia's content_moderation_filtering_2 to the answer (Moderation.filter);
+   ~moderate:false for the funcalls Julia exempted because their SQL functions take the viewer's
+   pubkey, and for writes. *)
 let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   let run ?(moderate = true) h =
     try
@@ -500,7 +500,7 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Broadcast_events -> run Handlers.broadcast_events
   | Broadcast_reply -> run Handlers.broadcast_reply
   | Dvm_feed -> run Handlers.dvm_feed
-  | Proxied s -> ( match Extensions.find_funcall s with Some e -> run ~moderate:e.moderate e.handler | None -> Response.Not_handled)
+  | Other s -> ( match Extensions.find_funcall s with Some e -> run ~moderate:e.moderate e.handler | None -> Response.Not_handled)
 
 (* mega_feed_directive routes spec ids that name exposed functions through the dispatcher *)
-let () = Handlers.dispatch_by_name := fun ctx name kw -> match of_string name with Proxied s when not (Extensions.has_funcall s) -> Response.Not_handled | f -> dispatch ctx f kw
+let () = Handlers.dispatch_by_name := fun ctx name kw -> match of_string name with Other s when not (Extensions.has_funcall s) -> Response.Not_handled | f -> dispatch ctx f kw

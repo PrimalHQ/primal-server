@@ -13,7 +13,7 @@ HTTP routes, config keys and operation.
 - Handlers return values (`Response`/`Http_server.resp`); the kernel writes frames. A new funcall goes into
   the closed `Funcall.t` variant so the dispatcher's exhaustive match forces a handler. Errors raised in a
   handler become NOTICE "error"; unknown funcalls get a NOTICE.
-- Never re-serialize frames you forward; zlib framing applies to native responses only.
+- Handlers return message JSON texts that are sent verbatim: never re-serialize them.
 - Per-connection fibers run on the domain that accepted the connection; do not share Eio sockets
   or PGOCaml connections across domains.
 - For anything user-visible, check with the real web app as well: `tools/playwright.sh tools/webapp-walk.py

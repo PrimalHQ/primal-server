@@ -1,7 +1,7 @@
-(* Minimal HTTPS GET client over Eio + tls-eio, optionally tunnelled through a SOCKS5 proxy.
-   Just enough to fetch LNURL pay endpoints (small JSON). cohttp-eio is not in nixpkgs 25.11,
-   so this is hand-rolled per the plan. A RNG must be installed in the calling domain
-   (Mirage_crypto_rng_unix.use_default ()). *)
+(* Minimal HTTP(S) client over Eio + tls-eio, optionally tunnelled through a SOCKS5 proxy:
+   [https_get] (written for LNURL pay endpoints, small JSON), [plain_request] and [request]
+   (below). cohttp-eio is not in nixpkgs 25.11, so this is hand-rolled. A RNG must be installed
+   in the calling domain (Mirage_crypto_rng_unix.use_default ()). *)
 
 open Eio.Std
 
@@ -171,9 +171,8 @@ let tls_wrap ~(host : string) (tcp : [> Eio.Flow.two_way_ty ] r) : Eio.Flow.two_
 
    The timeout covers the WHOLE request — DNS, TCP/SOCKS5 connect, TLS handshake, request write
    and response read — not just the body read. A wedged LNURL endpoint once hung every worker
-   forever in the TLS handshake because only the read was bounded. One caveat remains:
-   getaddrinfo runs in a systhread that Eio cannot interrupt mid-call, so a truly hung resolver
-   still blocks past the deadline (a stall watchdog is the backstop). *)
+   forever in the TLS handshake because only the read was bounded. DNS goes through Dns_eio (see
+   [resolve]), not getaddrinfo, so a hung resolver is bounded by the deadline too. *)
 let https_get ~net ~clock ?proxy ?(timeout = 10.0) (u : url) : string option =
   if u.scheme <> "https" then None
   else

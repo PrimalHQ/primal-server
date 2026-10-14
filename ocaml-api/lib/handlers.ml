@@ -1,6 +1,6 @@
-(* The natively handled funcalls — port of ws-connector/src/handlers/handlers.rs (the 17 funcalls the
-   Rust ws-handlers answered without the Julia backend). Behaviour, defaults and NOTICE texts are kept
-   identical; what ws-connector did not handle is [Not_handled] and goes to the upstream.
+(* The funcall handlers. The first ones port ws-connector/src/handlers/handlers.rs (the 17 funcalls
+   the Rust ws-handlers answered without the Julia backend), the rest app.jl / app_ext.jl; behaviour,
+   defaults and NOTICE texts are kept identical. [Not_handled] is answered NOTICE "error".
 
    Every handler is total over its kwargs: malformed arguments raise [Kw.Invalid], which the
    dispatcher maps to [Not_handled] exactly as ws-handlers' error responses were treated. *)
@@ -58,7 +58,7 @@ let fixup_live_event_p_tags (s : string) : string =
 let with_cache (ctx : ctx) f = Db.with_cache ~clock:ctx.clock f
 let with_membership (ctx : ctx) f = Db.with_membership ~clock:ctx.clock f
 
-(* Phase 4d: advanced_search is defined after the mega-feed basics that route to it *)
+(* advanced_search is defined after the mega-feed basics that route to it *)
 let advanced_search_ref : (ctx -> Kw.t -> query:string -> Response.outcome) ref = ref (fun _ _ ~query:_ -> Response.Not_handled)
 let adv (ctx : ctx) (kw : Kw.t) ~(query : string) = !advanced_search_ref ctx kw ~query
 let dvm_feed_ref : (ctx -> Kw.t -> Response.outcome) ref = ref (fun _ _ -> Response.Not_handled)
@@ -329,10 +329,10 @@ let events (ctx : ctx) (kw : Kw.t) : outcome =
                     Queries.enrich_events c ~event_ids_json ~user_pubkey ~apply_humaness_check:true ~orderby:"created_at")))
     | _ -> Not_handled
 
-(* {1 Phase 3b: the Julia-era funcalls} — ported from app.jl / app_ext.jl. Argument handling follows
-   Julia: a missing required kwarg or an invalid id raises (-> Not_handled, the upstream answers with
-   Julia's own NOTICE). Every error Julia raises itself reaches the client as NOTICE "error"
-   (CacheServerHandlers: the TaskFailedException is not unwrapped), so that is what [julia_error] is. *)
+(* {1 The app.jl funcalls} — ported from app.jl / app_ext.jl. Argument handling follows Julia: a
+   missing required kwarg or an invalid id raises (-> Not_handled, NOTICE "error"). Every error
+   Julia raised itself reached the client as NOTICE "error" (CacheServerHandlers: the
+   TaskFailedException was not unwrapped), so that is what [julia_error] is. *)
 
 let () = Random.self_init ()
 let julia_error : outcome = Notice "error"
@@ -1374,7 +1374,7 @@ let membership_media_management_delete (ctx : ctx) (kw : Kw.t) : outcome =
                     Handled empty
                 | _ -> julia_error))
 
-(* {1 Phase 4a: notifications and the push subscriptions} *)
+(* {1 Notifications and the push subscriptions} *)
 
 (* src/notifications.jl notification_args: what each argument of a notification type is *)
 type notif_arg = Pk | Eid | Int | Str
@@ -1531,7 +1531,7 @@ let rebroadcasting_status (_ : ctx) (kw : Kw.t) : outcome =
 (* broadcast_notification has no caller any more (the importer moved out of the API node): EOSE only *)
 let notifications (_ : ctx) (_ : Kw.t) : outcome = Handled empty
 
-(* {1 Phase 4b: explore / trending} (app_ext.jl scored_content and friends) *)
+(* {1 Explore / trending} (app_ext.jl scored_content and friends) *)
 
 (* set by Funcall at start-up: run a funcall by name (mega_feed_directive routes spec ids to
    exposed functions); Not_handled for everything that is not native *)
@@ -2087,7 +2087,7 @@ let explore_legend_counts (ctx : ctx) (kw : Kw.t) : outcome =
 
 (* {2 mega_feed_directive, the rest of app.jl's spec ids} *)
 
-(* {1 Phase 4d: advanced search (app_ext.jl advanced_search, dag.jl search / to_sql)} *)
+(* {1 Advanced search (app_ext.jl advanced_search, dag.jl search / to_sql)} *)
 
 let primal_pubkey = Hex_util.decode_exn "532d830dffe09c13e75e8b145c825718fc12b0003f61d61e9077721c7fff93cb"
 let has_sub (s : string) (sub : string) = try ignore (Str.search_forward (Str.regexp_string sub) s 0); true with Not_found -> false
@@ -2407,7 +2407,7 @@ let rec mega_feed_directive ?(depth = 0) (ctx : ctx) (kw : Kw.t) : outcome =
         | "bookmarked-by-follows" -> advanced_search_query ctx kwargs ~query:"kind:1 features:bookmarked-by-follows"
         | "important-notes-i-might-have-missed" -> important_notes_feed ctx kwargs
         | "muted-threads" -> muted_threads_feed ctx merged
-        | "search" -> Not_handled (* App.search: an HTTP call to another Julia node *)
+        | "search" -> Not_handled (* App.search was an HTTP call to a Julia search node: NOTICE error *)
         | _ -> Handled empty
       end
       else
@@ -2512,7 +2512,7 @@ let advanced_feed (ctx : ctx) (kw : Kw.t) : outcome =
   | `Null -> raise (Kw.Invalid "specification argument required")
   | spec -> mega_feed_directive ctx (Kw.set (Kw.remove kw "specification") "spec" spec)
 
-(* {1 Phase 4c: the long tail} *)
+(* {1 The long tail} *)
 
 (* Julia user_infos_1 from memory: metadata events, USER_SCORES of the ones found,
    USER_FOLLOWER_COUNTS of every pubkey asked, verified names, media and previews *)
@@ -3325,31 +3325,11 @@ let note_mentions (ctx : ctx) (kw : Kw.t) : outcome =
     | `Null, _, _ -> Handled empty
     | _ -> raise (Kw.Invalid "invalid event_id")
 
-(* {1 Phase 4e: the remaining readers} *)
+(* {1 The remaining readers} *)
 
-(* When the search node cannot be reached (connect failure or timeout), the answer is NOTICE error
-   either way; for [search_down_s] after such a failure it is given at once instead of after the
-   connect timeout (~3 s per request while the node was down), then the next request tries again. *)
-let search_down_s = 300.0
-let search_down_until : float Atomic.t = Atomic.make 0.0
-
-(* app_ext.jl search: Julia forwards the call over HTTP to another node's /api *)
-let search (ctx : ctx) (kw : Kw.t) : outcome =
-  match (ctx.cfg.search_api_url, !net_ref) with
-  | Some url, Some net -> (
-      match Http.parse_url url with
-      | None -> julia_error
-      | Some _ when Unix.gettimeofday () < Atomic.get search_down_until -> julia_error
-      | Some u -> (
-          let body = Yojson.Safe.to_string (`List [ `String "search"; kw ]) in
-          match Http.plain_request ~net ~clock:ctx.clock ~timeout:20.0 ~meth:"GET" ~body ~host:u.Http.host ~port:u.Http.port ~path:u.Http.path () with
-          | 200, resp -> ( match Yojson.Safe.from_string resp with `List msgs -> Handled (messages (List.map Yojson.Safe.to_string msgs)) | _ -> julia_error)
-          | _ -> julia_error
-          | exception (Eio.Cancel.Cancelled _ as e) -> raise e
-          | exception _ ->
-              Atomic.set search_down_until (Unix.gettimeofday () +. search_down_s);
-              julia_error))
-  | _ -> julia_error
+(* app_ext.jl search forwarded the call over HTTP to a Julia search node's /api; there is no such
+   node any more, so it answers NOTICE error *)
+let search (_ : ctx) (_ : Kw.t) : outcome = julia_error
 
 let explore_media (ctx : ctx) (kw : Kw.t) : outcome = mega_feed_directive ctx (Kw.set kw "spec" (`String {|{"id":"explore-media"}|}))
 
@@ -3583,7 +3563,7 @@ let dvm_feed_info (ctx : ctx) (kw : Kw.t) : outcome =
       let eids = Option.to_list (Queries.parametrized_event_id_one c ~pubkey ~kind:31990 ~identifier) in
       Handled (messages (dvm_responses ctx c ~eids ~user_pubkey ~primal_feeds:None)))
 
-(* {1 Phase 4f: settings and the remaining writes} *)
+(* {1 Settings and the remaining writes} *)
 
 exception Julia_err
 
@@ -3814,7 +3794,7 @@ let import_poll_vote_event (ctx : ctx) (kw : Kw.t) : outcome =
           | None -> Handled r))
   | o -> o
 
-(* {1 Phase 4g: relay-facing funcalls} *)
+(* {1 Relay-facing funcalls} *)
 
 let relay_event_payload (event_json : string) = Printf.sprintf "[\"EVENT\",%s]" event_json
 
