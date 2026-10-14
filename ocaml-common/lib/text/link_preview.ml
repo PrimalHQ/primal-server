@@ -84,5 +84,30 @@ let parse ~(url : string) (html : string) : t =
     (tag_attrs head "meta");
   { mimetype = "text/html"; title = !title; image = !image; description = !description; icon_url = "" }
 
+(* {1 oEmbed} YouTube answers some proxy exits with a "confirm you're not a bot" page that has no
+   title; its oEmbed endpoint still answers there (title and thumbnail, no description) *)
+
+let pct_encode (s : string) : string =
+  let b = Buffer.create (String.length s * 3) in
+  String.iter (fun c -> match c with 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '-' | '_' | '.' | '~' -> Buffer.add_char b c | c -> Buffer.add_string b (Printf.sprintf "%%%02X" (Char.code c))) s;
+  Buffer.contents b
+
+(* the oEmbed request for [url], when its site has one we use *)
+let oembed_url (url : string) : string option =
+  match Http.parse_url url with
+  | Some u ->
+      let h = String.lowercase_ascii u.Http.host in
+      if h = "youtu.be" || h = "youtube.com" || String.ends_with ~suffix:".youtube.com" h then Some ("https://www.youtube.com/oembed?format=json&url=" ^ pct_encode url) else None
+  | None -> None
+
+(* an oEmbed response as a preview; None without a title *)
+let parse_oembed (body : string) : t option =
+  match Yojson.Safe.from_string body with
+  | `Assoc l ->
+      let str k = match List.assoc_opt k l with Some (`String s) -> s | _ -> "" in
+      if str "title" = "" then None else Some { mimetype = "text/html"; title = str "title"; image = str "thumbnail_url"; description = ""; icon_url = "" }
+  | _ -> None
+  | exception Yojson.Json_error _ -> None
+
 let to_json (p : t) : string =
   Yojson.Safe.to_string (`Assoc [ ("mimetype", `String p.mimetype); ("title", `String p.title); ("image", `String p.image); ("description", `String p.description); ("icon_url", `String p.icon_url) ])

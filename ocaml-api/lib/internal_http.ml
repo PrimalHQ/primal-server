@@ -316,9 +316,17 @@ let fetch_resource_metadata (ctx : ctx) (url : string) : Link_preview.t =
             let s = List.fold_left (fun s pre -> if String.starts_with ~prefix:pre s then String.sub s (String.length pre) (String.length s - String.length pre) else s) p [ "socks5h://"; "socks5://" ] in
             match String.rindex_opt s ':' with Some i -> ( match int_of_string_opt (String.sub s (i + 1) (String.length s - i - 1)) with Some port -> Some (String.sub s 0 i, port) | None -> None) | None -> None
         in
-        match Http.request ~net ~clock:ctx.clock ?proxy ~timeout:10.0 ~headers:[ ("User-Agent", Link_preview.user_agent) ] url with
-        | Some r when r.Http.status >= 200 && r.status < 300 -> Some (Link_preview.parse ~url r.body)
-        | _ -> None
+        let get u =
+          match Http.request ~net ~clock:ctx.clock ?proxy ~timeout:10.0 ~headers:[ ("User-Agent", Link_preview.user_agent) ] u with
+          | Some r when r.Http.status >= 200 && r.status < 300 -> Some r.body
+          | _ -> None
+        in
+        let page = Option.map (Link_preview.parse ~url) (get url) in
+        match page with
+        | Some pv when pv.Link_preview.title <> "" -> page
+        | _ -> (
+            (* no title (a bot check page, or no page): the site's oEmbed through the same proxy *)
+            match Option.bind (Option.bind (Link_preview.oembed_url url) get) Link_preview.parse_oembed with Some o -> Some o | None -> page)
       in
       let rec go = function
         | [] -> Link_preview.empty

@@ -230,6 +230,13 @@ let test_internal_http () =
   Alcotest.(check string) "title" "T & U" p.Link_preview.title;
   Alcotest.(check string) "description" "D" p.Link_preview.description;
   Alcotest.(check string) "image joined" "https://ex.com/a/img/p.png" p.Link_preview.image;
+  Alcotest.(check (option string)) "oembed youtu.be" (Some "https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fyoutu.be%2FKLfb%3Fsi%3Dx") (Link_preview.oembed_url "https://youtu.be/KLfb?si=x");
+  Alcotest.(check bool) "oembed m.youtube.com" true (Link_preview.oembed_url "https://m.youtube.com/watch?v=a" <> None);
+  Alcotest.(check (option string)) "no oembed elsewhere" None (Link_preview.oembed_url "https://notyoutube.com/watch?v=a");
+  let o = Link_preview.parse_oembed {|{"title":"V - X","author_name":"A","thumbnail_url":"https://i.ytimg.com/vi/a/hqdefault.jpg"}|} in
+  Alcotest.(check (option string)) "oembed title" (Some "V - X") (Option.map (fun p -> p.Link_preview.title) o);
+  Alcotest.(check (option string)) "oembed image" (Some "https://i.ytimg.com/vi/a/hqdefault.jpg") (Option.map (fun p -> p.Link_preview.image) o);
+  Alcotest.(check bool) "oembed without title" true (Link_preview.parse_oembed {|{"title":""}|} = None && Link_preview.parse_oembed "Not Found" = None);
   Alcotest.(check string) "urljoin abs" "https://ex.com/x" (Http.urljoin "https://ex.com/a/b" "/x")
 
 let test_p_tags () =

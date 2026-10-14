@@ -272,16 +272,22 @@ type resource_metadata = Link_preview.t
 
 (* Media.fetch_resource_metadata: one GET through [metadata_proxy] (direct when unset or "null",
    then [connect]'s public-address rule applies); an unparseable proxy gives no preview rather
-   than a direct fetch *)
+   than a direct fetch. A page without a title falls back to the site's oEmbed (YouTube), fetched
+   the same way. *)
 let fetch_resource_metadata (ctx : Procgraph.ctx) (url : string) : resource_metadata =
   let proxy = match ctx.cfg.metadata_proxy with None | Some "null" -> Some None | Some s -> Option.map Option.some (Media_config.parse_proxy s) in
   match proxy with
   | None -> Link_preview.empty
   | Some proxy -> (
-      match fetch ctx ?proxy ~timeout:10.0 ~meth:"GET" ~ua:Link_preview.user_agent ~max_body:(15 * 1024 * 1024) url with
-      | Some r when r.Http.status >= 200 && r.status < 300 -> Link_preview.parse ~url r.body
-      | _ -> Link_preview.empty
-      | exception Refused _ -> Link_preview.empty)
+      let get u =
+        match fetch ctx ?proxy ~timeout:10.0 ~meth:"GET" ~ua:Link_preview.user_agent ~max_body:(15 * 1024 * 1024) u with
+        | Some r when r.Http.status >= 200 && r.status < 300 -> Some r.body
+        | _ -> None
+        | exception Refused _ -> None
+      in
+      let page = match get url with Some body -> Link_preview.parse ~url body | None -> Link_preview.empty in
+      if page.Link_preview.title <> "" then page
+      else match Option.bind (Option.bind (Link_preview.oembed_url url) get) Link_preview.parse_oembed with Some o -> o | None -> page)
 
 (* {1 AI hosts} *)
 let post_json (ctx : Procgraph.ctx) ~(timeout : float) (url : string) (body : Pgj.t) : Pgj.t option =
