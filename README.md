@@ -7,41 +7,41 @@
 
 Primal Server includes caching, membership, discovery and media caching services for Nostr. It connects to the specified set of relays, collects all events in real time, stores them locally, and makes them available to nostr clients through a web socket-based API.
 
-### Usage
+It is written in OCaml 5 (Eio). The earlier Julia and Rust implementation was retired in October 2026;
+its code is in the tag `julia-final`, which the "Julia ..." provenance comments in the OCaml sources
+refer to.
 
-Setup database server:
+### Layout
 
-    nix develop -c sh -c '$setup_postgres $PWD/var/pg $PWD/var/pgdata'
+One dune workspace:
 
-Setup pg_primal (Primal database extension):
+| Directory | What |
+|---|---|
+| `ocaml-common/` | shared library: Postgres (`[%pgsql]`), Nostr, HTTP/WebSocket clients and server kernel, the dev shell (`flake.nix`), SQL migrations (`sql/`), baseline schemas (`schema/`) |
+| `ocaml-api/` | `primal-api`: the WebSocket cache API, the internal HTTP services, admin endpoint; `primalctl` |
+| `ocaml-importer/` | `primal-importer`: imports events from the fetcher's firehose into the cache DB |
+| `ocaml-fetcher/` | `primal-fetcher`: relay connections, the firehose, the relay lists (`relays/`) |
+| `ocaml-jobs/` | `primal-jobs`: DAG runner, TrustRank, analytics, DVM checker, rebroadcasting; the media role (processing graph, uploads, Blossom) |
 
-    nix develop -c sh -c '$setup_pg_primal'
+Each directory has a `README.md` with the details. `ocaml-plan.md` is the record of the port.
 
-Setup other database extensions:
+### Build
 
-    nix develop -c sh -c '$setup_pg_extensions'
+    nix develop path:./ocaml-common -c dune build @all
+    nix develop path:./ocaml-common -c dune test
 
-Start database in the background:
+The `[%pgsql]` statements are type-checked at compile time against a database: create one from the
+baseline schemas (`ocaml-common/schema/README.md`) and point `PGHOST`/`PGPORT` at it.
 
-    nix develop -c sh -c '$start_postgres'
+### Run
 
-Initialize database schema:
-
-    nix develop -c sh -c '$init_postgres_schema'
-
-Start the Primal server:
-
-    nix develop -c sh -c '$start_primal_server'
-
-Finally, open any Primal application and on network settings screen connect to cache server at:
-
-    ws://127.0.0.1:8801
-
-Enjoy self-hosted Nostr cache server.
+Every daemon reads one JSON config, given as its argument; `<exe> --check-config <file>` checks it
+without starting anything. `ocaml-common/sql/migrate.sh` applies the schema migrations. Then open any
+Primal application and, on the network settings screen, connect to the API's WebSocket port.
 
 ### API requests
 
-Read `app_*.jl` for list of all supported arguments.
+The funcalls are listed in `ocaml-api/lib/funcall.ml`.
 
 Examples:
 
@@ -57,4 +57,3 @@ Examples:
     ["REQ", "2t6z17orjp", {"cache": ["events", {"event_ids": ["64-hex digits of event id"]}]}]
 
     ["REQ", "1uddc0a2fv", {"cache": ["user_profile", {"pubkey": "64-hex digits of pubkey id"}]}]
-

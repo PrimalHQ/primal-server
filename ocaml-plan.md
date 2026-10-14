@@ -1,6 +1,8 @@
 # Plan: port everything in `primal-server` to OCaml 5 / Eio
 
-Status: proposal v2 (2026-10-03). Replaces the earlier `ocaml-api-plan.md` (renamed and expanded).
+Status: done. Proposal v2 (2026-10-03); every host ran the OCaml daemons by 2026-10-10, and the Julia,
+Rust, Python and C sources were deleted on 2026-10-14 (tag `julia-final`; §13 phase 12, §15). Kept
+as the record of the port; the file paths below are those of the tag.
 
 End state: this repo contains OCaml, SQL, shell and config only. Every `.jl`, `.rs`, `Cargo.toml`,
 `Project.toml`, Python helper and the Julia nix flake are deleted. Clients and peers keep using the
@@ -869,9 +871,9 @@ Sizes are relative effort. Each phase ends with its parity gate.
 | **7** Fetcher (7a done 2026-10-04: `ocaml-fetcher` — `Relay_set`/`Relay_url` (relay set identical to Julia's), `Relay_conn` per relay over 8 domains, Julia envelope + archive line format, `Resume` files, in-memory `Dedup`, `Archive`, `Firehose` server, pushgateway `fetcher<N>`, admin; shadow on the stage host (9027, own state/archive dirs) compared with `firehose_tap`: 605 distinct events/s with no duplicates vs Julia's 624 distinct/s inside 2394 lines/s — the extra ids Julia carried were hours-old re-fetches from stale resume points, inherited at cutover. Found that Julia's `default_connection_limit = 10000` parked most of its 61k relays; the port connects to all of them with a per-domain connect limiter and a 1 h backoff for never-productive relays, and forwards each new verified event once (`firehose_forward_raw: false`), see ocaml-fetcher/README.md "Deviations". **Live on the stage host since 2026-10-04 20:02**: Julia fetcher stopped, `primal-fetcher` on 9017 with the production state/archive dirs, importer reconnected) | `primal-fetcher` on 9000+N with resume files, archive writer, firehose server; Julia fetcher stopped per host | 24 h soak: importer `recv` rate and `cache_any` unchanged vs Julia fetcher; RSS budget | M |
 | **8** Media role (8a done 2026-10-04: `ocaml-jobs/lib_media` — `Pgj` typed JSON + the three node-id serialisations in use (Julia/blossom: `_ty` first; Rust: sorted keys; this executor creates sorted-key ids), `Procgraph` executor with `for update skip locked` claims, `Proc`/`Media_tools`/`Media_store`/`Hls`, nodes import_media_pn, import_media_variant_pn, import_media_fast_pn(_2), import_preview_pn, import_media_hls_pn, media_variants_pn, media_variant_fast_pn, import_text_event_pn, import_upload_3, block_media, purge_media_, inc_counter, purge_user_content; `media_tool` check-ids/execute-node/import-media. **Live on the media host since 2026-10-04 20:46** for the Rust task list (Rust `primal-media` stopped: its loop shell SIGSTOPped); `import_upload_3`/`block_media`/`purge_media_` stay with Julia node 18's scheduler until Phase 9 supplies the private after-upload analysis hook, because the public build would import uploads without CSAM analysis. Legacy `transcode_video_pn`/`media_video_variants_pn` (NVENC over ssh) not ported) | procgraph executor with all tasks, uploads, analysis, HLS providers, purger :22000; Rust `primal-media` stopped on the media host | node-id hash test; variant/preview outputs byte-compared for a sample; backlog drains; `requeue-cdn-backlog.py` still works | L |
 | **9** Private extensions (`ocaml-ext/`) (**9a done 2026-10-04**: `Api.Extensions` funcall/route registries, `Jobs.Roles`, `Kind.register_private`, `Daemon.run ~init` for both daemons, the `ext` config object; **9b code done 2026-10-04**: `primal-net-server/ocaml-ext` — Studio `studio_operation` (195/197 identical with the Julia host's Julia), `membership_name_available` + crash report, `studio_broadcast`, `rss_import` (NIP-44 in ocaml-common, html2md port: 200/200 drafts decrypt, 2000 conversions identical modulo script/style text), `purger_http` (URL sets identical with Julia), the MediaAnalysis nodes + upload/Bunny hooks (nsfw/csam identical on 12 re-analysed uploads), `rss_tool`/`analysis_tool`; nothing cut over: the Julia host is a public host — checklist in `ocaml-ext/README.md`; the wallet-transaction push intake stays with Julia, wallet/membership purchase funcalls out of scope) | registration points landed in public code during 3–8; `ocaml-ext` with Studio (`studio_operation`, SQL migrations, scheduled/RSS broadcasting, RSS importer), purger :22000, media analysis tasks + upload hook, push intake :20000, membership/wallet/crash-report funcalls; production binaries built from `ocaml-ext/bin`; Rust `rss-content-importer` and `studio/` stopped | `studio_operation` replay parity per op; one week of scheduled/RSS broadcasts with identical status rows; purger dry-run output identical on a corpus of past messages; analysis decisions identical on a sample | M/L |
-| **10** API cutover (**the stage host done 2026-10-05**: private build on 9001 + 8817/14017/24017/21017, Julia node 17 retired, proxied leftovers to the Julia host; the other hosts wait for a go-ahead, see `ocaml-api/README.md`) | `primal-api` (ocaml-ext build) binds 8800+N / 14000+N / 24000+N / 21000+N on every host; Julia API nodes retired; `deploy.sh` replaced by the scripts + `/readyz` LB checks | replay parity on every host; dashboards unchanged | S/M |
-| **11** Julia importer retirement | with 1, 6, 8, 9 done, `start_media_importer_2.jl` (node 18) stops; `EVAL` ports gone; DVM provider decided and ported if live | all §1.3 producers verified from OCaml daemons for a week | S |
-| **12** Deletion (§15) | remove Julia/Rust/Python/C from both repos, old SQL loaders, docs updated (`CLAUDE.md`, `README.md`, parent `AGENTS.md`) | both repos build with `dune build @all` only; nix flake is `ocaml-common/flake.nix` | S |
+| **10** API cutover (**done**: the stage host 2026-10-05, the production API hosts 2026-10-10; no Julia upstream since then: funcalls primal-api doesn't handle get a NOTICE) | `primal-api` (ocaml-ext build) binds 8800+N / 14000+N / 24000+N / 21000+N on every host; Julia API nodes retired; `deploy.sh` replaced by the scripts + `/readyz` LB checks | replay parity on every host; dashboards unchanged | S/M |
+| **11** Julia importer retirement (**done 2026-10-10**) | with 1, 6, 8, 9 done, `start_media_importer_2.jl` (node 18) stops; `EVAL` ports gone; DVM provider decided and ported if live | all §1.3 producers verified from OCaml daemons for a week | S |
+| **12** Deletion (§15) (**done 2026-10-14**, tag `julia-final`) | remove Julia/Rust/Python/C from both repos, old SQL loaders, docs updated (`CLAUDE.md`, `README.md`, parent `AGENTS.md`) | both repos build with `dune build @all` only; nix flake is `ocaml-common/flake.nix` | S |
 
 Phases 1, 2 and 6 can start in parallel after 0; 7 and 8 are independent of 3–5; 9 starts as soon
 as the first registration point exists (Studio's `studio_operation` can ship right after Phase 3).
@@ -906,6 +908,19 @@ as the first registration point exists (Studio's `studio_operation` can ship rig
 ---
 
 ## 15. Deletion checklist (Phase 12)
+
+**Done 2026-10-14.** Where it differs from the list below:
+- `default-relays.json`, `default-settings.json`, `nostr.json` and `pgfuncs1.sql` were deleted: the API
+  reads the content-moderation repo's copies, nostr.json comes from the membership DB, and
+  `sql/app.sql`'s functions supersede `pgfuncs1.sql`.
+- `sql/` was replaced by `ocaml-common/schema/` (current baseline schemas of the cache, membership and
+  media DBs, with the recorded migrations).
+- `relays*.txt` moved to `ocaml-fetcher/relays/`.
+- `link-preview.py`: the media role uses the OCaml `Link_preview`.
+- `primal-cache/` (Rust) moved into the private repo's Studio stats job, its only user.
+- Private repo: the replication scripts and `maintanance.sh` moved to the deployment repo.
+  `requeue-cdn-backlog.py` stays until `primalctl media requeue` exists.
+- The wallet server stays on Julia, running from its own checkout of older commits.
 
 Delete only after every producer in §1.3 has been verified running from OCaml for a week on every
 host, and after a final grep of all databases for `pg_primal` functions and `plpython` callers.

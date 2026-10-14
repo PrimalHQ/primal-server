@@ -1,11 +1,5 @@
 var/
-pgdir
-pgdata
-pgurl
-libbech32.so
-pljava/
 logs/
 /ocaml-ext
-__pycache__/
 _build/
 core.*
