@@ -3,7 +3,7 @@
 Shared library (`primal_common`) for all Primal OCaml daemons; `README.md` has the module map.
 
 - Build/test from any project dir with the workspace's flake (`nix/`):
-  `nix develop "path:$(git rev-parse --show-toplevel)/common" -c dune build @all`
+  `nix develop "path:$(git rev-parse --show-toplevel)/nix" -c dune build @all`
   (`dune test` for alcotest). `_build/` is at the repo root (one dune workspace).
 - OCaml 5 + Eio only, no Lwt. `[%pgsql]` for SQL, checked at compile time against a cache DB and a
   `primal_membership_ref` DB made from `schema/` (the dev shell sets `PG*`; override them inside it with

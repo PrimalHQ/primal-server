@@ -3,7 +3,7 @@
 The importer daemon (`primal_importerd.exe`): firehose -> cache DB. `README.md` has the pipeline, tables, config keys
 and dev tools.
 
-- Build with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/common" -c dune build @all`
+- Build with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/nix" -c dune build @all`
   (fails if any inline `[%pgsql]` doesn't match the cache DB schema; `dune build @check` type-checks only).
 - Runtime config is one JSON file, the sole argument (`primal_importerd.exe <config.json>`); the environment is not
   consulted. `--check-config` validates it. `Config.from_env` exists only for the dev tools in `tools/`.

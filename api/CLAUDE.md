@@ -3,7 +3,7 @@
 The Primal cache API daemon (`primal_apid`) and `primalctl`; `README.md` has the protocol, funcalls,
 HTTP routes, config keys and operation.
 
-- Build/test with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/common" -c dune build @all`
+- Build/test with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/nix" -c dune build @all`
   (`dune test api`). `_build/` is at the repo root.
 - Run it locally with `selfhost/primal.sh` (Postgres, fetcher, importer and api; `restart` after a rebuild).
   Never start a second `primal_apid` on the same ports by hand: generations share them (SO_REUSEPORT) and

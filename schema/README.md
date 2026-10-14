@@ -7,8 +7,13 @@ Julia code, which created its tables on start, and the old `sql/app.sql` and `sq
 - `cache.sql`: the cache DB, schemas `public` and `cache`. The extensions it uses come first, and
   the `schema_migrations` rows of the migrations it already includes come last, so
   `../sql/migrate.sh` applies only the migrations added after the snapshot.
-- `membership.sql`: the membership DB (`public`). The membership queries are checked against a
-  database with this schema, `primal_membership_ref`, on the same server as `primal1`.
+- `membership.sql`: the part of the membership DB (`public`) that this repository's code uses: the
+  tables and functions it queries (settings, notifications, filter lists, verified names, media
+  uploads, memberships and tiers, ...). The rest of that DB (payments and reporting) is not part of
+  this repository. Two views the API reads, `legend_users` and `premium_users`, are stand-ins built
+  from `memberships` with the columns the queries use; the real ones derive them from payment
+  records. The membership queries are checked against a database with this schema,
+  `primal_membership_ref`, on the same server as `primal1`.
 - `media.sql`: the media DB (schemas `public` and `archive`), with its extensions first. The objects
   that reach other hosts are left out, because they name internal addresses: three functions
   (`categorized_uploads`, `ollama`, `vals`), the `membership_server` FDW and its four foreign
@@ -36,7 +41,7 @@ The membership reference DB, on the same server:
 The `[%pgsql]` checks build against these databases (`../README.md`). The dev shell sets
 `PGHOST`/`PGPORT` itself, so point them at another server inside the shell:
 
-    nix develop "path:$(git rev-parse --show-toplevel)/common" \
+    nix develop "path:$(git rev-parse --show-toplevel)/nix" \
       -c env PGHOST=... PGPORT=... dune build @all
 
 A build against the restored baselines alone succeeded on 2026-10-14.

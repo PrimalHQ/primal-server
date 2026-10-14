@@ -551,8 +551,8 @@ test/test_media.ml         unit tests
 
 From anywhere in the repo, with the shared dev shell:
 
-    nix develop "path:$(git rev-parse --show-toplevel)/common" -c dune build @all
-    nix develop "path:$(git rev-parse --show-toplevel)/common" -c dune test jobs
+    nix develop "path:$(git rev-parse --show-toplevel)/nix" -c dune build @all
+    nix develop "path:$(git rev-parse --show-toplevel)/nix" -c dune test jobs
 
 `_build/` is at the repository root; the binaries are
 `_build/default/jobs/bin/{primal_jobsd,media_tool,blossom_tool}.exe`.

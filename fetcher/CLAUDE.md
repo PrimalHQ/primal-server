@@ -2,7 +2,7 @@
 
 The relay fetcher + firehose daemon (`primal_fetcherd`); `README.md` has the design, config keys and endpoints.
 
-- Build/test with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/common" -c dune build @all`
+- Build/test with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/nix" -c dune build @all`
   (`dune test fetcher`). `_build/` is at the repo root.
 - Run it locally with `selfhost/primal.sh` (`restart` after a rebuild). Status:
   `curl -s http://127.0.0.1:<admin_port>/status`; `/relays` lists every relay with its state.

@@ -3,7 +3,7 @@
 The background jobs daemon (`primal_jobsd`): DAG, TrustRank, analytics, DVM checker, rebroadcasting and
 the media role (processing graph, uploads, Blossom); `README.md` has the roles and config keys.
 
-- Build/test with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/common" -c dune build @all`.
+- Build/test with the shared flake: `nix develop "path:$(git rev-parse --show-toplevel)/nix" -c dune build @all`.
 - Config: one JSON file, the sole argument; `--check-config` validates it. Roles are singletons: stop the
   old process before starting a new one, never run two generations.
 - Roles are simple loops (`Periodic.run`), no task framework. A role that writes shared tables must be

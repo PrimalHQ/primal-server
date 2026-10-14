@@ -50,7 +50,7 @@ pg_start() {
     -o "-p $PG_PORT -k $VAR/pg/run -c listen_addresses=127.0.0.1" start > /dev/null
 }
 
-# the common dev shell, with PG* pointing at var/pg (the shell's own PG* are its defaults)
+# the nix/ dev shell, with PG* pointing at var/pg (the shell's own PG* are its defaults)
 devshell() {
   "$NIX" "${NIXF[@]}" develop "path:$ROOT/nix" -c \
     env PGHOST=127.0.0.1 PGPORT="$PG_PORT" PGUSER="$PG_USER" PGDATABASE=primal1 "$@"
