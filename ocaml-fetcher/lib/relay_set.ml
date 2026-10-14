@@ -1,4 +1,4 @@
-(* The relay set: fetching.jl load_relays (relays-active.txt verbatim; relays.txt, relays-paid.txt,
+(* The relay set (files in ../relays, copied into the store by the deploy): fetching.jl load_relays (relays-active.txt verbatim; relays.txt, relays-paid.txt,
    relays-mined-from-events.txt, relays-mined-from-contact-lists.txt sanitised), the extra relays
    of start_fetcher.jl, and start_relays_from_db's 1 s poll of fetcher_relays (updated_at since the
    previous poll; urls over 300 chars, unparsable, or on private IPv4 ranges skipped). New urls
