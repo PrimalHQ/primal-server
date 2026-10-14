@@ -14,7 +14,7 @@ shared by every project, so number ranges are reserved per project to keep names
 |---|---|
 | `0001`–`0999` | `ocaml-common` (shared tables, helper functions) |
 | `1000`–`1999` | `ocaml-importer` |
-| `2000`–`2999` | `ocaml-api` (incl. the split of `sql/app.sql`) |
+| `2000`–`2999` | `ocaml-api` (the functions of the old `sql/app.sql` are in `../../schema/cache.sql`) |
 | `3000`–`3999` | `ocaml-fetcher` |
 | `4000`–`4999` | `ocaml-jobs` (DAG outputs, analytics, trustrank) |
 | `9000`–`9999` | private `ocaml-ext` (parent repo: studio, …) |
