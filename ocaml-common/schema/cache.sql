@@ -2,9 +2,7 @@
 -- --no-subscriptions --no-publications -n public -n cache, with the extensions it uses first.
 -- See README.md in this directory.
 
-CREATE SCHEMA IF NOT EXISTS ag_catalog;
 CREATE SCHEMA IF NOT EXISTS hint_plan;
-CREATE EXTENSION IF NOT EXISTS age WITH SCHEMA ag_catalog;
 CREATE EXTENSION IF NOT EXISTS amcheck WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS dblink WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public;
