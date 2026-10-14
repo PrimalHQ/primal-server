@@ -1,5 +1,5 @@
 var/
 logs/
-/ocaml-ext
+/ext
 _build/
 core.*

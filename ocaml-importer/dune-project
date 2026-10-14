@@ -1,7 +1,0 @@
-(lang dune 3.0)
-(name primal_importer)
-; A public library name is required for ocaml-jobs (another dune project) to link the
-; importer's storage/notification code (Cache_storage, Cache_storage_ext, Dag_index).
-(package
- (name primal_importer)
- (synopsis "Primal cache importer — OCaml 5 / Eio"))

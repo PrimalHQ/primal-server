@@ -1,0 +1,15 @@
+(executable
+ (name primal_importerd)
+ (flags
+  (:standard -open Primal_common))
+ (libraries
+  primal_common
+  primal_importer
+  eio
+  eio.unix
+  eio_main
+  yojson
+  mirage-crypto-rng.unix
+  ca-certs)
+ (preprocess
+  (pps pgocaml_ppx)))

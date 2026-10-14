@@ -5,9 +5,9 @@
 # it creates lives in var/ (gitignored); needs only nix (flakes).
 #
 #   selfhost/primal.sh init     PostgreSQL (nix) in var/pg, the cache and membership DBs from
-#                               ocaml-common/schema, TrustRank seeds (selfhost/trust-seeds.txt),
+#                               schema/, TrustRank seeds (selfhost/trust-seeds.txt),
 #                               migrations, configs in var/config
-#   selfhost/primal.sh build    the four daemons (dune, in the ocaml-common dev shell; the
+#   selfhost/primal.sh build    the four daemons (dune, in the nix/ dev shell; the
 #                               [%pgsql] checks run against var/pg), copied to var/bin
 #   selfhost/primal.sh start    PostgreSQL and the daemons in the background (logs in var/log);
 #                               the first start runs bootstrap before primal-jobs
@@ -17,7 +17,7 @@
 # Settings (environment): PRIMAL_VAR (default <repo>/var), PRIMAL_PG_PORT (54317),
 # PRIMAL_API_PORT (8801; the other daemons' ports are 8802-8840), PRIMAL_LISTEN_HOST (127.0.0.1;
 # 0.0.0.0 to serve other machines), PRIMAL_RELAYS_FILE (selfhost/relays.txt; empty = the full
-# lists in ocaml-fetcher/relays), NIX (the nix binary).
+# lists in fetcher/relays), NIX (the nix binary).
 set -euo pipefail
 # nix-built binaries carry their own library paths; an inherited one (nix-ld hosts) breaks them
 unset LD_LIBRARY_PATH
@@ -35,7 +35,7 @@ PGBIN=$VAR/postgres/bin
 DAEMONS=(fetcher importer api jobs)
 
 declare -A PORT=([API_HTTP]=8802 [API_MODERATION]=8803 [API_ADMIN]=8811 [FIREHOSE]=8820 [FETCHER_ADMIN]=8821 [IMPORTER]=8830 [JOBS_ADMIN]=8840)
-declare -A EXE=([fetcher]=ocaml-fetcher/bin/primal_fetcherd.exe [importer]=ocaml-importer/bin/main.exe [api]=ocaml-api/bin/primal_apid.exe [jobs]=ocaml-jobs/bin/primal_jobsd.exe)
+declare -A EXE=([fetcher]=fetcher/bin/primal_fetcherd.exe [importer]=importer/bin/primal_importerd.exe [api]=api/bin/primal_apid.exe [jobs]=jobs/bin/primal_jobsd.exe)
 
 say() { printf '\033[1m%s\033[0m\n' "$*" >&2; }
 die() { say "error: $*"; exit 1; }
@@ -50,9 +50,9 @@ pg_start() {
     -o "-p $PG_PORT -k $VAR/pg/run -c listen_addresses=127.0.0.1" start > /dev/null
 }
 
-# the ocaml-common dev shell, with PG* pointing at var/pg (the shell's own PG* are its defaults)
+# the common dev shell, with PG* pointing at var/pg (the shell's own PG* are its defaults)
 devshell() {
-  "$NIX" "${NIXF[@]}" develop "path:$ROOT/ocaml-common" -c \
+  "$NIX" "${NIXF[@]}" develop "path:$ROOT/nix" -c \
     env PGHOST=127.0.0.1 PGPORT="$PG_PORT" PGUSER="$PG_USER" PGDATABASE=primal1 "$@"
 }
 
@@ -98,7 +98,7 @@ EOF
   for db in primal1 primal_membership_ref; do
     if [ -z "$(psql_ -d postgres -At -c "select 1 from pg_database where datname = '$db'")" ]; then
       psql_ -d postgres -c "create database $db"
-      file=$ROOT/ocaml-common/schema/cache.sql; [ "$db" = primal1 ] || file=$ROOT/ocaml-common/schema/membership.sql
+      file=$ROOT/schema/cache.sql; [ "$db" = primal1 ] || file=$ROOT/schema/membership.sql
       load_schema "$db" "$file"
     fi
   done
@@ -109,7 +109,7 @@ EOF
       where not exists (select 1 from verified_users where pubkey = decode('$pk', 'hex') and default_name)"
   done
   say "migrations"
-  PATH=$PGBIN:$PATH PGHOST=127.0.0.1 PGPORT=$PG_PORT PGUSER=$PG_USER PGDATABASE=primal1 "$ROOT/ocaml-common/sql/migrate.sh"
+  PATH=$PGBIN:$PATH PGHOST=127.0.0.1 PGPORT=$PG_PORT PGUSER=$PG_USER PGDATABASE=primal1 "$ROOT/sql/migrate.sh"
   render_configs
   say "init done: next selfhost/primal.sh build"
 }

@@ -7,7 +7,7 @@
   "state_dir": "@VAR@/fetcher/state",
   "archive_dir": "@VAR@/fetcher/archive",
   "archive_enabled": false,
-  "relays_dir": "@ROOT@/ocaml-fetcher/relays",
+  "relays_dir": "@ROOT@/fetcher/relays",
   "relays_file": "@RELAYS_FILE@",
   "extra_relays": [],
   "no_proxy_relays": [],

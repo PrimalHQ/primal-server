@@ -1,0 +1,15 @@
+; Membership-DB statements of the jobs: [%pgsql] checks this directory against the schema-only clone
+; primal_membership_ref (sql/membership-refdb-setup.sh) instead of primal1.
+(env
+ (_
+  (env-vars
+   (PGDATABASE primal_membership_ref))))
+
+(library
+ (name primal_jobs_membership)
+ (public_name primal_jobs.membership)
+ (flags
+  (:standard -w -33-26-27 -open Primal_common))
+ (libraries primal_common pgocaml)
+ (preprocess
+  (pps pgocaml_ppx)))

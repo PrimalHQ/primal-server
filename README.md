@@ -13,15 +13,18 @@ refer to.
 
 ### Layout
 
-One dune workspace:
+One dune workspace, one dune project per daemon:
 
 | Directory | What |
 |---|---|
-| `ocaml-common/` | shared library: Postgres (`[%pgsql]`), Nostr, HTTP/WebSocket clients and server kernel, the dev shell (`flake.nix`), SQL migrations (`sql/`), baseline schemas (`schema/`) |
-| `ocaml-api/` | `primal-api`: the WebSocket cache API, the internal HTTP services, admin endpoint; `primalctl` |
-| `ocaml-importer/` | `primal-importer`: imports events from the fetcher's firehose into the cache DB |
-| `ocaml-fetcher/` | `primal-fetcher`: relay connections, the firehose, the relay lists (`relays/`) |
-| `ocaml-jobs/` | `primal-jobs`: DAG runner, TrustRank, analytics, DVM checker, rebroadcasting; the media role (processing graph, uploads, Blossom) |
+| `common/` | `primal_common`, the shared library: Postgres (`[%pgsql]`), Nostr, HTTP/WebSocket clients and server kernel |
+| `api/` | `primal-api`: the WebSocket cache API, the internal HTTP services, admin endpoint; `primalctl` |
+| `importer/` | `primal-importer`: imports events from the fetcher's firehose into the cache DB |
+| `fetcher/` | `primal-fetcher`: relay connections, the firehose, the relay lists (`relays/`) |
+| `jobs/` | `primal-jobs`: DAG runner, TrustRank, analytics, DVM checker, rebroadcasting; the media role (processing graph, uploads, Blossom) |
+| `nix/` | the dev shell for the whole workspace (`flake.nix`) and patches to third-party packages |
+| `sql/` | the schema migrations (`migrations/`, applied by `migrate.sh`) |
+| `schema/` | baseline schemas of the cache, membership and media DBs |
 | `selfhost/` | `primal.sh`, PostgreSQL (`postgres.nix`), config templates, content files and relay list for a private server (below) |
 
 Each directory has a `README.md` with the details.
@@ -49,7 +52,7 @@ What runs:
 
 | Process | Does | Port |
 |---|---|---|
-| PostgreSQL 16 (`selfhost/postgres.nix`) | the cache DB `primal1` and the membership DB, created from `ocaml-common/schema/` | 127.0.0.1:54317 |
+| PostgreSQL 16 (`selfhost/postgres.nix`) | the cache DB `primal1` and the membership DB, created from `schema/` | 127.0.0.1:54317 |
 | `primal-fetcher` | subscribes to the relays in `selfhost/relays.txt`, adds the ones it learns from relay lists, and serves the new events as a firehose | 8820 (admin 8821) |
 | `primal-importer` | imports the firehose into the cache DB: events, profiles, follows, reactions, zaps, notifications, counters | 8830 (import listener) |
 | `primal-api` | the WebSocket API the apps use, plus internal HTTP (link previews, nostr.json) | 8801 (HTTP 8802, 8803, admin 8811) |
@@ -58,7 +61,7 @@ What runs:
 Settings, as environment variables:
 - `PRIMAL_LISTEN_HOST=0.0.0.0` serves the API to other machines. Put TLS in front of it with a reverse proxy.
 - `PRIMAL_API_PORT` and `PRIMAL_PG_PORT` move the API and the database.
-- `PRIMAL_RELAYS_FILE` takes another relay list; set it empty for the full lists in `ocaml-fetcher/relays/`.
+- `PRIMAL_RELAYS_FILE` takes another relay list; set it empty for the full lists in `fetcher/relays/`.
 - `PRIMAL_VAR` moves the state directory.
 
 The configs come from the templates in `selfhost/config/` and are written to `var/config/`, where
@@ -81,22 +84,22 @@ within seconds of `start`.
 
 ### Build
 
-    nix develop path:./ocaml-common -c dune build @all
-    nix develop path:./ocaml-common -c dune test
+    nix develop path:./nix -c dune build @all
+    nix develop path:./nix -c dune test
 
 The `[%pgsql]` statements are type-checked at compile time against a database made from the
-baseline schemas (`ocaml-common/schema/README.md`), for instance the one `selfhost/primal.sh init`
+baseline schemas (`schema/README.md`), for instance the one `selfhost/primal.sh init`
 creates. The dev shell sets `PG*` itself, so override them inside it:
-`nix develop path:./ocaml-common -c env PGPORT=54317 PGUSER=$USER dune build @all`.
+`nix develop path:./nix -c env PGPORT=54317 PGUSER=$USER dune build @all`.
 
 ### Run
 
 Every daemon reads one JSON config, given as its argument; `<exe> --check-config <file>` checks it
-without starting anything. `ocaml-common/sql/migrate.sh` applies the schema migrations.
+without starting anything. `sql/migrate.sh` applies the schema migrations.
 
 ### API requests
 
-The funcalls are listed in `ocaml-api/lib/funcall.ml`.
+The funcalls are listed in `api/lib/funcall.ml`.
 
 Examples:
 
