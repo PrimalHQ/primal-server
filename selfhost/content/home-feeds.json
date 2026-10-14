@@ -1,0 +1,65 @@
+[
+    {
+        "name": "Latest",
+        "description": "Latest notes by your follows", 
+        "spec": "{\"id\":\"latest\",\"kind\":\"notes\"}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+    {
+        "name": "Latest with Replies",
+        "description": "Latest notes and replies by your follows", 
+        "spec": "{\"id\":\"latest\",\"include_replies\":true,\"kind\":\"notes\"}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+    {
+        "name": "Trending 7d",
+        "description": "Global trending notes in the past 7 days", 
+        "spec": "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":168}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Trending 48h",
+        "description": "Global trending notes in the past 48 hours", 
+        "spec": "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":48}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Trending 24h",
+        "description": "Global trending notes in the past 24 hours", 
+        "spec": "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":24}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+    {
+        "name": "Trending 12h",
+        "description": "Global trending notes in the past 12 hours", 
+        "spec": "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":12}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Trending 4h",
+        "description": "Global trending notes in the past 4 hours", 
+        "spec": "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":4}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Trending 1h",
+        "description": "Global trending notes in the past hour", 
+        "spec": "{\"id\":\"global-trending\",\"kind\":\"notes\",\"hours\":1}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Nostr Firehose",
+        "description": "Latest global notes; be careful!", 
+        "spec": "{\"id\":\"all-notes\",\"kind\":\"notes\"}",
+        "feedkind": "primal",
+        "enabled": false
+    }
+]

@@ -1,0 +1,102 @@
+{
+    "feeds": [
+        {
+            "name": "Trending 24h",
+            "hex": "global;trending"
+        },
+        {
+            "name": "Most-zapped 4h",
+            "hex": "global;mostzapped4h"
+        },
+        {
+            "name": "Nostr Highlights",
+            "hex": "9a500dccc084a138330a1d1b2be0d5e86394624325d25084d3eca164e7ea698a"
+        },
+        {
+            "name": "#foodstr",
+            "hex": "search;#foodstr"
+        },
+        {
+            "name": "#nostrasia",
+            "hex": "search;#nostrasia"
+        },
+        {
+            "name": "#photography",
+            "hex": "search;#photography"
+        },
+        {
+            "name": "#nature",
+            "hex": "search;#nature"
+        }
+    ],
+
+    "pushNotifications": {
+        "NEW_FOLLOWS": true,
+        "ZAPS": true,
+        "REACTIONS": true,
+        "REPLIES": true,
+        "REPOSTS": true,
+        "MENTIONS": true,
+        "DIRECT_MESSAGES": true,
+        "WALLET_TRANSACTIONS": true,
+        "LIVE_EVENT_HAPPENING": true
+    },
+    
+    "notifications": {
+        "NEW_USER_FOLLOWED_YOU": true,
+        "USER_UNFOLLOWED_YOU": false,
+        "YOUR_POST_WAS_ZAPPED": true,
+        "YOUR_POST_WAS_LIKED": true,
+        "YOUR_POST_WAS_REPOSTED": true,
+        "YOUR_POST_WAS_REPLIED_TO": true,
+        "YOU_WERE_MENTIONED_IN_POST": true,
+        "YOUR_POST_WAS_MENTIONED_IN_POST": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_ZAPPED": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_LIKED": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_REPOSTED": true,
+        "POST_YOU_WERE_MENTIONED_IN_WAS_REPLIED_TO": true,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_ZAPPED": false,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_LIKED": false,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPOSTED": false,
+        "POST_YOUR_POST_WAS_MENTIONED_IN_WAS_REPLIED_TO": false,
+        "YOUR_POST_WAS_HIGHLIGHTED": true,
+        "YOUR_POST_WAS_BOOKMARKED": true,
+        "LIVE_EVENT_HAPPENING": true
+    },
+
+    "notificationsAdditional": {
+        "ignore_events_with_too_many_mentions": true,
+        "only_show_dm_notifications_from_users_i_follow": true,
+        "only_show_reactions_from_users_i_follow": false,
+        "include_deep_replies": true,
+        "show_wallet_push_notifications_above_sats": 1
+    },
+    
+    "defaultZapAmount": 42,
+    "zapOptions": [
+      21,
+      420,
+      1000,
+      5000,
+      10000,
+      100000
+    ],
+    
+    "zapDefault": { "amount": 42, "message": "Onward 🫡" },
+    "zapConfig": [
+      { "emoji": "👍", "amount": 21, "message": "Great post 👍" },
+      { "emoji": "🚀", "amount": 420, "message": "Let's go 🚀" },
+      { "emoji": "☕", "amount": 1000, "message": "Coffee on me ☕" },
+      { "emoji": "🍻", "amount": 5000, "message": "Cheers 🍻" },
+      { "emoji": "🍷", "amount": 10000, "message": "Party time 🍷" },
+      { "emoji": "👑", "amount": 100000, "message": "Generational wealth 👑" }
+    ],
+
+    "theme": "sunrise",
+
+    "applyContentModeration": true,
+    "contentModeration": [
+        {"name": "primal_spam", "scopes": ["content", "trending"]},
+        {"name": "primal_nsfw", "scopes": ["trending"]}
+    ]
+}

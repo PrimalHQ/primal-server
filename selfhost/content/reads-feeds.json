@@ -1,0 +1,122 @@
+[
+    {
+        "name": "Nostr Reads",
+        "description": "Latest reads from your network", 
+        "spec": "{\"id\":\"nostr-reads-feed\",\"kind\":\"reads\"}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+    {
+        "name": "All reads",
+        "description": "Latest global reads", 
+        "spec": "{\"kind\":\"reads\",\"minwords\":0}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+
+    {
+        "name": "Art Reads",
+        "description": "Art Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-art\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Bitcoin Reads",
+        "description": "Bitcoin Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-bitcoin\"}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+    {
+        "name": "Finance Reads",
+        "description": "Finance Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-finance\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Food Reads",
+        "description": "Food Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-food\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Gaming Reads",
+        "description": "Gaming Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-gaming\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Human Rights Reads",
+        "description": "Human Rights Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-human-rights\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Music Reads",
+        "description": "Music Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-music\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "News Topic Reads",
+        "description": "News Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-news\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Nostr Reads",
+        "description": "Nostr Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-nostr\"}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+    {
+        "name": "Philosophy Reads",
+        "description": "Philosophy Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-philosophy\"}",
+        "feedkind": "primal",
+        "enabled": true
+    },
+    {
+        "name": "Photography Reads",
+        "description": "Photography Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-photography\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Podcasts Reads",
+        "description": "Podcasts Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-podcasts\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Sports Reads",
+        "description": "Sports Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-sports\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Technology Reads",
+        "description": "Technology Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-technology\"}",
+        "feedkind": "primal",
+        "enabled": false
+    },
+    {
+        "name": "Travel Reads",
+        "description": "Travel Topic Reads from Primal", 
+        "spec": "{\"id\":\"reads-topic-travel\"}",
+        "feedkind": "primal",
+        "enabled": false
+    }
+]

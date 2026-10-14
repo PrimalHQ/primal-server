@@ -1,0 +1,8 @@
+wss://relay.primal.net
+wss://relay.damus.io
+wss://nos.lol
+wss://relay.nostr.band
+wss://purplepag.es
+wss://nostr.wine
+wss://relay.snort.social
+wss://nostr.mom
