@@ -57,18 +57,30 @@ let mb_json (m : mb) : string =
       @ (match m.reason with Some r -> [ ("reason", `String r) ] | None -> [])
       @ match m.pubkey with Some p -> [ ("pubkey", `String p) ] | None -> []))
 
-let cloudflare_purge (ctx : ctx) ~(zone_id : string) ~(api_key : string) (file_url : string) : unit =
+(* files per purge_cache request: the single-file purge limit below Enterprise plans *)
+let cloudflare_batch = 30
+
+let rec chunks n l =
+  let rec take k acc = function x :: r when k > 0 -> take (k - 1) (x :: acc) r | r -> (List.rev acc, r) in
+  match l with [] -> [] | _ -> let c, r = take n [] l in c :: chunks n r
+
+(* the Cloudflare cache of these file URLs, cloudflare_batch per request *)
+let cloudflare_purge (ctx : ctx) ~(zone_id : string) ~(api_key : string) (file_urls : string list) : unit =
   match !Handlers.net_ref with
   | None -> ()
-  | Some net -> (
-      let body = Yojson.Safe.to_string (`Assoc [ ("files", `List [ `String file_url ]) ]) in
-      match
-        Http.request ~net ~clock:ctx.clock ~timeout:20.0 ~meth:"POST" ~headers:[ ("Authorization", "Bearer " ^ api_key); ("Content-Type", "application/json") ] ~body
-          ("https://api.cloudflare.com/client/v4/zones/" ^ zone_id ^ "/purge_cache")
-      with
-      | Some r when r.Http.status = 200 -> log "cloudflare purge %s ok" file_url
-      | Some r -> log "cloudflare purge %s: HTTP %d" file_url r.Http.status
-      | None -> log "cloudflare purge %s failed" file_url)
+  | Some net ->
+      List.iter
+        (fun files ->
+          let body = Yojson.Safe.to_string (`Assoc [ ("files", `List (List.map (fun f -> `String f) files)) ]) in
+          let n = List.length files and all = String.concat " " files in
+          match
+            Http.request ~net ~clock:ctx.clock ~timeout:20.0 ~meth:"POST" ~headers:[ ("Authorization", "Bearer " ^ api_key); ("Content-Type", "application/json") ] ~body
+              ("https://api.cloudflare.com/client/v4/zones/" ^ zone_id ^ "/purge_cache")
+          with
+          | Some r when r.Http.status = 200 -> log "cloudflare purge ok (%d): %s" n all
+          | Some r -> log "cloudflare purge (%d): HTTP %d %s: %s" n r.Http.status (String.sub r.Http.body 0 (min 200 (String.length r.Http.body))) all
+          | None -> log "cloudflare purge (%d) failed: %s" n all)
+        (chunks cloudflare_batch file_urls)
 
 (* purge_media_. The walk over the media paths runs 10 entries at a time (Julia: asyncmap ntasks=10)
    and no pooled connection is held across the S3 / file work: rows are read first, the files are
@@ -77,125 +89,140 @@ let cloudflare_purge (ctx : ctx) ~(zone_id : string) ~(api_key : string) (file_u
    /mnt/ext/var/cdn-hidden; Julia derives it from the file's depth). *)
 let purge_media (ctx : ctx) ~(pubkey : string option) ~(surl : string) ~(reason : string option) ~(initiator_pubkey : Yojson.Safe.t) ~(block_all_uploads : bool) ~(clear_cache : bool) : unit =
   let cfg = ctx.cfg in
-  let media_block_id = uuid4 () in
-  let mb = { surl; files = []; media_urls = []; thumbnail_urls = []; short_urls = []; blossom_urls = []; upload_urls = []; extra = [ ("initiator_pubkey", initiator_pubkey) ]; reason; pubkey = Option.map Hex_util.encode pubkey } in
-  Handlers.with_membership ctx (fun m -> Queries_mem.media_block_insert m ~id:media_block_id ~d:(mb_json mb));
-  let update_mb () = Handlers.with_membership ctx (fun m -> Queries_mem.media_block_update m ~id:media_block_id ~d:(mb_json mb)) in
-  let purged = Hashtbl.create 16 in
-  let purge_entry ~kh (p, (mp : Config.media_path)) =
-    (match mp with
-    | Config.Local { root; _ } -> (
-        let filepath = root ^ p in
-        try
-          if Sys.file_exists filepath && Sys.is_directory filepath then log "local purge %s: a directory, left in place" filepath
-          else if Sys.file_exists filepath then begin
-            let dst_dir = Filename.concat (Filename.dirname root) "cdn-hidden" in
-            (try Sys.mkdir dst_dir 0o755 with Sys_error _ -> ());
-            let dst = Filename.concat dst_dir (Filename.basename filepath) in
-            mb.files <- `Assoc [ ("mp", `List [ `String "local"; `String (Config.media_path_label mp); `String root ]); ("p", `String p); ("filepath", `String filepath); ("dst", `String dst) ] :: mb.files;
-            Sys.rename filepath dst
-          end
-        with e -> log "local purge %s: %s" filepath (Printexc.to_string e))
-    | Config.S3_path { provider = name; _ } -> (
-        match (provider cfg name, !Handlers.net_ref) with
-        | Some prov, Some net -> (
-            let key = String.sub p 1 (String.length p - 1) in
-            try
-              let present =
-                match S3.check_opt ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov key with
-                | Some b -> b
-                | None -> log "s3 check %s %s failed: object left in place" name p; false
-              in
-              if present then begin
-                mb.files <- `Assoc [ ("mp", `List [ `String "s3"; `String name ]); ("p", `String p) ] :: mb.files;
-                (match prov.S3.bucket2 with
-                | Some b2 -> ignore (S3.copy ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov ~source_bucket:prov.bucket ~source_key:key ~destination_bucket:b2 ~destination_key:key)
-                | None -> ());
-                ignore (S3.delete ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov key)
-              end;
-              match (cfg.cloudflare, prov.S3.domain) with
-              | Some (zone_id, api_key), Some domain when name = "cloudflare" || name = "cloudflare2" -> cloudflare_purge ctx ~zone_id ~api_key ("https://" ^ domain ^ p)
-              | _ -> ()
-            with e -> log "s3 purge %s %s: %s" name p (Printexc.to_string e))
-        | _ -> ()));
-    Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block c ~storage_provider:(Config.media_path_label mp) ~h:kh ~block:media_block_id)
+  (* the Cloudflare cache purges, collected (once per file URL) and sent in batches when the purge
+     ends, also when it fails part way: one request per file made a large purge take minutes *)
+  let cf_files = ref [] and cf_seen = Hashtbl.create 16 in
+  let cf_add u = if not (Hashtbl.mem cf_seen u) then (Hashtbl.replace cf_seen u (); cf_files := u :: !cf_files) in
+  let flush_cf () =
+    match (cfg.cloudflare, List.rev !cf_files) with
+    | Some (zone_id, api_key), (_ :: _ as files) -> (
+        cf_files := [];
+        try cloudflare_purge ctx ~zone_id ~api_key files with Eio.Cancel.Cancelled _ as e -> raise e | e -> log "cloudflare purge: %s" (Printexc.to_string e))
+    | _ -> ()
   in
-  (* once per storage path: the work below depends only on the URL's path, and one blob comes as
-     several URLs with the same path (the upload path, its media_storage rows on each provider),
-     which each repeated every check and Cloudflare purge *)
-  let purge (url : string) =
-    let path_ext = url_path url in
-    if not (file_path_ok path_ext) then log "purge %s: not a file path, skipped" url
-    else if not (Hashtbl.mem purged path_ext) then begin
-      Hashtbl.replace purged path_ext ();
-      let path, _ = splitext path_ext in
-      let kh = match String.rindex_opt path '/' with Some i -> String.sub path (i + 1) (String.length path - i - 1) | None -> path in
-      let variants = List.filter file_path_ok (List.sort_uniq compare [ path; path ^ ".key"; path_ext ]) in
-      let entries = List.concat_map (fun p -> List.map (fun mp -> (p, mp)) cfg.media_paths) variants in
-      Eio.Fiber.List.iter ~max_fibers:10 (purge_entry ~kh) entries;
-      update_mb ()
+  match
+    let media_block_id = uuid4 () in
+    let mb = { surl; files = []; media_urls = []; thumbnail_urls = []; short_urls = []; blossom_urls = []; upload_urls = []; extra = [ ("initiator_pubkey", initiator_pubkey) ]; reason; pubkey = Option.map Hex_util.encode pubkey } in
+    Handlers.with_membership ctx (fun m -> Queries_mem.media_block_insert m ~id:media_block_id ~d:(mb_json mb));
+    let update_mb () = Handlers.with_membership ctx (fun m -> Queries_mem.media_block_update m ~id:media_block_id ~d:(mb_json mb)) in
+    let purged = Hashtbl.create 16 in
+    let purge_entry ~kh (p, (mp : Config.media_path)) =
+      (match mp with
+      | Config.Local { root; _ } -> (
+          let filepath = root ^ p in
+          try
+            if Sys.file_exists filepath && Sys.is_directory filepath then log "local purge %s: a directory, left in place" filepath
+            else if Sys.file_exists filepath then begin
+              let dst_dir = Filename.concat (Filename.dirname root) "cdn-hidden" in
+              (try Sys.mkdir dst_dir 0o755 with Sys_error _ -> ());
+              let dst = Filename.concat dst_dir (Filename.basename filepath) in
+              mb.files <- `Assoc [ ("mp", `List [ `String "local"; `String (Config.media_path_label mp); `String root ]); ("p", `String p); ("filepath", `String filepath); ("dst", `String dst) ] :: mb.files;
+              Sys.rename filepath dst
+            end
+          with e -> log "local purge %s: %s" filepath (Printexc.to_string e))
+      | Config.S3_path { provider = name; _ } -> (
+          match (provider cfg name, !Handlers.net_ref) with
+          | Some prov, Some net -> (
+              let key = String.sub p 1 (String.length p - 1) in
+              try
+                let present =
+                  match S3.check_opt ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov key with
+                  | Some b -> b
+                  | None -> log "s3 check %s %s failed: object left in place" name p; false
+                in
+                if present then begin
+                  mb.files <- `Assoc [ ("mp", `List [ `String "s3"; `String name ]); ("p", `String p) ] :: mb.files;
+                  (match prov.S3.bucket2 with
+                  | Some b2 -> ignore (S3.copy ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov ~source_bucket:prov.bucket ~source_key:key ~destination_bucket:b2 ~destination_key:key)
+                  | None -> ());
+                  ignore (S3.delete ~net ~clock:ctx.clock ?proxy:cfg.relay_proxy prov key)
+                end;
+                match (cfg.cloudflare, prov.S3.domain) with
+                | Some _, Some domain when name = "cloudflare" || name = "cloudflare2" -> cf_add ("https://" ^ domain ^ p)
+                | _ -> ()
+              with e -> log "s3 purge %s %s: %s" name p (Printexc.to_string e))
+          | _ -> ()));
+      Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block c ~storage_provider:(Config.media_path_label mp) ~h:kh ~block:media_block_id)
+    in
+    (* once per storage path: the work below depends only on the URL's path, and one blob comes as
+       several URLs with the same path (the upload path, its media_storage rows on each provider),
+       which each repeated every check and Cloudflare purge *)
+    let purge (url : string) =
+      let path_ext = url_path url in
+      if not (file_path_ok path_ext) then log "purge %s: not a file path, skipped" url
+      else if not (Hashtbl.mem purged path_ext) then begin
+        Hashtbl.replace purged path_ext ();
+        let path, _ = splitext path_ext in
+        let kh = match String.rindex_opt path '/' with Some i -> String.sub path (i + 1) (String.length path - i - 1) | None -> path in
+        let variants = List.filter file_path_ok (List.sort_uniq compare [ path; path ^ ".key"; path_ext ]) in
+        let entries = List.concat_map (fun p -> List.map (fun mp -> (p, mp)) cfg.media_paths) variants in
+        Eio.Fiber.List.iter ~max_fibers:10 (purge_entry ~kh) entries;
+        update_mb ()
+      end
+    in
+    let purge_media_urls urls = List.iter (fun u -> mb.media_urls <- u :: mb.media_urls; purge u) urls in
+    let purge_upload_paths paths =
+      List.iter
+        (fun path ->
+          let upload_url = "https://_media.primal.net" ^ path in
+          mb.upload_urls <- upload_url :: mb.upload_urls;
+          purge upload_url)
+        paths
+    in
+    let host = url_host surl in
+    let spath, ext = splitext (let p = url_path surl in if String.length p > 0 then String.sub p 1 (String.length p - 1) else p) in
+    if host = "blossom.primal.net" || host = "blossom-dev.primal.net" then begin
+      mb.blossom_urls <- surl :: mb.blossom_urls;
+      let sha256 = match Hex_util.decode_opt spath with Some s when String.length s = 32 -> s | _ -> raise Not_found in
+      let clear_cache = ref clear_cache in
+      (match pubkey with
+      | Some pk -> (
+          (* the uploader's rows are blocked; the files go only when nobody else uploaded the same blob *)
+          let paths =
+            Handlers.with_membership ctx (fun m ->
+                Queries_mem.media_uploads_set_block m ~sha256 ~pubkey:pk ~block:media_block_id;
+                let ulcnt = Queries_mem.media_uploads_count m ~sha256 ~pubkey:(Some pk) and ulallcnt = Queries_mem.media_uploads_count m ~sha256 ~pubkey:None in
+                if ulcnt <> 0L && ulcnt = ulallcnt then Some (Queries_mem.media_uploads_paths m ~sha256 ~pubkey:(Some pk)) else None)
+          in
+          match paths with
+          | Some paths ->
+              purge_upload_paths paths;
+              purge_media_urls (Handlers.with_cache ctx (fun c -> Queries.media_storage_urls_by_sha256 c ~sha256));
+              Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block_by_sha256 c ~sha256 ~block:media_block_id ~cache_only:false);
+              clear_cache := true
+          | None -> ())
+      | None ->
+          purge_upload_paths (Handlers.with_membership ctx (fun m -> Queries_mem.media_uploads_paths m ~sha256 ~pubkey:None));
+          Handlers.with_membership ctx (fun m -> Queries_mem.media_uploads_set_block_all m ~sha256 ~block:media_block_id));
+      if !clear_cache then begin
+        purge_media_urls (Handlers.with_cache ctx (fun c -> Queries.media_cache_urls_by_orig_sha256 c ~sha256));
+        Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block_by_sha256 c ~sha256 ~block:media_block_id ~cache_only:true)
+      end;
+      if block_all_uploads then begin
+        Handlers.with_membership ctx (fun m -> Queries_mem.media_uploads_set_block_all m ~sha256 ~block:media_block_id);
+        purge_media_urls (Handlers.with_cache ctx (fun c -> Queries.media_storage_urls_by_sha256 c ~sha256));
+        Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block_by_sha256 c ~sha256 ~block:media_block_id ~cache_only:false)
+      end
     end
-  in
-  let purge_media_urls urls = List.iter (fun u -> mb.media_urls <- u :: mb.media_urls; purge u) urls in
-  let purge_upload_paths paths =
-    List.iter
-      (fun path ->
-        let upload_url = "https://_media.primal.net" ^ path in
-        mb.upload_urls <- upload_url :: mb.upload_urls;
-        purge upload_url)
-      paths
-  in
-  let host = url_host surl in
-  let spath, ext = splitext (let p = url_path surl in if String.length p > 0 then String.sub p 1 (String.length p - 1) else p) in
-  if host = "blossom.primal.net" || host = "blossom-dev.primal.net" then begin
-    mb.blossom_urls <- surl :: mb.blossom_urls;
-    let sha256 = match Hex_util.decode_opt spath with Some s when String.length s = 32 -> s | _ -> raise Not_found in
-    let clear_cache = ref clear_cache in
-    (match pubkey with
-    | Some pk -> (
-        (* the uploader's rows are blocked; the files go only when nobody else uploaded the same blob *)
-        let paths =
+    else if host = "m.primal.net" then
+      List.iter
+        (fun url ->
+          mb.short_urls <- url :: mb.short_urls;
+          purge url;
           Handlers.with_membership ctx (fun m ->
-              Queries_mem.media_uploads_set_block m ~sha256 ~pubkey:pk ~block:media_block_id;
-              let ulcnt = Queries_mem.media_uploads_count m ~sha256 ~pubkey:(Some pk) and ulallcnt = Queries_mem.media_uploads_count m ~sha256 ~pubkey:None in
-              if ulcnt <> 0L && ulcnt = ulallcnt then Some (Queries_mem.media_uploads_paths m ~sha256 ~pubkey:(Some pk)) else None)
-        in
-        match paths with
-        | Some paths ->
-            purge_upload_paths paths;
-            purge_media_urls (Handlers.with_cache ctx (fun c -> Queries.media_storage_urls_by_sha256 c ~sha256));
-            Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block_by_sha256 c ~sha256 ~block:media_block_id ~cache_only:false);
-            clear_cache := true
-        | None -> ())
-    | None ->
-        purge_upload_paths (Handlers.with_membership ctx (fun m -> Queries_mem.media_uploads_paths m ~sha256 ~pubkey:None));
-        Handlers.with_membership ctx (fun m -> Queries_mem.media_uploads_set_block_all m ~sha256 ~block:media_block_id));
-    if !clear_cache then begin
-      purge_media_urls (Handlers.with_cache ctx (fun c -> Queries.media_cache_urls_by_orig_sha256 c ~sha256));
-      Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block_by_sha256 c ~sha256 ~block:media_block_id ~cache_only:true)
+              Queries_mem.short_urls_set_block m ~path:spath ~ext ~block:media_block_id;
+              match pubkey with Some pk -> Queries_mem.media_uploads_set_block_by_path m ~pubkey:pk ~path:(url_path url) ~block:media_block_id | None -> ()))
+        (Handlers.with_membership ctx (fun m -> Queries_mem.short_urls_by_path_ext m ~path:spath ~ext))
+    else begin
+      purge surl;
+      let media_urls, thumbnails = Handlers.with_cache ctx (fun c -> (Queries.media_urls_for_url c ~url:surl, Queries.video_thumbnails_for_video c ~video_url:surl)) in
+      purge_media_urls media_urls;
+      List.iter (fun u -> mb.thumbnail_urls <- u :: mb.thumbnail_urls; purge u) thumbnails
     end;
-    if block_all_uploads then begin
-      Handlers.with_membership ctx (fun m -> Queries_mem.media_uploads_set_block_all m ~sha256 ~block:media_block_id);
-      purge_media_urls (Handlers.with_cache ctx (fun c -> Queries.media_storage_urls_by_sha256 c ~sha256));
-      Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block_by_sha256 c ~sha256 ~block:media_block_id ~cache_only:false)
-    end
-  end
-  else if host = "m.primal.net" then
-    List.iter
-      (fun url ->
-        mb.short_urls <- url :: mb.short_urls;
-        purge url;
-        Handlers.with_membership ctx (fun m ->
-            Queries_mem.short_urls_set_block m ~path:spath ~ext ~block:media_block_id;
-            match pubkey with Some pk -> Queries_mem.media_uploads_set_block_by_path m ~pubkey:pk ~path:(url_path url) ~block:media_block_id | None -> ()))
-      (Handlers.with_membership ctx (fun m -> Queries_mem.short_urls_by_path_ext m ~path:spath ~ext))
-  else begin
-    purge surl;
-    let media_urls, thumbnails = Handlers.with_cache ctx (fun c -> (Queries.media_urls_for_url c ~url:surl, Queries.video_thumbnails_for_video c ~video_url:surl)) in
-    purge_media_urls media_urls;
-    List.iter (fun u -> mb.thumbnail_urls <- u :: mb.thumbnail_urls; purge u) thumbnails
-  end;
-  update_mb ()
+    update_mb ()
+  with
+  | () -> flush_cf ()
+  | exception e -> flush_cf (); raise e
 
 let service ~(cfg : Config.t) ~clock : Http_server.service =
   let ctx = Internal_http.ctx_of cfg clock in

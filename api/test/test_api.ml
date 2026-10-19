@@ -71,6 +71,13 @@ let test_purge_file_path () =
   List.iter (fun p -> Alcotest.(check bool) p true (ok p)) [ "/uploads2/2/c8/a0/2c8a.png"; "/2c8a"; "/cache/c/70/08/c700.png.key" ];
   List.iter (fun p -> Alcotest.(check bool) (Printf.sprintf "%S" p) false (ok p)) [ ""; "/"; "uploads2/x.png"; "/uploads2/0/"; "/uploads2/../x.png"; "/.." ]
 
+(* Cloudflare purges go in batches of Moderation_http.cloudflare_batch files *)
+let test_cloudflare_batches () =
+  let sizes l = List.map List.length (Primal_api.Moderation_http.chunks Primal_api.Moderation_http.cloudflare_batch l) in
+  Alcotest.(check (list int)) "65" [ 30; 30; 5 ] (sizes (List.init 65 string_of_int));
+  Alcotest.(check (list int)) "30" [ 30 ] (sizes (List.init 30 string_of_int));
+  Alcotest.(check (list int)) "0" [] (sizes [])
+
 let test_wants_zlib () =
   Alcotest.(check bool) "zlib" true (P.wants_zlib (`Assoc [ ("compression", `String "zlib") ]));
   Alcotest.(check bool) "none" false (P.wants_zlib (`Assoc []));
@@ -322,6 +329,7 @@ let () =
           Alcotest.test_case "internal http" `Quick test_internal_http;
           Alcotest.test_case "wants_zlib" `Quick test_wants_zlib;
           Alcotest.test_case "purge file paths" `Quick test_purge_file_path;
+          Alcotest.test_case "cloudflare batches" `Quick test_cloudflare_batches;
         ] );
       ( "handlers",
         [
