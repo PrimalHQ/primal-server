@@ -24,6 +24,14 @@ let splitext (s : string) : string * string =
   | None -> (s, "")
 
 let url_path (u : string) : string = match Http.parse_url u with Some p -> p.Http.path | None -> ""
+
+(* A path a purge may act on: a file name below the media root. Never empty, "/", ending in "/"
+   or with a ".." segment: root ^ "" is the media root itself, which an empty URL (a profile's
+   "picture": "") once tried to move into cdn-hidden/, and "/uploads2/0" names a whole shard. *)
+let file_path_ok (p : string) : bool =
+  let n = String.length p in
+  n > 1 && p.[0] = '/' && p.[n - 1] <> '/' && not (List.mem ".." (String.split_on_char '/' p))
+
 let url_host (u : string) : string = match Http.parse_url u with Some p -> p.Http.host | None -> ""
 
 type mb = {
@@ -79,7 +87,8 @@ let purge_media (ctx : ctx) ~(pubkey : string option) ~(surl : string) ~(reason 
     | Config.Local { root; _ } -> (
         let filepath = root ^ p in
         try
-          if Sys.file_exists filepath then begin
+          if Sys.file_exists filepath && Sys.is_directory filepath then log "local purge %s: a directory, left in place" filepath
+          else if Sys.file_exists filepath then begin
             let dst_dir = Filename.concat (Filename.dirname root) "cdn-hidden" in
             (try Sys.mkdir dst_dir 0o755 with Sys_error _ -> ());
             let dst = Filename.concat dst_dir (Filename.basename filepath) in
@@ -111,13 +120,18 @@ let purge_media (ctx : ctx) ~(pubkey : string option) ~(surl : string) ~(reason 
         | _ -> ()));
     Handlers.with_cache ctx (fun c -> Queries.media_storage_set_block c ~storage_provider:(Config.media_path_label mp) ~h:kh ~block:media_block_id)
   in
+  (* once per storage path: the work below depends only on the URL's path, and one blob comes as
+     several URLs with the same path (the upload path, its media_storage rows on each provider),
+     which each repeated every check and Cloudflare purge *)
   let purge (url : string) =
-    if not (Hashtbl.mem purged url) then begin
-      Hashtbl.replace purged url ();
-      let path_ext = url_path url in
+    let path_ext = url_path url in
+    if not (file_path_ok path_ext) then log "purge %s: not a file path, skipped" url
+    else if not (Hashtbl.mem purged path_ext) then begin
+      Hashtbl.replace purged path_ext ();
       let path, _ = splitext path_ext in
       let kh = match String.rindex_opt path '/' with Some i -> String.sub path (i + 1) (String.length path - i - 1) | None -> path in
-      let entries = List.concat_map (fun p -> List.map (fun mp -> (p, mp)) cfg.media_paths) [ path; path ^ ".key"; path_ext ] in
+      let variants = List.filter file_path_ok (List.sort_uniq compare [ path; path ^ ".key"; path_ext ]) in
+      let entries = List.concat_map (fun p -> List.map (fun mp -> (p, mp)) cfg.media_paths) variants in
       Eio.Fiber.List.iter ~max_fibers:10 (purge_entry ~kh) entries;
       update_mb ()
     end

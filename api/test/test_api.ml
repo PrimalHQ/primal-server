@@ -65,6 +65,12 @@ let test_funcall_names () =
     [ "thread_view"; "feed"; "live_feed"; "events"; "server_name"; "something_else" ];
   match of_string "something_else" with Other _ -> () | _ -> Alcotest.fail "unknown names must be Other"
 
+(* the paths a media purge may act on: never the media root or a directory *)
+let test_purge_file_path () =
+  let ok = Primal_api.Moderation_http.file_path_ok in
+  List.iter (fun p -> Alcotest.(check bool) p true (ok p)) [ "/uploads2/2/c8/a0/2c8a.png"; "/2c8a"; "/cache/c/70/08/c700.png.key" ];
+  List.iter (fun p -> Alcotest.(check bool) (Printf.sprintf "%S" p) false (ok p)) [ ""; "/"; "uploads2/x.png"; "/uploads2/0/"; "/uploads2/../x.png"; "/.." ]
+
 let test_wants_zlib () =
   Alcotest.(check bool) "zlib" true (P.wants_zlib (`Assoc [ ("compression", `String "zlib") ]));
   Alcotest.(check bool) "none" false (P.wants_zlib (`Assoc []));
@@ -315,6 +321,7 @@ let () =
           Alcotest.test_case "advsearch" `Quick test_advsearch;
           Alcotest.test_case "internal http" `Quick test_internal_http;
           Alcotest.test_case "wants_zlib" `Quick test_wants_zlib;
+          Alcotest.test_case "purge file paths" `Quick test_purge_file_path;
         ] );
       ( "handlers",
         [

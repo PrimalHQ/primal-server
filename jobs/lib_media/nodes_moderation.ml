@@ -9,6 +9,13 @@ let uuid4 () = let h = Hex_util.encode (String.init 16 (fun _ -> Char.chr (Rando
 let all_path_entries (cfg : Media_config.t) : Media_config.path_entry list = List.concat_map (fun (p : Media_config.paths) -> p.uploadfast @ p.upload @ p.cache) [ cfg.media_paths; cfg.media_paths_2 ]
 let parent_dir (p : string) = match String.rindex_opt p '/' with Some i when i > 0 -> String.sub p 0 i | _ -> p
 
+(* A path a purge may act on: a file name below the media root (as in the API's Moderation_http):
+   never empty, "/", ending in "/" or with a ".." segment, which would name the root or a
+   directory. *)
+let file_path_ok (p : string) : bool =
+  let n = String.length p in
+  n > 1 && p.[0] = '/' && p.[n - 1] <> '/' && not (List.mem ".." (String.split_on_char '/' p))
+
 type mb = { surl : string; mutable files : Pgj.t list; mutable media_urls : string list; mutable thumbnail_urls : string list; mutable short_urls : string list; mutable blossom_urls : string list; mutable upload_urls : string list; extra : (string * Pgj.t) list; reason : string option; pubkey : string option }
 
 let mb_json (m : mb) : Pgj.t =
@@ -32,10 +39,13 @@ let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(rea
   ignore (qm ctx "insert into media_block values ($1::uuid, now(), $2::jsonb)" [ Some media_block_id; Some (Pgj.to_string (mb_json mb)) ]);
   let update_mb () = ignore (qm ctx "update media_block set d = $2::jsonb where id = $1::uuid" [ Some media_block_id; Some (Pgj.to_string (mb_json mb)) ]) in
   let purged = Hashtbl.create 16 in
+  (* once per storage path: the work depends only on the URL's path, and one blob comes as several
+     URLs with the same path (its upload path, its media_storage rows on each provider) *)
   let purge (url : string) =
-    if not (Hashtbl.mem purged url) then begin
-      Hashtbl.replace purged url ();
-      let _, path_ext = url_parts url in
+    let _, path_ext = url_parts url in
+    if not (file_path_ok path_ext) then log "purge %s: not a file path, skipped" url
+    else if not (Hashtbl.mem purged path_ext) then begin
+      Hashtbl.replace purged path_ext ();
       let path, _ = splitext path_ext in
       let kh = match String.rindex_opt path '/' with Some i -> String.sub path (i + 1) (String.length path - i - 1) | None -> path in
       (* Every distinct place the URL's file can be: each local file (the three forms; path
@@ -50,14 +60,15 @@ let purge_media (ctx : ctx) ~(pubkey_hex : string option) ~(surl : string) ~(rea
         (fun (mp : Media_config.path_entry) ->
           match mp with
           | Media_config.Local { host; path = root } ->
-              List.iter (fun p -> let filepath = parent_dir root ^ p in add ("local:" ^ filepath) (`Local (host, root, p, filepath))) [ path; path ^ ".key"; path_ext ]
+              List.iter (fun p -> let filepath = parent_dir root ^ p in add ("local:" ^ filepath) (`Local (host, root, p, filepath))) (List.filter file_path_ok [ path; path ^ ".key"; path_ext ])
           | Media_config.S3 { provider = name; _ } -> add ("s3:" ^ name) (`S3 (name, path_ext)))
         (all_path_entries cfg);
       let purge_target = function
         | `Local (host, root, p, filepath) -> (
             try
-              let exists = try ignore (Unix.lstat filepath); true with _ -> false in
-              if exists then begin
+              let kind = try Some (Unix.lstat filepath).Unix.st_kind with _ -> None in
+              if kind = Some Unix.S_DIR then log "local purge %s: a directory, left in place" filepath
+              else if kind <> None then begin
                 let parts = String.split_on_char '/' filepath in
                 let n = List.length parts in
                 let dst_root = String.concat "/" (List.filteri (fun i _ -> i < n - 6) parts) in
