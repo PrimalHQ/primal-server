@@ -1,8 +1,8 @@
 (* trustrank_maker.jl make_2 + TrustRank.import_trustrank: personalized PageRank over the follow
    graph, seeded at the verified users (membership verified_users.default_name), blocked
    (spam/csam) pubkeys zeroed, [trustrank_alpha], [trustrank_iterations], ranks > 0 kept, then
-   written to pubkey_trustrank_new and swapped under the live name (the dependent view recreated)
-   — or, when [trustrank_target_table] names another table, written there (for comparisons).
+   written to pubkey_trustrank_new and swapped under the live name (the dependent view recreated;
+   merged in place where other views depend on the live table) — or, when [trustrank_target_table] names another table, written there (for comparisons).
    The graph is read once through a cursor from pubkey_followers (follower -> pubkey) into CSR
    arrays; Julia walked the contact lists from the seeds, which reaches the same nodes that can
    hold rank. *)
@@ -154,7 +154,32 @@ let import (dbh : Postgres.dbh) ~(table : string) ~(live : bool) (rows : (string
      (try Postgres.exec dbh "rollback" with _ -> ());
      raise e);
   Postgres.exec dbh (Printf.sprintf "analyze %s" newt);
-  if live then begin
+  (* a view or matview other than ours that reads pubkey_trustrank (the media DB's pn_time_for_pubkeys)
+     would block the drop of the old table: there the ranks are merged into the live table instead *)
+  let other_dependents () =
+    match
+      Postgres.query dbh
+        "select count(distinct c.oid) from pg_depend d join pg_rewrite r on r.oid = d.objid join pg_class c on c.oid = r.ev_class where d.classid = 'pg_rewrite'::regclass and d.refobjid = 'pubkey_trustrank'::regclass and c.oid <> 'pubkey_trustrank'::regclass and c.relname <> 'trusted_users_trusted_followers'"
+        []
+    with
+    | [ [ Some n ] ] -> int_of_string n > 0
+    | _ -> false
+  in
+  if live && other_dependents () then begin
+    Postgres.exec dbh "begin";
+    (try
+       Postgres.exec dbh
+         "insert into pubkey_trustrank (pubkey, rank) select pubkey, rank from pubkey_trustrank_new on conflict (pubkey) do update set rank = excluded.rank where pubkey_trustrank.rank is distinct from excluded.rank";
+       Postgres.exec dbh
+         "delete from pubkey_trustrank t where not exists (select 1 from pubkey_trustrank_new n where n.pubkey = t.pubkey)";
+       Postgres.exec dbh "drop table pubkey_trustrank_new";
+       Postgres.exec dbh "commit"
+     with e ->
+       (try Postgres.exec dbh "rollback" with _ -> ());
+       raise e);
+    log "merged into pubkey_trustrank (other views depend on it)"
+  end
+  else if live then begin
     Postgres.exec dbh "begin";
     (try
        Postgres.exec dbh "drop view if exists trusted_users_trusted_followers";
