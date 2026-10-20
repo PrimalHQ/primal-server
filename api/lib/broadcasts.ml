@@ -13,16 +13,18 @@ let log fmt = Printf.ksprintf (fun s -> Printf.printf "%s [bcast] %s\n%!" (Proci
 
 type kind = Notification_counts of bool | Directmsg_count of bool | Net_stats | Rebroadcasting
 
-type sub = { send : string -> unit; subid : string; kind : kind; pubkey : string (* raw; "" for net_stats *) }
+(* send: false when the frame was dropped (the client's outbound queue is full) *)
+type sub = { send : string -> bool; conn_id : int; subid : string; kind : kind; pubkey : string (* raw; "" for net_stats *) }
 type sub_key = int * string
 
 type t = {
   lock : Mutex.t;
   subs : (sub_key, sub) Hashtbl.t;
   conn_subs : (int, (string, unit) Hashtbl.t) Hashtbl.t;
+  last_push : (int, float) Hashtbl.t; (* conn id -> when a push to it was last queued *)
 }
 
-let create () = { lock = Mutex.create (); subs = Hashtbl.create 1024; conn_subs = Hashtbl.create 1024 }
+let create () = { lock = Mutex.create (); subs = Hashtbl.create 1024; conn_subs = Hashtbl.create 1024; last_push = Hashtbl.create 1024 }
 
 let with_lock t f =
   Mutex.lock t.lock;
@@ -33,13 +35,13 @@ let add t ~conn_id ~subid (s : sub) =
   let cs = match Hashtbl.find_opt t.conn_subs conn_id with Some c -> c | None -> let c = Hashtbl.create 4 in Hashtbl.replace t.conn_subs conn_id c; c in
   Hashtbl.replace cs subid ()
 
-let register (t : t) ~conn_id ~subid ~(send : string -> unit) (r : Response.registration) : unit =
+let register (t : t) ~conn_id ~subid ~(send : string -> bool) (r : Response.registration) : unit =
   with_lock t (fun () ->
       match r with
-      | Response.Notification_counts { pubkey; v2 } -> add t ~conn_id ~subid { send; subid; kind = Notification_counts v2; pubkey }
-      | Response.Directmsg_count { pubkey; v2 } -> add t ~conn_id ~subid { send; subid; kind = Directmsg_count v2; pubkey }
-      | Response.Net_stats -> add t ~conn_id ~subid { send; subid; kind = Net_stats; pubkey = "" }
-      | Response.Rebroadcasting_status { pubkey } -> add t ~conn_id ~subid { send; subid; kind = Rebroadcasting; pubkey }
+      | Response.Notification_counts { pubkey; v2 } -> add t ~conn_id ~subid { send; conn_id; subid; kind = Notification_counts v2; pubkey }
+      | Response.Directmsg_count { pubkey; v2 } -> add t ~conn_id ~subid { send; conn_id; subid; kind = Directmsg_count v2; pubkey }
+      | Response.Net_stats -> add t ~conn_id ~subid { send; conn_id; subid; kind = Net_stats; pubkey = "" }
+      | Response.Rebroadcasting_status { pubkey } -> add t ~conn_id ~subid { send; conn_id; subid; kind = Rebroadcasting; pubkey }
       | Response.Live_events _ | Response.Live_events_from_follows _ -> ())
 
 let unregister_sub (t : t) ~conn_id ~subid : unit =
@@ -52,14 +54,21 @@ let unregister_conn (t : t) ~conn_id : unit =
       (match Hashtbl.find_opt t.conn_subs conn_id with
       | Some cs -> Hashtbl.iter (fun subid () -> Hashtbl.remove t.subs (conn_id, subid)) cs
       | None -> ());
-      Hashtbl.remove t.conn_subs conn_id)
+      Hashtbl.remove t.conn_subs conn_id;
+      Hashtbl.remove t.last_push conn_id)
 
 let stats (t : t) : int = with_lock t (fun () -> Hashtbl.length t.subs)
 
 let snapshot (t : t) (pred : kind -> bool) : sub list =
   with_lock t (fun () -> Hashtbl.fold (fun _ s acc -> if pred s.kind then s :: acc else acc) t.subs [])
 
-let push (s : sub) (msg : string) = try s.send (Protocol.event s.subid msg) with _ -> ()
+let push (t : t) (s : sub) (msg : string) =
+  if (try s.send (Protocol.event s.subid msg) with _ -> false) then
+    with_lock t (fun () -> Hashtbl.replace t.last_push s.conn_id (Unix.gettimeofday ()))
+
+(* When a push to the connection was last queued (0. if never): the idle check counts it as
+   activity, so a client that only listens to its subscriptions is not closed as idle. *)
+let last_push (t : t) ~conn_id : float = with_lock t (fun () -> Option.value (Hashtbl.find_opt t.last_push conn_id) ~default:0.)
 
 (* {1 Message shapes} (app.jl / app_ext.jl) *)
 
@@ -129,11 +138,11 @@ let counts_loop (t : t) ~clock : unit =
               | Notification_counts v2 -> (
                   (* Julia: one message per row, nothing when the user has no row *)
                   match List.assoc_opt pubkey_hex nc with
-                  | Some counts -> push s (if v2 then notification_counts_2_msg ~pubkey_hex counts else notification_counts_msg ~pubkey_hex counts)
+                  | Some counts -> push t s (if v2 then notification_counts_2_msg ~pubkey_hex counts else notification_counts_msg ~pubkey_hex counts)
                   | None -> ())
               | Directmsg_count v2 ->
                   let cnt = Option.value (List.assoc_opt pubkey_hex dm) ~default:0L in
-                  push s (if v2 then directmsg_count_2_msg cnt else directmsg_count_msg cnt)
+                  push t s (if v2 then directmsg_count_2_msg cnt else directmsg_count_msg cnt)
               | _ -> ())
             subs)
   done
@@ -148,7 +157,7 @@ let rebroadcast_loop (t : t) ~clock : unit =
           let pks = List.map (fun s -> s.pubkey) subs |> List.sort_uniq compare in
           let rows = Db.with_membership ~clock (fun m -> List.map (fun pk -> (pk, Queries_mem.rebroadcast_status m ~pubkey:pk)) pks) in
           List.iter
-            (fun s -> match List.assoc_opt s.pubkey rows with Some (Some r) -> push s (rebroadcast_msg r) | _ -> ())
+            (fun s -> match List.assoc_opt s.pubkey rows with Some (Some r) -> push t s (rebroadcast_msg r) | _ -> ())
             subs)
   done
 
@@ -162,7 +171,7 @@ let netstats_loop (t : t) ~net ~clock ~(cfg : Config.t) : unit =
           match Netstats.content ~net ~clock cfg with
           | Some content ->
               let msg = Yojson.Safe.to_string (`Assoc [ ("kind", `Int Kind.net_stats); ("content", `String content) ]) in
-              List.iter (fun s -> push s msg) subs
+              List.iter (fun s -> push t s msg) subs
           | None -> ())
   done
 

@@ -288,8 +288,10 @@ let test_ws_stalled_client () =
     let sent = Eio.Time.with_timeout clock 3.0 (fun () -> for _ = 1 to 40 do s.ws_send_text frame done; Ok ()) in
     Alcotest.(check bool) "blocking sends return after the stall" true (sent = Ok ());
     let t0 = Eio.Time.now clock in
-    for _ = 1 to 40 do s.ws_try_send_text frame done;
+    let queued = ref 0 in
+    for _ = 1 to 40 do if s.ws_try_send_text frame then incr queued done;
     Alcotest.(check bool) "try_send does not wait" true (Eio.Time.now clock -. t0 < 0.5);
+    Alcotest.(check int) "try_send reports the drops" 0 !queued;
     checked := true;
     (* a close with unread data resets the connection, which ends the server's blocked write *)
     Eio.Resource.close flow;

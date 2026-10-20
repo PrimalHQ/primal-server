@@ -166,6 +166,23 @@ let test_broadcast_msgs () =
   Alcotest.(check string) "directmsg_count" {|{"kind":10000117,"cnt":624}|} (B.directmsg_count_msg 624L);
   Alcotest.(check string) "directmsg_count_2" {|{"kind":10000134,"content":"624"}|} (B.directmsg_count_2_msg 624L)
 
+(* a push the client's queue took counts as activity for the idle check; a dropped one does not *)
+let test_broadcast_last_push () =
+  let module B = Primal_api.Broadcasts in
+  let t = B.create () in
+  let accept = ref true in
+  B.register t ~conn_id:7 ~subid:"dm" ~send:(fun _ -> !accept) (Primal_api.Response.Directmsg_count { pubkey = "k"; v2 = false });
+  Alcotest.(check (float 0.)) "nothing pushed yet" 0. (B.last_push t ~conn_id:7);
+  let s = List.hd (B.snapshot t (fun _ -> true)) in
+  accept := false;
+  B.push t s "{}";
+  Alcotest.(check (float 0.)) "dropped push" 0. (B.last_push t ~conn_id:7);
+  accept := true;
+  B.push t s "{}";
+  Alcotest.(check bool) "queued push" true (B.last_push t ~conn_id:7 > 0.);
+  B.unregister_conn t ~conn_id:7;
+  Alcotest.(check (float 0.)) "forgotten with the connection" 0. (B.last_push t ~conn_id:7)
+
 let test_filter_funcall () =
   let module C = Primal_api.Conn in
   (match C.filter_funcall {|["REQ","s",{"ids":["107db94a94a9cdc30638e412636f4ba79e7829086306725482e347583a93bea8","zz"]}]|} with
@@ -321,6 +338,7 @@ let () =
           Alcotest.test_case "event_from_user" `Quick test_event_from_user;
           Alcotest.test_case "notif json" `Quick test_notif_json;
           Alcotest.test_case "broadcast msgs" `Quick test_broadcast_msgs;
+          Alcotest.test_case "broadcast last push" `Quick test_broadcast_last_push;
           Alcotest.test_case "filter funcall" `Quick test_filter_funcall;
           Alcotest.test_case "f32 string" `Quick test_f32;
           Alcotest.test_case "mega ids" `Quick test_mega_ids;

@@ -104,7 +104,7 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
            a full queue drops the frame instead of waiting *)
         List.iter
           (fun reg ->
-            Live_events.register live ~conn_id:c.id ~subid ~send:c.session.ws_try_send_text reg;
+            Live_events.register live ~conn_id:c.id ~subid ~send:(fun s -> ignore (c.session.ws_try_send_text s)) reg;
             Broadcasts.register bc ~conn_id:c.id ~subid ~send:c.session.ws_try_send_text reg)
           r.registrations;
         Stats.incr stats.handled;
@@ -245,7 +245,10 @@ let run ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (bc : B
         loop ()
       in
       (* as ws-connector did: every 3 s, close when idle for >= (0.95..1.0) * idle_timeout (the timeout
-         itself comes from wsconnvars, re-read each tick). *)
+         itself comes from wsconnvars, re-read each tick). Unlike ws-connector, a broadcast push the
+         client's queue took counts as activity: the apps keep a socket open for the per-second
+         counts without sending anything, and closing it showed them as disconnected. A client
+         that stops reading gets no pushes queued, so it is still closed. *)
       let idle_loop () =
         let rfactor = 0.95 +. Random.float 0.05 in
         let rec loop () =
@@ -253,10 +256,10 @@ let run ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.t) (bc : B
           if c.closing || session.ws_is_closed () then ()
           else
             let limit = rfactor *. Wsconnvars.idle_connection_timeout_s () in
-            let dt = Unix.gettimeofday () -. c.last_msg in
+            let dt = Unix.gettimeofday () -. Float.max c.last_msg (Broadcasts.last_push bc ~conn_id:c.id) in
             if dt >= limit then begin
               Stats.incr stats.idle_closed;
-              log "closing idle connection %d (%s), last message %.0fs ago" c.id session.ws_peer dt
+              log "closing idle connection %d (%s), last message or push %.0fs ago" c.id session.ws_peer dt
             end
             else loop ()
         in

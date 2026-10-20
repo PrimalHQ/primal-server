@@ -43,8 +43,8 @@ type ws_frame = [ `Text of string | `Binary of string | `Closed ]
 type ws_session = {
   ws_send_text : string -> unit; (* enqueue; blocks while the outbound queue is full, at most send_stall_s *)
   ws_send_binary : string -> unit;
-  ws_try_send_text : string -> unit;
-      (* enqueue only if the queue has room, else drop the frame; never blocks. For loops that
+  ws_try_send_text : string -> bool;
+      (* enqueue only if the queue has room, else drop the frame (false); never blocks. For loops that
          push to many connections (broadcasts, live events): one client that stops reading must
          not hold up the others. *)
   ws_recv : unit -> ws_frame; (* blocking *)
@@ -248,7 +248,7 @@ let ws_input_handlers ~(limits : ws_limits) (wsd : Httpun_ws.Wsd.t) (push : ws_f
    the socket is closed and the queue is abandoned. *)
 let start_ws_writer ~sw ~clock ~(limits : ws_limits) (wsd : Httpun_ws.Wsd.t) :
     (([ `Text | `Binary | `Continuation ] * string) option -> unit)
-    * (([ `Text | `Binary | `Continuation ] * string) option -> unit)
+    * (([ `Text | `Binary | `Continuation ] * string) option -> bool)
     * (unit -> bool) =
   let queue : ([ `Text | `Binary | `Continuation ] * string) option Eio.Stream.t =
     Eio.Stream.create limits.outbound_queue
@@ -292,10 +292,13 @@ let start_ws_writer ~sw ~clock ~(limits : ws_limits) (wsd : Httpun_ws.Wsd.t) :
       | Error `Timeout -> dead := true
   in
   let try_send item =
-    if (not !dead) && Eio.Stream.length queue < limits.outbound_queue then
-      (* another domain may fill the last slot between the check and the add *)
-      match Eio.Time.with_timeout clock 0.05 (fun () -> Eio.Stream.add queue item; Ok ()) with
-      | Ok () | Error `Timeout -> ()
+    (not !dead)
+    && Eio.Stream.length queue < limits.outbound_queue
+    &&
+    (* another domain may fill the last slot between the check and the add *)
+    match Eio.Time.with_timeout clock 0.05 (fun () -> Eio.Stream.add queue item; Ok ()) with
+    | Ok () -> true
+    | Error `Timeout -> false
   in
   (send, try_send, fun () -> !dead)
 
