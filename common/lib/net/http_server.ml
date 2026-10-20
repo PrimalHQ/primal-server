@@ -41,8 +41,12 @@ let body_json (r : req) : Yojson.Safe.t option =
 type ws_frame = [ `Text of string | `Binary of string | `Closed ]
 
 type ws_session = {
-  ws_send_text : string -> unit; (* enqueue; blocks when the outbound queue is full *)
+  ws_send_text : string -> unit; (* enqueue; blocks while the outbound queue is full, at most send_stall_s *)
   ws_send_binary : string -> unit;
+  ws_try_send_text : string -> unit;
+      (* enqueue only if the queue has room, else drop the frame; never blocks. For loops that
+         push to many connections (broadcasts, live events): one client that stops reading must
+         not hold up the others. *)
   ws_recv : unit -> ws_frame; (* blocking *)
   ws_close : ?code:int -> unit -> unit; (* send a close frame *)
   ws_is_closed : unit -> bool;
@@ -243,7 +247,9 @@ let ws_input_handlers ~(limits : ws_limits) (wsd : Httpun_ws.Wsd.t) (push : ws_f
    the fiber waits for the flush callback (bounded by [send_stall_s]); on a stall or a closed wsd
    the socket is closed and the queue is abandoned. *)
 let start_ws_writer ~sw ~clock ~(limits : ws_limits) (wsd : Httpun_ws.Wsd.t) :
-    (([ `Text | `Binary | `Continuation ] * string) option -> unit) * (unit -> bool) =
+    (([ `Text | `Binary | `Continuation ] * string) option -> unit)
+    * (([ `Text | `Binary | `Continuation ] * string) option -> unit)
+    * (unit -> bool) =
   let queue : ([ `Text | `Binary | `Continuation ] * string) option Eio.Stream.t =
     Eio.Stream.create limits.outbound_queue
   in
@@ -258,7 +264,7 @@ let start_ws_writer ~sw ~clock ~(limits : ws_limits) (wsd : Httpun_ws.Wsd.t) :
   Fiber.fork ~sw (fun () ->
       let rec loop () =
         match Eio.Stream.take queue with
-        | None -> ()
+        | None -> dead := true
         | Some (kind, s) ->
             if Httpun_ws.Wsd.is_closed wsd then dead := true
             else begin
@@ -275,8 +281,23 @@ let start_ws_writer ~sw ~clock ~(limits : ws_limits) (wsd : Httpun_ws.Wsd.t) :
             end
       in
       loop ());
-  let send item = if not !dead then Eio.Stream.add queue item in
-  (send, fun () -> !dead)
+  (* Once the writer has stopped, nothing takes from the queue: a sender blocked on a full queue
+     would wait forever (the API's broadcasts stopped for every connection after one client
+     stalled). So the wait is bounded; a queue that stays full that long means the
+     writer is stalled or gone. *)
+  let send item =
+    if not !dead then
+      match Eio.Time.with_timeout clock limits.send_stall_s (fun () -> Eio.Stream.add queue item; Ok ()) with
+      | Ok () -> ()
+      | Error `Timeout -> dead := true
+  in
+  let try_send item =
+    if (not !dead) && Eio.Stream.length queue < limits.outbound_queue then
+      (* another domain may fill the last slot between the check and the add *)
+      match Eio.Time.with_timeout clock 0.05 (fun () -> Eio.Stream.add queue item; Ok ()) with
+      | Ok () | Error `Timeout -> ()
+  in
+  (send, try_send, fun () -> !dead)
 
 (* {1 Request parsing / routing} *)
 
@@ -374,11 +395,12 @@ let send_resp (svc : service) ~sw ~clock ~(peer : string) ~(record : status:int 
       let upgrade () =
         let ws_conn =
           Httpun_ws.Server_connection.create_websocket (fun wsd ->
-              let send, writer_dead = start_ws_writer ~sw ~clock ~limits wsd in
+              let send, try_send, writer_dead = start_ws_writer ~sw ~clock ~limits wsd in
               let session =
                 {
                   ws_send_text = (fun s -> send (Some (`Text, s)));
                   ws_send_binary = (fun s -> send (Some (`Binary, s)));
+                  ws_try_send_text = (fun s -> try_send (Some (`Text, s)));
                   ws_recv = (fun () -> if !closed && Eio.Stream.length inbox = 0 then `Closed else Eio.Stream.take inbox);
                   ws_close =
                     (fun ?code () ->

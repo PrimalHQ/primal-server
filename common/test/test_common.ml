@@ -244,6 +244,61 @@ let test_ws_burst () =
   Eio.Flow.shutdown flow `All;
   Promise.resolve resolve_stop ()
 
+(* Regression: a client that stops reading. Its outbound queue fills while the writer waits for a
+   flush; the writer then gives up, nothing takes from the queue any more, and a sender blocked
+   on it waited forever (the API's broadcast loop stopped for every connection). Sends must
+   return once the writer has given up, and ws_try_send_text must never wait. *)
+let test_ws_stalled_client () =
+  let open Eio.Std in
+  Eio_main.run @@ fun env ->
+  let clock = Eio.Stdenv.clock env and net = Eio.Stdenv.net env in
+  let checked = ref false in
+  let run () =
+    Switch.run @@ fun sw ->
+    let fd = Listen.bind ~host:"127.0.0.1" ~port:0 () in
+    let port = Listen.port_of_fd fd in
+    let session, resolve_session = Promise.create () in
+    let hold (s : Http_server.ws_session) =
+      Promise.resolve resolve_session s;
+      let rec loop () = match s.ws_recv () with `Closed -> () | _ -> loop () in
+      loop ()
+    in
+    let svc =
+      {
+        (Http_server.default_service "stall"
+           [ { Http_server.meth = `GET; pattern = []; handler = (fun _ -> Http_server.Ws (None, hold)) } ])
+        with
+        ws_limits = { Http_server.default_ws_limits with outbound_queue = 2; send_stall_s = 0.2 };
+      }
+    in
+    let stop, resolve_stop = Promise.create () in
+    Fiber.fork ~sw (fun () -> Http_server.serve_on ~sw ~clock ~stop svc (Listen.import ~sw fd));
+    let flow = Eio.Net.connect ~sw net (`Tcp (Eio.Net.Ipaddr.V4.loopback, port)) in
+    Eio.Flow.copy_string
+      "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+      flow;
+    let r = Eio.Buf_read.of_flow ~max_size:(1 lsl 20) flow in
+    let status = Eio.Buf_read.line r in
+    Alcotest.(check bool) "101" true (String.length status > 12 && String.sub status 9 3 = "101");
+    let rec skip () = if Eio.Buf_read.line r <> "" then skip () in
+    skip ();
+    (* from here on the client reads nothing: 40 MB is more than the loopback buffers hold *)
+    let s = Promise.await session in
+    let frame = String.make (1 lsl 20) 'x' in
+    let sent = Eio.Time.with_timeout clock 3.0 (fun () -> for _ = 1 to 40 do s.ws_send_text frame done; Ok ()) in
+    Alcotest.(check bool) "blocking sends return after the stall" true (sent = Ok ());
+    let t0 = Eio.Time.now clock in
+    for _ = 1 to 40 do s.ws_try_send_text frame done;
+    Alcotest.(check bool) "try_send does not wait" true (Eio.Time.now clock -. t0 < 0.5);
+    checked := true;
+    (* a close with unread data resets the connection, which ends the server's blocked write *)
+    Eio.Resource.close flow;
+    Promise.resolve resolve_stop ()
+  in
+  (* the stalled connection's teardown is not under test: cut off after 5 s *)
+  (match Eio.Time.with_timeout clock 5.0 (fun () -> run (); Ok ()) with Ok () | Error `Timeout -> ());
+  Alcotest.(check bool) "checks done within 5 s" true !checked
+
 let () =
   Alcotest.run "primal_common"
     [ ("nip44", [ Alcotest.test_case "padding" `Quick nip44_padding; Alcotest.test_case "conversation key" `Quick nip44_conversation_key; Alcotest.test_case "roundtrip" `Quick nip44_roundtrip ]);
@@ -264,5 +319,6 @@ let () =
       ("langid", [ Alcotest.test_case "detect" `Quick test_langid ]);
       ("phases", [ Alcotest.test_case "slots" `Quick test_phases ]);
       ("procinfo", [ Alcotest.test_case "formatting" `Quick test_procinfo ]);
-      ("http_server", [ Alcotest.test_case "ws burst" `Quick test_ws_burst ]);
+      ( "http_server",
+        [ Alcotest.test_case "ws burst" `Quick test_ws_burst; Alcotest.test_case "ws stalled client" `Quick test_ws_stalled_client ] );
     ]

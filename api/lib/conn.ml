@@ -100,10 +100,12 @@ let handle_native ~clock (cfg : Config.t) (stats : Stats.t) (live : Live_events.
     (match outcome with
     | Response.Handled r ->
         respond c stats ~subid r.messages;
+        (* the live-event distributor and the broadcast loops push to every subscriber in turn:
+           a full queue drops the frame instead of waiting *)
         List.iter
           (fun reg ->
-            Live_events.register live ~conn_id:c.id ~subid ~send:c.session.ws_send_text reg;
-            Broadcasts.register bc ~conn_id:c.id ~subid ~send:c.session.ws_send_text reg)
+            Live_events.register live ~conn_id:c.id ~subid ~send:c.session.ws_try_send_text reg;
+            Broadcasts.register bc ~conn_id:c.id ~subid ~send:c.session.ws_try_send_text reg)
           r.registrations;
         Stats.incr stats.handled;
         Wsconnvars.log_request ~funcall:fc ~kwargs ~conn_id:c.id ~subid ~elapsed_s:elapsed;
