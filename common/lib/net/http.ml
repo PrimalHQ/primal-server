@@ -265,6 +265,11 @@ let urljoin (base : string) (ref_ : string) : string =
           let dir = match String.rindex_opt b.path '/' with Some i -> String.sub b.path 0 (i + 1) | None -> "/" in
           origin ^ dir ^ ref_
 
+(* [headers] plus "Accept: */*" when they have no Accept: some hosts answer a GET without one with
+   an empty 503 (nostr.build's Cloudflare front, since 2026-10-24) *)
+let with_accept (headers : (string * string) list) : (string * string) list =
+  if List.exists (fun (k, _) -> String.lowercase_ascii k = "accept") headers then headers else headers @ [ ("Accept", "*/*") ]
+
 let request ~net ~clock ?proxy ?(timeout = 10.0) ?(meth = "GET") ?(headers = []) ?(body = "") ?(max_redirects = 5) (url : string) : response option =
   let one (u : url) : response option =
     try
@@ -273,7 +278,7 @@ let request ~net ~clock ?proxy ?(timeout = 10.0) ?(meth = "GET") ?(headers = [])
         Eio.Time.with_timeout clock timeout (fun () ->
             let tcp = two_way_of_proxy ~sw ~net ~clock ~proxy ~host:u.host ~port:u.port in
             let flow = if u.scheme = "https" then tls_wrap ~host:u.host tcp else (tcp :> Eio.Flow.two_way_ty r) in
-            let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("Content-Length", string_of_int (String.length body)) :: headers in
+            let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("Content-Length", string_of_int (String.length body)) :: with_accept headers in
             let req = Printf.sprintf "%s %s HTTP/1.1\r\n%s\r\n%s" meth u.path (String.concat "" (List.map (fun (k, v) -> k ^ ": " ^ v ^ "\r\n") hdrs)) body in
             Eio.Flow.copy_string req (flow :> _ Eio.Flow.sink);
             let r = Eio.Buf_read.of_flow (flow :> _ Eio.Flow.source) ~max_size:(16 * 1024 * 1024) in

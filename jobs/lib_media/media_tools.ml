@@ -65,7 +65,7 @@ let fetch (ctx : Procgraph.ctx) ?proxy ~(timeout : float) ~(meth : string) ?(ua 
         Eio.Time.with_timeout ctx.clock timeout (fun () ->
             let tcp = connect ctx ~sw ~proxy u in
             let flow = if u.scheme = "https" then Http.tls_wrap ~host:u.host tcp else (tcp :> Eio.Flow.two_way_ty r) in
-            let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("User-Agent", ua) :: headers in
+            let hdrs = ("Host", u.host) :: ("Connection", "close") :: ("User-Agent", ua) :: Http.with_accept headers in
             let req = Printf.sprintf "%s %s HTTP/1.1\r\n%s\r\n" meth u.path (String.concat "" (List.map (fun (k, v) -> k ^ ": " ^ v ^ "\r\n") hdrs)) in
             Eio.Flow.copy_string req (flow :> _ Eio.Flow.sink);
             let r = Eio.Buf_read.of_flow (flow :> _ Eio.Flow.source) ~max_size:(max_body + (1 lsl 20)) in
