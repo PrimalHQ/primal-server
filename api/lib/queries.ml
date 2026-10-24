@@ -1427,7 +1427,8 @@ let thread_parents (c : Db.cache Db.conn) ~event_id : (string * int64) list =
        the last parsable one not marked "mention"; an a tag resolves through
        parametrized_replaceable_events. From the event's own tags, because basic_tags keeps neither
        the tag order nor a tags (nor events with 50 tags or more). The chain ends at an event that is
-       not stored. *)
+       not stored. Rows written by the older (Julia) rules are not reproduced: events with only
+       positional e tags (mostly 2022-2024) get no parent. *)
     let kinds = i64s [ 1; 1068; 6969; 20; 1111 ] in
     [%pgsql dbh
       "with recursive p as ( \
