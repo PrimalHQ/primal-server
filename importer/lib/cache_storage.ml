@@ -804,6 +804,8 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
       | Some "a", Some s -> (
           match parse_a_tag s with
           | None -> ()
+          (* only the author may delete their addressable events *)
+          | Some (_, pk, _) when pk <> e.pubkey -> ()
           | Some (kind, pk, identifier) ->
               let k = i64 kind in
               (match [%pgsql dbh "select event_id from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pk and kind = $k and identifier = $identifier limit 1"] with
