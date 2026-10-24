@@ -41,7 +41,9 @@ type pools = { cache : Postgres.pool; mem : Postgres.pool }
 let with_est (p : pools) (f : CS.est -> 'a) : 'a =
   Postgres.use p.cache (fun dbh -> Postgres.use p.mem (fun mem_dbh -> f { CS.cfg = CS.default_config; dbh; mem_dbh }))
 
-type run = { since : int; until : int; running : bool Atomic.t; dry_run : bool; ignore_coverage : bool; tasks : int; stop : unit Promise.t; pools : pools; poll_votes : bool; verbose : bool }
+(* [lean] (config "lean"): half-open windows and segments, [since, until) instead of [since, until]
+   (process_segments), and the lean variants of some nodes *)
+type run = { since : int; until : int; running : bool Atomic.t; dry_run : bool; ignore_coverage : bool; tasks : int; stop : unit Promise.t; pools : pools; poll_votes : bool; verbose : bool; lean : bool }
 
 let coverages (dbh : Postgres.dbh) ~(cov : string) : (int * int) list =
   [%pgsql dbh "select t, t2 from coverages_1_8656fc443b where name = $cov"] |> List.map (fun (t, t2) -> (Int64.to_int t, Int64.to_int t2))
@@ -74,31 +76,47 @@ let set_coverage (dbh : Postgres.dbh) ~(cov : string) ~t ~t2 : unit =
   let t = i64 t and t2 = i64 t2 in
   ignore [%pgsql dbh "insert into coverages_1_8656fc443b (name, t, t2) values ($cov, $t, $t2) on conflict (name, t) do update set t = $t, t2 = $t2"]
 
+(* The segments (coverage key t, start, end) of [since, until] in steps of [step]: the step-aligned
+   pieces that [done_] (coverage rows (t, t2)) does not cover yet, in time order.
+   Closed (default): a segment [t1, t2] is recorded as covering up to t2 and the next segment or run
+   starts at t2, so the boundary second is processed twice (the additive nodes count its events
+   twice). Half-open ([lean]): a segment is [t1, t2), coverage (t, t2) means everything before t2 is
+   done, and the next segment or run starts at t2: every second is processed exactly once; empty
+   segments are dropped. Coverage rows written closed before the switch make the first half-open run
+   process their end second once more. *)
+let segments ~lean ~since ~until ~step ~(done_ : (int * int) list) : (int * int * int) list =
+  let rec go t acc =
+    if t > until || (lean && t >= until) then acc
+    else
+      let acc =
+        match List.assoc_opt t done_ with
+        | None -> (t, max t since, min (t + step) until) :: acc
+        (* a piece already covered past [until] is skipped: running it would write [until] as
+           the segment's end, moving its coverage back *)
+        | Some t2 when t2 - t < step && max t2 since < min (t + step) until -> (t, max t2 since, min (t + step) until) :: acc
+        | Some _ -> acc
+      in
+      go (t + step) acc
+  in
+  let segs = List.rev (go (since / step * step) []) in
+  if lean then List.filter (fun (_, t1, t2) -> t1 < t2) segs else segs
+
 (* process_segments: the uncovered pieces of [since, until] in steps of [step] (one segment when
-   [step] is None), each run by [f] inside a transaction on its own connections *)
+   [step] is None; see [segments]), each run by [f] inside a transaction on its own connections.
+   [f est t1 t2] processes the whole seconds t1 .. t2, both included (the nodes' SQL compares
+   integer imported_at/created_at with >= t1 and <= t2); half-open ([r.lean]) it gets t1 .. t2 - 1
+   of the segment [t1, t2). *)
 let process_segments (r : run) ~(cov : string) ?since ?until ?step ?(sequential = false) ?(parallel_workers = 0) (f : CS.est -> int -> int -> unit) : unit =
   let since = Option.value since ~default:r.since and until = Option.value until ~default:r.until in
   if not (since = 0 && until = 0) && Atomic.get r.running then begin
     let segs =
       match step with
-      | None -> [ (-1, since, until) ]
+      | None -> if r.lean && since >= until then [] else [ (-1, since, until) ]
       | Some step ->
           let done_ = if r.ignore_coverage then [] else with_est r.pools (fun est -> coverages est.CS.dbh ~cov) in
-          let rec go t acc =
-            if t > until then acc
-            else
-              let acc =
-                match List.assoc_opt t done_ with
-                | None -> (t, max t since, min (t + step) until) :: acc
-                (* a piece already covered past [until] is skipped: running it would write [until] as
-                   the segment's end, moving its coverage back *)
-                | Some t2 when t2 - t < step && max t2 since < min (t + step) until -> (t, max t2 since, min (t + step) until) :: acc
-                | Some _ -> acc
-              in
-              go (t + step) acc
-          in
-          List.rev (go (since / step * step) [])
+          segments ~lean:r.lean ~since ~until ~step ~done_
     in
+    let last t2 = if r.lean then t2 - 1 else t2 in
     let run_one (t, t1, t2) =
       if Atomic.get r.running && not (Promise.is_resolved r.stop) then
         try
@@ -108,7 +126,7 @@ let process_segments (r : run) ~(cov : string) ?since ?until ?step ?(sequential 
               Postgres.exec dbh "begin";
               (try
                  Postgres.exec dbh (Printf.sprintf "set local max_parallel_workers_per_gather = %d" parallel_workers);
-                 f est t1 t2;
+                 f est t1 (last t2);
                  if r.dry_run then Postgres.exec dbh "rollback" else Postgres.exec dbh "commit"
                with e ->
                  (try Postgres.exec dbh "rollback" with _ -> ());
@@ -137,6 +155,8 @@ let process_segments (r : run) ~(cov : string) ?since ?until ?step ?(sequential 
 
 let event_of_row (id, pubkey, created_at, kind, tags, content, sig_) : Nostr.t =
   { Nostr.id; pubkey; created_at = Int64.to_int created_at; kind = Int64.to_int kind; tags = CSE.tags_of_json (Option.value tags ~default:"[]"); content; sig_ }
+
+let hexes_json (l : string list) = Yojson.Safe.to_string (`List (List.map (fun b -> `String (Hex_util.encode b)) l))
 
 let kinds_json (ks : int list) = Yojson.Safe.to_string (`List (List.map (fun k -> `Int k) ks))
 
@@ -418,13 +438,26 @@ let note_stats_node (r : run) ~now =
       let dbh = est.CS.dbh in
       let rank = match [%pgsql dbh "select humaness_threshold_trustrank()"] with Some r :: _ -> r | _ -> 0.0 in
       let peids = ref [] in
+      let events = events_in_window dbh ~t1 ~t2 ~kinds:[ 1 ] in
+      (* lean: the length test (pure) first, then one trustrank query for the authors of the long
+         notes instead of one per note; the same notes pass *)
+      let events, is_human =
+        if not r.lean then (events, fun pubkey -> [%pgsql dbh "select 1 from pubkey_trustrank where pubkey = $pubkey and rank >= $rank"] <> [])
+        else
+          let events = List.filter (fun (e : Nostr.t) -> utf8_length e.content >= 600) events in
+          let pks_json = hexes_json (List.sort_uniq compare (List.map (fun (e : Nostr.t) -> e.pubkey) events)) in
+          let humans = Hashtbl.create 64 in
+          if events <> [] then
+            List.iter (fun pk -> Hashtbl.replace humans pk ())
+              [%pgsql dbh
+                "select pubkey from pubkey_trustrank \
+                 where pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pks_json::jsonb) x(a))) and rank >= $rank"];
+          (events, Hashtbl.mem humans)
+      in
       List.iter
         (fun (e : Nostr.t) ->
-          let pubkey = e.pubkey in
-          match [%pgsql dbh "select 1 from pubkey_trustrank where pubkey = $pubkey and rank >= $rank"] with
-          | [] -> ()
-          | _ -> ( match CS.parse_parent_eid est e with Some parent when utf8_length e.content >= 600 -> peids := parent :: !peids | _ -> ()))
-        (events_in_window dbh ~t1 ~t2 ~kinds:[ 1 ]);
+          if is_human e.pubkey then match CS.parse_parent_eid est e with Some parent when utf8_length e.content >= 600 -> peids := parent :: !peids | _ -> ())
+        events;
       List.iter
         (fun peid ->
           ignore [%pgsql dbh "insert into note_stats_1_07d205f278 (eid, long_replies) values ($peid, 0) on conflict do nothing"];
@@ -434,6 +467,9 @@ let note_stats_node (r : run) ~now =
 let update_user_search_node (r : run) ~now =
   process_segments r ~cov:"update_user_search/1/postgres-p0-human_override" ~step:day ~since:(max r.since (now - (3 * day))) (fun est t1 t2 ->
       let dbh = est.CS.dbh in
+      (* added_at is a timestamptz: half-open, the segment ends at the instant t2 + 1 (included here:
+         the node is idempotent, so the one shared instant is harmless) *)
+      let t2 = if r.lean then t2 + 1 else t2 in
       let t1 = float_of_int t1 and t2 = float_of_int t2 in
       let pks = [%pgsql dbh "select ho.pubkey from human_override ho where ho.added_at >= to_timestamp($t1) and ho.added_at <= to_timestamp($t2) order by ho.pubkey"] in
       List.iter (fun pk -> ignore (CSE.update_user_search est pk)) pks)
@@ -473,7 +509,7 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
   if cfg.dag_dry_run && cfg.dag_dry_run_window_s > 0 then begin
     (* one exercise of every node over the last [dag_dry_run_window_s] seconds, coverage ignored, all rolled back *)
     let until = Utils.current_time () in
-    let r = { since = until - cfg.dag_dry_run_window_s; until; running = Atomic.make true; dry_run = true; ignore_coverage = true; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = true } in
+    let r = { since = until - cfg.dag_dry_run_window_s; until; running = Atomic.make true; dry_run = true; ignore_coverage = true; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = true; lean = cfg.lean } in
     let t0 = Unix.gettimeofday () in
     run_pipeline r;
     log "dry run over %d s %s in %.1fs; idling" cfg.dag_dry_run_window_s (if Atomic.get r.running then "ok" else "FAILED") (Unix.gettimeofday () -. t0);
@@ -496,13 +532,19 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
           | Some n :: _ -> n
           | _ -> 0L)
     in
+    (* lean: the window is half-open and ends at most at now - 1, so the run processes up to second
+       now - 2: the current second is still being imported, and an event's imported_at is taken
+       before its import transaction commits *)
+    let margin = if cfg.lean then 1 else 0 in
     let one_run () =
       let now = Utils.current_time () in
       let since_ = max !since 1672531200 in
+      if cfg.lean && since_ >= now - margin then (true, 0.0, 0)
+      else
       let rec fit sp = if sp <= 10 || count_events since_ (since_ + sp) <= max_events then sp else fit (sp / 2) in
-      let sp = if since_ + !span >= now then !span else fit !span in
-      let until = min now (since_ + sp) in
-      let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log } in
+      let sp = if since_ + !span >= now - margin then !span else fit !span in
+      let until = min (now - margin) (since_ + sp) in
+      let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log; lean = cfg.lean } in
       let t0 = Unix.gettimeofday () in
       run_pipeline r;
       let ok = Atomic.get r.running in
@@ -512,10 +554,12 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
       (span :=
          if ok then max 10 (min max_span (min (sp * 2) (int_of_float (float_of_int w *. target /. Float.max dur 0.5))))
          else max 10 (w / 2));
-      if dur >= 1.0 || now - until <= 0 || not ok then
-        log "run %s in %.1fs (window %d .. %d, next span %ds%s)" (if ok then "ok" else "FAILED") dur r.since until !span
-          (if now - until > 0 then Printf.sprintf ", lag %ds" (now - until) else "");
-      (ok, dur, now - until)
+      let lag = now - margin - until in
+      if dur >= 1.0 || lag <= 0 || not ok then
+        log "run %s in %.1fs (window %s, next span %ds%s)" (if ok then "ok" else "FAILED") dur
+          (if cfg.lean then Printf.sprintf "[%d, %d)" r.since until else Printf.sprintf "%d .. %d" r.since until) !span
+          (if lag > 0 then Printf.sprintf ", lag %ds" lag else "");
+      (ok, dur, lag)
     in
     Periodic.run ~clock ~stop ~period:cfg.dag_period_s ~label:"dag" (fun () ->
         let rec go i =

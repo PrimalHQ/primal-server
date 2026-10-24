@@ -1,4 +1,10 @@
 (test
  (name test_media)
+ (modules test_media)
  (flags (:standard -open Primal_common))
  (libraries primal_common primal_jobs.media alcotest eio eio.unix eio_main ipaddr))
+
+(test
+ (name test_lean)
+ (modules test_lean)
+ (libraries primal_jobs alcotest yojson))

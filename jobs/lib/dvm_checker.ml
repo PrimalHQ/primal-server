@@ -25,6 +25,21 @@ let event_json (dbh : Postgres.dbh) ~event_id : Yojson.Safe.t option =
 let relay_url (dbh : Postgres.dbh) ~event_id : string option =
   match [%pgsql dbh "select relay_url from event_relay where event_id = $event_id limit 1"] with Some u :: _ -> Some u | _ -> None
 
+(* lean: the handler event's own relay hints instead of event_relay (which only the old importer wrote):
+   every value of a "relays" tag and the first value of "relay"/"r" tags, ws:// or wss:// URLs only, at
+   most [max_relay_hints] *)
+let max_relay_hints = 3
+
+let relay_hints (tags : Yojson.Safe.t list) : string list =
+  let is_relay u = String.starts_with ~prefix:"wss://" u || String.starts_with ~prefix:"ws://" u in
+  List.concat_map
+    (function
+      | `List (`String "relays" :: vs) -> List.filter_map (function `String u -> Some (String.trim u) | _ -> None) vs
+      | `List (`String ("relay" | "r") :: `String u :: _) -> [ String.trim u ]
+      | _ -> [])
+    tags
+  |> List.filter is_relay |> List.sort_uniq compare |> List.filteri (fun i _ -> i < max_relay_hints)
+
 (* (hex, kind, created_at) of the answer's events that exist in the cache *)
 let posts (dbh : Postgres.dbh) ~(ids_json : string) : (string * int64 * int64) list =
   [%pgsql dbh
@@ -50,9 +65,10 @@ let run_checks ~(cfg : Config.t) ~net ~clock ~(pool : Postgres.pool) ~(stop : un
     (fun eid_hex ->
       if not (Promise.is_resolved stop) then begin
         let event_id = Hex_util.decode_exn eid_hex in
-        match Postgres.use pool (fun dbh -> (event_json dbh ~event_id, relay_url dbh ~event_id)) with
+        match Postgres.use pool (fun dbh -> (event_json dbh ~event_id, if cfg.lean then None else relay_url dbh ~event_id)) with
         | Some (`Assoc f as e), relay when (match List.assoc_opt "kind" f with Some (`Int 31990) -> true | _ -> false) -> (
             let tags = match List.assoc_opt "tags" f with Some (`List l) -> l | _ -> [] in
+            let relay = if cfg.lean then relay_hints tags else Option.to_list relay in
             let dvm_id = List.find_map (function `List (`String "d" :: `String v :: _) -> Some v | _ -> None) tags in
             let dvm_pubkey = match List.assoc_opt "pubkey" f with Some (`String pk) -> Hex_util.decode_opt pk | _ -> None in
             match (dvm_id, dvm_pubkey) with
@@ -63,7 +79,7 @@ let run_checks ~(cfg : Config.t) ~net ~clock ~(pool : Postgres.pool) ~(stop : un
                   | Some (`String c) -> ( match Yojson.Safe.from_string c with `Assoc d -> List.assoc_opt "personalized" d = Some (`Bool true) | _ -> false | exception _ -> false)
                   | _ -> false
                 in
-                let relays = List.sort_uniq compare (cfg.dvm_relays @ Option.to_list relay) in
+                let relays = List.sort_uniq compare (cfg.dvm_relays @ relay) in
                 let jobreq = Dvm_client.job_request ~seckey:cfg.dvm_requester_seckey ~dvm_pubkey ~relays ~user:(if personalized then Some cfg.dvm_requester_pubkey else None) ~now:(Utils.current_time ()) in
                 let t0 = Unix.gettimeofday () in
                 let r = Dvm_client.request ~net ~clock ?proxy:cfg.relay_proxy ~relays ~jobreq ~timeout:cfg.dvm_timeout_s () in

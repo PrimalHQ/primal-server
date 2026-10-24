@@ -351,7 +351,7 @@ parses it, runs the extensions' initialisation, checks that every role is known,
 
 **Every top-level key is required**, including those of roles the instance does not run (give
 them inert values, e.g. a zero key for `dvm_requester_pubkey`). Exceptions: `dag_statement_timeout_s`
-(default 30), `media`, `blossom` and `ext` may be absent. Unknown keys are ignored. A conninfo is
+(default 30), `media`, `blossom`, `ext` and `lean` may be absent. Unknown keys are ignored. A conninfo is
 `{"host", "port", "user", "database"}`.
 
 | Key | Type | Used by | Meaning |
@@ -398,6 +398,21 @@ them inert values, e.g. a zero key for `dvm_requester_pubkey`). Exceptions: `dag
 | `media` | object, optional | media, blossom | below |
 | `blossom` | object, optional | blossom | below |
 | `ext` | any, optional | extensions | settings of extension roles |
+| `lean` | object or null, optional | dag, pg_listener, dvm_checker, trustrank | below; absent or `null` = off |
+
+### The `lean` object
+
+`{"enabled": true}` switches on the behaviours for a lean cache schema (fewer redundant tables
+and rows); absent, `null` or `{"enabled": false}` keeps the behaviour above exactly. `enabled` is
+required in the object and any other key is an error.
+
+| Role | With `enabled` |
+|---|---|
+| `dag` | **Half-open windows.** Each run's window is `[since, until)` with `until` at most now − 1 (the current second is still being imported, and an event's `imported_at` is taken before its import commits), and so is every segment: coverage `(t, t2)` means everything before `t2` is done and the next segment or run starts at `t2`, so each second is processed once. Closed, the boundary second of every run and segment was processed twice and the adding nodes (`pubkey_media_cnt`, `pubkey_content_zap_cnt`, the zaps/likes/replies/reposts of `reads`, `note_stats`) counted its events twice. The first run after switching processes the end second of the closed coverage once more. |
+| `dag` | `note_stats`: the 600-character test first, then one `pubkey_trustrank` query for the authors of the long notes (instead of one per kind-1 event). |
+| `pg_listener` | Per live event, the followers that have a `live_event_notification_created` row are kept in memory (loaded with one query at the event's first update since start): an update tries the insert only for followers not in it, instead of an insert probe for every follower on every update. Events without an update for a day are forgotten, and the least recently updated ones above 500,000 pairs. |
+| `dvm_checker` | The handler's relays are the configured `dvm_relays` plus the handler event's own hints (values of a `relays` tag, first values of `relay`/`r` tags; `ws(s)://` only, at most 3), not `event_relay`. |
+| `trustrank` | The view `trusted_users_trusted_followers` (read by no code) is dropped at the swap and not recreated. |
 
 ### The `media` object
 
@@ -565,4 +580,6 @@ against a membership DB (its `dune` sets `PGDATABASE` to the membership referenc
 
 The tests (`test/test_media.ml`) cover float formatting, storage key hashes, the typed node JSON,
 Blossom paths, external processes, and the download rules (direct hosts, refusal of private
-addresses).
+addresses). `test/test_lean.ml` covers the `lean` object's parsing, the DAG's closed and half-open
+segments (closed as before; half-open runs process every second once), the DVM checker's relay
+hints and pg_listener's pair set.

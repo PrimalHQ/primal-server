@@ -129,8 +129,9 @@ let pagerank (g : graph) ~(seeds : string list) ~(blocked : string list) ~alpha 
 
 let hex = Hex_util.encode
 
-(* TrustRank.import_trustrank: fill the new table in batches, analyze, swap under the view *)
-let import (dbh : Postgres.dbh) ~(table : string) ~(live : bool) (rows : (string * float) array) : unit =
+(* TrustRank.import_trustrank: fill the new table in batches, analyze, swap under the view. [lean]:
+   the view trusted_users_trusted_followers (read by no code) is dropped and not recreated *)
+let import (dbh : Postgres.dbh) ~(table : string) ~(live : bool) ~(lean : bool) (rows : (string * float) array) : unit =
   let newt = if live then "pubkey_trustrank_new" else table in
   Postgres.exec dbh (Printf.sprintf "drop table if exists %s" newt);
   Postgres.exec dbh (Printf.sprintf "create unlogged table %s (like pubkey_trustrank including all)" newt);
@@ -186,8 +187,9 @@ let import (dbh : Postgres.dbh) ~(table : string) ~(live : bool) (rows : (string
        Postgres.exec dbh "alter table pubkey_trustrank rename to pubkey_trustrank_old";
        Postgres.exec dbh "alter table pubkey_trustrank_new rename to pubkey_trustrank";
        Postgres.exec dbh "drop table pubkey_trustrank_old";
-       Postgres.exec dbh
-         "create view trusted_users_trusted_followers as select pf.pubkey, tr1.rank as pubkey_rank, pf.follower_pubkey, tr2.rank as follower_pubkey_rank from pubkey_followers pf, pubkey_trustrank tr1, pubkey_trustrank tr2 where pf.pubkey = tr1.pubkey and pf.follower_pubkey = tr2.pubkey";
+       if not lean then
+         Postgres.exec dbh
+           "create view trusted_users_trusted_followers as select pf.pubkey, tr1.rank as pubkey_rank, pf.follower_pubkey, tr2.rank as follower_pubkey_rank from pubkey_followers pf, pubkey_trustrank tr1, pubkey_trustrank tr2 where pf.pubkey = tr1.pubkey and pf.follower_pubkey = tr2.pubkey";
        Postgres.exec dbh "commit"
      with e ->
        (try Postgres.exec dbh "rollback" with _ -> ());
@@ -209,7 +211,7 @@ let run_make ~(cfg : Config.t) ~(stop : unit Promise.t) : unit =
       Hashtbl.reset g.ids;
       log "ranked %d pubkeys (%.0fs)" (Array.length rows) (Unix.gettimeofday () -. t0);
       let live = cfg.trustrank_target_table = "pubkey_trustrank" in
-      import dbh ~table:cfg.trustrank_target_table ~live rows;
+      import dbh ~table:cfg.trustrank_target_table ~live ~lean:cfg.lean rows;
       log "%s %s (%.0fs)" (if live then "swapped into" else "written to") cfg.trustrank_target_table (Unix.gettimeofday () -. t0);
       (* the other databases that read pubkey_trustrank but have no follow graph of their own get the
          same ranks (Julia: import_trustrank per TARGET_SERVERS entry); one failing does not stop the rest *)
@@ -219,7 +221,7 @@ let run_make ~(cfg : Config.t) ~(stop : unit Promise.t) : unit =
             try
               let t1 = Unix.gettimeofday () in
               let x = Postgres.connect ~statement_timeout_ms:0 ~application_name:"primal-jobs-trustrank" ci in
-              Fun.protect ~finally:(fun () -> try Postgres.close x with _ -> ()) (fun () -> import x ~table:cfg.trustrank_target_table ~live rows);
+              Fun.protect ~finally:(fun () -> try Postgres.close x with _ -> ()) (fun () -> import x ~table:cfg.trustrank_target_table ~live ~lean:cfg.lean rows);
               log "%s on %s:%d/%s (%.0fs)" cfg.trustrank_target_table ci.host ci.port ci.database (Unix.gettimeofday () -. t1)
             with
             | Eio.Cancel.Cancelled _ as e -> raise e
