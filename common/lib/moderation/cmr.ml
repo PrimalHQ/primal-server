@@ -159,24 +159,34 @@ let make_tsquery (ws : string list) : string =
 let both_scopes = [ Content; Trending ]
 let scopes_of (l : string list) = if l = [] then both_scopes else List.filter_map cmr_scope_of_string_opt l
 
+(* Set by a daemon whose caller may already hold a transaction on [dbh] (the importer's
+   lean.transaction_per_event): then [in_transaction] runs [f] inside that one. Default: never. *)
+let already_in_transaction : (Postgres.dbh -> bool) ref = ref (fun _ -> false)
+
 (* Run [f] inside a transaction on [dbh]; rollback on any exception (re-raised). *)
 let in_transaction (dbh : Postgres.dbh) (f : unit -> unit) : unit =
+  if !already_in_transaction dbh then f ()
+  else begin
   PGOCaml.begin_work dbh;
   match f () with
   | () -> PGOCaml.commit dbh
   | exception e ->
       (try PGOCaml.rollback dbh with _ -> ());
       raise e
+  end
 
-let import ~(dbh : Postgres.dbh) (user_pubkey : string) (cmr : t) : unit =
+(* [legacy] (default true): also write cmr_pubkeys_parent, cmr_words and cmr_hashtags, which nothing
+   reads any more (the _2 tables replaced the last two); the importer's lean.no_cmr_legacy passes
+   false. *)
+let import ?(legacy = true) ~(dbh : Postgres.dbh) (user_pubkey : string) (cmr : t) : unit =
   in_transaction dbh (fun () ->
       ignore [%pgsql dbh "delete from cmr_pubkeys_scopes where user_pubkey = $user_pubkey"];
-      ignore [%pgsql dbh "delete from cmr_pubkeys_parent where user_pubkey = $user_pubkey"];
+      if legacy then ignore [%pgsql dbh "delete from cmr_pubkeys_parent where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_groups where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_pubkeys_allowed where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_threads where user_pubkey = $user_pubkey"];
-      ignore [%pgsql dbh "delete from cmr_hashtags where user_pubkey = $user_pubkey"];
-      ignore [%pgsql dbh "delete from cmr_words where user_pubkey = $user_pubkey"];
+      if legacy then ignore [%pgsql dbh "delete from cmr_hashtags where user_pubkey = $user_pubkey"];
+      if legacy then ignore [%pgsql dbh "delete from cmr_words where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_hashtags_2 where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_words_2 where user_pubkey = $user_pubkey"];
       Hashtbl.iter
@@ -184,7 +194,8 @@ let import ~(dbh : Postgres.dbh) (user_pubkey : string) (cmr : t) : unit =
           List.iter
             (fun scope -> ignore [%pgsql dbh "insert into cmr_pubkeys_scopes (user_pubkey, pubkey, scope) values ($user_pubkey, $pubkey, $scope)"])
             (scopes_of scopes);
-          ignore [%pgsql dbh "insert into cmr_pubkeys_parent (user_pubkey, pubkey, parent) values ($user_pubkey, $pubkey, $parent)"])
+          if legacy then
+            ignore [%pgsql dbh "insert into cmr_pubkeys_parent (user_pubkey, pubkey, parent) values ($user_pubkey, $pubkey, $parent)"])
         cmr.cmr_pubkeys;
       List.iter
         (fun (name, scopes) ->
@@ -197,8 +208,10 @@ let import ~(dbh : Postgres.dbh) (user_pubkey : string) (cmr : t) : unit =
       List.iter
         (fun scope ->
           List.iter (fun event_id -> ignore [%pgsql dbh "insert into cmr_threads (user_pubkey, event_id, scope) values ($user_pubkey, $event_id, $scope)"]) cmr.cmr_threads;
-          List.iter (fun hashtag -> ignore [%pgsql dbh "insert into cmr_hashtags (user_pubkey, hashtag, scope) values ($user_pubkey, $hashtag, $scope)"]) cmr.cmr_hashtags;
-          List.iter (fun word -> ignore [%pgsql dbh "insert into cmr_words (user_pubkey, word, scope) values ($user_pubkey, $word, $scope)"]) cmr.cmr_words;
+          if legacy then begin
+            List.iter (fun hashtag -> ignore [%pgsql dbh "insert into cmr_hashtags (user_pubkey, hashtag, scope) values ($user_pubkey, $hashtag, $scope)"]) cmr.cmr_hashtags;
+            List.iter (fun word -> ignore [%pgsql dbh "insert into cmr_words (user_pubkey, word, scope) values ($user_pubkey, $word, $scope)"]) cmr.cmr_words
+          end;
           if cmr.cmr_hashtags <> [] then begin
             let q = make_tsquery cmr.cmr_hashtags in
             ignore [%pgsql dbh "insert into cmr_hashtags_2 (user_pubkey, scope, hashtags) values ($user_pubkey, $scope, to_tsquery('simple', $q))"]
