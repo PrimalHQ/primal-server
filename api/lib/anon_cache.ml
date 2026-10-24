@@ -41,6 +41,11 @@ let cacheable (f : Funcall.t) (kw : Kw.t) : bool =
   match f with
   | Funcall.Mega_feed_directive | Funcall.Multi_kind_mega_feed_directive | Funcall.Explore -> anonymous kw
   | Funcall.Scored_users_24h | Funcall.User_infos -> true
+  (* lean: answers that are the same for every caller: get_recommended_users (a constant file and
+     the profiles in it), get_dvm_feeds (no viewer) and get_featured_dvm_feeds for the anonymous
+     viewer (~12 queries per feed, ~25 feeds) *)
+  | Funcall.Get_recommended_users | Funcall.Get_dvm_feeds -> Lean.enabled ()
+  | Funcall.Get_featured_dvm_feeds -> Lean.enabled () && anonymous kw
   | _ -> false
 
 let rec canon (j : Yojson.Safe.t) : Yojson.Safe.t =

@@ -19,6 +19,7 @@ let run ~(argv : string array) ?(init : Config.t -> unit = fun _ -> ()) () : uni
     try
       let c = Config.of_json_file cfg_path in
       Replicate.configure c.replicate_to;
+      Lean.set c.lean;
       c
     with Config.Config_error m ->
       prerr_endline ("primal-api: config error: " ^ m);

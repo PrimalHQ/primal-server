@@ -90,15 +90,32 @@ let live_feed_initial_response (c : Db.cache Db.conn) ~kind ~pubkey ~identifier 
 
 let live_events_from_follows (c : Db.cache Db.conn) ~user_pubkey : string list =
   let dbh = Db.raw c in
-  [%pgsql dbh
-    "select get_event_jsonb(lep.event_id)::text \
-     from live_event_participants lep, pubkey_followers pf \
-     where pf.follower_pubkey = $user_pubkey \
-       and pf.pubkey = lep.participant_pubkey \
-       and lep.kind = 30311 \
-       and lep.created_at >= extract(epoch from now() - interval '1h')::int8 \
-       and not exists (select 1 from live_event_pubkey_filterlist lepf where lepf.user_pubkey = pf.follower_pubkey and lepf.blocked_pubkey = lep.participant_pubkey) \
-       and not live_feed_is_hidden(lep.event_id, $user_pubkey, live_feed_hosts(lep.kind, lep.pubkey, lep.identifier), 'moderated')"]
+  (if Lean.enabled () then
+     (* lean: the same rows, but live_feed_is_hidden (live_feed_hosts + is_event_hidden for the
+        viewer and every host) runs only on the live events the viewer's follows take part in: the
+        planner ran it on every live event of the last hour before the follows join (~80 events,
+        200-300 function calls per request for usually 0-2 rows) *)
+     [%pgsql dbh
+       "with j as materialized ( \
+          select lep.event_id, lep.kind, lep.pubkey, lep.identifier \
+          from live_event_participants lep, pubkey_followers pf \
+          where pf.follower_pubkey = $user_pubkey \
+            and pf.pubkey = lep.participant_pubkey \
+            and lep.kind = 30311 \
+            and lep.created_at >= extract(epoch from now() - interval '1h')::int8 \
+            and not exists (select 1 from live_event_pubkey_filterlist lepf where lepf.user_pubkey = pf.follower_pubkey and lepf.blocked_pubkey = lep.participant_pubkey)) \
+        select get_event_jsonb(j.event_id)::text from j \
+        where not live_feed_is_hidden(j.event_id, $user_pubkey, live_feed_hosts(j.kind, j.pubkey, j.identifier), 'moderated')"]
+   else
+     [%pgsql dbh
+       "select get_event_jsonb(lep.event_id)::text \
+        from live_event_participants lep, pubkey_followers pf \
+        where pf.follower_pubkey = $user_pubkey \
+          and pf.pubkey = lep.participant_pubkey \
+          and lep.kind = 30311 \
+          and lep.created_at >= extract(epoch from now() - interval '1h')::int8 \
+          and not exists (select 1 from live_event_pubkey_filterlist lepf where lepf.user_pubkey = pf.follower_pubkey and lepf.blocked_pubkey = lep.participant_pubkey) \
+          and not live_feed_is_hidden(lep.event_id, $user_pubkey, live_feed_hosts(lep.kind, lep.pubkey, lep.identifier), 'moderated')"])
   |> List.filter_map Fun.id
 
 let find_live_events (c : Db.cache Db.conn) ~host_pubkey ~identifier : string list =
@@ -166,6 +183,18 @@ let events_imported_between (c : Db.cache Db.conn) ~since ~until : string list =
   let since = i64 since and until = i64 until in
   [%pgsql dbh
     "select get_event_jsonb(id)::text from event where imported_at >= $since and imported_at <= $until order by created_at"]
+  |> List.filter_map Fun.id
+
+(* lean: only what the live distribution can act on (Live_events.handle_event): kind-30311 events and
+   events with an `a` tag (a superset: jsonb containment matches a tag holding "a" anywhere; the
+   distributor checks the tag name itself). Everything else was turned into JSON and parsed every
+   second only to be dropped. *)
+let live_events_imported_between (c : Db.cache Db.conn) ~since ~until : string list =
+  let dbh = Db.raw c in
+  let since = i64 since and until = i64 until in
+  [%pgsql dbh
+    "select get_event_jsonb(id)::text from event where imported_at >= $since and imported_at <= $until \
+       and (kind = 30311 or tags @> '[[\"a\"]]'::jsonb) order by created_at"]
   |> List.filter_map Fun.id
 
 (* {1 Management} *)
@@ -270,6 +299,24 @@ let user_profile_counts (c : Db.cache Db.conn) ~pubkey : profile_counts =
   let dbh = Db.raw c in
   let z = Option.value ~default:0L in
   match
+    if Lean.follows_count_from_followers () then
+      (* lean C7: the follows count from pubkey_followers (index-only, follower_pubkey) instead of
+         expanding the contact list's tags JSON on every profile view; capped like Julia follows().
+         Not identical where pubkey_followers has duplicate or stale rows. The counter rows read
+         below already default to 0 when missing. *)
+      [%pgsql dbh
+        "select \
+           (select count(1) from pubkey_events where pubkey = $pubkey and is_reply = 0), \
+           (select count(1) from pubkey_events where pubkey = $pubkey and is_reply = 1), \
+           (select count(1) from parametrized_replaceable_events where pubkey = $pubkey and kind = 30023), \
+           (select min(created_at) from pubkey_events where pubkey = $pubkey), \
+           (select least(5000, count(*)) from pubkey_followers pf where pf.follower_pubkey = $pubkey), \
+           (select coalesce(max(value), 0) from pubkey_followers_cnt where key = $pubkey), \
+           (select coalesce(max(zaps), 0) from pubkey_zapped where pubkey = $pubkey), \
+           (select coalesce(max(satszapped), 0) from pubkey_zapped where pubkey = $pubkey), \
+           (select coalesce(max(cnt), 0) from pubkey_media_cnt where pubkey = $pubkey), \
+           (select coalesce(max(cnt), 0) from pubkey_content_zap_cnt where pubkey = $pubkey)"]
+    else
     [%pgsql dbh
       "select \
          (select count(1) from pubkey_events where pubkey = $pubkey and is_reply = 0), \
@@ -300,10 +347,18 @@ let get_user_relays (c : Db.cache Db.conn) ~pubkey : string list =
 let user_profile_followed_by_pubkeys (c : Db.cache Db.conn) ~pubkey ~user_pubkey ~limit : string list =
   let dbh = Db.raw c in
   let limit = i64 limit in
-  [%pgsql dbh
-    "select pf1.pubkey from pubkey_followers pf1, pubkey_followers pf2, pubkey_followers_cnt pfc \
-     where $user_pubkey = pf1.follower_pubkey and pf1.pubkey = pf2.follower_pubkey and pf2.pubkey = $pubkey and pf1.pubkey = pfc.key \
-     group by pf1.pubkey order by max(pfc.value) desc limit $limit"]
+  (if Lean.enabled () then
+     (* lean: a missing pubkey_followers_cnt row is a count of 0 (lazy counter rows) *)
+     [%pgsql dbh
+       "select pf1.pubkey from pubkey_followers pf1 join pubkey_followers pf2 on pf1.pubkey = pf2.follower_pubkey \
+          left join pubkey_followers_cnt pfc on pfc.key = pf1.pubkey \
+        where $user_pubkey = pf1.follower_pubkey and pf2.pubkey = $pubkey \
+        group by pf1.pubkey order by coalesce(max(pfc.value), 0) desc limit $limit"]
+   else
+     [%pgsql dbh
+       "select pf1.pubkey from pubkey_followers pf1, pubkey_followers pf2, pubkey_followers_cnt pfc \
+        where $user_pubkey = pf1.follower_pubkey and pf1.pubkey = pf2.follower_pubkey and pf2.pubkey = $pubkey and pf1.pubkey = pfc.key \
+        group by pf1.pubkey order by max(pfc.value) desc limit $limit"])
   |> List.filter_map Fun.id
 
 let contact_list (c : Db.cache Db.conn) ~pubkey ~extended_response : string list =
@@ -336,6 +391,16 @@ let pubkeys_with_metadata (c : Db.cache Db.conn) ~(pubkeys_json : string) : stri
 let user_search_query (c : Db.cache Db.conn) ~(q : string) ~limit : (string * int64) list =
   let dbh = Db.raw c in
   let limit = i64 limit in
+  (if Lean.enabled () then
+     (* lean: a missing pubkey_followers_cnt row is a count of 0 (lazy counter rows) *)
+     [%pgsql dbh
+       "select encode(us.pubkey, 'hex'), coalesce(pfc.value, 0) from user_search us left join pubkey_followers_cnt pfc on us.pubkey = pfc.key \
+        where (us.name @@ to_tsquery('simple', $q) or us.username @@ to_tsquery('simple', $q) or \
+               us.display_name @@ to_tsquery('simple', $q) or us.displayname @@ to_tsquery('simple', $q) or \
+               us.nip05 @@ to_tsquery('simple', $q) or us.lud16 @@ to_tsquery('simple', $q)) \
+          and not exists (select 1 from filterlist where grp in ('csam', 'impersonation') and target_type = 'pubkey' and target = us.pubkey and blocked limit 1) \
+        order by coalesce(pfc.value, 0) desc limit $limit"]
+   else
   [%pgsql dbh
     "select encode(us.pubkey, 'hex'), pfc.value from user_search us, pubkey_followers_cnt pfc \
      where (us.name @@ to_tsquery('simple', $q) or us.username @@ to_tsquery('simple', $q) or \
@@ -343,7 +408,7 @@ let user_search_query (c : Db.cache Db.conn) ~(q : string) ~limit : (string * in
             us.nip05 @@ to_tsquery('simple', $q) or us.lud16 @@ to_tsquery('simple', $q)) \
        and us.pubkey = pfc.key \
        and not exists (select 1 from filterlist where grp in ('csam', 'impersonation') and target_type = 'pubkey' and target = us.pubkey and blocked limit 1) \
-     order by pfc.value desc limit $limit"]
+     order by pfc.value desc limit $limit"])
   |> List.filter_map (function Some k, Some v -> Some (k, v) | Some k, None -> Some (k, 0L) | _ -> None)
 
 let user_search_follows (c : Db.cache Db.conn) ~follower ~(q : string) : (string * int64) list =
@@ -367,6 +432,17 @@ let follows_with_counts (c : Db.cache Db.conn) ~pubkey : (string * int64) list =
 
 let follower_count (c : Db.cache Db.conn) ~pubkey : int64 option =
   let dbh = Db.raw c in
+  if Lean.enabled () then
+    (* lean: the importer created a row (0) for every pubkey it saw, and stops doing so for lazy
+       counter rows: a known pubkey (one with a metadata event) without a row has 0 followers *)
+    match
+      [%pgsql dbh
+        "select coalesce((select value from pubkey_followers_cnt where key = $pubkey limit 1), \
+                         (select 0::int8 from meta_data where key = $pubkey limit 1))"]
+    with
+    | Some v :: _ -> Some v
+    | _ -> None
+  else
   match [%pgsql dbh "select value from pubkey_followers_cnt where key = $pubkey limit 1"] with
   | Some v :: _ -> Some v
   | _ -> None
@@ -400,9 +476,15 @@ let events_plain (c : Db.cache Db.conn) ~(event_ids_json : string) : string list
 let event_ids_between (c : Db.cache Db.conn) ~since ~until ~limit ~offset : string list =
   let dbh = Db.raw c in
   let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
-  [%pgsql dbh
-    "select encode(event_id, 'hex') from event_created_at where created_at >= $since and created_at <= $until \
-     order by created_at asc limit $limit offset $offset"]
+  (if Lean.enabled () then
+     (* lean: event_created_at is a copy of event(id, created_at) that a lean DB leaves empty *)
+     [%pgsql dbh
+       "select encode(id, 'hex') from event where created_at >= $since and created_at <= $until \
+        order by created_at asc limit $limit offset $offset"]
+   else
+     [%pgsql dbh
+       "select encode(event_id, 'hex') from event_created_at where created_at >= $since and created_at <= $until \
+        order by created_at asc limit $limit offset $offset"])
   |> List.filter_map Fun.id
 
 (* {2 media} (app_ext.jl get_media_metadata) *)
@@ -614,6 +696,17 @@ let notifications (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset ~u
   let dbh = Db.raw c in
   let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
   match types_json with
+  | None when Lean.enabled () ->
+      (* lean: the follow-back test as a per-row index probe, only for type-2 rows. As a plain
+         EXISTS the planner hashed all followers of the user on every call (a bitmap heap scan of
+         350 k rows for a big account); OFFSET 0 keeps the subquery from becoming a hashable ANY. *)
+      [%pgsql dbh
+        "select created_at, type, arg1, arg2, arg3::text, arg4::text from pubkey_notifications pn \
+         where pubkey = $pubkey and created_at >= $since and created_at <= $until \
+           and notification_is_visible(type, arg1, arg2, arg3, $?user_pubkey) \
+           and not (type = 2 and exists (select 1 from pubkey_followers pf where pf.pubkey = $pubkey and pf.follower_pubkey = pn.arg1 offset 0)) \
+         order by created_at desc limit $limit offset $offset"]
+      |> List.filter_map notif_of
   | None ->
       [%pgsql dbh
         "select created_at, type, arg1, arg2, arg3::text, arg4::text from pubkey_notifications pn \
@@ -719,8 +812,25 @@ let scored_rows l = List.filter_map (function Some pk, Some eid, Some v -> Some 
 let scored_global_grouped (c : Db.cache Db.conn) ~(field : scored_field) ~created_after ~user_pubkey ~n ~offset ~gm_mode ~kinds_json : scored_row list =
   let dbh = Db.raw c in
   let created_after = i64 created_after and n = i64 n and offset = i64 offset in
+  let note_kinds = i64s Lean.note_kinds in
   scored_rows
     (match field with
+    | Created_at when Lean.enabled () ->
+        (* lean: "latest" from the note-kind events themselves (every one of them had an
+           event_stats row, which lazy counter rows no longer guarantee) *)
+        [%pgsql dbh
+          "with a as (select e.pubkey as author_pubkey, max(e.created_at) as maxfield from event e \
+             where e.kind = any($note_kinds) and e.created_at > 0 and $created_after <= e.created_at and ($?kinds_json::text is null or e.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8))) \
+               and not is_event_hidden($?user_pubkey, 'trending', e.id) \
+       and not exists (select 1 from filterlist fl where fl.target = e.id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = e.id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
+             group by e.pubkey order by maxfield desc limit $n offset $offset) \
+           select a.author_pubkey, e.id, e.created_at from a, event e \
+           where a.author_pubkey = e.pubkey and a.maxfield = e.created_at and e.kind = any($note_kinds) and e.created_at > 0 and $created_after <= e.created_at \
+             and ($?kinds_json::text is null or e.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8))) and ($?gm_mode::text is null \
+       or ($?gm_mode::text = 'gmonly' and (e.content ilike '%gm%' or e.content ilike '%good morning%')) \
+       or ($?gm_mode::text = 'nogm' and not (e.content ilike '%gm%' or e.content ilike '%good morning%')))"]
+        |> List.map (fun (a, b, c) -> (Some a, Some b, Some c))
     | Created_at ->
         [%pgsql dbh
           "with a as (select es.author_pubkey, max(es.created_at) as maxfield from event_stats es \
@@ -770,8 +880,24 @@ let scored_global (c : Db.cache Db.conn) ~(field : scored_field) ~created_after 
   let created_after = i64 created_after and n = i64 n and offset = i64 offset in
   let candidates = Int64.mul (Int64.add n offset) 10L in
   let since = Option.map i64 since and until = Option.map i64 until in
+  let note_kinds = i64s Lean.note_kinds in
   scored_rows
     (match field with
+    | Created_at when Lean.enabled () ->
+        (* lean: "latest" from the note-kind events themselves (see scored_global_grouped) *)
+        [%pgsql dbh
+          "with top_candidates as materialized ( \
+             select e.pubkey as author_pubkey, e.id as event_id, e.created_at from event e \
+             where e.kind = any($note_kinds) and e.created_at > 0 and $created_after <= e.created_at \
+               and ($?since::int8 is null or $?since::int8 <= e.created_at) and ($?until::int8 is null or $?until::int8 >= e.created_at) \
+               and ($?kinds_json::text is null or e.kind = any(array(select (jsonb_array_elements_text($?kinds_json::jsonb))::int8))) \
+             order by e.created_at desc limit $candidates) \
+           select es.author_pubkey, es.event_id, es.created_at from top_candidates es \
+           where not is_event_hidden($?user_pubkey, 'trending', es.event_id) \
+       and not exists (select 1 from filterlist fl where fl.target = es.event_id and fl.target_type = 'event' and fl.grp = 'trending' and fl.blocked) \
+       and ($?user_pubkey::bytea is null or not coalesce((select true from basic_tags bt where cardinality(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) > 0 and bt.id = es.event_id and bt.tag = 'p' and bt.arg1 = any(array(select cmr.pubkey from cmr_pubkeys_scopes cmr where cmr.user_pubkey = $?user_pubkey and cmr.scope = 'trending')) limit 1), false)) \
+           order by es.created_at desc limit $n offset $offset"]
+        |> List.map (fun (a, b, c) -> (Some a, Some b, Some c))
     | Created_at ->
         [%pgsql dbh
           "with top_candidates as materialized ( \
@@ -829,8 +955,41 @@ let scored_by_pubkeys (c : Db.cache Db.conn) ~(field : scored_field) ~created_af
   let dbh = Db.raw c in
   let created_after = i64 created_after and lo = Int64.add (i64 offset) 1L and hi = i64 (offset + n) in
   let since = Option.map i64 since and until = Option.map i64 until in
+  let note_kinds = i64s Lean.note_kinds in
   scored_rows
     (match field with
+    (* lean: the authors' note-kind events with their event_stats row, a missing one as zeros
+       (lazy counter rows); before, every such event had a row *)
+    | Created_at when Lean.enabled () ->
+        [%pgsql dbh
+          "select author_pubkey, event_id, created_at from ( \
+             select e.pubkey as author_pubkey, e.id as event_id, e.created_at as created_at, row_number() over (partition by e.pubkey order by e.created_at desc) as rn \
+             from event e \
+             where e.pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) \
+               and e.kind = any($note_kinds) and $created_after <= e.created_at \
+               and ($?since::int8 is null or $?since::int8 <= e.created_at) and ($?until::int8 is null or $?until::int8 >= e.created_at)) t \
+           where rn >= $lo and rn <= $hi"]
+        |> List.map (fun (a, b, c) -> (Some a, Some b, Some c))
+    | Score when Lean.enabled () ->
+        [%pgsql dbh
+          "select author_pubkey, event_id, score from ( \
+             select e.pubkey as author_pubkey, e.id as event_id, coalesce(es.score, 0) as score, row_number() over (partition by e.pubkey order by coalesce(es.score, 0) desc) as rn \
+             from event e left join event_stats es on es.event_id = e.id \
+             where e.pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) \
+               and e.kind = any($note_kinds) and $created_after <= e.created_at \
+               and ($?since::int8 is null or $?since::int8 <= coalesce(es.score, 0)) and ($?until::int8 is null or $?until::int8 >= coalesce(es.score, 0))) t \
+           where rn >= $lo and rn <= $hi"]
+        |> List.map (fun (a, b, c) -> (Some a, Some b, c))
+    | Satszapped when Lean.enabled () ->
+        [%pgsql dbh
+          "select author_pubkey, event_id, satszapped from ( \
+             select e.pubkey as author_pubkey, e.id as event_id, coalesce(es.satszapped, 0) as satszapped, row_number() over (partition by e.pubkey order by coalesce(es.satszapped, 0) desc) as rn \
+             from event e left join event_stats es on es.event_id = e.id \
+             where e.pubkey = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) \
+               and e.kind = any($note_kinds) and $created_after <= e.created_at \
+               and ($?since::int8 is null or $?since::int8 <= coalesce(es.satszapped, 0)) and ($?until::int8 is null or $?until::int8 >= coalesce(es.satszapped, 0))) t \
+           where rn >= $lo and rn <= $hi"]
+        |> List.map (fun (a, b, c) -> (Some a, Some b, c))
     | Created_at ->
         [%pgsql dbh
           "select author_pubkey, event_id, created_at from ( \
@@ -1053,7 +1212,19 @@ let reset_directmsg_count (c : Db.cache Db.conn) ~receiver ~sender ~by : unit =
 
 let reset_directmsg_counts (c : Db.cache Db.conn) ~receiver : unit =
   let dbh = Db.raw c in
-  ignore [%pgsql dbh "update pubkey_directmsgs_cnt set cnt = 0 where receiver = $receiver"]
+  if Lean.enabled () then
+    (* lean: rows already at 0 are not rewritten (each update was a dead tuple and a replicated row) *)
+    ignore [%pgsql dbh "update pubkey_directmsgs_cnt set cnt = 0 where receiver = $receiver and cnt <> 0"]
+  else ignore [%pgsql dbh "update pubkey_directmsgs_cnt set cnt = 0 where receiver = $receiver"]
+
+(* lean get_directmsg_contacts: the peers (hex) blocked as csam/impersonation, in one query
+   (is_user_blocked per peer before) *)
+let blocked_users (c : Db.cache Db.conn) ~(pubkeys_json : string) : string list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select a::text from jsonb_array_elements_text($pubkeys_json::jsonb) x(a) \
+     where exists (select 1 from filterlist where grp in ('csam', 'impersonation') and target_type = 'pubkey' and target = decode(a::text, 'hex') and blocked limit 1)"]
+  |> List.filter_map Fun.id
 
 let zap_rows l =
   List.filter_map
@@ -1128,6 +1299,14 @@ let user_followers_mutual (c : Db.cache Db.conn) ~pubkey : string list =
 let user_followers_top (c : Db.cache Db.conn) ~pubkey ~limit : string list =
   let dbh = Db.raw c in
   let limit = i64 limit in
+  if Lean.enabled () then
+    (* lean: a missing pubkey_followers_cnt row is a count of 0 (lazy counter rows) *)
+    [%pgsql dbh
+      "select distinct encode(pf.follower_pubkey, 'hex'), coalesce(pfc.value, 0) as v from pubkey_followers pf \
+         left join pubkey_followers_cnt pfc on pf.follower_pubkey = pfc.key \
+       where pf.pubkey = $pubkey order by v desc limit $limit"]
+    |> List.filter_map (fun (p, _) -> p)
+  else
   [%pgsql dbh
     "select distinct encode(pf.follower_pubkey, 'hex'), pfc.value from pubkey_followers pf, pubkey_followers_cnt pfc \
      where pf.pubkey = $pubkey and pf.follower_pubkey = pfc.key order by pfc.value desc limit $limit"]
@@ -1162,6 +1341,16 @@ let follow_packs (c : Db.cache Db.conn) ~since ~until ~limit ~offset : string li
 let most_followed_of (c : Db.cache Db.conn) ~(pubkeys_json : string) ~limit : string list =
   let dbh = Db.raw c in
   let limit = i64 limit in
+  if Lean.enabled () then
+    (* lean: pubkeys without a pubkey_followers_cnt row count 0 followers if they are known (have a
+       metadata event; the importer created a 0 row for every pubkey it saw) *)
+    [%pgsql dbh
+      "select encode(x.k, 'hex') from (select distinct decode(a::text, 'hex') as k from jsonb_array_elements_text($pubkeys_json::jsonb) x(a)) x \
+         left join pubkey_followers_cnt pfc on pfc.key = x.k \
+       where pfc.key is not null or exists (select 1 from meta_data md where md.key = x.k) \
+       order by coalesce(pfc.value, 0) desc limit $limit"]
+    |> List.filter_map Fun.id
+  else
   [%pgsql dbh
     "select encode(key, 'hex') from pubkey_followers_cnt \
      where key = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) order by value desc limit $limit"]
@@ -1231,6 +1420,42 @@ let reads_stats (c : Db.cache Db.conn) ~eid : (int64 * int64 * int64 * int64 * i
 (* app.jl thread_view_parents: the chain of thread parents (event_thread_parents), stored events only *)
 let thread_parents (c : Db.cache Db.conn) ~event_id : (string * int64) list =
   let dbh = Db.raw c in
+  if Lean.thread_parents_from_basic_tags () then begin
+    (* lean C13: each parent as the importer derives it when it writes event_thread_parents
+       (cache_storage.ml parse_parent_eid, for the kinds whose replies it handles): among the e/a tags
+       with at least 4 fields, the last parsable "reply" marker, else the first parsable "root", else
+       the last parsable one not marked "mention"; an a tag resolves through
+       parametrized_replaceable_events. From the event's own tags, because basic_tags keeps neither
+       the tag order nor a tags (nor events with 50 tags or more). The chain ends at an event that is
+       not stored. *)
+    let kinds = i64s [ 1; 1068; 6969; 20; 1111 ] in
+    [%pgsql dbh
+      "with recursive p as ( \
+         select $event_id::bytea as id, 0 as d \
+         union all \
+         select par.eid, p.d + 1 from p \
+           join event pe on pe.id = p.id and pe.kind = any($kinds) \
+           cross join lateral ( \
+             select x.eid from ( \
+               select t.i, t.t->>3 as marker, \
+                 case when t.t->>0 = 'e' then \
+                        (case when length(t.t->>1) = 64 and t.t->>1 !~* '[^0-9a-f]' then decode(t.t->>1, 'hex') end) \
+                      when split_part(t.t->>1, ':', 1) <> '' and split_part(t.t->>1, ':', 1) !~ '[^0-9]' and length(split_part(t.t->>1, ':', 1)) <= 18 \
+                           and length(split_part(t.t->>1, ':', 2)) = 64 and split_part(t.t->>1, ':', 2) !~* '[^0-9a-f]' then \
+                        (select pre.event_id from parametrized_replaceable_events pre \
+                         where pre.kind = split_part(t.t->>1, ':', 1)::int8 and pre.pubkey = decode(split_part(t.t->>1, ':', 2), 'hex') \
+                           and pre.identifier = substr(t.t->>1, length(split_part(t.t->>1, ':', 1)) + 67) limit 1) \
+                 end as eid \
+               from jsonb_array_elements(case when jsonb_typeof(pe.tags) = 'array' then pe.tags else '[]'::jsonb end) with ordinality t(t, i) \
+               where jsonb_typeof(t.t) = 'array' and jsonb_array_length(t.t) >= 4 and t.t->>0 in ('e', 'a') and (t.t->>3) is distinct from 'mention') x \
+             where x.eid is not null \
+             order by (case x.marker when 'reply' then 0 when 'root' then 1 else 2 end), (case when x.marker = 'root' then x.i else - x.i end) \
+             limit 1) par \
+         where p.d < 200) \
+       select encode(e.id, 'hex'), e.created_at from p join events e on e.id = p.id order by e.created_at asc"]
+    |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
+  end
+  else
   [%pgsql dbh
     "with recursive p as (select $event_id::bytea as id, 0 as d union all select etp.value, p.d + 1 from p join event_thread_parents etp on etp.key = p.id where p.d < 200) \
      select encode(e.id, 'hex'), e.created_at from p join events e on e.id = p.id order by e.created_at asc"]
@@ -1265,6 +1490,16 @@ let event_tags_of (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * 
 let scored_media_eids (c : Db.cache Db.conn) ~pubkey ~limit : string list =
   let dbh = Db.raw c in
   let limit = i64 limit in
+  if Lean.enabled () then
+    (* lean: from the author's note-kind events (the ones that have an event_stats row, or would
+       have one with lazy counter rows), a missing row as 0 *)
+    let kinds = i64s Lean.note_kinds in
+    [%pgsql dbh
+      "select encode(e.id, 'hex') from event e join event_media em on em.event_id = e.id \
+         left join event_stats es on es.event_id = e.id \
+       where e.pubkey = $pubkey and e.kind = any($kinds) order by coalesce(es.score24h, 0) desc limit $limit"]
+    |> List.filter_map Fun.id
+  else
   [%pgsql dbh
     "select encode(es.event_id, 'hex') from event_stats es, event_media em \
      where es.author_pubkey = $pubkey and es.event_id = em.event_id order by es.score24h desc limit $limit"]
@@ -1331,6 +1566,9 @@ let reads_stats_rows (c : Db.cache Db.conn) ~(event_ids_json : string) : (string
 
 let event_relays_rows (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * string) list =
   let dbh = Db.raw c in
+  (* lean: no relay hints (event_relay has had no writes for months: hints only for old events) *)
+  if Lean.enabled () then []
+  else
   [%pgsql dbh
     "select encode(er.event_id, 'hex'), coalesce(rum.dest, er.relay_url) from event_relay er left join relay_url_map rum on rum.src = er.relay_url \
      where er.event_id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
@@ -1465,6 +1703,40 @@ let dvm_follows_actions_pks (c : Db.cache Db.conn) ~dvm_kind ~dvm_pubkey ~(dvm_i
      group by pks.pubkey order by max(pfc.value) desc limit $limit"]
   |> List.filter_map Fun.id
 
+(* dvm_follows_actions_pks with a missing pubkey_followers_cnt row as 0 (lean, lazy counter rows) *)
+let dvm_follows_actions_pks_lean (c : Db.cache Db.conn) ~dvm_kind ~dvm_pubkey ~(dvm_id : string) ~user_pubkey ~limit : string list =
+  let dbh = Db.raw c in
+  let dvm_kind = i64 dvm_kind and limit = i64 limit in
+  [%pgsql dbh
+    "select encode(pks.pubkey, 'hex') from \
+       ((select es.pubkey from a_tags at, event es \
+         where at.ref_kind = $dvm_kind and at.ref_pubkey = $dvm_pubkey and at.ref_identifier = $dvm_id and (at.kind = 1 or at.kind = 7) and es.id = at.eid) \
+        union \
+        (select zr.sender as pubkey from a_tags at, zap_receipts zr \
+         where at.ref_kind = $dvm_kind and at.ref_pubkey = $dvm_pubkey and at.ref_identifier = $dvm_id and at.kind = 9735 and at.eid = zr.eid)) pks \
+       join pubkey_followers pf on pf.pubkey = pks.pubkey and $user_pubkey = pf.follower_pubkey \
+       left join pubkey_followers_cnt pfc on pks.pubkey = pfc.key \
+     group by pks.pubkey order by coalesce(max(pfc.value), 0) desc limit $limit"]
+  |> List.filter_map Fun.id
+
+(* {2 lean dvm_responses: one query per feed list instead of per feed} *)
+
+(* (pubkey hex, identifier, likes) of [[pubkey hex, identifier], ...] *)
+let dvm_likes_many (c : Db.cache Db.conn) ~(feeds_json : string) : (string * string * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select f->>0, f->>1, (select count(1) from a_tags where kind = 7 and ref_kind = 31990 and ref_pubkey = decode(f->>0, 'hex') and ref_identifier = f->>1) \
+     from (select distinct f from jsonb_array_elements($feeds_json::jsonb) x(f)) x"]
+  |> List.filter_map (function Some p, Some i, Some n -> Some (p, i, n) | _ -> None)
+
+(* (pubkey hex, sum of satszapped of every zap it received) *)
+let dvm_satszapped_many (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string * int64) list =
+  let dbh = Db.raw c in
+  [%pgsql dbh
+    "select a::text, (select coalesce(sum(satszapped), 0)::int8 from zap_receipts where receiver = decode(a::text, 'hex')) \
+     from (select distinct a from jsonb_array_elements_text($pubkeys_json::jsonb) x(a)) x"]
+  |> List.filter_map (function Some p, Some n -> Some (p, n) | _ -> None)
+
 let dvm_user_action_kinds (c : Db.cache Db.conn) ~dvm_kind ~dvm_pubkey ~(dvm_id : string) ~user_pubkey : int64 list =
   let dbh = Db.raw c in
   let dvm_kind = i64 dvm_kind in
@@ -1516,6 +1788,9 @@ let metadata_event_json (c : Db.cache Db.conn) ~pubkey : string option =
 
 let event_relay_url_one (c : Db.cache Db.conn) ~event_id : string option =
   let dbh = Db.raw c in
+  (* lean: no relay hint (see event_relays_rows) *)
+  if Lean.enabled () then None
+  else
   match [%pgsql dbh "select relay_url from event_relay where event_id = $event_id limit 1"] with Some u :: _ -> Some u | _ -> None
 
 (* app.jl dvm_feed: the DVM checker's fresh results (updated_at is naive local time) *)
@@ -1622,6 +1897,13 @@ let video_thumbnails_for_video (c : Db.cache Db.conn) ~(video_url : string) : st
    knows (Julia's bookmarks walk reads created_at from est.event_created_at and skips the rest) *)
 let events_meta_by_ids (c : Db.cache Db.conn) ~(event_ids_json : string) : (string * int64 * int64) list =
   let dbh = Db.raw c in
+  if Lean.enabled () then
+    (* lean: created_at from the event itself (event_created_at is its copy, left empty) *)
+    [%pgsql dbh
+      "select encode(e.id, 'hex'), e.kind, e.created_at from events e \
+       where e.id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a)))"]
+    |> List.filter_map (function Some h, Some k, Some t -> Some (h, k, t) | _ -> None)
+  else
   [%pgsql dbh
     "select encode(e.id, 'hex'), e.kind, eca.created_at from events e, event_created_at eca \
      where e.id = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($event_ids_json::jsonb) x(a))) and eca.event_id = e.id"]

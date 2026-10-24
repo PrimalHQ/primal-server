@@ -268,9 +268,41 @@ type sql = { text : string; params : string option list; orderby_key : string }
 
 let hex_param (raw : string) = "\\x" ^ Hex_util.encode raw
 
+(* {2 The lean variants} ([lean], the API config's "lean": see Lean) *)
+
+(* Ops that a kind:30023 query can answer from reads alone: the advsearch row of an article was
+   joined only to check its kind (30023, which every reads row is) and for these columns, which
+   reads has too (latest_eid is the advsearch id, pubkey its author). *)
+let reads_safe = function
+  | Kind 30023 | MinWords _ | MaxWords _ | HashTag _ | NotHashTag _ | From (From_pk _) | EventAddr _ | Lang _ -> true
+  | Scope ("myfollows" | "mynetwork" | "myfollowsinteractions" | "mynetworkinteractions" | "notmyfollows" | "mutedbyothers") -> true
+  | Features fs -> List.for_all (fun f -> f = "summary") fs
+  | And _ | Or _ -> true
+  | _ -> false
+
+(* event_stats is joined (an inner join) when an op reads it. With lazy counter rows an event
+   without engagement has no row, which must count as zeros: unless a top-level condition already
+   requires a positive counter, the join goes through a one-row lateral with zeros for no row. *)
+let uses_stats = function EventStatsField _ | MinInteractions _ | MaxInteractions _ -> true | OrderBy f -> f <> "score2" | _ -> false
+
+let requires_positive_stat = function
+  | EventStatsField (_, ">=", a) -> a > 0
+  | MinInteractions n -> n > 0
+  | OrderBy f -> List.mem f [ "score"; "likes"; "replies"; "reposts"; "zaps"; "satszapped" ]
+  | _ -> false
+
+let stats_lateral =
+  "lateral (select advsearch.id as event_id, advsearch.created_at as created_at, coalesce(max(s.likes), 0) as likes, \
+   coalesce(max(s.replies), 0) as replies, coalesce(max(s.mentions), 0) as mentions, coalesce(max(s.reposts), 0) as reposts, \
+   coalesce(max(s.zaps), 0) as zaps, coalesce(max(s.satszapped), 0) as satszapped, coalesce(max(s.score), 0) as score, \
+   coalesce(max(s.score24h), 0) as score24h from event_stats s where s.event_id = advsearch.id) event_stats"
+
 (* [interactions]: reads_interactions is complete (migration 2007 and its backfill), so the reads
-   scope can test it before probing basic_tags *)
-let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list) : sql =
+   scope can test it before probing basic_tags.
+   [lean] (default off = the statements as before): the csam/impersonation author check on the row's
+   own pubkey column instead of the event row; kind:30023 queries made only of [reads_safe] ops
+   without the advsearch join; event_stats rows that may be missing ([stats_lateral]). *)
+let to_sql ?(interactions = false) ?(lean = false) ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list) : sql =
   let expr = match expr with Or _ | And _ -> expr | o -> And [ o ] in
   let params = ref [] and np = ref 0 in
   let p (v : string) = incr np; params := Some v :: !params; Printf.sprintf "$%d" !np in
@@ -290,9 +322,16 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
          table (pb user_pubkey) (pb user_pubkey))
   in
   let top = match expr with Or l | And l -> l | o -> [ o ] in
-  let adv = t "advsearch" in
   let kind, explicit = match List.find_map (function Kind k -> Some k | _ -> None) top with Some k -> (k, true) | None -> (1, false) in
-  if explicit then cond (Printf.sprintf "%s.kind = %s" adv (pi kind));
+  let reads_only = lean && explicit && kind = 30023 && (kinds = [] || kinds = [ 30023 ]) && List.for_all reads_safe (ops expr) in
+  let lazy_stats = lean && List.exists uses_stats (ops expr) && not (List.exists requires_positive_stat top) in
+  let adv = if reads_only then (ignore (t "reads"); "advsearch") else t "advsearch" in
+  (* the advsearch row's id and author, or the reads row's when reads stands alone *)
+  let aid = if reads_only then "reads.latest_eid" else adv ^ ".id" and apk = if reads_only then "reads.pubkey" else adv ^ ".pubkey" in
+  (* "advsearch.id = reads.latest_eid and " where both are joined *)
+  let link_reads r = if reads_only then "" else Printf.sprintf "%s.id = %s.latest_eid and " adv r in
+  let stats () = if lazy_stats then (ignore (t stats_lateral); "event_stats") else t "event_stats" in
+  if explicit && not reads_only then cond (Printf.sprintf "%s.kind = %s" adv (pi kind));
   let orderkey = ref "" and orderby = ref "" in
   (if kind = 1 then begin
      if not explicit then cond (Printf.sprintf "%s.kind IN (%s, %s, %s)" adv (pi 1) (pi 1068) (pi 6969));
@@ -304,7 +343,7 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
    else if kind = 30023 then begin
      let reads = t "reads" in
      orderkey := reads ^ ".published_at";
-     cond (Printf.sprintf "%s.id = %s.latest_eid" adv reads);
+     if not reads_only then cond (Printf.sprintf "%s.id = %s.latest_eid" adv reads);
      cond (Printf.sprintf "%s.published_at >= %s" reads (pi since));
      cond (Printf.sprintf "%s.published_at <= %s" reads (pi until));
      orderby := reads ^ ".published_at"
@@ -315,7 +354,7 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
      cond (Printf.sprintf "%s.created_at <= %s" adv (pi until));
      orderby := adv ^ ".created_at"
    end);
-  if kinds <> [] then cond (Printf.sprintf "%s.kind IN (%s)" adv (String.concat ", " (List.map pi kinds)));
+  if kinds <> [] && not reads_only then cond (Printf.sprintf "%s.kind IN (%s)" adv (String.concat ", " (List.map pi kinds)));
   (* The event id and author the per-row checks test. For reads they are the reads row's own
      (latest_eid is the advsearch id, pubkey its author), so the planner can reject a read while
      scanning reads by published_at, before the advsearch lookup (a 158 GB table, ~10 buffers per
@@ -323,12 +362,12 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
   let id_col, pk_col = if kind = 30023 then ("reads.latest_eid", "reads.pubkey") else (adv ^ ".id", adv ^ ".pubkey") in
   (match List.find_map (function OrderBy f -> Some f | _ -> None) top with
   | Some "interactions" ->
-      let es = t "event_stats" in
+      let es = stats () in
       cond (Printf.sprintf "%s.event_id = %s.id" es adv);
       orderby := Printf.sprintf "(%s.likes + %s.replies + %s.reposts + %s.zaps)" es es es es;
       orderkey := !orderby
   | Some f when List.mem f [ "score"; "likes"; "replies"; "reposts"; "zaps"; "satszapped" ] ->
-      let es = t "event_stats" in
+      let es = stats () in
       cond (Printf.sprintf "%s.event_id = %s.id" es adv);
       cond (Printf.sprintf "%s.%s > 0" es f);
       orderby := Printf.sprintf "%s.%s" es f;
@@ -337,6 +376,14 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
   | Some f -> raise (Parse_error ("unsupported orderby " ^ f))
   | None -> ());
   cond (Printf.sprintf "NOT EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'event' AND target = %s AND blocked LIMIT 1)" id_col);
+  if lean then
+    (* the row's author column (advsearch.pubkey / reads.pubkey) is the event's pubkey: no event
+       heap fetch per candidate *)
+    cond
+      (Printf.sprintf
+         "NOT EXISTS (SELECT 1 FROM filterlist fl WHERE fl.target = %s AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)"
+         pk_col)
+  else
   cond
     (Printf.sprintf
        "NOT EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = %s AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)"
@@ -422,7 +469,7 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
         else if kind = 30023 then c (Printf.sprintf "not (%s.topics @@ plainto_tsquery('simple', %s))" (t "reads") (p h))
     | Since ts -> c (Printf.sprintf "%s.created_at >= %s" adv (pi ts))
     | Until ts -> c (Printf.sprintf "%s.created_at <= %s" adv (pi ts))
-    | From (From_pk pk) -> c (Printf.sprintf "%s.pubkey = %s" adv (pb pk))
+    | From (From_pk pk) -> c (Printf.sprintf "%s = %s" apk (pb pk))
     | From (From_addr (k, pk, id)) ->
         if k <> 39089 then raise (Parse_error "from: naddr must be a follow list");
         c (Printf.sprintf "%s.pubkey in (select follow_pubkey from follow_lists where pubkey = %s and identifier = %s)" adv (pb pk) (p id))
@@ -432,7 +479,8 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
     | EventId eid -> c (Printf.sprintf "%s.id = %s" adv (pb eid))
     | EventAddr (_, pk, id) ->
         let reads = t "reads" in
-        c (Printf.sprintf "%s.pubkey = %s and %s.identifier = %s and %s.latest_eid = %s.id" reads (pb pk) reads (p id) reads adv)
+        if reads_only then c (Printf.sprintf "%s.pubkey = %s and %s.identifier = %s" reads (pb pk) reads (p id))
+        else c (Printf.sprintf "%s.pubkey = %s and %s.identifier = %s and %s.latest_eid = %s.id" reads (pb pk) reads (p id) reads adv)
     | Filter f ->
         if String.length f > 0 && f.[0] = '-' then c (Printf.sprintf "%s.filter_tsv @@ to_tsquery('simple', %s)" adv (p ("! " ^ f)))
         else c (Printf.sprintf "%s.filter_tsv @@ plainto_tsquery('simple', %s)" adv (p f))
@@ -457,26 +505,26 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
         let tm = t "text_metadata" in
         c (Printf.sprintf "%s.event_id = %s.id and exists (select 1 where %s = any (select jsonb_array_elements_text(%s.md->'categories')))" tm adv (p cat) tm)
     | EventStatsField (field, oper, arg) ->
-        let es = t "event_stats" in
+        let es = stats () in
         c (Printf.sprintf "%s.event_id = %s.id and %s.%s %s %s" es adv es field oper (pi arg));
         if String.ends_with ~suffix:".created_at" !orderby then begin
           c (Printf.sprintf "%s.created_at >= %s" es (pi since));
           c (Printf.sprintf "%s.created_at <= %s" es (pi until))
         end
     | MinInteractions n ->
-        let es = t "event_stats" in
+        let es = stats () in
         c (Printf.sprintf "%s.event_id = %s.id and %s.likes + %s.replies + %s.reposts + %s.zaps >= %s" es adv es es es es (pi n))
     | MaxInteractions n ->
-        let es = t "event_stats" in
+        let es = stats () in
         c (Printf.sprintf "%s.event_id = %s.id and %s.likes + %s.replies + %s.reposts + %s.zaps <= %s" es adv es es es es (pi n))
-    | MinWords n -> let r = t "reads" in c (Printf.sprintf "%s.id = %s.latest_eid and %s.words >= %s" adv r r (pi n))
-    | MaxWords n -> let r = t "reads" in c (Printf.sprintf "%s.id = %s.latest_eid and %s.words <= %s" adv r r (pi n))
+    | MinWords n -> let r = t "reads" in c (Printf.sprintf "%s%s.words >= %s" (link_reads r) r (pi n))
+    | MaxWords n -> let r = t "reads" in c (Printf.sprintf "%s%s.words <= %s" (link_reads r) r (pi n))
     | MaxChars n -> let nl = t "note_length" in c (Printf.sprintf "%s.id = %s.eid and %s.length <= %s" adv nl nl (pi n))
     | MinLongReplies n -> let ns = t "note_stats" in c (Printf.sprintf "%s.id = %s.eid and %s.long_replies >= %s" adv ns ns (pi n))
     | MinTrustRank n -> let tr = t "pubkey_trustrank" in c (Printf.sprintf "%s.pubkey = %s.pubkey and %s.rank >= %s" adv tr tr (p (Printf.sprintf "%.17g" (10.0 ** float_of_int n))))
     | Lang l ->
         if kind = 1 then (let tm = t "text_metadata" in c (Printf.sprintf "%s.event_id = %s.id and %s.md->>'lang' = %s" tm adv tm (p l)))
-        else if kind = 30023 then (let r = t "reads" in c (Printf.sprintf "%s.id = %s.latest_eid and %s.lang = %s and %s.lang_prob = 1.0" adv r r (p l) r))
+        else if kind = 30023 then (let r = t "reads" in c (Printf.sprintf "%s%s.lang = %s and %s.lang_prob = 1.0" (link_reads r) r (p l) r))
     | ZappedBy pk -> let zr = t "zap_receipts" in c (Printf.sprintf "%s.sender = %s and %s.target_eid = %s.id" zr (pb pk) zr adv)
     | Features feats ->
         List.iter
@@ -497,7 +545,7 @@ let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~u
   in
   (match tosql expr with Some c -> cond c | None -> ());
   let text =
-    Printf.sprintf " %s select %s.id, %s as orderkey from %s where %s order by %s desc " (String.concat ", " !ctes) adv !orderkey (String.concat ", " !tables)
+    Printf.sprintf " %s select %s, %s as orderkey from %s where %s order by %s desc " (String.concat ", " !ctes) aid !orderkey (String.concat ", " !tables)
       (String.concat " and " !conds) !orderby
   in
   let orderby_key = match String.rindex_opt !orderby '.' with Some k -> String.sub !orderby (k + 1) (String.length !orderby - k - 1) | None -> !orderby in
@@ -556,7 +604,7 @@ let run ~(dbh : Postgres.dbh) ~(user_pubkey : string) ~(expr : op) ~(has_orderby
       try
         while List.length !res < want && since <= !t && Unix.gettimeofday () < deadline do
           let s, u = if has_orderby then (since, !t) else (!t - !dt, !t) in
-          let sql = to_sql ~interactions ~user_pubkey expr ~since:s ~until:u ~kinds in
+          let sql = to_sql ~interactions ~lean:(Lean.enabled ()) ~user_pubkey expr ~since:s ~until:u ~kinds in
           orderby_key := sql.orderby_key;
           let budget_ms = int_of_float ((deadline -. Unix.gettimeofday ()) *. 1000.) in
           if budget_ms <= 0 then raise Exit;

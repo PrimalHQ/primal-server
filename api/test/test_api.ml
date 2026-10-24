@@ -321,10 +321,42 @@ let test_anon_cache () =
   let h, m, _, n = Anon_cache.stats () in
   Alcotest.(check bool) "stats" true (h = 1 && m = 7 && n >= 1)
 
+(* the optional "lean" config object and the lean advsearch SQL *)
+let test_lean () =
+  let module L = Primal_api.Lean in
+  let j = Yojson.Safe.from_string in
+  Alcotest.(check bool) "null = off" true (L.of_json `Null = L.off);
+  Alcotest.(check bool) "empty = off" true (L.of_json (j "{}") = L.off);
+  let t = L.of_json (j {|{"enabled":true,"thread_parents_from_basic_tags":true}|}) in
+  Alcotest.(check bool) "flags" true (t.enabled && t.thread_parents_from_basic_tags && not t.follows_count_from_followers);
+  Alcotest.(check bool) "unknown key" true (match L.of_json (j {|{"enabld":true}|}) with exception L.Error _ -> true | _ -> false);
+  Alcotest.(check bool) "not a bool" true (match L.of_json (j {|{"enabled":1}|}) with exception L.Error _ -> true | _ -> false);
+  Alcotest.(check bool) "not an object" true (match L.of_json (j "true") with exception L.Error _ -> true | _ -> false);
+  (* sub-flags only with enabled *)
+  L.set { L.off with thread_parents_from_basic_tags = true };
+  Alcotest.(check bool) "sub-flag needs enabled" false (L.thread_parents_from_basic_tags ());
+  L.set L.off;
+  let module A = Primal_api.Advsearch in
+  let now = 1_700_000_000 in
+  let has s sub = try ignore (Str.search_forward (Str.regexp_string sub) s 0); true with Not_found -> false in
+  let sql ?(lean = true) q = (A.to_sql ~lean ~user_pubkey:(String.make 32 '\000') (A.parse ~now q) ~since:0 ~until:now ~kinds:[]).A.text in
+  let reads = "kind:30023 scope:myfollowsinteractions minwords:100 features:summary" in
+  Alcotest.(check bool) "reads: advsearch joined (off)" true (has (sql ~lean:false reads) "advsearch.id = reads.latest_eid");
+  Alcotest.(check bool) "reads: no advsearch (lean)" false (has (sql reads) "advsearch");
+  Alcotest.(check bool) "reads: reads ids (lean)" true (has (sql reads) "select reads.latest_eid,");
+  Alcotest.(check bool) "reads with since: advsearch" true (has (sql "kind:30023 since:yesterday") "advsearch.id = reads.latest_eid");
+  Alcotest.(check bool) "csam on the event (off)" true (has (sql ~lean:false "bitcoin") "FROM events es, filterlist fl");
+  Alcotest.(check bool) "csam on the row's pubkey (lean)" true (has (sql "bitcoin") "fl.target = advsearch.pubkey");
+  Alcotest.(check bool) "positive stat: plain join" false (has (sql "bitcoin minlikes:3") "lateral");
+  Alcotest.(check bool) "zero-matching stat: lateral" true (has (sql "bitcoin maxlikes:3") "lateral (select advsearch.id as event_id");
+  Alcotest.(check bool) "zero-matching stat (off): join" false (has (sql ~lean:false "bitcoin maxlikes:3") "lateral");
+  Alcotest.(check bool) "orderby interactions: lateral" true (has (sql "bitcoin orderby:interactions") "lateral")
+
 let () =
   Alcotest.run "primal_api"
     [
       ("anon_cache", [ Alcotest.test_case "cache" `Quick test_anon_cache ]);
+      ("lean", [ Alcotest.test_case "config and advsearch sql" `Quick test_lean ]);
       ( "protocol",
         [
           Alcotest.test_case "parse" `Quick test_parse;

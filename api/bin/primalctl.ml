@@ -111,7 +111,9 @@ let () =
       let kinds = match rest with k :: _ -> List.map int_of_string (String.split_on_char ',' k) | [] -> [] in
       let now = int_of_float (Unix.gettimeofday ()) in
       let expr, _ = Primal_api.Advsearch.prepare ~now (Primal_api.Advsearch.quote_urls query) in
-      let sql = Primal_api.Advsearch.to_sql ~user_pubkey expr ~since:(int_of_string since) ~until:(int_of_string until) ~kinds in
+      (* PRIMAL_LEAN=1: the SQL of the config's "lean" paths *)
+      let lean = Sys.getenv_opt "PRIMAL_LEAN" = Some "1" in
+      let sql = Primal_api.Advsearch.to_sql ~lean ~user_pubkey expr ~since:(int_of_string since) ~until:(int_of_string until) ~kinds in
       (* inline $n: bytea params as '\x..'::bytea, numbers bare, the rest quoted *)
       let params = Array.of_list sql.params in
       let buf = Buffer.create 4096 in

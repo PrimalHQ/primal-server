@@ -247,6 +247,49 @@ Content and services:
 | `cloudflare` | `{zone_id, api_key}` \| null | cache purge on `/purge-media` |
 | `media_paths` | list of `{"type": "local", "root", "label"}` \| `{"type": "s3", "provider", "label"}` | storage a purge walks; `label` (may be null: `local` or the provider name) is the storage provider name in the DB |
 | `ext` | object, optional | settings of a private extension |
+| `lean` | object \| null, optional | query paths for a slimmer cache DB schema (below); absent or null = off |
+
+### `lean`
+
+`{"enabled": bool, "follows_count_from_followers": bool, "thread_parents_from_basic_tags": bool}`, each
+key optional (false), unknown keys rejected (`lib/lean.ml`). Without the object every statement is
+the same as before. The two sub-flags act only with `enabled`.
+
+`enabled` switches on:
+
+- **Lazy counter rows.** A missing `event_stats`, `pubkey_followers_cnt` or `pubkey_zapped` row
+  reads as zeros (left joins, `coalesce`), so the importer may stop inserting all-zero rows: profile
+  counts, follower counts, user search, followers and "followed by" lists, DVM follows, the media
+  thumbnails of a profile, the `EVENT_STATS` of a note without a row (kinds 1, 1068, 6969, 20, 34235,
+  34236, 1111), "latest" explore/scored pages and the per-author scored pages (from the note-kind
+  events themselves), advsearch's counter filters and `orderby:interactions` (a one-row lateral when
+  zero can match). A pubkey counts as known (0 followers) when it has a metadata event.
+- **No `event_relay` reads**: no `EVENT_RELAYS` hints, no relay URL in `dvm_feed`.
+- **No `event_created_at` reads**: plain since/until event filters and the bookmarks feed read `event`.
+- **advsearch**: the csam/impersonation author check on `advsearch.pubkey` / `reads.pubkey` (no
+  `event` fetch per candidate); `kind:30023` queries made only of reads columns (scopes, `minwords`,
+  `features:summary`, hashtags, `lang`, `from:`, naddr) run on `reads` without the `advsearch` join.
+- `live_events_from_follows` tests `live_feed_is_hidden` only on the follows' live events.
+- Notifications: the follow-back test (type 2) as an index probe per row, not a hash of all followers.
+- Live-event poll: skipped while nobody subscribes; otherwise only kind-30311 and `a`-tagged events.
+- `get_directmsg_contacts`: blocked peers in one query, no discarded `hidden_pubkeys_default`.
+- `Moderation.filter` reads each viewer's rules (membership app settings, cmr rows) once per answer.
+- `get_dvm_feeds` / `get_featured_dvm_feeds`: events, likes and zap sums in one query per answer;
+  with `anon_feed_cache_s > 0` also cached: `get_recommended_users`, `get_dvm_feeds`, and
+  `get_featured_dvm_feeds` for the anonymous viewer.
+- `reset_directmsg_counts` leaves rows already at 0 alone.
+
+`follows_count_from_followers`: `user_profile`'s follows count is `least(5000, count)` of
+`pubkey_followers` instead of the contact list's p tags (differs where `pubkey_followers` has
+duplicate or stale rows).
+
+`thread_parents_from_basic_tags`: `long_form_content_thread_view`'s parent chain without
+`event_thread_parents`: each parent derived from the event's tags as the importer's
+`parse_parent_eid` does (last `reply` marker, else first `root`, else last unmarked e/a tag with 4+
+fields; `a` tags resolved through `parametrized_replaceable_events`).
+
+The cache DB's SQL functions (`enrich_feed_events`, `thread_view`, ...) have their own lean versions,
+installed in the DB, not switched here.
 
 ## Operation
 
@@ -303,7 +346,7 @@ primalctl req <ws-url> <funcall> ['{kwargs}'] [--zlib]   # one request, frames p
 primalctl status|metrics|drain [<admin-url>]               # the admin endpoints (default: the selfhost admin port, http://127.0.0.1:8811)
 primalctl replay <corpus.jsonl> --a <ws-url> --b <ws-url> [--only f1,f2] [--all]
                  [--per-funcall N] [--workers K] [--timeout S] [--report diffs.jsonl]
-primalctl advsearch-sql <user-hex> '<query>' <since> <until> [kinds]   # one advanced-search window's SQL, params inlined
+primalctl advsearch-sql <user-hex> '<query>' <since> <until> [kinds]   # one advanced-search window's SQL, params inlined (PRIMAL_LEAN=1: the lean SQL)
 primalctl sign <nsec-file> <kind> <content> ['[tags]']   # a signed event as JSON (for event_from_user kwargs)
 ```
 

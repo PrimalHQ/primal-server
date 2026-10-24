@@ -1937,7 +1937,12 @@ module Rmfp = struct
             push a (if wrap then wrap_referenced e else e.text);
             if e.kind = 30023 then push a (content_msg Kind.long_form_metadata (Yojson.Safe.to_string (`Assoc [ ("event_id", `String e.id); ("words", `Int (words e.content)) ])));
             (if e.kind = 30023 then (match List.assoc_opt e.id rstats with Some r -> push a (reads_stats_msg e.id r) | None -> ())
-             else match List.find_opt (fun (r : Queries.stats_row) -> r.st_eid = e.id) stats with Some r -> push a (event_stats_msg r) | None -> ());
+             else match List.find_opt (fun (r : Queries.stats_row) -> r.st_eid = e.id) stats with
+               | Some r -> push a (event_stats_msg r)
+               | None ->
+                   (* lean: lazy counter rows, a note without a row has all zeros *)
+                   if Lean.enabled () && List.mem e.kind Lean.stats_kinds then
+                     push a (event_stats_msg { Queries.st_eid = e.id; likes = 0L; replies = 0L; mentions = 0L; reposts = 0L; zaps = 0L; satszapped = 0L; score = 0L; score24h = 0L }));
             if user_pubkey <> None then Hashtbl.replace a.reids e.id ();
             Hashtbl.replace a.pks e.pubkey ();
             List.iter (fun (k, m) -> if k = e.id then push a m) extras;
@@ -2575,16 +2580,22 @@ let get_directmsg_contacts (ctx : ctx) (kw : Kw.t) : outcome =
         let rows = Queries.directmsg_contacts_in c ~user ~since ~until @ Queries.directmsg_contacts_out c ~user ~since ~until in
         let follows = List.map fst (Queries.follows_with_counts c ~pubkey:user) |> SS.of_list in
         let peers = List.map (fun (r : Queries.dm_contact) -> r.peer) rows |> List.sort_uniq compare in
-        let blocked =
-          if peers = [] then SS.empty
-          else
-            SS.of_list
-              (Queries.hidden_pubkeys_default c ~scope:"content" ~pubkeys_json:(hex_list_json peers) ~author_exempt:None
-              |> List.filter (fun _ -> false))
-        in
-        ignore blocked;
         let csam = Hashtbl.create 16 in
-        List.iter (fun pk -> if Queries.is_user_blocked c ~pubkey:(Hex_util.decode_exn pk) then Hashtbl.replace csam pk ()) peers;
+        if Lean.enabled () then begin
+          (* lean: the blocked peers in one query; no hidden_pubkeys_default, whose result was dropped *)
+          if peers <> [] then List.iter (fun pk -> Hashtbl.replace csam pk ()) (Queries.blocked_users c ~pubkeys_json:(hex_list_json peers))
+        end
+        else begin
+          let blocked =
+            if peers = [] then SS.empty
+            else
+              SS.of_list
+                (Queries.hidden_pubkeys_default c ~scope:"content" ~pubkeys_json:(hex_list_json peers) ~author_exempt:None
+                |> List.filter (fun _ -> false))
+          in
+          ignore blocked;
+          List.iter (fun pk -> if Queries.is_user_blocked c ~pubkey:(Hex_util.decode_exn pk) then Hashtbl.replace csam pk ()) peers
+        end;
         let d : (string, int64 * int64 * string option) Hashtbl.t = Hashtbl.create 64 in
         let order = ref [] in
         List.iter
@@ -3481,9 +3492,43 @@ let trending_images_4h (ctx : ctx) (_ : Kw.t) : outcome =
 
 (* app.jl response_messages_for_dvm_feeds *)
 let dvm_responses (ctx : ctx) (c : Db.cache Db.conn) ~(eids : string list) ~(user_pubkey : string option) ~(primal_feeds : bool option) : string list =
+  let lean = Lean.enabled () in
+  (* lean: the feeds' events, likes and zap sums in one query each instead of one per feed (the
+     messages and their order are the same) *)
+  let lean_events = if lean && eids <> [] then Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) else [] in
+  let lean_feeds =
+    if not lean then []
+    else
+      List.filter_map
+        (fun (eid, e) ->
+          match Yojson.Safe.from_string e with
+          | `Assoc f -> (
+              let tags = match List.assoc_opt "tags" f with Some (`List l) -> l | _ -> [] in
+              let pk = match List.assoc_opt "pubkey" f with Some (`String s) -> s | _ -> "" in
+              match List.find_map (function `List (`String "d" :: `String v :: _) -> Some v | _ -> None) tags with
+              | Some d when String.length pk = 64 -> Some (eid, (pk, d))
+              | _ -> None)
+          | _ -> None
+          | exception _ -> None)
+        lean_events
+  in
+  let lean_likes =
+    if lean_feeds = [] then []
+    else Queries.dvm_likes_many c ~feeds_json:(Yojson.Safe.to_string (`List (List.map (fun (_, (pk, d)) -> `List [ `String pk; `String d ]) lean_feeds)))
+  in
+  let lean_sats =
+    if lean_feeds = [] then [] else Queries.dvm_satszapped_many c ~pubkeys_json:(hex_list_json (List.map (fun (_, (pk, _)) -> pk) lean_feeds))
+  in
+  let likes_of pkb pk d =
+    if lean then match List.find_opt (fun (p, i, _) -> p = pk && i = d) lean_likes with Some (_, _, n) -> n | None -> Queries.dvm_likes c ~pubkey:pkb ~identifier:d
+    else Queries.dvm_likes c ~pubkey:pkb ~identifier:d
+  in
+  let sats_of pkb pk =
+    if lean then match List.assoc_opt pk lean_sats with Some n -> n | None -> Queries.dvm_satszapped c ~pubkey:pkb else Queries.dvm_satszapped c ~pubkey:pkb
+  in
   List.concat_map
     (fun eid ->
-      match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid ]) with
+      match if lean then List.filter (fun (k, _) -> k = eid) lean_events else Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid ]) with
       | [] -> []
       | (_, e) :: _ -> (
           match Yojson.Safe.from_string e with
@@ -3502,14 +3547,17 @@ let dvm_responses (ctx : ctx) (c : Db.cache Db.conn) ~(eids : string list) ~(use
                     let stats =
                       content_msg Kind.event_stats
                         (Yojson.Safe.to_string
-                           (`Assoc [ ("event_id", `String eid); ("likes", i64json (Queries.dvm_likes c ~pubkey:pkb ~identifier:dvm_id)); ("satszapped", i64json (Queries.dvm_satszapped c ~pubkey:pkb)) ]))
+                           (`Assoc [ ("event_id", `String eid); ("likes", i64json (likes_of pkb pk dvm_id)); ("satszapped", i64json (sats_of pkb pk)) ]))
                     in
                     let actions =
                       match user_pubkey with
                       | None -> []
                       | Some u ->
                           (* get_dvm_feed_follows_actions *)
-                          let pks = Queries.dvm_follows_actions_pks c ~dvm_kind:kind ~dvm_pubkey:pkb ~dvm_id ~user_pubkey:u ~limit:5 in
+                          let pks =
+                            if lean then Queries.dvm_follows_actions_pks_lean c ~dvm_kind:kind ~dvm_pubkey:pkb ~dvm_id ~user_pubkey:u ~limit:5
+                            else Queries.dvm_follows_actions_pks c ~dvm_kind:kind ~dvm_pubkey:pkb ~dvm_id ~user_pubkey:u ~limit:5
+                          in
                           let found, cards = if pks = [] then ([], []) else user_cards c pks in
                           let users = List.filter (fun p -> List.mem p found) pks in
                           let follows =

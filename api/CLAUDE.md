@@ -8,7 +8,7 @@ HTTP routes, config keys and operation.
 - Run it locally with `selfhost/primal.sh` (Postgres, fetcher, importer and api; `restart` after a rebuild).
   Never start a second `primal_apid` on the same ports by hand: generations share them (SO_REUSEPORT) and
   only a drained old generation should leave. Status: `curl -s http://127.0.0.1:<admin_port>/status`.
-- Config: one JSON file, all keys required except `ext` (README table); `--check-config` validates it.
+- Config: one JSON file, all keys required except `ext` and `lean` (README table; `lean` gates the slim-schema query paths, absent = unchanged); `--check-config` validates it.
   A new key means updating every config that uses this binary, including `selfhost/config/primal-api.json`.
 - Handlers return values (`Response`/`Http_server.resp`); the kernel writes frames. A new funcall goes into
   the closed `Funcall.t` variant so the dispatcher's exhaustive match forces a handler. Errors raised in a

@@ -66,15 +66,28 @@ let viewer_rules ~clock (c : Db.cache Db.conn) (u : string) : viewer_rules =
   in
   if switched_off then Off else if Queries.user_has_cmr c ~pubkey:u then Compiled else Default
 
-let hidden_pubkeys ~clock (c : Db.cache Db.conn) ~(user_pubkey : string option) ~(scope : string) ~(hexes : string list)
+(* [memo] (lean): the viewers' rules already read in this call, so one [filter] reads each viewer's
+   app settings (membership DB) and cmr rows once, not once per pubkey set *)
+let hidden_pubkeys ?memo ~clock (c : Db.cache Db.conn) ~(user_pubkey : string option) ~(scope : string) ~(hexes : string list)
     ~(author_exempt : string option) : SS.t =
   if hexes = [] then SS.empty
   else
     let pubkeys_json = Queries.hexes_json hexes in
+    let rules u =
+      match memo with
+      | None -> viewer_rules ~clock c u
+      | Some m -> (
+          match Hashtbl.find_opt m u with
+          | Some r -> r
+          | None ->
+              let r = viewer_rules ~clock c u in
+              Hashtbl.replace m u r;
+              r)
+    in
     SS.of_list
       (match user_pubkey with
       | Some u -> (
-          match viewer_rules ~clock c u with
+          match rules u with
           | Off -> []
           | Compiled -> Queries.hidden_pubkeys c ~user_pubkey ~scope ~pubkeys_json ~author_exempt
           | Default -> Queries.hidden_pubkeys_default_for c ~viewer:user_pubkey ~scope ~pubkeys_json ~author_exempt)
@@ -126,7 +139,8 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
     else begin
       let hidden_ids, hidden_scope, hidden_trending, hidden_zap_user, hidden_zap_receiver, hidden_notif =
         Db.with_cache ~clock (fun c ->
-            let q set scope user = hidden_pubkeys ~clock c ~user_pubkey:user ~scope ~hexes:(SS.elements set) ~author_exempt in
+            let memo = if Lean.enabled () then Some (Hashtbl.create 4) else None in
+            let q set scope user = hidden_pubkeys ?memo ~clock c ~user_pubkey:user ~scope ~hexes:(SS.elements set) ~author_exempt in
             let hidden_ids =
               if SS.is_empty !ids then SS.empty
               else SS.of_list (Queries.hidden_events c ~event_ids_json:(Queries.hexes_json (SS.elements !ids)))
