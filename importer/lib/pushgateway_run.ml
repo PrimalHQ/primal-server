@@ -52,6 +52,18 @@ let run ~net ~clock ~(stats : Stats.t) ~host ~port ~job ~stats_file ~(interval :
         ("importer_zap_dropped_total", "counter", zap_dropped);
       ]
     in
+    (* lean counters, published once nonzero (an importer without lean never shows them) *)
+    let metrics =
+      metrics
+      @ List.filter
+          (fun (_, _, v) -> v > 0)
+          [
+            ("importer_lean_kind_rejected_total", "counter", Atomic.get Lean.kind_rejected);
+            ("importer_lean_superseded_deleted_total", "counter", Atomic.get Lean.superseded_deleted);
+            ("importer_lean_tx_retries_total", "counter", Atomic.get Lean.tx_retries);
+            ("importer_lean_tx_fallbacks_total", "counter", Atomic.get Lean.tx_fallbacks);
+          ]
+    in
     (* Device-push metrics (Julia PushGatewayExporter push_notification_latest/_sent), merged into
        this job's group — a pushgateway POST replaces the whole group, so they must ride in the
        same body as cache_any to coexist. Published only once a send has happened, so

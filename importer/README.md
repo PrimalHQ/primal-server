@@ -282,7 +282,7 @@ Push and file errors are logged and skipped.
 
 ## Configuration
 
-One JSON object. **Every key is required**; *nullable* keys take `null`. Unknown keys are
+One JSON object. **Every key is required** (except `lean`, below); *nullable* keys take `null`. Unknown keys are
 ignored. Pubkeys are 64-char hex; entries that don't decode are dropped. In parentheses: the
 values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
 
@@ -316,6 +316,52 @@ values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
 | `pushgateway_job` | string | `job` label (`exported_job` in Prometheus). |
 | `pushgateway_stats_file` | string | JSON file holding the `cache_any` total. |
 | `pushgateway_interval` | number | Seconds (15). |
+| `lean` | object, optional | The lean write path (next section). Absent or `null`: the classic path, statement for statement. |
+
+### Lean mode (`lean`)
+
+An optional object; every key is optional (absent or `null` = off / the default), and an unknown key
+is a config error. Each flag is independent. The startup log prints the flags in force; the status
+line adds `lean krej/sup/txr/txf` once one of those counters moves, and the pushgateway job gets
+`importer_lean_{kind_rejected,superseded_deleted,tx_retries,tx_fallbacks}_total`.
+
+Some flags need schema objects a classic cache DB lacks: the unique index on `event_stats(event_id)`
+(`lazy_counters`), `pubkey_events.kind` (`pubkey_events_kind`), `event_hooks.created_at` (`enabled`).
+Recommended with `enabled`: an index on `event_hooks(created_at)` (the hourly expiry otherwise scans the
+table) and one on `event_pubkey_action_refs(event_id, ref_pubkey, ref_kind)` (the score duplicate check).
+
+| Key | Type | Effect |
+|---|---|---|
+| `enabled` | bool | Refactors with the same results, listed below. |
+| `no_event_created_at` | bool | Stop writing `event_created_at` (`event` has the same data). |
+| `no_hashtags` | bool | Stop updating `hashtags` and scheduling its 4-h expiry hook (`event_hashtags` stays). |
+| `no_pubkey_ids` | bool | Stop reading/writing `pubkey_ids`. Without `lazy_counters` a new pubkey is told by `insert into pubkey_followers_cnt … on conflict do nothing returning`; with it nothing needs "new pubkey" (only `disable_trustrank`'s idempotent rank seed). |
+| `no_thread_parents` | bool | Stop writing `event_thread_parents`; reply-chain notifications walk the parents from the events' tags (`parse_parent_eid`, from the note-reply kinds, at most 16 deep) instead of `thread_view_parent_posts`. |
+| `no_cmr_legacy` | bool | Content-moderation rules stop writing `cmr_pubkeys_parent`, `cmr_words`, `cmr_hashtags` (read by nothing; the `_2` tables replaced them). |
+| `lazy_counters` | bool | No zero rows: `event_stats` (at note insert), `pubkey_followers_cnt` and `pubkey_zapped` (at a new pubkey). The first increment creates the row (upsert); a decrement never creates one. A missing row reads as zeros. Note: followed/zapped pubkeys that never posted here now get a row (the classic `UPDATE` found none). |
+| `pubkey_events_kind` | bool | Write `pubkey_events.kind`. |
+| `transaction_per_event` | bool | After the claim, the event's side effects run in one transaction (also a verified zap's). A deadlock/serialization failure retries the whole event (4 attempts, random pause); any other error rolls back and applies the event once more without a transaction (the classic partial semantics). Device pushes run after the commit. Content-moderation rules, live events, follow packs and the 10555 list join the event's transaction. The transaction stays open across the membership-DB lookups of the notification gates, humanness and content-moderation settings (with `enabled` most are cache hits), and the spam-hash filterlist write to the membership DB is not rolled back with it. Locks on hot rows (popular accounts' follower counts, `event_stats` of viral notes) are held until the commit, which can cost throughput. |
+| `delete_superseded` | bool | A replaceable/addressable version (kind 0, 3, 10000–19999, 30000–39999 with a `d` tag) moves its pointer only when newer by NIP-01 (greater `created_at`, or equal and the lower id); then the previous version's `event` row is deleted (derived rows stay), after the dispatch (kind 3 diffs against it first). An older incoming version changes nothing and its row is deleted again, before any derived row. A recently deleted id is dropped before the claim (in-memory, 1 h). |
+| `keep_versions_kinds` | int[] | Kinds never deleted by `delete_superseded` (default `[30023]`, whose versions back `reads_versions`). |
+| `kind_allowlist` | int[], nullable | When set, kinds 0, 3, 10000–19999 and 30000–39999 are imported only if listed (**list 0 and 3**, or profiles and follows stop); other kinds keep `accepted_kind`. Refusals count as rejected (and in `krej`). The syncer skips them without fetching. |
+| `hooks_expire_days` | int | With `enabled`: pending `event_hooks` older than this are deleted, hourly, in the hooks loop (default 30). |
+
+What `enabled` changes (same rows written, fewer statements and reads):
+
+- `fetcher_relays`: `on conflict do nothing` (the fetcher only learns new URLs; it never forgets one). The user's relays are read with one join each (the relay list's tags; else the contact list's content, not its tags).
+- A per-event scope: events read by id are memoized, seeded with the event in hand (hooks on the DM itself, the acting event in `notifications_cb`, kind 0's user search and lightning address don't re-read it; each hook target is read once per event, not once per hook); parents and addressable lookups once per event. `event_hook` is one read instead of exists + read.
+- Narrow reads where only pubkey/kind/created_at are used: deletion author checks (tags only for a repost), the replied-to parent.
+- Kind 3: one read of the previous contact list (created_at + tags) for both the "newer" check and the follow diff.
+- Reply chains: `thread_view_parent_posts` once per note (was twice) and only when the parent is present. Differs from the classic path only when the parent was deleted while its thread-parent row stayed: its ancestors are no longer notified.
+- `ext_is_human` for hashtags only when the note has one.
+- `event_stats`: all of an event's deltas on a row (likes/replies/reposts/zaps/satszapped + score + score24h) in one statement at the end of the event, rows in id order.
+- Per-worker TTL caches: `ext_is_human`, `is_trusted_user` and `is_app_user` (60 s), parsed app settings (60 s), notification settings and the filterlist probes (30 s).
+- DMs: no existence check before the insert (the claim makes it once-only).
+- `pubkey_bookmarks`: updated by diff, not delete-all + reinsert.
+- `event_hooks`: `delete … returning funcall` instead of select + delete; old pending hooks expire (`hooks_expire_days`).
+- Score duplicate check: the same count, stopped at the second matching ref (`limit 2`).
+- Kind and allowlist checks before the `deleted_events` probe.
+- Event syncer: pulls `(id, imported_at, kind)`, skips kinds the import refuses, checks which ids exist locally (`id = any($1)`), and fetches full rows only for the missing ones.
 
 ## Layout
 
@@ -327,7 +373,9 @@ values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
 - `lib/config.ml`, `firehose_client.ml`, `dag_index.ml`, `import_listener.ml`, `event_syncer.ml`,
   `spam_detection.ml`, `zap_verifier.ml`, `lnurl.ml`, `push_notifications.ml`, `push_intake.ml`,
   `pushgateway_run.ml`: the parts named above. `lib/stats.ml`: counters, status line, watchdog.
-- `test/events.jsonl`: sample events (`importcheck`'s default input).
+- `lib/lean.ml`: the `lean` settings and their pure helpers (kind allowlist, NIP-01 order, bookmark diff,
+  TTL caches).
+- `test/events.jsonl`: sample events (`importcheck`'s default input). `test/test_importer.ml`: unit tests.
 
 ## Build and test
 
@@ -337,7 +385,7 @@ One dune workspace for the repo (`_build/` at its root), built from `common`'s f
 cd "$(git rev-parse --show-toplevel)"
 nix develop path:$PWD/nix -c dune build @all       # fails on any [%pgsql] mismatch
 nix develop path:$PWD/nix -c dune build importer/bin/primal_importerd.exe
-nix develop path:$PWD/nix -c dune test             # workspace tests; none in importer
+nix develop path:$PWD/nix -c dune test             # workspace tests; importer/test: lean mode's pure parts
 ```
 
 - **`[%pgsql]` checks** need a DB with the cache schema at `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`.

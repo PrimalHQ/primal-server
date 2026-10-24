@@ -1,0 +1,6 @@
+; Pure-logic tests of the importer (no database beyond the compile-time [%pgsql] schema check):
+; the lean config, kind allowlist, version order, bookmark diff, TTL caches, syncer helpers.
+(test
+ (name test_importer)
+ (flags (:standard -open Primal_common))
+ (libraries primal_common primal_importer alcotest yojson))

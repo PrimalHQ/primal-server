@@ -53,10 +53,27 @@ let load_humaness_threshold (est : CS.est) : float =
       | _ -> () (* empty table: keep 0.0 *)));
   !humaness_threshold
 
+(* Lean (enabled): per-worker TTL caches of the per-pubkey/per-event lookups the import path repeats
+   for every note, hook and notification (most of them round trips to the membership DB). A cached
+   answer is at most [ttl] seconds old. *)
+let lean_on (est : CS.est) = est.CS.cfg.CS.lean.Lean.enabled
+let human_cache : (string * float, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:60.0 ()
+let hidden_event_cache : (string, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:30.0 ()
+let hidden_pubkey_cache : (string, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:30.0 ()
+let import_blocked_cache : (string, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:30.0 ()
+let unblocked_cache : (string, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:30.0 ()
+let app_user_cache : (string, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:60.0 ()
+let notif_settings_cache : (string * int, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:30.0 ()
+
+let cached (est : CS.est) cache key (q : unit -> 'v) : 'v = if lean_on est then Lean.Ttl.find_or_add cache key q else q ()
+
 (* Julia ext_is_human: a human_override (membership) wins; otherwise pubkey_trustrank.rank >
    threshold. *)
-let ext_is_human ?threshold (est : CS.est) (pubkey : string) : bool =
+let rec ext_is_human ?threshold (est : CS.est) (pubkey : string) : bool =
   let threshold = match threshold with Some t -> t | None -> !humaness_threshold in
+  cached est human_cache (pubkey, threshold) (fun () -> ext_is_human_db ~threshold est pubkey)
+
+and ext_is_human_db ~(threshold : float) (est : CS.est) (pubkey : string) : bool =
   let mdbh = est.CS.mem_dbh in
   match [%pgsql mdbh "select is_human from human_override where pubkey = $pubkey"] with
   | Some h :: _ -> h
@@ -71,10 +88,10 @@ let ext_is_human ?threshold (est : CS.est) (pubkey : string) : bool =
 
 (* Julia ext_is_hidden(eid/pubkey): read the filterlist (local cache DB). *)
 let ext_is_hidden_event (est : CS.est) (id : string) : bool =
-  Filterlist.is_event_blocked_spam est.CS.dbh id
+  cached est hidden_event_cache id (fun () -> Filterlist.is_event_blocked_spam est.CS.dbh id)
 
 let ext_is_hidden_pubkey (est : CS.est) (pk : string) : bool =
-  Filterlist.is_pubkey_blocked_spam est.CS.dbh pk
+  cached est hidden_pubkey_cache pk (fun () -> Filterlist.is_pubkey_blocked_spam est.CS.dbh pk)
 
 (* {1 spam content hash} (Julia spam_content_sha256 / store_/check_spam_content_hash) *)
 
@@ -97,7 +114,7 @@ let store_spam_content_hash (est : CS.est) (e : Nostr.t) : unit =
 let check_spam_content_hash (est : CS.est) (e : Nostr.t) : unit =
   if
     e.kind = Nostr.kind_text_note
-    && (not (Filterlist.is_pubkey_unblocked est.CS.dbh e.pubkey))
+    && (not (cached est unblocked_cache e.pubkey (fun () -> Filterlist.is_pubkey_unblocked est.CS.dbh e.pubkey)))
     && CS.pubkey_followers_cnt est e.pubkey < 50
   then begin
     let dbh = est.CS.dbh in
@@ -303,6 +320,7 @@ let schedule_node (est : CS.est) ~(mod_ : string) ~(func : string) ~(args : Pgj.
          [ Some id; Some mod_; Some func; Some (Pgj.to_string args); Some (Pgj.to_string kwargs) ])
   with
   | Eio.Cancel.Cancelled _ as ex -> raise ex
+  | ex when CS.in_event_tx () -> raise ex (* the event's transaction is aborted: let its runner decide *)
   | ex -> Printf.eprintf "schedule_node %s: %s\n%!" func (Printexc.to_string ex)
 
 (* @pnd <func>(est, e.id, url, extra...) in PrimalServer.DB *)
@@ -444,6 +462,7 @@ let hexp s = Some (Hex_util.encode s)
 
 (* recipient is a Primal app user (Julia: pubkey in est.app_settings). *)
 let is_app_user (est : CS.est) (pubkey : string) : bool =
+  cached est app_user_cache pubkey @@ fun () ->
   match
     Postgres.query est.CS.mem_dbh "select 1 from app_settings where key = decode($1,'hex') limit 1"
       [ hexp pubkey ]
@@ -462,7 +481,40 @@ let is_app_user (est : CS.est) (pubkey : string) : bool =
    import_zap_receipt never ran, leaving the zap permanently invisible AND unmarked, so every
    backfill pass would re-apply it. A malformed setting must degrade to the default, not throw.
    Casting `->KEY` to bool in SQL had the same problem for a non-boolean setting value. *)
-let app_setting_flag (est : CS.est) (pubkey : string) ~(key : string) ~(default : bool) : bool =
+(* Lean (enabled): a user's app settings fetched and parsed once per TTL, not once per flag and
+   notification. The entry keeps exactly what app_setting_flag reads. *)
+type app_settings_entry = As_missing | As_null | As_additional of Yojson.Safe.t
+
+let app_settings_cache : (string, app_settings_entry) Lean.Ttl.t = Lean.Ttl.create ~ttl:60.0 ()
+
+let rec app_setting_flag (est : CS.est) (pubkey : string) ~(key : string) ~(default : bool) : bool =
+  if lean_on est then
+    match Lean.Ttl.find_or_add app_settings_cache pubkey (fun () -> app_settings_entry est pubkey) with
+    | As_missing -> false
+    | As_null -> default
+    | As_additional additional -> (
+        match (try Yojson.Safe.Util.member key additional with _ -> `Null) with `Bool b -> b | _ -> default)
+  else app_setting_flag_db est pubkey ~key ~default
+
+and app_settings_entry (est : CS.est) (pubkey : string) : app_settings_entry =
+  match
+    Postgres.query est.CS.mem_dbh
+      "select value from app_settings where key = decode($1,'hex') limit 1" [ hexp pubkey ]
+  with
+  | (Some value :: _) :: _ ->
+      As_additional
+        (try
+           let content =
+             match Yojson.Safe.Util.member "content" (Yojson.Safe.from_string value) with
+             | `String s -> Yojson.Safe.from_string s
+             | other -> other
+           in
+           Yojson.Safe.Util.member "notificationsAdditional" content
+         with _ -> `Null)
+  | (None :: _) :: _ -> As_null
+  | _ -> As_missing
+
+and app_setting_flag_db (est : CS.est) (pubkey : string) ~(key : string) ~(default : bool) : bool =
   match
     Postgres.query est.CS.mem_dbh
       "select value from app_settings where key = decode($1,'hex') limit 1" [ hexp pubkey ]
@@ -524,6 +576,7 @@ let gate_additional (est : CS.est) (recipient : string) (ntype : int) (arr : CS.
 
 (* Julia notification_settings gate (cache_storage_ext.jl:735): a row with enabled=false blocks. *)
 let gate_notification_settings (est : CS.est) (recipient : string) (ntype : int) : bool =
+  cached est notif_settings_cache (recipient, ntype) @@ fun () ->
   match
     Postgres.query est.CS.mem_dbh
       "select enabled from notification_settings where pubkey = decode($1,'hex') and type = $2 limit 1"
@@ -644,6 +697,7 @@ let blocked_nonhuman_sender (est : CS.est) (ntype : int) (arr : CS.notif_arg arr
   | Some initiator -> (
       try not (ext_is_human est initiator) with
       | Eio.Cancel.Cancelled _ as e -> raise e
+      | e when CS.in_event_tx () -> raise e (* its trustrank read may have aborted the event's transaction *)
       | _ -> false)
 
 (* Julia notification (cache_storage_ext.jl:611). Membership-table gates run only when app_settings
@@ -669,7 +723,10 @@ let notification (est : CS.est) (recipient : string) (notif_created_at : int) (n
   else begin
     assert (List.length args = Notif.arg_count ntype);
     if !Push_notifications.enabled then
-      Push_notifications.notification est ~recipient ~created_at:notif_created_at ~ntype ~args;
+      (* lean.transaction_per_event: after the commit (a retried event must not push twice, and the
+         sender's lookups shouldn't hold the event's locks); immediate otherwise *)
+      CS.after_commit (fun () ->
+          Push_notifications.notification est ~recipient ~created_at:notif_created_at ~ntype ~args);
     let dbh = est.CS.dbh in
     let nth i = if i < Array.length arr then Some arr.(i) else None in
     let arg1 = match nth 0 with Some a -> Option.value (notif_arg_bytes a) ~default:"" | None -> "" in
@@ -741,27 +798,61 @@ let notifications_cb (est : CS.est) (e : Nostr.t) (ntype : int) (args : Yojson.S
    mentions in the note, and mentions up the thread. The thread chains come from the
    thread_view_parent_posts(eid) SQL function (present in primal1). *)
 let import_reply_notifications (est : CS.est) (e : Nostr.t) : unit =
+  let lean = est.CS.cfg.CS.lean in
   let notified = Hashtbl.create 16 in
   let already pk = Hashtbl.mem notified pk in
   let mark pk = Hashtbl.replace notified pk () in
   let notify recipient ntype args = notification est recipient e.created_at ntype args in
   (* direct reply *)
-  (match CS.parse_parent_eid est e with
-  | Some parent_eid -> (
-      match CS.get_event est parent_eid with
-      | Some ep ->
-          notify ep.pubkey Notif.your_post_was_replied_to [ CS.Aeid ep.id; CS.Apk e.pubkey; CS.Aeid e.id ];
-          mark ep.pubkey
-      | None -> ())
-  | None -> ());
+  let parent_present =
+    match CS.parse_parent_eid est e with
+    | Some parent_eid -> (
+        (* lean: only the parent's pubkey is used (the scope memo has the parent when a hook read it) *)
+        match
+          if lean.Lean.enabled then Option.map (fun (pk, _, _) -> pk) (CS.get_event_meta est parent_eid)
+          else Option.map (fun (ep : Nostr.t) -> ep.pubkey) (CS.get_event est parent_eid)
+        with
+        | Some parent_pubkey ->
+            notify parent_pubkey Notif.your_post_was_replied_to [ CS.Aeid parent_eid; CS.Apk e.pubkey; CS.Aeid e.id ];
+            mark parent_pubkey;
+            true
+        | None -> false)
+    | None -> false
+  in
   let dbh = est.CS.dbh in
   let id = e.id in
+  (* The thread's present events, leaf (e) first. Classic: thread_view_parent_posts walks
+     event_thread_parents. lean.no_thread_parents (that table isn't written): the same walk over
+     parse_parent_eid of each present ancestor, from the kinds that get a thread-parent row (the
+     note-reply kinds), at most 16 deep (a chain of more than 15 notifies nobody). *)
+  let ancestors () : (string * Nostr.t) list =
+    if lean.Lean.no_thread_parents then begin
+      let reply_kind (x : Nostr.t) = CS.is_text_note_branch x.kind || x.kind = Nostr.kind_comment in
+      let rec walk acc (x : Nostr.t) n =
+        if n >= 16 || not (reply_kind x) then List.rev acc
+        else
+          match CS.parse_parent_eid est x with
+          | Some pid when not (List.mem_assoc pid acc) -> (
+              match CS.get_event est pid with Some p -> walk ((pid, p) :: acc) p (n + 1) | None -> List.rev acc)
+          | _ -> List.rev acc
+      in
+      walk [ (e.id, e) ] e 1
+    end
+    else
+      let ids = List.filter_map Fun.id [%pgsql dbh "select p.event_id from thread_view_parent_posts($id) p"] in
+      List.filter_map (fun eid -> match CS.get_event est eid with Some e1 -> Some (eid, e1) | None -> None) ids
+  in
+  (* lean.enabled: walked once, and only when the parent is present (without it the chain is just
+     this note and notifies nobody; the classic walk differs only when the parent was deleted and its
+     thread-parent row kept, see README) *)
+  let cached_chain =
+    if lean.Lean.enabled then lazy (if parent_present then ancestors () else []) else lazy (ancestors ())
+  in
   (* The thread ancestor chain (each present event paired with the pubkeys it contributes),
      reversed to leaf-last as Julia does. *)
   let build_chain (pks_of : Nostr.t -> string list) : (string * string list) list =
-    let ids = List.filter_map Fun.id [%pgsql dbh "select p.event_id from thread_view_parent_posts($id) p"] in
-    List.filter_map (fun eid -> match CS.get_event est eid with Some e1 -> Some (eid, pks_of e1) | None -> None) ids
-    |> List.rev
+    let chain = if lean.Lean.enabled then Lazy.force cached_chain else ancestors () in
+    List.map (fun (eid, e1) -> (eid, pks_of e1)) chain |> List.rev
   in
   let notify_chain chain ~(gt : int) =
     let len = List.length chain in
@@ -811,12 +902,17 @@ let ext_pubkey (est : CS.est) (pubkey : string) : unit =
 
 (* Julia update_user_search (cache_storage_ext.jl:958): the full-text-search row for a human
    user's current metadata (one tsvector per searchable field). Non-humans get no row. *)
-let update_user_search (est : CS.est) (pubkey : string) : bool =
+(* [current] (lean): the kind 0 just made current, (id, content): the row is built from it instead
+   of re-reading the meta_data pointer and the event. *)
+let update_user_search ?(current : (string * string) option) (est : CS.est) (pubkey : string) : bool =
   if not (ext_is_human est pubkey) then false
   else begin
     let dbh = est.CS.dbh in
     ignore [%pgsql dbh "delete from user_search where pubkey = $pubkey"];
     match
+      match current with
+      | Some c -> [ c ]
+      | None ->
       [%pgsql dbh
         "select m.value, e.content from meta_data_1_323bc43167 m, event e where m.key = $pubkey and e.id = m.value"]
     with
@@ -841,8 +937,10 @@ let update_user_search (est : CS.est) (pubkey : string) : bool =
 (* Julia ext_metadata_changed: update_user_search (the metadata media import branch is gated on
    DOWNLOAD_MEDIA, off). *)
 let ext_metadata_changed (est : CS.est) (e : Nostr.t) : unit =
-  try ignore (update_user_search est e.pubkey) with
+  let current = if lean_on est then Some (e.id, e.content) else None in
+  try ignore (update_user_search ?current est e.pubkey) with
   | Eio.Cancel.Cancelled _ as ex -> raise ex
+  | exn when CS.in_event_tx () -> raise exn
   | exn -> Printf.eprintf "update_user_search: %s\n%!" (Printexc.to_string exn)
 
 let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
@@ -869,13 +967,22 @@ let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
               end)
       | _ -> ());
   import_note_urls est e;
-  if ext_is_human est e.pubkey then
+  let lean = est.CS.cfg.CS.lean in
+  (* lean: the membership/trustrank lookup only for a note that has a hashtag *)
+  let has_hashtag () =
+    let b = ref false in
+    for_hashtags e (fun _ -> b := true);
+    !b
+  in
+  if ((not lean.Lean.enabled) || has_hashtag ()) && ext_is_human est e.pubkey then
     for_hashtags e (fun hashtag ->
         let hashtag = String.lowercase_ascii hashtag in
         let dbh = est.CS.dbh in
         let event_id = e.id and created_at = i64 e.created_at in
         ignore
           [%pgsql dbh "insert into event_hashtags_1_295f217c0e (event_id, hashtag, created_at) values ($event_id, $hashtag, $created_at)"];
+        (* lean.no_hashtags: the hashtags table (and its 4-h expiry hook) is read by nothing *)
+        if not lean.Lean.no_hashtags then begin
         (* One statement in the steady state, not select-then-update. A handful of hashtags are
            extremely hot (every worker touches 'the'), and each statement holds that single row's
            lock for its whole round trip — so halving the statements halves the time the row is
@@ -890,7 +997,8 @@ let ext_text_note (est : CS.est) (e : Nostr.t) : unit =
         | _ -> ());
         CS.schedule_hook est
           ~execute_at:(current_time () + (4 * 3600))
-          (`List [ `String "expire_hashtag_score_cb"; `String hashtag; `Int 1 ]))
+          (`List [ `String "expire_hashtag_score_cb"; `String hashtag; `Int 1 ])
+        end)
 
 let ext_reaction (est : CS.est) (e : Nostr.t) (eid : string) : unit =
   CS.event_hook est eid
@@ -946,6 +1054,13 @@ let ext_pubkey_zap (est : CS.est) (e : Nostr.t) (zapped_pk : string) (amount_sat
   | Some sender when ext_is_human est sender ->
       let dbh = est.CS.dbh in
       let amount = i64 amount_sats in
+      if est.CS.cfg.CS.lean.Lean.lazy_counters then
+        (* lean: the first zap creates the row (no zero row per pubkey) *)
+        ignore
+          [%pgsql dbh "insert into pubkey_zapped_1_17f1f622a9 (pubkey, zaps, satszapped) values ($zapped_pk, 1, $amount) \
+                       on conflict (pubkey) do update set zaps = pubkey_zapped_1_17f1f622a9.zaps + 1, \
+                       satszapped = pubkey_zapped_1_17f1f622a9.satszapped + excluded.satszapped"]
+      else
       ignore
         [%pgsql dbh "update pubkey_zapped_1_17f1f622a9 set zaps = zaps + 1, satszapped = satszapped + $amount where pubkey = $zapped_pk"]
   | _ -> ()
@@ -967,7 +1082,7 @@ let ext_video_note (est : CS.est) (e : Nostr.t) : unit =
 (* Julia ext_preimport_check: !(pubkey in Filterlist.import_pubkey_blocked) — read the local
    filterlist. *)
 let ext_preimport_check (est : CS.est) (e : Nostr.t) : bool =
-  not (Filterlist.is_import_pubkey_blocked est.CS.dbh e.pubkey)
+  not (cached est import_blocked_cache e.pubkey (fun () -> Filterlist.is_import_pubkey_blocked est.CS.dbh e.pubkey))
 
 (* Scheduled-hook callback: decrement a hashtag's score after the expiry window (Julia
    expire_hashtag_score_cb). *)
@@ -1038,7 +1153,18 @@ let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at 
   | Some ref_kind ->
       let dbh = est.CS.dbh in
       let event_id = e.id and rk = i64 ref_kind in
+      let lean = est.CS.cfg.CS.lean in
       let dup =
+        if lean.Lean.enabled then
+          (* the same decision (a second ref exists) without counting every ref of a viral note: the
+             scan stops at the second match. Constant time needs an index on
+             event_pubkey_action_refs (event_id, ref_pubkey, ref_kind). *)
+          match
+            [%pgsql dbh "select count(1) from (select 1 from event_pubkey_action_refs_1_f32e1ff589 where event_id = $event_id and ref_pubkey = $initiator and ref_kind = $rk limit 2) t"]
+          with
+          | Some n :: _ -> n > 1L
+          | _ -> false
+        else
         match
           [%pgsql dbh "select count(1) from event_pubkey_action_refs_1_f32e1ff589 where event_id = $event_id and ref_pubkey = $initiator and ref_kind = $rk"]
         with
@@ -1046,7 +1172,20 @@ let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at 
         | _ -> false
       in
       let increment = if dup then 0 else increment in
-      if increment > 0 then begin
+      if increment > 0 && CS.lean_stats est then begin
+        (* lean: score and score24h in the row's one statement (with the event's other deltas) *)
+        let expire_at = scored_at + (24 * 3600) in
+        let recent = expire_at > current_time () in
+        CS.stats_add est ~target:e e.id (fun d ->
+            d.CS.score <- d.CS.score + increment;
+            if recent then d.CS.score24h <- d.CS.score24h + increment);
+        if recent then begin
+          let author_pubkey = e.pubkey and change = i64 increment and expire_at = i64 expire_at in
+          ignore
+            [%pgsql dbh "insert into score_expiry (event_id, author_pubkey, change, expire_at) values ($event_id, $author_pubkey, $change, $expire_at)"]
+        end
+      end
+      else if increment > 0 then begin
         let inc = i64 increment in
         ignore [%pgsql dbh "update event_stats_1_1b380f4869 set score = score + $inc where event_id = $event_id"];
         let expire_at = scored_at + (24 * 3600) in
@@ -1070,14 +1209,17 @@ let tags_of_json (s : string) : Nostr.tag list =
   | _ -> []
   | exception _ -> []
 
-(* Run [f] inside a transaction on [dbh]; rollback on any exception (re-raised). *)
+(* Run [f] inside a transaction on [dbh]; rollback on any exception (re-raised). Inside the event's
+   transaction (lean.transaction_per_event) it is just part of that one. *)
 let in_transaction (dbh : Postgres.dbh) (f : unit -> unit) : unit =
+  if CS.in_event_tx_on dbh then f () else begin
   PGOCaml.begin_work dbh;
   match f () with
   | () -> PGOCaml.commit dbh
   | exception e ->
       (try PGOCaml.rollback dbh with _ -> ());
       raise e
+  end
 
 let p_tag_pubkeys (e : Nostr.t) : string list =
   List.filter_map
@@ -1262,16 +1404,19 @@ let compile_content_moderation_rules (est : CS.est) (pubkey : string) : cmr =
   Cmr.compile ~dbh:est.CS.dbh ~mem_dbh:est.CS.mem_dbh ~defaults:(default_settings ()) ~get_event:(CS.get_event est) pubkey
 
 let make_tsquery = Cmr.make_tsquery
-let import_content_moderation_rules (est : CS.est) (user_pubkey : string) (cmr : cmr) : unit = Cmr.import ~dbh:est.CS.dbh user_pubkey cmr
+let import_content_moderation_rules (est : CS.est) (user_pubkey : string) (cmr : cmr) : unit =
+  Cmr.import ~legacy:(not est.CS.cfg.CS.lean.Lean.no_cmr_legacy) ~dbh:est.CS.dbh user_pubkey cmr
 let notify_user_live_events (est : CS.est) (pubkey : string) : unit = Cmr.notify_user_live_events ~dbh:est.CS.dbh pubkey
 
 let update_content_moderation_rules (est : CS.est) (pubkey : string) : unit =
   if !content_moderation_rules_enabled && !app_settings_present && is_app_user est pubkey then begin
     (try import_content_moderation_rules est pubkey (compile_content_moderation_rules est pubkey) with
     | Eio.Cancel.Cancelled _ as e -> raise e
+    | exn when CS.in_event_tx () -> raise exn
     | exn -> log_p1 "update_content_moderation_rules %s: %s" (Hex_util.encode pubkey) (Printexc.to_string exn));
     try notify_user_live_events est pubkey with
     | Eio.Cancel.Cancelled _ as e -> raise e
+    | exn when CS.in_event_tx () -> raise exn
     | exn -> log_p1 "notify_user_live_events %s: %s" (Hex_util.encode pubkey) (Printexc.to_string exn)
   end
 

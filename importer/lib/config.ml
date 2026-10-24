@@ -140,6 +140,7 @@ let from_env () : t =
         reporting_whitelist = pubkey_list_env "IMPORTER_REPORTING_WHITELIST";
         download_media = bool_env "IMPORTER_DOWNLOAD_MEDIA" false;
         download_previews = bool_env "IMPORTER_DOWNLOAD_PREVIEWS" false;
+        lean = Lean.off;
       };
     cache_db = Postgres.cache_conninfo ();
     membership_db = Postgres.membership_conninfo ();
@@ -195,6 +196,16 @@ let rstrlist j key = List.map U.to_string (U.to_list (field j key))
 let rpubkeys j key =
   List.filter_map (fun h -> Hex_util.decode_opt (U.to_string h)) (U.to_list (field j key))
 
+(* The one optional key: "lean" (absent or null = the classic write path). Its own keys are all
+   optional, but an unknown one is an error (see Lean.of_json). *)
+let lean_of_json (j : Yojson.Safe.t) : Lean.t =
+  match j with
+  | `Assoc l -> (
+      match List.assoc_opt "lean" l with
+      | None -> Lean.off
+      | Some v -> ( match Lean.of_json v with Ok x -> x | Error msg -> raise (Config_error msg)))
+  | _ -> Lean.off
+
 let conninfo_of_json (j : Yojson.Safe.t) : Postgres.conninfo =
   {
     Postgres.host = rstr j "host";
@@ -243,6 +254,7 @@ let of_json (j : Yojson.Safe.t) : t =
         reporting_whitelist = rpubkeys j "reporting_whitelist";
         download_media = rbool j "download_media";
         download_previews = rbool j "download_previews";
+        lean = lean_of_json j;
       };
     cache_db = conninfo_of_json (field j "cache_db");
     membership_db = conninfo_of_json (field j "membership_db");

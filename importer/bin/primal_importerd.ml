@@ -60,6 +60,29 @@ let () =
      workers enqueue onto the Zap_verifier pool (never blocking on third-party HTTP) and its
      dedicated domains fetch the endpoint and apply the zap effects (see lib/zap_verifier.ml). *)
   Primal_importer.Cache_storage_ext.register ();
+  (* lean.transaction_per_event: content-moderation rules written inside an event's transaction join
+     it (never true without that flag). *)
+  Primal_common.Cmr.already_in_transaction := CS.in_event_tx_on;
+  let lean = cfg.cs.CS.lean in
+  if Primal_importer.Lean.active lean then
+    Printf.printf "primal-importer: lean mode: %s\n%!"
+      (String.concat ", "
+         (List.filter_map Fun.id
+            [ (if lean.enabled then Some "enabled" else None);
+              (if lean.no_event_created_at then Some "no_event_created_at" else None);
+              (if lean.no_hashtags then Some "no_hashtags" else None);
+              (if lean.no_pubkey_ids then Some "no_pubkey_ids" else None);
+              (if lean.no_thread_parents then Some "no_thread_parents" else None);
+              (if lean.no_cmr_legacy then Some "no_cmr_legacy" else None);
+              (if lean.lazy_counters then Some "lazy_counters" else None);
+              (if lean.pubkey_events_kind then Some "pubkey_events_kind" else None);
+              (if lean.transaction_per_event then Some "transaction_per_event" else None);
+              (if lean.delete_superseded then
+                 Some (Printf.sprintf "delete_superseded (keep %s)" (String.concat "/" (List.map string_of_int lean.keep_versions_kinds)))
+               else None);
+              (match lean.kind_allowlist with
+              | Some l -> Some (Printf.sprintf "kind_allowlist (%d kinds)" (Primal_importer.Lean.IS.cardinal l))
+              | None -> None) ]));
   let zap_pool = Primal_importer.Zap_verifier.create ~stats () in
   CS.set_zap_verifier_submit (Primal_importer.Zap_verifier.submit zap_pool);
 
@@ -213,6 +236,7 @@ let () =
   (* Main-domain fibers share one domain, so each long-lived fiber owns an explicit Stats slot
      (the implicit per-domain [Stats.phase] is for worker domains only). *)
   let hooks_slot = Primal_importer.Stats.new_slot "sched-hooks" in
+  let last_hooks_expiry = ref 0.0 in
   let run_scheduled_hooks_loop () =
     while true do
       Primal_importer.Stats.set_slot hooks_slot "run";
@@ -224,6 +248,13 @@ let () =
            if n >= CS.scheduled_hooks_batch then
              Printf.printf "scheduled_hooks: ran %d due hooks in %.1fs\n%!" n
                (Unix.gettimeofday () -. t0)
+         end;
+         (* lean: pending event_hooks for events that never arrived, once an hour *)
+         if lean.enabled && Unix.gettimeofday () -. !last_hooks_expiry >= 3600. then begin
+           Primal_importer.Stats.set_slot hooks_slot "expire-event-hooks";
+           last_hooks_expiry := Unix.gettimeofday ();
+           let n = CS.expire_event_hooks hooks_est ~days:lean.hooks_expire_days in
+           if n > 0 then Printf.printf "event_hooks: deleted %d pending hooks older than %d days\n%!" n lean.hooks_expire_days
          end;
          (* Julia CacheStorage.periodic runs expire_scores in the same 60 s loop. *)
          if cfg.expire_scores_enabled then begin
@@ -262,7 +293,7 @@ let () =
     (* The syncer owns its connections (a dedicated local conninfo + the remotes); it must not
        reuse hooks_est.dbh, which the scheduled-hooks fiber drives concurrently. *)
     if cfg.event_sync_enabled && sync_remotes <> [] then
-      Primal_importer.Event_syncer.run ~clock ~local:cfg.cache_db ~remotes:sync_remotes
+      Primal_importer.Event_syncer.run ~lean ~clock ~local:cfg.cache_db ~remotes:sync_remotes
         ~submit:(fun e ->
           Primal_importer.Stats.set_slot syncer_slot "submit";
           WP.submit_event pool e;

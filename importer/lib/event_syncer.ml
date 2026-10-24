@@ -84,11 +84,96 @@ let pull_remote (dbh : Pg.dbh) ~(since : int) : Nostr.t list * int * bool =
   end;
   (evs, !hw, full)
 
+(* {1 Lean: ids first} (lean.enabled)
+
+   Each event reaches a node about four times (firehose + three peers), so most pulled rows are
+   events we already hold. Pull only (id, imported_at, kind) from the remote, drop kinds the import
+   would refuse and ids recently deleted as superseded, ask the local DB which of the rest exist
+   (id = any($1)), and fetch full rows only for the missing ones. Same high-water / limit semantics
+   as [pull_remote]. *)
+
+let bytea_array (ids : string list) : string =
+  "{" ^ String.concat "," (List.map (fun s -> "\"\\\\x" ^ Hex_util.encode s ^ "\"") ids) ^ "}"
+
+let rec chunks k l =
+  if l = [] then []
+  else
+    let rec take i acc rest = if i = 0 then (List.rev acc, rest) else match rest with [] -> (List.rev acc, []) | x :: tl -> take (i - 1) (x :: acc) tl in
+    let c, rest = take k [] l in
+    c :: chunks k rest
+
+let chunk_size = 5_000
+
+(* Whether the import would even look at this kind (accepted, not blocked, allowlisted). *)
+let wanted_kind (lean : Lean.t) (k : int) : bool =
+  CS.accepted_kind k && (not (List.mem k CS.blocked_kinds)) && Lean.kind_allowed lean k
+
+let pull_remote_ids_first ~(lean : Lean.t) ~(local : Pg.dbh) (dbh : Pg.dbh) ~(since : int) : Nostr.t list * int * bool =
+  let since64 = Int64.of_int since in
+  let limit64 = Int64.of_int pull_limit in
+  let rows =
+    [%pgsql dbh "select id, imported_at, kind from event where imported_at >= $since64 order by imported_at limit $limit64"]
+  in
+  let hw = ref since in
+  let candidates =
+    List.filter_map
+      (fun (id, imported_at, kind) ->
+        let ia = Int64.to_int imported_at in
+        if ia > !hw then hw := ia;
+        let k = Int64.to_int kind in
+        if not (wanted_kind lean k) then begin
+          if not (Lean.kind_allowed lean k) then Atomic.incr Lean.kind_rejected;
+          None
+        end
+        else if lean.Lean.delete_superseded && Lean.Superseded.mem id then None
+        else Some id)
+      rows
+  in
+  let full = List.length rows >= pull_limit in
+  if full && !hw = since then begin
+    Printf.eprintf "event_syncer: >= %d events at imported_at %d; skipping ahead\n%!" pull_limit since;
+    hw := since + 1
+  end;
+  let present = Hashtbl.create 4096 in
+  List.iter
+    (fun c ->
+      List.iter
+        (function [ Some h ] -> Hashtbl.replace present h () | _ -> ())
+        (Pg.query local "select encode(id, 'hex') from event where id = any($1::bytea[])" [ Some (bytea_array c) ]))
+    (chunks chunk_size candidates);
+  let missing = List.filter (fun id -> not (Hashtbl.mem present (Hex_util.encode id))) candidates in
+  let evs =
+    List.concat_map
+      (fun c ->
+        List.filter_map
+          (function
+            | [ Some id; Some pubkey; Some created_at; Some kind; Some tags; Some content; Some sig_ ] -> (
+                try
+                  Some
+                    {
+                      Nostr.id = Hex_util.decode_exn id;
+                      pubkey = Hex_util.decode_exn pubkey;
+                      created_at = int_of_string created_at;
+                      kind = int_of_string kind;
+                      tags = CS.parse_tags_json tags;
+                      content;
+                      sig_ = Hex_util.decode_exn sig_;
+                    }
+                with _ -> None)
+            | _ -> None)
+          (Pg.query dbh
+             "select encode(id, 'hex'), encode(pubkey, 'hex'), created_at, kind, tags::text, content, encode(sig, 'hex') \
+              from event where id = any($1::bytea[])"
+             [ Some (bytea_array c) ]))
+      (chunks chunk_size missing)
+  in
+  (evs, !hw, full)
+
 (* Loop forever (intended as a fiber). Per-remote state = a lazily-(re)connected handle plus a
    high-water imported_at; both are kept across cycles, and the high-water survives a reconnect
    (only the connection slot is dropped on error). The whole cycle per remote is guarded so a
    transient DB failure just skips that remote rather than killing the fiber. *)
-let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.conninfo list)
+let run ?(lean = Lean.off) ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.conninfo list)
     ~(submit : Nostr.t -> unit) ~(interval : float) ~(overlap : int) () : unit =
   (* Compute the initial floor once from the local event table (guarded; falls back to now-overlap). *)
   let floor =
@@ -114,6 +199,8 @@ let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.connin
     (match !slot with Some dbh -> ( try Pg.close dbh with _ -> ()) | None -> ());
     slot := None
   in
+  (* lean: the local connection for the existence check (the syncer's own) *)
+  let local_slot = ref None in
   Printf.printf "event_syncer: %d remotes, interval %.0fs, overlap %ds, start imported_at >= %d\n%!"
     (List.length remotes) interval overlap floor;
   while true do
@@ -127,7 +214,17 @@ let run ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.connin
         try
           let dbh = get_conn ci slot in
           let since = !last in
-          let evs, hw, full = pull_remote dbh ~since in
+          let evs, hw, full =
+            if lean.Lean.enabled then begin
+              let ldbh = try get_conn local local_slot with ex -> (drop local_slot; raise ex) in
+              try pull_remote_ids_first ~lean ~local:ldbh dbh ~since with
+              | ex when Pg.is_connection_error ex && !local_slot <> None ->
+                  (* either side may have dropped: reconnect both next cycle *)
+                  drop local_slot;
+                  raise ex
+            end
+            else pull_remote dbh ~since
+          in
           if hw > !last then last := hw;
           if full then backlog := true;
           let n = List.length evs in

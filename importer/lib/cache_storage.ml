@@ -21,6 +21,7 @@ type config = {
   reporting_whitelist : string list; (* raw 32-byte pubkeys allowed to report (REPORTING_WHITELIST) *)
   download_media : bool; (* Julia DOWNLOAD_MEDIA: queue import_media_pn / import_media_fast_pn nodes (media host) *)
   download_previews : bool; (* Julia DOWNLOAD_PREVIEWS: queue import_preview_pn nodes for non-media URLs (media host) *)
+  lean : Lean.t; (* the optional lean write path (config key "lean"); Lean.off = the classic path *)
 }
 
 let default_config =
@@ -33,6 +34,7 @@ let default_config =
     reporting_whitelist = [];
     download_media = false;
     download_previews = false;
+    lean = Lean.off;
   }
 
 (* [dbh] is the cache DB (Julia :p0); [mem_dbh] is the membership DB (Julia :membership),
@@ -136,8 +138,73 @@ let max_message_size = 2_000_000
 let max_satszapped = 1_100_000
 let i64 = Int64.of_int
 
+(* {1 Lean: the event transaction} (lean.transaction_per_event)
+
+   After the claim, an event's side effects run in one transaction on [est.dbh]. The state is per
+   domain (each worker domain imports one event at a time on its own connection). [after_commit]
+   defers work that must not be repeated by a retry or that talks to other hosts (device pushes).
+   Nested transactions (live events, follow packs, content-moderation rules) become part of the
+   event's transaction ([in_event_tx_on]). *)
+type tx_state = { mutable tx_dbh : Postgres.dbh option; mutable post_commit : (unit -> unit) list }
+
+let tx_key : tx_state Domain.DLS.key = Domain.DLS.new_key (fun () -> { tx_dbh = None; post_commit = [] })
+let in_event_tx () = (Domain.DLS.get tx_key).tx_dbh <> None
+
+let in_event_tx_on (dbh : Postgres.dbh) : bool =
+  match (Domain.DLS.get tx_key).tx_dbh with Some d -> d == dbh | None -> false
+
+let after_commit (f : unit -> unit) : unit =
+  let st = Domain.DLS.get tx_key in
+  if st.tx_dbh <> None then st.post_commit <- f :: st.post_commit else f ()
+
+let sqlstate : exn -> string option = function
+  | PGOCaml.PostgreSQL_Error (_, fields) -> List.assoc_opt 'C' fields
+  | _ -> None
+
+(* deadlock_detected / serialization_failure: the whole event is retried *)
+let is_retryable_tx_error (e : exn) : bool = match sqlstate e with Some ("40P01" | "40001") -> true | _ -> false
+
 let guard label f = try f () with exn ->
+  (* inside an event transaction a failed statement has aborted the transaction: let the
+     transaction runner see it (it retries or falls back to this autocommit path) *)
+  if in_event_tx () then raise exn;
   Printf.eprintf "import_event: %s: %s\n%!" label (Printexc.to_string exn)
+
+(* {1 Lean: the per-event scope} (lean.enabled)
+
+   While one event (or one verified zap) is applied: a memo of the events read by id (seeded with
+   the event in hand, so hooks, notifications and kind 0 don't re-read it, and each hook target is
+   read once), of parsed parents and of addressable-pointer lookups; and the event_stats deltas of
+   every hook, written at the end as one statement per row (in id order, so concurrent workers lock
+   rows in the same order). *)
+type stats_delta = {
+  mutable likes : int;
+  mutable replies : int;
+  mutable mentions : int;
+  mutable reposts : int;
+  mutable zaps : int;
+  mutable satszapped : int;
+  mutable score : int;
+  mutable score24h : int;
+  mutable author : string option; (* the target's pubkey and created_at, for a lazy insert *)
+  mutable target_created_at : int;
+  mutable note : bool; (* the target is a note kind (only those have event_stats rows) *)
+}
+
+let zero_delta () =
+  { likes = 0; replies = 0; mentions = 0; reposts = 0; zaps = 0; satszapped = 0; score = 0; score24h = 0;
+    author = None; target_created_at = 0; note = false }
+
+type scope = {
+  memo : (string, Nostr.t option) Hashtbl.t;
+  stats : (string, stats_delta) Hashtbl.t;
+  parents : (string, string option) Hashtbl.t;
+  pre : (int * string * string, string option) Hashtbl.t;
+}
+
+let scope_key : scope option ref Domain.DLS.key = Domain.DLS.new_key (fun () -> ref None)
+let current_scope () = !(Domain.DLS.get scope_key)
+let memo_forget (id : string) = match current_scope () with Some s -> Hashtbl.remove s.memo id | None -> ()
 
 (* {1 Kind classification} (Julia kindints / accepted_kind / is_pubkey_event) *)
 
@@ -216,7 +283,18 @@ let parse_tags_json (s : string) : Nostr.tag list =
   | _ -> []
 
 (* Julia: est.events[eid] -> Nostr.Event (reconstructed from the row). *)
-let get_event (est : est) (id : string) : Nostr.t option =
+let rec get_event (est : est) (id : string) : Nostr.t option =
+  match current_scope () with
+  | Some s -> (
+      match Hashtbl.find_opt s.memo id with
+      | Some r -> r
+      | None ->
+          let r = get_event_db est id in
+          Hashtbl.replace s.memo id r;
+          r)
+  | None -> get_event_db est id
+
+and get_event_db (est : est) (id : string) : Nostr.t option =
   let dbh = est.dbh in
   match
     [%pgsql dbh "select pubkey, created_at, kind, tags, content, sig from event where id = $id"]
@@ -234,12 +312,30 @@ let get_event (est : est) (id : string) : Nostr.t option =
         }
   | [] -> None
 
+(* Lean: pubkey, created_at and kind of an event, for callers that need nothing else (the row is
+   read without detoasting tags/content); from the scope's memo when it has the event. *)
+let get_event_meta (est : est) (id : string) : (string * int * int) option =
+  match current_scope () with
+  | Some s when Hashtbl.mem s.memo id -> (
+      match Hashtbl.find s.memo id with Some e -> Some (e.Nostr.pubkey, e.created_at, e.kind) | None -> None)
+  | _ -> (
+      let dbh = est.dbh in
+      match [%pgsql dbh "select pubkey, created_at, kind from event where id = $id"] with
+      | (pubkey, created_at, kind) :: _ -> Some (pubkey, Int64.to_int created_at, Int64.to_int kind)
+      | [] -> None)
+
+(* Lean: per-worker TTL cache of is_trusted_user (lean.enabled). *)
+let trusted_cache : (string, bool) Lean.Ttl.t = Lean.Ttl.create ~ttl:60.0 ()
+
 (* Julia is_trusted_user -> ext_is_human(threshold=0) -> pubkey_trustrank.rank > 0 *)
 let is_trusted_user (est : est) (pubkey : string) : bool =
-  let dbh = est.dbh in
-  match [%pgsql dbh "select 1 from pubkey_trustrank where pubkey = $pubkey and rank > 0 limit 1"] with
-  | [] -> false
-  | _ -> true
+  let q () =
+    let dbh = est.dbh in
+    match [%pgsql dbh "select 1 from pubkey_trustrank where pubkey = $pubkey and rank > 0 limit 1"] with
+    | [] -> false
+    | _ -> true
+  in
+  if est.cfg.lean.enabled then Lean.Ttl.find_or_add trusted_cache pubkey q else q ()
 
 (* {1 event_stats counters} (Julia event_stats_cb; dynamic column -> one query each) *)
 
@@ -256,6 +352,117 @@ let incr_event_stat (est : est) (event_id : string) (prop : string) (increment :
   | "score" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set score = score + $d where event_id = $event_id"]
   | "score24h" -> ignore [%pgsql dbh "update event_stats_1_1b380f4869 set score24h = score24h + $d where event_id = $event_id"]
   | _ -> ()
+
+(* Lean: one statement for all of a row's deltas (lean.enabled merges a whole event's hooks; with
+   only lazy_counters each hook is still its own statement). With lazy_counters a note's row is
+   created by its first increment (upsert on the unique event_id; no zero row at insert), and a
+   decrement (repost deletion) never creates a row. Non-note targets never had a row: plain UPDATE,
+   as the classic path. *)
+let write_stats_delta (est : est) (event_id : string) (d : stats_delta) : unit =
+  let all = [ d.likes; d.replies; d.mentions; d.reposts; d.zaps; d.satszapped; d.score; d.score24h ] in
+  if List.exists (fun x -> x <> 0) all then begin
+    let dbh = est.dbh in
+    let l = i64 d.likes and r = i64 d.replies and m = i64 d.mentions and rp = i64 d.reposts in
+    let z = i64 d.zaps and s = i64 d.satszapped and sc = i64 d.score and s24 = i64 d.score24h in
+    match d.author with
+    | Some author_pubkey when est.cfg.lean.lazy_counters && d.note && List.for_all (fun x -> x >= 0) all ->
+        let created_at = i64 d.target_created_at in
+        ignore
+          [%pgsql dbh
+            "insert into event_stats_1_1b380f4869 (event_id, author_pubkey, created_at, likes, replies, mentions, \
+             reposts, zaps, satszapped, score, score24h) values ($event_id, $author_pubkey, $created_at, $l, $r, $m, \
+             $rp, $z, $s, $sc, $s24) on conflict (event_id) do update set \
+             likes = event_stats_1_1b380f4869.likes + excluded.likes, \
+             replies = event_stats_1_1b380f4869.replies + excluded.replies, \
+             mentions = event_stats_1_1b380f4869.mentions + excluded.mentions, \
+             reposts = event_stats_1_1b380f4869.reposts + excluded.reposts, \
+             zaps = event_stats_1_1b380f4869.zaps + excluded.zaps, \
+             satszapped = event_stats_1_1b380f4869.satszapped + excluded.satszapped, \
+             score = event_stats_1_1b380f4869.score + excluded.score, \
+             score24h = event_stats_1_1b380f4869.score24h + excluded.score24h"]
+    | _ ->
+        ignore
+          [%pgsql dbh
+            "update event_stats_1_1b380f4869 set likes = likes + $l, replies = replies + $r, mentions = mentions + $m, \
+             reposts = reposts + $rp, zaps = zaps + $z, satszapped = satszapped + $s, score = score + $sc, \
+             score24h = score24h + $s24 where event_id = $event_id"]
+  end
+
+let add_prop (d : stats_delta) (prop : string) (inc : int) : unit =
+  match prop with
+  | "likes" -> d.likes <- d.likes + inc
+  | "replies" -> d.replies <- d.replies + inc
+  | "mentions" -> d.mentions <- d.mentions + inc
+  | "reposts" -> d.reposts <- d.reposts + inc
+  | "zaps" -> d.zaps <- d.zaps + inc
+  | "satszapped" -> d.satszapped <- d.satszapped + inc
+  | "score" -> d.score <- d.score + inc
+  | "score24h" -> d.score24h <- d.score24h + inc
+  | _ -> ()
+
+(* Lean (enabled or lazy_counters): add to a row's deltas — into the scope's buffer when one is
+   open, else written at once. [target] (the event the row belongs to) gives author/created_at/kind
+   for a lazy insert. *)
+let stats_add (est : est) ?(target : Nostr.t option) (event_id : string) (f : stats_delta -> unit) : unit =
+  let fill d =
+    match target with
+    | Some t when d.author = None ->
+        d.author <- Some t.Nostr.pubkey;
+        d.target_created_at <- t.created_at;
+        d.note <- is_note_kind t.kind
+    | _ -> ()
+  in
+  match current_scope () with
+  | Some s ->
+      let d =
+        match Hashtbl.find_opt s.stats event_id with
+        | Some d -> d
+        | None ->
+            let d = zero_delta () in
+            Hashtbl.replace s.stats event_id d;
+            d
+      in
+      fill d;
+      f d
+  | None ->
+      let d = zero_delta () in
+      fill d;
+      f d;
+      write_stats_delta est event_id d
+
+let lean_stats (est : est) = est.cfg.lean.enabled || est.cfg.lean.lazy_counters
+
+(* Open the per-event scope (lean.enabled) around [f], seeded with the event in hand; re-entrant (a
+   zap applied inside its receipt's import joins that scope). The buffered event_stats deltas are
+   written when [f] returns, and also when it raises outside an event transaction (the classic path
+   had already written them by then); inside one, the rollback discards them. *)
+let with_scope (est : est) (seed : Nostr.t) (f : unit -> 'a) : 'a =
+  if not est.cfg.lean.enabled then f ()
+  else
+    let r = Domain.DLS.get scope_key in
+    match !r with
+    | Some s ->
+        Hashtbl.replace s.memo seed.id (Some seed);
+        f ()
+    | None ->
+        let s = { memo = Hashtbl.create 16; stats = Hashtbl.create 8; parents = Hashtbl.create 4; pre = Hashtbl.create 4 } in
+        Hashtbl.replace s.memo seed.id (Some seed);
+        r := Some s;
+        let flush () =
+          let ids = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) s.stats []) in
+          List.iter (fun id -> write_stats_delta est id (Hashtbl.find s.stats id)) ids;
+          Hashtbl.reset s.stats
+        in
+        Fun.protect
+          ~finally:(fun () -> r := None)
+          (fun () ->
+            match f () with
+            | v ->
+                flush ();
+                v
+            | exception e ->
+                if not (in_event_tx ()) then (try flush () with _ -> ());
+                raise e)
 
 (* {1 event_hooks} (Julia event_hook / event_hook_execute; funcall stored as JSON)
 
@@ -293,14 +500,25 @@ let hook_of_json (j : Yojson.Safe.t) : hook_call =
 (* event_hook_execute: Julia evals the funcall against the *event* whose hooks fired, so the
    executor receives the full parent event (needed by score_event_cb for content/pubkey). *)
 let apply_hook (est : est) (e : Nostr.t) = function
-  | Event_stats_cb (prop, inc) -> incr_event_stat est e.id prop inc
+  | Event_stats_cb (prop, inc) ->
+      if lean_stats est then stats_add est ~target:e e.id (fun d -> add_prop d prop inc)
+      else incr_event_stat est e.id prop inc
   | Score_event_cb { initiator; scored_at; action; increment } ->
       (!ext).score_event_cb est e initiator scored_at action increment
   | Notifications_cb (ntype, args) -> (!ext).notifications_cb est e ntype args
   | Other _ -> () (* unknown deferred funcall: ignore (Julia would error; we drop it) *)
 
 let event_hook (est : est) (eid : string) (call : hook_call) : unit =
-  if already_imported_id est eid then
+  if est.cfg.lean.enabled then begin
+    (* one read instead of exists + read (and none for the event in hand: scope memo) *)
+    match get_event est eid with
+    | Some e -> apply_hook est e call
+    | None ->
+        let dbh = est.dbh in
+        let event_id = eid and funcall = Yojson.Safe.to_string (hook_to_json call) in
+        ignore [%pgsql dbh "insert into event_hooks (event_id, funcall) values ($event_id, $funcall)"]
+  end
+  else if already_imported_id est eid then
     (* Julia: eid in est.events -> event_hook_execute(est, est.events[eid], funcall) *)
     (match get_event est eid with Some e -> apply_hook est e call | None -> ())
   else begin
@@ -312,11 +530,40 @@ let event_hook (est : est) (eid : string) (call : hook_call) : unit =
 let fire_event_hooks (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
   let id = e.id in
+  if est.cfg.lean.enabled then
+    (* one statement: claim and remove the pending hooks together *)
+    List.iter
+      (fun funcall -> apply_hook est e (hook_of_json (Yojson.Safe.from_string funcall)))
+      [%pgsql dbh "delete from event_hooks where event_id = $id returning funcall"]
+  else begin
   let rows = [%pgsql dbh "select funcall from event_hooks where event_id = $id"] in
   List.iter
     (fun funcall -> apply_hook est e (hook_of_json (Yojson.Safe.from_string funcall)))
     rows;
   ignore [%pgsql dbh "delete from event_hooks where event_id = $id"]
+  end
+
+(* Lean (enabled): pending hooks wait for an event that may never arrive; delete those older than
+   [days], in bounded batches (event_hooks.created_at; an index on it keeps each batch cheap).
+   Called from the hooks loop. Returns the number deleted. *)
+let expire_event_hooks ?(batch = 20_000) ?(max_batches = 50) (est : est) ~(days : int) : int =
+  let dbh = est.dbh in
+  let cutoff = Unix.gettimeofday () -. (float_of_int days *. 86400.) in
+  let n = Int64.of_int batch in
+  let total = ref 0 in
+  (try
+     for _ = 1 to max_batches do
+       let got =
+         List.length
+           [%pgsql dbh
+             "delete from event_hooks where ctid in \
+              (select ctid from event_hooks where created_at < to_timestamp($cutoff) limit $n) returning event_id"]
+       in
+       total := !total + got;
+       if got < batch then raise Exit
+     done
+   with Exit -> ());
+  !total
 
 (* schedule_hook (Julia cache_storage.jl): defer a funcall to run after [execute_at]. A past-due
    hook is dropped (Julia ran it at once); the others are persisted in scheduled_hooks, which
@@ -469,13 +716,26 @@ let parse_bolt11 (b : string) : int option =
 (* {1 Parametrized replaceable lookup / parent eid} (Julia lookup_* / parse_parent_eid) *)
 
 let lookup_parametrized_replaceable_event (est : est) ~kind ~pubkey ~identifier : string option =
-  let dbh = est.dbh in
-  let k = i64 kind in
-  match
-    [%pgsql dbh "select event_id from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pubkey and kind = $k and identifier = $identifier limit 1"]
-  with
-  | x :: _ -> Some x
-  | [] -> None
+  let q () =
+    let dbh = est.dbh in
+    let k = i64 kind in
+    match
+      [%pgsql dbh "select event_id from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pubkey and kind = $k and identifier = $identifier limit 1"]
+    with
+    | x :: _ -> Some x
+    | [] -> None
+  in
+  (* lean: an event's mentions/parents are resolved several times per import; once is enough *)
+  match current_scope () with
+  | Some s -> (
+      let key = (kind, pubkey, identifier) in
+      match Hashtbl.find_opt s.pre key with
+      | Some r -> r
+      | None ->
+          let r = q () in
+          Hashtbl.replace s.pre key r;
+          r)
+  | None -> q ()
 
 (* Julia parse_eid (inner of parse_parent_eid): requires >= 4 fields. *)
 let parse_eid_of_tag (est : est) (tg : Nostr.tag) : string option =
@@ -490,7 +750,18 @@ let parse_eid_of_tag (est : est) (tg : Nostr.tag) : string option =
         | None -> None)
     | _ -> None
 
-let parse_parent_eid (est : est) (e : Nostr.t) : string option =
+let rec parse_parent_eid (est : est) (e : Nostr.t) : string option =
+  match current_scope () with
+  | Some s -> (
+      match Hashtbl.find_opt s.parents e.id with
+      | Some r -> r
+      | None ->
+          let r = parse_parent_eid_uncached est e in
+          Hashtbl.replace s.parents e.id r;
+          r)
+  | None -> parse_parent_eid_uncached est e
+
+and parse_parent_eid_uncached (est : est) (e : Nostr.t) : string option =
   let last_with f =
     List.fold_left
       (fun acc tg -> if f tg then match parse_eid_of_tag est tg with Some _ as r -> r | None -> acc else acc)
@@ -580,10 +851,51 @@ let track_pubkey (est : est) (pubkey : string) : unit =
     (!ext).ext_pubkey est pubkey
   end
 
-let insert_pubkey_event (est : est) ~pubkey ~event_id ~created_at ~is_reply : unit =
+(* Lean variant of [track_pubkey]. What a new pubkey triggers: the pubkey_ids row, the zero rows of
+   pubkey_followers_cnt and (ext_pubkey) pubkey_zapped, and with disable_trustrank a rank-1.0 row.
+   - lazy_counters: no zero rows;
+   - no_pubkey_ids: no pubkey_ids; without lazy_counters the follower-count seed itself (insert ..
+     on conflict do nothing returning) tells whether the pubkey is new; with lazy_counters nothing
+     needs "new pubkey" but the disable_trustrank seed, which is idempotent anyway. *)
+let track_pubkey_lean (est : est) (pubkey : string) : unit =
+  let l = est.cfg.lean in
   let dbh = est.dbh in
-  ignore
-    [%pgsql dbh "insert into pubkey_events_1_1dcbfe1466 (pubkey, event_id, created_at, is_reply) values ($pubkey, $event_id, $created_at, $is_reply)"]
+  let seed_trustrank () =
+    if est.cfg.disable_trustrank then begin
+      let rank = 1.0 in
+      ignore [%pgsql dbh "insert into pubkey_trustrank (pubkey, rank) values ($pubkey, $rank) on conflict (pubkey) do nothing"]
+    end
+  in
+  if not l.no_pubkey_ids then begin
+    if not (pubkey_known est pubkey) then begin
+      ignore [%pgsql dbh "insert into pubkey_ids_1_54b55dd09c (key, value) values ($pubkey, 1) on conflict (key) do nothing"];
+      if not l.lazy_counters then
+        ignore [%pgsql dbh "insert into pubkey_followers_cnt_1_a6f7e200e7 (key, value) values ($pubkey, 0) on conflict (key) do nothing"];
+      seed_trustrank ();
+      if not l.lazy_counters then (!ext).ext_pubkey est pubkey
+    end
+  end
+  else if not l.lazy_counters then begin
+    match
+      [%pgsql dbh "insert into pubkey_followers_cnt_1_a6f7e200e7 (key, value) values ($pubkey, 0) on conflict (key) do nothing returning key"]
+    with
+    | [] -> ()
+    | _ ->
+        seed_trustrank ();
+        (!ext).ext_pubkey est pubkey
+  end
+  else seed_trustrank ()
+
+let insert_pubkey_event ?kind (est : est) ~pubkey ~event_id ~created_at ~is_reply : unit =
+  let dbh = est.dbh in
+  match kind with
+  | None ->
+      ignore
+        [%pgsql dbh "insert into pubkey_events_1_1dcbfe1466 (pubkey, event_id, created_at, is_reply) values ($pubkey, $event_id, $created_at, $is_reply)"]
+  | Some kind ->
+      (* lean.pubkey_events_kind (the column exists on lean hosts only) *)
+      ignore
+        [%pgsql dbh "insert into pubkey_events_1_1dcbfe1466 (pubkey, event_id, created_at, is_reply, kind) values ($pubkey, $event_id, $created_at, $is_reply, $kind)"]
 
 let event_stats_init (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
@@ -617,13 +929,14 @@ let store_replaceable_event (est : est) (e : Nostr.t) : unit =
   ignore
     [%pgsql dbh "insert into replaceable_events (pubkey, kind, event_id) values ($pubkey, $kind, $event_id) on conflict (pubkey, kind) do update set event_id = excluded.event_id"]
 
+let first_d_tag (e : Nostr.t) : string option =
+  List.find_map
+    (fun tg -> match (Nostr.tag_name tg, Nostr.tag_field tg 1) with Some "d", Some d -> Some d | _ -> None)
+    e.tags
+
 let store_parametrized_replaceable_event (est : est) (e : Nostr.t) : unit =
   (* find the first d tag *)
-  match
-    List.find_map
-      (fun tg -> match (Nostr.tag_name tg, Nostr.tag_field tg 1) with Some "d", Some d -> Some d | _ -> None)
-      e.tags
-  with
+  match first_d_tag e with
   | None -> ()
   | Some identifier ->
       let dbh = est.dbh in
@@ -631,6 +944,69 @@ let store_parametrized_replaceable_event (est : est) (e : Nostr.t) : unit =
       ignore [%pgsql dbh "delete from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pubkey and kind = $kind and identifier = $identifier"];
       ignore
         [%pgsql dbh "insert into parametrized_replaceable_events_1_cbe75c8d53 (pubkey, kind, identifier, event_id, created_at) values ($pubkey, $kind, $identifier, $event_id, $created_at)"]
+
+(* {1 Lean: superseded versions} (lean.delete_superseded)
+
+   The current version of a replaceable/addressable event is the one its pointer names: meta_data
+   (kind 0), contact_lists (3), replaceable_events (10000-19999), parametrized_replaceable_events
+   (30000-39999 with a d tag). Its created_at decides (NIP-01: greater created_at, or equal and the
+   lower id): an older incoming version is deleted again and changes nothing, a newer one moves the
+   pointers and then the previous version's row is deleted (not its derived rows), except for the
+   kinds in keep_versions_kinds. *)
+type version_check =
+  | No_pointer (* no pointer for this event (3xxxx without d tag, regular kinds) *)
+  | Newest of string option (* the previous version's id, if any *)
+  | Older
+
+let version_check (est : est) (e : Nostr.t) : version_check =
+  let dbh = est.dbh and pubkey = e.pubkey and k = e.kind in
+  let decide = function
+    | [] -> Newest None
+    | (old_id, _) :: _ when old_id = e.id -> Newest None
+    | (old_id, old_created_at) :: _ ->
+        if Lean.newer ~created_at:e.created_at ~id:e.id ~old_created_at:(Int64.to_int old_created_at) ~old_id then
+          Newest (Some old_id)
+        else Older
+  in
+  if k = Nostr.kind_set_metadata then
+    decide
+      [%pgsql dbh "select m.value, ev.created_at from meta_data_1_323bc43167 m, event ev where m.key = $pubkey and ev.id = m.value"]
+  else if k = Nostr.kind_contact_list then
+    decide
+      [%pgsql dbh "select c.value, ev.created_at from contact_lists_1_1abdf474bd c, event ev where c.key = $pubkey and ev.id = c.value"]
+  else if 10000 <= k && k < 20000 then
+    let kind = i64 k in
+    decide
+      [%pgsql dbh "select r.event_id, ev.created_at from replaceable_events r, event ev where r.pubkey = $pubkey and r.kind = $kind and ev.id = r.event_id"]
+  else if 30000 <= k && k < 40000 then
+    match first_d_tag e with
+    | None -> No_pointer
+    | Some identifier ->
+        let kind = i64 k in
+        decide
+          [%pgsql dbh "select event_id, created_at from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pubkey and kind = $kind and identifier = $identifier limit 1"]
+  else No_pointer
+
+(* the pointer move of a newer addressable version when its predecessor's row is known: one
+   UPDATE instead of DELETE + INSERT *)
+let move_parametrized_replaceable_pointer (est : est) (e : Nostr.t) ~(exists : bool) : unit =
+  match first_d_tag e with
+  | None -> ()
+  | Some identifier ->
+      if not exists then store_parametrized_replaceable_event est e
+      else begin
+        let dbh = est.dbh in
+        let pubkey = e.pubkey and kind = i64 e.kind and event_id = e.id and created_at = i64 e.created_at in
+        ignore
+          [%pgsql dbh "update parametrized_replaceable_events_1_cbe75c8d53 set event_id = $event_id, created_at = $created_at where pubkey = $pubkey and kind = $kind and identifier = $identifier"]
+      end
+
+let delete_superseded_row (est : est) (id : string) : unit =
+  let dbh = est.dbh in
+  ignore [%pgsql dbh "delete from event where id = $id"];
+  memo_forget id;
+  Lean.Superseded.add id;
+  Atomic.incr Lean.superseded_deleted
 
 (* {1 Replaceable single-event dict writes (meta_data, mute lists, contact_lists)} *)
 
@@ -665,20 +1041,23 @@ let get_meta_data_event (est : est) (pubkey : string) : Nostr.t option =
   | mid :: _ -> get_event est mid
   | [] -> None
 
-let update_pubkey_ln_address (est : est) (pubkey : string) : unit =
+let rec update_pubkey_ln_address (est : est) (pubkey : string) : unit =
   match get_meta_data_event est pubkey with
   | None -> ()
-  | Some me -> (
-      match Yojson.Safe.from_string me.content with
-      | `Assoc kv -> (
-          match List.assoc_opt "lud16" kv with
-          | Some (`String lud16) when lud16 <> "" ->
-              let dbh = est.dbh in
-              ignore
-                [%pgsql dbh "insert into pubkey_ln_address_1_d3649b2898 (pubkey, ln_address) values ($pubkey, $lud16) on conflict (pubkey) do update set ln_address = excluded.ln_address"]
-          | _ -> ())
-      | _ -> ()
-      | exception _ -> ())
+  | Some me -> update_pubkey_ln_address_from est pubkey me
+
+(* [me] = the pubkey's current metadata event (lean: the kind 0 just imported, no re-read) *)
+and update_pubkey_ln_address_from (est : est) (pubkey : string) (me : Nostr.t) : unit =
+  match Yojson.Safe.from_string me.content with
+  | `Assoc kv -> (
+      match List.assoc_opt "lud16" kv with
+      | Some (`String lud16) when lud16 <> "" ->
+          let dbh = est.dbh in
+          ignore
+            [%pgsql dbh "insert into pubkey_ln_address_1_d3649b2898 (pubkey, ln_address) values ($pubkey, $lud16) on conflict (pubkey) do update set ln_address = excluded.ln_address"]
+      | _ -> ())
+  | _ -> ()
+  | exception _ -> ()
 
 (* {1 Contact list import} (Julia import_contact_list) *)
 
@@ -695,11 +1074,27 @@ let get_contact_list_event (est : est) (pubkey : string) : Nostr.t option =
 
 module SS = Set.Make (String)
 
-let import_contact_list (est : est) (e : Nostr.t) : unit =
-  let dbh = est.dbh in
+let rec import_contact_list (est : est) (e : Nostr.t) : unit =
   let old_follows =
     match get_contact_list_event est e.pubkey with Some old_e -> contact_list_follows old_e | None -> []
   in
+  import_contact_list_diff est e ~old_follows
+
+(* Lean (enabled): one read of the previous contact list (its id, created_at and tags) serves both
+   the "is it newer" check and the follow diff (the classic path reads it three times). *)
+and import_contact_list_lean (est : est) (e : Nostr.t) ~(newer_known : bool) : unit =
+  let dbh = est.dbh and key = e.pubkey in
+  let old = [%pgsql dbh "select ev.created_at, ev.tags from contact_lists_1_1abdf474bd c, event ev where c.key = $key and ev.id = c.value"] in
+  let newer = newer_known || (match old with [] -> true | (oc, _) :: _ -> i64 e.created_at > oc) in
+  if newer then begin
+    let old_follows =
+      match old with (_, tags) :: _ -> contact_list_follows { e with tags = parse_tags_json tags } | [] -> []
+    in
+    import_contact_list_diff est e ~old_follows
+  end
+
+and import_contact_list_diff (est : est) (e : Nostr.t) ~(old_follows : string list) : unit =
+  let dbh = est.dbh in
   upsert_pubkey_event_id est ~table:`Contact_lists ~key:e.pubkey ~value:e.id;
   let news = SS.of_list (contact_list_follows e) and olds = SS.of_list old_follows in
   let trusted = is_trusted_user est e.pubkey in
@@ -709,6 +1104,10 @@ let import_contact_list (est : est) (e : Nostr.t) : unit =
         let follower_pubkey = e.pubkey and follower_contact_list_event_id = e.id in
         ignore [%pgsql dbh "insert into pubkey_followers_1_d52305fb47 (pubkey, follower_pubkey, follower_contact_list_event_id) values ($follow_pubkey, $follower_pubkey, $follower_contact_list_event_id)"];
         if trusted then begin
+          if est.cfg.lean.lazy_counters then
+            (* lean: the first follower creates the row (no zero row per pubkey) *)
+            ignore [%pgsql dbh "insert into pubkey_followers_cnt_1_a6f7e200e7 (key, value) values ($follow_pubkey, 1) on conflict (key) do update set value = pubkey_followers_cnt_1_a6f7e200e7.value + 1"]
+          else
           ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = value + 1 where key = $follow_pubkey"];
           (!ext).notification est follow_pubkey e.created_at Notif.new_user_followed_you [ Apk e.pubkey ]
         end
@@ -743,6 +1142,9 @@ let import_directmsg (est : est) (e : Nostr.t) : unit =
       let dbh = est.dbh in
       let sender = e.pubkey and created_at = i64 e.created_at and event_id = e.id in
       let exists =
+        (* lean: the event claim already makes this insert once-only *)
+        if est.cfg.lean.enabled then false
+        else
         match [%pgsql dbh "select 1 from pubkey_directmsgs_1_c794110a2c where receiver = $receiver and event_id = $event_id limit 1"] with
         | [] -> false
         | _ -> true
@@ -773,7 +1175,17 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
   let delete_event eid =
     let deletion_event_id = e.id in
     ignore [%pgsql dbh "insert into deleted_events_1_0249f47b16 (event_id, deletion_event_id) values ($eid, $deletion_event_id) on conflict (event_id) do update set deletion_event_id = excluded.deletion_event_id"];
-    ignore [%pgsql dbh "delete from event where id = $eid"]
+    ignore [%pgsql dbh "delete from event where id = $eid"];
+    memo_forget eid
+  in
+  (* lean: the author check needs pubkey and kind only; the tags only for a repost *)
+  let get_deleted eid =
+    if est.cfg.lean.enabled then
+      match get_event_meta est eid with
+      | Some (_, _, kind) when kind = Nostr.kind_repost -> get_event est eid
+      | Some (pubkey, created_at, kind) -> Some { Nostr.id = eid; pubkey; created_at; kind; tags = []; content = ""; sig_ = "" }
+      | None -> None
+    else get_event est eid
   in
   List.iter
     (fun tg ->
@@ -783,7 +1195,7 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
           | None -> ()
           | Some eid -> (
               (* only delete if it belongs to the same author *)
-              match get_event est eid with
+              match get_deleted eid with
               | Some de when de.pubkey = e.pubkey ->
                   delete_event eid;
                   if de.kind = Nostr.kind_repost then
@@ -797,6 +1209,8 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
                                 let depk = de.pubkey and deid = de.id in
                                 ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set reposted = 0 where event_id = $reid and pubkey = $depk"];
                                 ignore [%pgsql dbh "delete from event_pubkey_action_refs_1_f32e1ff589 where ref_event_id = $deid and ref_pubkey = $depk"];
+                                if lean_stats est then stats_add est reid (fun d -> d.reposts <- d.reposts - 1)
+                                else
                                 ignore [%pgsql dbh "update event_stats_1_1b380f4869 set reposts = reposts - 1 where event_id = $reid"])
                         | _ -> ())
                       de.tags
@@ -839,7 +1253,7 @@ let handle_note_reply (est : est) (e : Nostr.t) : unit =
         event_hook est parent (Event_stats_cb ("replies", 1));
       insert_event_reply est ~parent ~reply:e.id ~reply_created_at:(i64 e.created_at);
       event_pubkey_action est ~eid:parent ~re:e ~action:"replied";
-      set_event_thread_parent est ~event_id:e.id ~parent;
+      if not est.cfg.lean.no_thread_parents then set_event_thread_parent est ~event_id:e.id ~parent;
       (!ext).ext_reply est e parent
   | None -> ());
   (!ext).import_reply_notifications est e
@@ -898,10 +1312,84 @@ type zap_job = {
   zj_amount_sats : int;
 }
 
+(* {1 Lean: the event transaction runner} (lean.transaction_per_event)
+
+   [f] (an event's side effects, after its claim committed) runs between BEGIN and COMMIT on
+   [est.dbh]. A deadlock or serialization failure rolls back and retries the whole of [f] (up to
+   [tx_max_attempts], with a random pause). Any other error rolls back and runs [f] once more
+   without a transaction: the classic autocommit path, so a statement that always fails costs what
+   it costs today (the rest still applies) instead of dropping the event's effects. Before COMMIT a
+   probe statement checks the transaction is still alive: a failed statement whose error was
+   swallowed somewhere would otherwise turn the COMMIT into a silent ROLLBACK. Work queued with
+   [after_commit] runs once the commit succeeded. Connection errors and cancellation propagate (the
+   worker reconnects). Nested calls just run [f]. *)
+let tx_max_attempts = 4
+
+let run_event_tx (est : est) (f : unit -> unit) : unit =
+  let st = Domain.DLS.get tx_key in
+  if st.tx_dbh <> None then f ()
+  else begin
+    let reset () =
+      st.tx_dbh <- None;
+      st.post_commit <- []
+    in
+    let rec attempt n =
+      let dbh = est.dbh in
+      match
+        PGOCaml.begin_work dbh;
+        st.tx_dbh <- Some dbh;
+        st.post_commit <- [];
+        f ();
+        ignore [%pgsql dbh "select 1"];
+        PGOCaml.commit dbh
+      with
+      | () ->
+          let post = List.rev st.post_commit in
+          reset ();
+          List.iter
+            (fun g ->
+              try g () with
+              | Eio.Cancel.Cancelled _ as ex -> raise ex
+              | exn -> Printf.eprintf "import_event: after commit: %s\n%!" (Printexc.to_string exn))
+            post
+      | exception (Eio.Cancel.Cancelled _ as ex) ->
+          reset ();
+          (try PGOCaml.rollback dbh with _ -> ());
+          raise ex
+      | exception ex when Postgres.is_connection_error ex ->
+          reset ();
+          raise ex
+      | exception ex ->
+          reset ();
+          (try PGOCaml.rollback dbh with _ -> ());
+          if is_retryable_tx_error ex && n < tx_max_attempts then begin
+            Atomic.incr Lean.tx_retries;
+            Eio_unix.sleep (0.005 +. Random.float (0.02 *. float_of_int n));
+            attempt (n + 1)
+          end
+          else begin
+            Atomic.incr Lean.tx_fallbacks;
+            Printf.eprintf "import_event: transaction abandoned after %d attempt(s) (%s); applying without one\n%!" n
+              (Printexc.to_string ex);
+            f ()
+          end
+    in
+    attempt 1
+  end
+
 (* The zap receipt's import side effects (event/pubkey zap stats, actions, ext hooks). Runs
    inline when no verification is needed, or later on a Zap_verifier domain (with that domain's
    own est) once the LNURL endpoint confirms the zapper. *)
-let apply_zap_effects (est : est) (j : zap_job) : unit =
+let rec apply_zap_effects (est : est) (j : zap_job) : unit =
+  let l = est.cfg.lean in
+  if (l.enabled || l.transaction_per_event) && current_scope () = None && not (in_event_tx ()) then begin
+    (* lean: a verified zap applied later is its own little event: scope and transaction *)
+    let run () = with_scope est j.zj_receipt (fun () -> apply_zap_effects_now est j) in
+    if l.transaction_per_event then run_event_tx est run else run ()
+  end
+  else apply_zap_effects_now est j
+
+and apply_zap_effects_now (est : est) (j : zap_job) : unit =
   let e = j.zj_receipt in
   (match j.zj_parent_eid with
   | Some parent ->
@@ -984,10 +1472,12 @@ let handle_categorized_people (est : est) (e : Nostr.t) : unit =
 
 (* {1 Relay list metadata / bookmarks} (Julia 1338-1353) *)
 
-let store_relay_list_metadata (est : est) (e : Nostr.t) : unit =
+let store_relay_list_metadata ?(force = false) (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
   let pubkey = e.pubkey and event_id = e.id in
   let newer =
+    force (* lean.delete_superseded: already decided against replaceable_events *)
+    ||
     match
       [%pgsql dbh "select ev.created_at from relay_list_metadata_1_801a17fc93 r, event ev where r.pubkey = $pubkey and ev.id = r.event_id"]
     with
@@ -1037,15 +1527,60 @@ let user_relay_urls (est : est) (pubkey : string) : string list =
 
 (* Julia update_fetcher_relays: publish the user's relays to fetcher_relays for the (separate)
    fetcher process. Called from the contact-list and relay-list-metadata branches. *)
+(* Lean (enabled): the same relay URLs with one read each, selecting only what is parsed (the
+   relay list's tags; the contact list's content, not its large tags). *)
+let user_relay_urls_lean (est : est) (pubkey : string) : string list =
+  let dbh = est.dbh in
+  let from_relay_list =
+    match
+      [%pgsql dbh "select ev.tags from relay_list_metadata_1_801a17fc93 r, event ev where r.pubkey = $pubkey and ev.id = r.event_id"]
+    with
+    | tags :: _ ->
+        List.filter_map
+          (fun tg ->
+            match (Nostr.tag_name tg, Nostr.tag_field tg 1) with
+            | Some "r", Some url when url <> "" -> Some url
+            | _ -> None)
+          (parse_tags_json tags)
+    | [] -> []
+  in
+  if from_relay_list <> [] then from_relay_list
+  else
+    match [%pgsql dbh "select ev.content from contact_lists_1_1abdf474bd c, event ev where c.key = $pubkey and ev.id = c.value"] with
+    | [] -> []
+    | content :: _ -> (
+        match Yojson.Safe.from_string content with
+        | `Assoc kv ->
+            List.filter_map
+              (fun (url, v) ->
+                if url = "" then None
+                else
+                  match v with
+                  | `Assoc markers when List.exists (fun (_, b) -> b = `Bool true) markers -> Some url
+                  | _ -> None)
+              kv
+        | _ -> []
+        | exception _ -> [])
+
 let update_fetcher_relays (est : est) ~(pubkey : string) ~(source_event_id : string option) : unit =
   let dbh = est.dbh in
+  if est.cfg.lean.enabled then
+    (* The fetcher polls updated_at for URLs it doesn't know yet and never forgets one, so bumping
+       known URLs (11 M non-HOT updates a month on the production cache host) told it nothing. *)
+    List.iter
+      (fun relay_url ->
+        ignore
+          [%pgsql dbh "insert into fetcher_relays (relay_url, updated_at, source_event_id) values ($relay_url, now(), $?source_event_id) on conflict (relay_url) do nothing"])
+      (user_relay_urls_lean est pubkey)
+  else
   List.iter
     (fun relay_url ->
       ignore
         [%pgsql dbh "insert into fetcher_relays (relay_url, updated_at, source_event_id) values ($relay_url, now(), $?source_event_id) on conflict (relay_url) do update set updated_at = excluded.updated_at"])
     (user_relay_urls est pubkey)
 
-let import_pubkey_bookmarks (est : est) (e : Nostr.t) : unit =
+let rec import_pubkey_bookmarks (est : est) (e : Nostr.t) : unit =
+  if est.cfg.lean.enabled then import_pubkey_bookmarks_diff est e else
   let dbh = est.dbh in
   let pubkey = e.pubkey in
   ignore [%pgsql dbh "delete from pubkey_bookmarks where pubkey = $pubkey"];
@@ -1061,12 +1596,42 @@ let import_pubkey_bookmarks (est : est) (e : Nostr.t) : unit =
       | _ -> ())
     e.tags
 
+(* Lean (enabled): the same rows as delete-all + reinsert, by diff (Lean.bookmark_diff): usually one
+   statement for the one bookmark added or removed. *)
+and import_pubkey_bookmarks_diff (est : est) (e : Nostr.t) : unit =
+  let dbh = est.dbh in
+  let pubkey = e.pubkey in
+  let existing =
+    List.map
+      (fun (id, plain) -> (id, plain = Some true))
+      [%pgsql dbh
+        "select ref_event_id, (ref_kind is null and ref_pubkey is null and ref_identifier is null) from pubkey_bookmarks where pubkey = $pubkey"]
+  in
+  let desired =
+    List.filter_map
+      (fun tg -> match (Nostr.tag_name tg, Nostr.tag_field tg 1) with Some "e", Some h -> decode32 h | _ -> None)
+      e.tags
+  in
+  let d = Lean.bookmark_diff ~existing ~desired in
+  if d.Lean.del_nonplain then
+    ignore
+      [%pgsql dbh
+        "delete from pubkey_bookmarks where pubkey = $pubkey and (ref_event_id is null or ref_kind is not null or ref_pubkey is not null or ref_identifier is not null)"];
+  List.iter
+    (fun ref_event_id -> ignore [%pgsql dbh "delete from pubkey_bookmarks where pubkey = $pubkey and ref_event_id = $ref_event_id"])
+    d.Lean.del_ids;
+  List.iter
+    (fun ref_event_id ->
+      ignore
+        [%pgsql dbh "insert into pubkey_bookmarks (pubkey, ref_event_id, ref_kind, ref_pubkey, ref_identifier) values ($pubkey, $ref_event_id, null, null, null)"])
+    d.Lean.ins
+
 let bookmark_eids (e : Nostr.t) : string list =
   List.filter_map
     (fun tg -> match (Nostr.tag_name tg, Nostr.tag_field tg 1) with Some "e", Some h -> decode32 h | _ -> None)
     e.tags
 
-let store_bookmarks (est : est) (e : Nostr.t) : unit =
+let store_bookmarks ?(force = false) (est : est) (e : Nostr.t) : unit =
   let dbh = est.dbh in
   let pubkey = e.pubkey and event_id = e.id in
   (* Julia compares against the previous bookmark event and only notifies newly-added eids
@@ -1076,7 +1641,7 @@ let store_bookmarks (est : est) (e : Nostr.t) : unit =
     | beid :: _ -> get_event est beid
     | [] -> None
   in
-  let newer = match old_be with None -> true | Some be -> e.created_at > be.created_at in
+  let newer = force || match old_be with None -> true | Some be -> e.created_at > be.created_at in
   if newer then begin
     ignore
       [%pgsql dbh "insert into bookmarks_1_43f5248b56 (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"];
@@ -1112,17 +1677,22 @@ let handle_highlight (est : est) (e : Nostr.t) : unit =
         | _ -> ())
     e.tags
 
-let dispatch_kind (est : est) (e : Nostr.t) : unit =
+(* [newer_known] (lean.delete_superseded): import_event already found this version newer than the
+   current one (NIP-01 order), so the per-kind "is it newer" checks are skipped. *)
+let dispatch_kind ?(newer_known = false) (est : est) (e : Nostr.t) : unit =
   let k = e.kind in
   if k = Nostr.kind_set_metadata then begin
-    if meta_data_should_update est ~pubkey:e.pubkey ~created_at:e.created_at then begin
+    if newer_known || meta_data_should_update est ~pubkey:e.pubkey ~created_at:e.created_at then begin
       upsert_pubkey_event_id est ~table:`Meta_data ~key:e.pubkey ~value:e.id;
       (!ext).ext_metadata_changed est e;
-      update_pubkey_ln_address est e.pubkey
+      (* lean: the event in hand is now the current metadata; no re-read *)
+      if est.cfg.lean.enabled then update_pubkey_ln_address_from est e.pubkey e
+      else update_pubkey_ln_address est e.pubkey
     end
   end
   else if k = Nostr.kind_contact_list then begin
-    if contact_list_should_update est ~pubkey:e.pubkey ~created_at:e.created_at then
+    if est.cfg.lean.enabled then import_contact_list_lean est e ~newer_known
+    else if newer_known || contact_list_should_update est ~pubkey:e.pubkey ~created_at:e.created_at then
       import_contact_list est e;
     update_fetcher_relays est ~pubkey:e.pubkey ~source_event_id:(Some e.id)
   end
@@ -1150,10 +1720,10 @@ let dispatch_kind (est : est) (e : Nostr.t) : unit =
   else if k = Nostr.kind_video_long_form || k = Nostr.kind_video_short_form then
     (!ext).ext_video_note est e
   else if k = Nostr.kind_relay_list_metadata then begin
-    store_relay_list_metadata est e;
+    store_relay_list_metadata ~force:newer_known est e;
     update_fetcher_relays est ~pubkey:e.pubkey ~source_event_id:(Some e.id)
   end
-  else if k = Nostr.kind_bookmarks then store_bookmarks est e
+  else if k = Nostr.kind_bookmarks then store_bookmarks ~force:newer_known est e
   else if k = Nostr.kind_highlight then handle_highlight est e
   else if k = Nostr.kind_reporting then begin
     if est.cfg.import_reporting then (!ext).import_reporting est e
@@ -1175,7 +1745,70 @@ let blocked_kinds = [ 29333 ]
    [Imported] = newly stored and dispatched. *)
 type import_result = Imported | Duplicate | Rejected
 
+(* The lean import path (any lean flag set). Each flag-off branch is the classic statement. *)
+let import_event_lean (est : est) (e : Nostr.t) : import_result =
+  let l = est.cfg.lean in
+  if est.cfg.verification_enabled && not (verify_event e) then Rejected
+  (* the kind checks cost nothing: before the deleted_events probe *)
+  else if (not (accepted_kind e.kind)) || List.mem e.kind blocked_kinds then Rejected
+  else if not (Lean.kind_allowed l e.kind) then begin
+    Atomic.incr Lean.kind_rejected;
+    Rejected
+  end
+  else if l.delete_superseded && Lean.Superseded.mem e.id then Duplicate
+  else if event_deleted est e.id then Rejected
+  else if not ((!ext).ext_preimport_check est e) then Rejected
+  else if not (store_event est e) then Duplicate
+  else begin
+    let side_effects () =
+      with_scope est e (fun () ->
+          let keep = Lean.keeps_versions l e.kind in
+          let check =
+            if not l.delete_superseded then No_pointer
+            else
+              try version_check est e with
+              | ex when not (in_event_tx () || Postgres.is_connection_error ex) ->
+                  (* undecided: the classic path (pointer moves, nothing deleted) *)
+                  Printf.eprintf "import_event: version_check: %s\n%!" (Printexc.to_string ex);
+                  No_pointer
+          in
+          if check = Older && not keep then
+            (* an older version than the current one changes nothing: its row goes again, before any
+               derived row is written *)
+            guard "superseded" (fun () -> delete_superseded_row est e.id)
+          else begin
+            if not l.no_event_created_at then set_event_created_at est e;
+            if l.no_pubkey_ids || l.lazy_counters then track_pubkey_lean est e.pubkey else track_pubkey est e.pubkey;
+            if is_pubkey_event_kind e.kind then
+              insert_pubkey_event ?kind:(if l.pubkey_events_kind then Some (i64 e.kind) else None) est ~pubkey:e.pubkey
+                ~event_id:e.id ~created_at:(i64 e.created_at)
+                ~is_reply:(if is_reply_event e then 1L else 0L);
+            if is_note_kind e.kind && not l.lazy_counters then event_stats_init est e;
+            match check with
+            | Older -> () (* a kept kind (keep_versions_kinds): the row stays, nothing moves *)
+            | No_pointer | Newest _ ->
+                let newer_known = check <> No_pointer in
+                guard "dispatch" (fun () -> dispatch_kind ~newer_known est e);
+                if 10000 <= e.kind && e.kind < 20000 then guard "replaceable" (fun () -> store_replaceable_event est e);
+                if 30000 <= e.kind && e.kind < 40000 then
+                  guard "parametrized_replaceable" (fun () ->
+                      match check with
+                      | Newest prev -> move_parametrized_replaceable_pointer est e ~exists:(prev <> None)
+                      | _ -> store_parametrized_replaceable_event est e);
+                (match check with
+                | Newest (Some old_id) when not keep ->
+                    (* after dispatch: kind 3's follow diff has read the previous list *)
+                    guard "superseded" (fun () -> delete_superseded_row est old_id)
+                | _ -> ())
+          end;
+          guard "event_hooks" (fun () -> fire_event_hooks est e))
+    in
+    if l.transaction_per_event then run_event_tx est side_effects else side_effects ();
+    Imported
+  end
+
 let import_event (est : est) (e : Nostr.t) : import_result =
+  if Lean.active est.cfg.lean then import_event_lean est e else
   if est.cfg.verification_enabled && not (verify_event e) then Rejected
   else if event_deleted est e.id then Rejected
   else if not (accepted_kind e.kind) then Rejected

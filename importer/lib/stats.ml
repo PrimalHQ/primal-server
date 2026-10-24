@@ -189,6 +189,13 @@ let report_loop ?(watchdog_stall_s = 180) ~clock ~capacity ~workers (t : t) : un
     (* Any fiber stuck non-idle > 30s gets called out (worst 3), so a partial wedge — a few
        workers pinned on one job — is visible long before the watchdog would fire. *)
     let stuck = Phases.stuck_summary ~min_age:30.0 () in
+    (* lean counters, shown once nonzero: kind-allowlist refusals, superseded rows deleted,
+       transaction retries / fallbacks *)
+    let lean_part =
+      let kr = g Lean.kind_rejected and sd = g Lean.superseded_deleted and tr = g Lean.tx_retries and tf = g Lean.tx_fallbacks in
+      if kr + sd + tr + tf = 0 then "" else Printf.sprintf " | lean krej %d sup %d txr %d txf %d" kr sd tr tf
+    in
+    let stuck = lean_part ^ stuck in
     Printf.printf
       "[importer %s up %s] recv %d/s  imp %d/s  dup %d/s  rej %d/s  err %d/s | q %d/%d %.1f%% qw %.1fs | busy %d/%d | lnurl %d/%d/%d | zap %d/%d/%d/%d | push %d | tot %d | rss %s heap %s | r=%d%s\n%!"
       (Procinfo.timestamp ()) (Procinfo.fmt_hms uptime) d_recv d_imp d_dup d_rej d_err depth
