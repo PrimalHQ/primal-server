@@ -1,4 +1,4 @@
-(* primal-api runtime configuration: one JSON file, every key required except "ext" and "lean" (the
+(* primal-api runtime configuration: one JSON file, every key required except "ext", "lean" and "default_relays" (the
    README's table). Keys the parser does not know are ignored, so a config may still carry removed ones. *)
 
 exception Config_error of string
@@ -167,7 +167,7 @@ let of_json (j : Yojson.Safe.t) : t =
           | None -> raise (Config_error "relay_proxy: expected host:port")));
     dvm_relays = (match field j "dvm_relays" with `List l -> List.map U.to_string l | _ -> raise (Config_error "dvm_relays: expected a list"));
     default_relays =
-      (match field j "default_relays" with
+      (match U.member "default_relays" j with (* optional: absent = the default list *)
       | `Null -> default_default_relays
       | `List (_ :: _ as l) -> List.map U.to_string l
       | _ -> raise (Config_error "default_relays: expected a non-empty list"));
