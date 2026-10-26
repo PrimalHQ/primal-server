@@ -986,21 +986,11 @@ let get_suggested_users (ctx : ctx) (_ : Kw.t) : outcome =
 
 (* {2 misc} *)
 
-(* app_ext.jl get_default_relays: primal + one well-known + four random recently-seen relays *)
+(* app_ext.jl get_default_relays: the relays a new account starts with (onboarding, "reset to default
+   relays"). Julia picked four relays the importer had seen in the last two hours (known_relays) plus two
+   fixed ones; known_relays has had no writer since 2026-07, so every call failed. Now the configured list. *)
 let get_default_relays (ctx : ctx) (_ : Kw.t) : outcome =
-  let mined = with_cache ctx (fun c -> Queries.mined_relays c) |> List.sort_uniq compare in
-  if List.length mined < 4 then julia_error (* Julia: @assert *)
-  else begin
-    let arr = Array.of_list mined in
-    let picked = ref [] in
-    while List.length !picked < 4 do
-      let r = arr.(Random.int (Array.length arr)) in
-      if not (List.mem r !picked) then picked := !picked @ [ r ]
-    done;
-    let known = [| "wss://relay.damus.io"; "wss://nos.lol"; "wss://relay.nostr.band"; "wss://relayable.org" |] in
-    let relays = "wss://relay.primal.net" :: known.(Random.int 4) :: !picked in
-    Handled (messages [ content_msg Kind.default_relays (Yojson.Safe.to_string (`List (List.map (fun r -> `String r) relays))) ])
-  end
+  Handled (messages [ content_msg Kind.default_relays (Yojson.Safe.to_string (`List (List.map (fun r -> `String r) ctx.cfg.default_relays))) ])
 
 (* app_ext.jl get_media_metadata *)
 let get_media_metadata (ctx : ctx) (kw : Kw.t) : outcome =

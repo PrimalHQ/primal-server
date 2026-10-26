@@ -55,6 +55,7 @@ type t = {
   monitoring_db : Postgres.conninfo option; (* events_nip46: the monitoring host's monitoring_events table *)
   relay_proxy : (string * int) option; (* SOCKS5 host, port for outbound relay connections (Main.PROXY) *)
   dvm_relays : string list; (* DVMFeedChecker.RELAYS: where DVM job requests are published *)
+  default_relays : string list; (* get_default_relays' answer (a new account's relay list), the Primal relay first *)
   dvm_requester_seckey : string option; (* raw 32 bytes; App.DVM_REQUESTER_KEYPAIR *)
   (* the HTTP services *)
   internal_http_port : int; (* the InternalServices router (Internal_http) *)
@@ -86,6 +87,10 @@ let rstr_opt j key = match field j key with `Null -> None | v -> Some (U.to_stri
 
 let conninfo_of_json (j : Yojson.Safe.t) : Postgres.conninfo =
   { Postgres.host = rstr j "host"; port = rint j "port"; user = rstr j "user"; database = rstr j "database" }
+
+(* the most used open write relays in the relay lists (kind 10002) of accounts with 10+ followers, all
+   answering NIP-11 without payment or auth (2026-10-26); the Primal relay first *)
+let default_default_relays = [ "wss://relay.primal.net"; "wss://relay.damus.io"; "wss://nos.lol"; "wss://relay.snort.social" ]
 
 let of_json (j : Yojson.Safe.t) : t =
   {
@@ -161,6 +166,11 @@ let of_json (j : Yojson.Safe.t) : t =
           | Some i -> ( match int_of_string_opt (String.sub p (i + 1) (String.length p - i - 1)) with Some port -> Some (String.sub p 0 i, port) | None -> raise (Config_error "relay_proxy: expected host:port"))
           | None -> raise (Config_error "relay_proxy: expected host:port")));
     dvm_relays = (match field j "dvm_relays" with `List l -> List.map U.to_string l | _ -> raise (Config_error "dvm_relays: expected a list"));
+    default_relays =
+      (match field j "default_relays" with
+      | `Null -> default_default_relays
+      | `List (_ :: _ as l) -> List.map U.to_string l
+      | _ -> raise (Config_error "default_relays: expected a non-empty list"));
     dvm_requester_seckey =
       (match rstr_opt j "dvm_requester_seckey" with
       | None -> None

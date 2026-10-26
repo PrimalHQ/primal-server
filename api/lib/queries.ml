@@ -511,15 +511,6 @@ let video_thumbnails (c : Db.cache Db.conn) ~(url : string) : string list =
     "select mu.media_url from video_thumbnails vt, get_media_url(vt.thumbnail_url) mu where vt.video_url = $url"]
   |> List.filter_map Fun.id
 
-(* app_ext.jl get_default_relays: relays seen importing in the last two hours *)
-let mined_relays (c : Db.cache Db.conn) : string list =
-  let dbh = Db.raw c in
-  [%pgsql dbh
-    "select (case when rum.dest is not null then rum.dest else kr.relay_url end) \
-     from known_relays kr left join relay_url_map rum on kr.relay_url = rum.src \
-     where kr.last_import_at >= now() - interval '2 hours'"]
-  |> List.filter_map Fun.id
-
 (* {1 Content moderation post-filter} (app.jl content_moderation_filtering_2) *)
 
 (* hex pubkeys of [pubkeys_json] hidden for [user_pubkey] in [scope] ("content"/"trending") *)

@@ -238,6 +238,7 @@ Content and services:
 | `import_events_line_server` | `{host, port}` \| null | the importer's import listener for `import_events` |
 | `relay_proxy` | `socks5h://host:port` \| null | SOCKS5 proxy for relay connections, DVM requests and S3 calls |
 | `dvm_relays` | list of ws URLs | relays for DVM job requests |
+| `default_relays` | list of ws URLs (optional) | `get_default_relays`' answer; default: the Primal relay, relay.damus.io, nos.lol, relay.snort.social |
 | `dvm_requester_seckey` | 64 hex \| null | signs DVM job requests (null: live `dvm_feed` answers `NOTICE "error"`) |
 | `primal_dvm_pubkeys` | list of hex | DVMs marked `is_primal` in DVM feed metadata |
 | `index_dirs` | `{host: dir}` | web-app directory (with `index.html`) per `Host` for preview pages |
