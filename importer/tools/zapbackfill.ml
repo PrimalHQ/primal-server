@@ -123,7 +123,7 @@ let () =
       incr total;
       match
         [%pgsql dbh
-            "select zap_receipt_id from og_zap_receipts_1_dc85307383 where zap_receipt_id = $id \
+            "select zap_receipt_id from og_zap_receipts where zap_receipt_id = $id \
              limit 1"]
       with
       | _ :: _ -> incr skipped (* effects already applied (live import or a previous run) *)

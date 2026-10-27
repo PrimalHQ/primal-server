@@ -379,6 +379,18 @@ let import_zap_receipt (est : CS.est) (e : Nostr.t) (parent_eid : string) (amoun
   let zap_receipt_id = e.id and created_at = i64 e.created_at in
   let sender = CS.zap_sender e and receiver = zap_receiver e in
   let amount = i64 amount_sats and event_id = Some parent_eid in
+  if est.CS.cfg.CS.lean.zap_merge then
+    (* the receipt's row in zap_receipts (the DAG fills target_eid, sender and satszapped, from its own
+       tags); og_zap_receipts is the view of the rows with og_amount_sats. A receipt without sender or
+       receiver fails as og_zap_receipts' not-null columns made it fail. *)
+    let () = if sender = None || receiver = None then failwith "og zap receipt: no sender or receiver" in
+    ignore
+      [%pgsql dbh
+        "insert into zap_receipts_1_9fe40119b2 (eid, created_at, receiver, imported_at, og_sender, og_amount_sats, og_event_id) \
+         values ($zap_receipt_id, $created_at, $?receiver, \
+                 coalesce((select imported_at from event where id = $zap_receipt_id), extract(epoch from now())::int8), $?sender, $amount, $?event_id) \
+         on conflict (eid) do update set og_sender = excluded.og_sender, og_amount_sats = excluded.og_amount_sats, og_event_id = excluded.og_event_id"]
+  else
   ignore
     [%pgsql dbh
       "insert into og_zap_receipts_1_dc85307383 (zap_receipt_id, created_at, sender, receiver, amount_sats, event_id) \
@@ -619,6 +631,8 @@ let str_contains (hay : string) (needle : string) : bool =
 let gate_mutelist (est : CS.est) (recipient : string) (arr : CS.notif_arg array) : bool =
   let dbh = est.CS.dbh in
   let mute_event =
+    if est.CS.cfg.CS.lean.Lean.pointer_views then CS.current_replaceable_event est ~pubkey:recipient ~kind:Nostr.kind_mute_list
+    else
     match [%pgsql dbh "select value from mute_list_1_f693a878b9 where key = $recipient"] with
     | mid :: _ -> CS.get_event est mid
     | [] -> None
@@ -897,6 +911,7 @@ let import_reply_notifications (est : CS.est) (e : Nostr.t) : unit =
 (* Seed pubkey_zapped for a newly-tracked pubkey (Julia ext_pubkey). *)
 let ext_pubkey (est : CS.est) (pubkey : string) : unit =
   let dbh = est.CS.dbh in
+  if est.CS.cfg.CS.lean.Lean.pubkey_stats then () (* no zero rows in pubkey_stats *) else
   ignore
     [%pgsql dbh "insert into pubkey_zapped_1_17f1f622a9 (pubkey, zaps, satszapped) values ($pubkey, 0, 0) on conflict do nothing"]
 
@@ -912,6 +927,8 @@ let update_user_search ?(current : (string * string) option) (est : CS.est) (pub
     match
       match current with
       | Some c -> [ c ]
+      | None when est.CS.cfg.CS.lean.Lean.pointer_views ->
+          [%pgsql dbh "select id, content from event where pubkey = $pubkey and kind = 0 order by created_at desc, id limit 1"]
       | None ->
       [%pgsql dbh
         "select m.value, e.content from meta_data_1_323bc43167 m, event e where m.key = $pubkey and e.id = m.value"]
@@ -1054,7 +1071,11 @@ let ext_pubkey_zap (est : CS.est) (e : Nostr.t) (zapped_pk : string) (amount_sat
   | Some sender when ext_is_human est sender ->
       let dbh = est.CS.dbh in
       let amount = i64 amount_sats in
-      if est.CS.cfg.CS.lean.Lean.lazy_counters then
+      if est.CS.cfg.CS.lean.Lean.pubkey_stats then
+        ignore
+          [%pgsql dbh "insert into pubkey_stats (pubkey, zaps, satszapped) values ($zapped_pk, 1, $amount) \
+                       on conflict (pubkey) do update set zaps = pubkey_stats.zaps + 1, satszapped = pubkey_stats.satszapped + excluded.satszapped"]
+      else if est.CS.cfg.CS.lean.Lean.lazy_counters then
         (* lean: the first zap creates the row (no zero row per pubkey) *)
         ignore
           [%pgsql dbh "insert into pubkey_zapped_1_17f1f622a9 (pubkey, zaps, satszapped) values ($zapped_pk, 1, $amount) \
@@ -1155,7 +1176,29 @@ let score_event_cb (est : CS.est) (e : Nostr.t) (initiator : string) (scored_at 
       let event_id = e.id and rk = i64 ref_kind in
       let lean = est.CS.cfg.CS.lean in
       let dup =
-        if lean.Lean.enabled then
+        if lean.Lean.no_action_tables then begin
+          (* the initiator's earlier action of this kind on the event (the acting event's own row is
+             left out by time, wherever its hook fires): likes are reactions whose content is a like
+             (like_content), replies those event_replies links to this parent, zaps the verified
+             receipts (sender from the description) *)
+          let before = i64 scored_at in
+          let found =
+            if ref_kind = Nostr.kind_reaction then
+              [%pgsql dbh "select 1 from basic_tags_6_62c3d17c2f bt, event ev where bt.arg1 = $event_id and bt.tag = 'e' and bt.pubkey = $initiator \
+                           and bt.kind = 7 and bt.created_at < $before and ev.id = bt.id \
+                           and (ev.content = '' or left(ev.content, 1) in ('+', chr(129305), chr(10084), chr(65039))) limit 1"]
+            else if ref_kind = Nostr.kind_text_note then
+              [%pgsql dbh "select 1 from basic_tags_6_62c3d17c2f bt, event_replies_1_9d033b5bb3 er where bt.arg1 = $event_id and bt.tag = 'e' \
+                           and bt.pubkey = $initiator and bt.kind = 1 and bt.created_at < $before and er.reply_event_id = bt.id and er.event_id = $event_id limit 1"]
+            else if ref_kind = Nostr.kind_repost then
+              [%pgsql dbh "select 1 from basic_tags_6_62c3d17c2f bt where bt.arg1 = $event_id and bt.tag = 'e' and bt.pubkey = $initiator \
+                           and bt.kind = 6 and bt.created_at < $before limit 1"]
+            else
+              [%pgsql dbh "select 1 from og_zap_receipts z where z.event_id = $event_id and z.sender = $initiator and z.created_at < $before limit 1"]
+          in
+          found <> []
+        end
+        else if lean.Lean.enabled then
           (* the same decision (a second ref exists) without counting every ref of a viral note: the
              scan stops at the second match. Constant time needs an index on
              event_pubkey_action_refs (event_id, ref_pubkey, ref_kind). *)
@@ -1401,7 +1444,7 @@ let user_settings (est : CS.est) (pubkey : string) : Yojson.Safe.t = Cmr.user_se
 type cmr = Cmr.t
 
 let compile_content_moderation_rules (est : CS.est) (pubkey : string) : cmr =
-  Cmr.compile ~dbh:est.CS.dbh ~mem_dbh:est.CS.mem_dbh ~defaults:(default_settings ()) ~get_event:(CS.get_event est) pubkey
+  Cmr.compile ~pointer_views:est.CS.cfg.CS.lean.Lean.pointer_views ~dbh:est.CS.dbh ~mem_dbh:est.CS.mem_dbh ~defaults:(default_settings ()) ~get_event:(CS.get_event est) pubkey
 
 let make_tsquery = Cmr.make_tsquery
 let import_content_moderation_rules (est : CS.est) (user_pubkey : string) (cmr : cmr) : unit =
@@ -1426,6 +1469,9 @@ let get_user_relays (est : CS.est) (pubkey : string) : string list =
   let dbh = est.CS.dbh in
   let from_relay_list =
     match
+      if est.CS.cfg.CS.lean.Lean.pointer_views then
+        [%pgsql dbh "select tags from event where pubkey = $pubkey and kind = 10002 order by created_at desc, id limit 1"]
+      else
       [%pgsql dbh
         "select e.tags from relay_list_metadata_1_801a17fc93 r, event e where r.pubkey = $pubkey and e.id = r.event_id"]
     with
@@ -1440,6 +1486,9 @@ let get_user_relays (est : CS.est) (pubkey : string) : string list =
     if from_relay_list <> [] then from_relay_list
     else
       match
+        if est.CS.cfg.CS.lean.Lean.pointer_views then
+          [%pgsql dbh "select content from event where pubkey = $pubkey and kind = 3 order by created_at desc, id limit 1"]
+        else
         [%pgsql dbh
           "select e.content from contact_lists_1_1abdf474bd c, event e where c.key = $pubkey and e.id = c.value"]
       with

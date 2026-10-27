@@ -102,7 +102,6 @@ type t =
   | Set_last_time_user_was_online
   | Report_user
   | Report_note
-  | Relays
   | Trusted_users
   | Client_config
   | Network_stats
@@ -268,7 +267,6 @@ let names : (string * t) list =
     ("set_last_time_user_was_online", Set_last_time_user_was_online);
     ("report_user", Report_user);
     ("report_note", Report_note);
-    ("relays", Relays);
     ("trusted_users", Trusted_users);
     ("client_config", Client_config);
     ("network_stats", Network_stats);
@@ -459,7 +457,6 @@ let dispatch (ctx : Handlers.ctx) (f : t) (kw : Kw.t) : Response.outcome =
   | Set_last_time_user_was_online -> run ~moderate:false Handlers.set_last_time_user_was_online
   | Report_user -> run ~moderate:false Handlers.report_user
   | Report_note -> run ~moderate:false Handlers.report_note
-  | Relays -> run ~moderate:false Handlers.relays
   | Trusted_users -> run Handlers.trusted_users
   | Client_config -> run ~moderate:false Handlers.client_config
   | Network_stats -> run ~moderate:false Handlers.network_stats

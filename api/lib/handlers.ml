@@ -2994,11 +2994,6 @@ let report_id (ctx : ctx) (kw : Kw.t) ~typ ~id : outcome =
 let report_user (ctx : ctx) (kw : Kw.t) : outcome = report_id ctx kw ~typ:1 ~id:(Kw.hex32_exn kw "pubkey")
 let report_note (ctx : ctx) (kw : Kw.t) : outcome = report_id ctx kw ~typ:2 ~id:(Kw.hex32_exn kw "event_id")
 
-let relays (ctx : ctx) (kw : Kw.t) : outcome =
-  let limit = Kw.int kw "limit" ~default:20 in
-  let rows = with_cache ctx (fun c -> Queries.relays_top c ~limit) in
-  Handled (messages [ content_msg Kind.relays (Yojson.Safe.to_string (`Assoc (List.map (fun (u, n) -> (u, i64json n)) rows))) ])
-
 let trusted_users (ctx : ctx) (kw : Kw.t) : outcome =
   let limit = min 10000 (Kw.int kw "limit" ~default:500) in
   with_cache ctx (fun c ->
@@ -3611,7 +3606,7 @@ let cache_get_event (c : Db.cache Db.conn) (eid : string) : Nostr.t option =
   | [] -> None
 
 let compile_cmr (ctx : ctx) (c : Db.cache Db.conn) (m : Db.membership Db.conn) (pubkey : string) : Cmr.t =
-  Cmr.compile ~dbh:(Db.raw c) ~mem_dbh:(Db.raw m) ~defaults:(Cmr.default_settings (Some (cm_file ctx "default-settings.json"))) ~get_event:(cache_get_event c) pubkey
+  Cmr.compile ~pointer_views:(Lean.pointer_views ()) ~dbh:(Db.raw c) ~mem_dbh:(Db.raw m) ~defaults:(Cmr.default_settings (Some (cm_file ctx "default-settings.json"))) ~get_event:(cache_get_event c) pubkey
 
 (* app_ext.jl set_app_settings: keys of the stored settings missing from the new event are carried
    over; the event is stored; notification settings and the compiled moderation rules follow (Julia
@@ -3655,7 +3650,7 @@ let is_hidden_on_primal_nsfw (ctx : ctx) (c : Db.cache Db.conn) (cmr : Cmr.t) ~p
   match ctx.cfg.algos_user_pubkey with
   | None -> false
   | Some apk -> (
-      match Cmr.list_event_id ~dbh:(Db.raw c) `Mute_list apk with
+      match Cmr.list_event_id ~pointer_views:(Lean.pointer_views ()) ~dbh:(Db.raw c) `Mute_list apk with
       | None -> false
       | Some eid ->
           let pks = match cache_get_event c eid with Some e -> p_tag_pubkeys (Yojson.Safe.to_string (Nostr.to_json e)) | None -> [] in

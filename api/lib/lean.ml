@@ -6,7 +6,8 @@
    "lean": {
      "enabled": true,                          the lean paths (all of the items below)
      "follows_count_from_followers": false,    user_profile follows count from pubkey_followers
-     "thread_parents_from_basic_tags": false   thread parents parsed from the event's tags
+     "thread_parents_from_basic_tags": false,  thread parents parsed from the event's tags
+     "pointer_views": false                    lean schema iteration 2: current versions read from event
    }
    v}
 
@@ -21,11 +22,12 @@ type t = {
   enabled : bool;
   follows_count_from_followers : bool; (* C7: least(5000, count) of pubkey_followers rows *)
   thread_parents_from_basic_tags : bool; (* C13: the importer's parse_parent_eid over event tags *)
+  pointer_views : bool; (* iteration 2: the pointer tables are not written (mute lists from event) *)
 }
 
-let off = { enabled = false; follows_count_from_followers = false; thread_parents_from_basic_tags = false }
+let off = { enabled = false; follows_count_from_followers = false; thread_parents_from_basic_tags = false; pointer_views = false }
 
-let keys = [ "enabled"; "follows_count_from_followers"; "thread_parents_from_basic_tags" ]
+let keys = [ "enabled"; "follows_count_from_followers"; "thread_parents_from_basic_tags"; "pointer_views" ]
 
 let of_json (j : Yojson.Safe.t) : t =
   match j with
@@ -39,7 +41,7 @@ let of_json (j : Yojson.Safe.t) : t =
         | Some _ -> raise (Error (Printf.sprintf "lean.%s: expected a bool" k))
       in
       { enabled = b "enabled"; follows_count_from_followers = b "follows_count_from_followers";
-        thread_parents_from_basic_tags = b "thread_parents_from_basic_tags" }
+        thread_parents_from_basic_tags = b "thread_parents_from_basic_tags"; pointer_views = b "pointer_views" }
   | _ -> raise (Error "lean: expected an object or null")
 
 let current : t Atomic.t = Atomic.make off
@@ -48,6 +50,7 @@ let get () = Atomic.get current
 let enabled () = (get ()).enabled
 let follows_count_from_followers () = let t = get () in t.enabled && t.follows_count_from_followers
 let thread_parents_from_basic_tags () = let t = get () in t.enabled && t.thread_parents_from_basic_tags
+let pointer_views () = let t = get () in t.enabled && t.pointer_views
 
 (* The kinds the importer creates an event_stats row for (cache_storage.ml is_note_kind), without
    30023 (articles answer from reads). With lazy counter rows a missing row of one of these is all

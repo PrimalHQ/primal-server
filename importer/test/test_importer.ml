@@ -30,6 +30,17 @@ let test_lean_parse () =
   Alcotest.(check bool) "zero days" true (is_error {|{"hooks_expire_days": 0}|});
   Alcotest.(check bool) "not an object" true (is_error {|[1]|})
 
+let test_lean_contact_list_versions () =
+  let l = ok {|{"delete_superseded": true, "zap_merge": true, "contact_list_versions": 30}|} in
+  Alcotest.(check bool) "zap_merge" true l.zap_merge;
+  Alcotest.(check int) "contact list versions" 30 l.contact_list_versions;
+  Alcotest.(check bool) "kind 3 keeps versions" true (L.keeps_versions l 3);
+  Alcotest.(check bool) "kind 0 doesn't" false (L.keeps_versions l 0);
+  Alcotest.(check bool) "off: kind 3 doesn't" false (L.keeps_versions L.off 3);
+  Alcotest.(check bool) "zap_merge alone is active" true (L.active (ok {|{"zap_merge": true}|}));
+  Alcotest.(check bool) "negative" true (is_error {|{"contact_list_versions": -1}|});
+  Alcotest.(check bool) "not an int" true (is_error {|{"contact_list_versions": true}|})
+
 (* A complete importer config as the deploy writes it (no "lean" key): it must still parse. *)
 let base_config =
   {|{"firehose_host": "127.0.0.1", "firehose_port": 9017, "num_workers": 4, "queue_capacity": 10000,
@@ -155,6 +166,7 @@ let () =
       ( "lean",
         [
           Alcotest.test_case "parse" `Quick test_lean_parse;
+          Alcotest.test_case "contact list versions" `Quick test_lean_contact_list_versions;
           Alcotest.test_case "config" `Quick test_config;
           Alcotest.test_case "kind allowlist" `Quick test_kind_allowlist;
           Alcotest.test_case "newer" `Quick test_newer;

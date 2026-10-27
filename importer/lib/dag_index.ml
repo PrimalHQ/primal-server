@@ -37,8 +37,12 @@ let import_basic_tags (est : CS.est) (e : Nostr.t) : unit =
          returning pubkey, kind, tag, arg1) \
        insert into reads_interactions (pubkey, eid) \
        select distinct ins.pubkey, ins.arg1 from ins \
-       where ins.tag = 'e' and ins.kind in (1, 6, 7) and exists (select 1 from reads_versions_12_b537d4df66 rv where rv.eid = ins.arg1) \
+       where ins.tag = 'e' and ins.kind in (1, 6, 7) and exists (select 1 from reads_versions rv where rv.eid = ins.arg1) \
        on conflict do nothing"]
+
+(* lean.basic_tags_at_import: the importer writes an event's basic_tags rows when it stores the
+   event (the DAG's later insert of the same rows does nothing) *)
+let () = CS.basic_tags_hook := import_basic_tags
 
 (* DAG.parse_zap_receipt (dag.jl:1847) + import_zap_receipts insert for one receipt. *)
 let import_zap_receipt (est : CS.est) (e : Nostr.t) : unit =
@@ -71,9 +75,12 @@ let import_zap_receipt (est : CS.est) (e : Nostr.t) : unit =
         match [%pgsql dbh "select imported_at from event where id = $id"] with
         | imported_at :: _ ->
             ignore
+              (* a row the importer's zap path made first (lean.zap_merge) gets the DAG's columns *)
               [%pgsql dbh
                 "insert into zap_receipts_1_9fe40119b2 (eid, created_at, target_eid, sender, receiver, satszapped, imported_at) \
-                 values ($id, $created_at, $target_eid, $sender, $receiver, $satszapped, $imported_at) on conflict do nothing"]
+                 values ($id, $created_at, $target_eid, $sender, $receiver, $satszapped, $imported_at) \
+                 on conflict (eid) do update set target_eid = excluded.target_eid, sender = excluded.sender, satszapped = excluded.satszapped \
+                 where zap_receipts_1_9fe40119b2.sender is null"]
         | [] -> ())
     | _ -> ()
   end
@@ -252,10 +259,10 @@ let update_single_poll_stats (est : CS.est) (poll_id : string) : bool =
               (if !amount_msats = 0 then
                  match
                    [%pgsql dbh
-                     "select amount_sats from og_zap_receipts_1_dc85307383 where zap_receipt_id = $zap_eid limit 1"]
+                     "select amount_sats from og_zap_receipts where zap_receipt_id = $zap_eid limit 1"]
                  with
-                 | sats :: _ -> amount_msats := Int64.to_int sats * 1000
-                 | [] -> ());
+                 | Some sats :: _ -> amount_msats := Int64.to_int sats * 1000
+                 | _ -> ());
               match (!option_id, !zap_sender) with
               | Some option_id, Some sender_pk
                 when Hashtbl.mem opts option_id && CSE.ext_is_human est sender_pk ->

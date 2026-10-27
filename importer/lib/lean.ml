@@ -22,6 +22,18 @@ type t = {
   keep_versions_kinds : int list; (* ... except these kinds (default [30023]) *)
   kind_allowlist : IS.t option; (* kinds 0, 3, 10000-19999, 30000-39999 imported only if listed *)
   hooks_expire_days : int; (* pending event_hooks older than this are deleted (with [enabled]) *)
+  (* lean schema, iteration 2 (infrastructure docs/proposal-lean-schema-iteration2-20261026.md) *)
+  thread_parents_view : bool; (* stop writing event_thread_parents (a view over event_replies, unique per reply) *)
+  delete_derived : bool; (* a deleted event (superseded, kind 5) also loses its tag/mention/feed rows *)
+  basic_tags_at_import : bool; (* the event's p/P/e tags into basic_tags at import, not minutes later by the DAG *)
+  no_action_tables : bool; (* stop writing event_pubkey_actions(_refs): the actions are read from basic_tags *)
+  pointer_views : bool; (* stop writing the pointer tables; the current version is read from event *)
+  pubkey_stats : bool; (* the per-pubkey counters (followers, zaps) in one pubkey_stats row *)
+  no_ln_address : bool; (* stop writing pubkey_ln_address (a view over the kind-0 events) *)
+  zap_merge : bool; (* og_zap_receipts' rows go into zap_receipts (og_* columns); og_zap_receipts is a view *)
+  contact_list_versions : int;
+      (* > 0: kind 3 keeps the versions membership_recovery_contact_lists shows (the longest list of
+         each of the newest this-many days) and the current one, the rest deleted; 0 = like any kind *)
 }
 
 let off =
@@ -39,18 +51,29 @@ let off =
     keep_versions_kinds = [ 30023 ];
     kind_allowlist = None;
     hooks_expire_days = 30;
+    thread_parents_view = false;
+    delete_derived = false;
+    basic_tags_at_import = false;
+    no_action_tables = false;
+    pointer_views = false;
+    pubkey_stats = false;
+    no_ln_address = false;
+    zap_merge = false;
+    contact_list_versions = 0;
   }
 
 (* Any flag on: import_event takes the lean path (whose flag-off branches are the classic code). *)
 let active (l : t) : bool =
   l.enabled || l.no_event_created_at || l.no_hashtags || l.no_pubkey_ids || l.no_thread_parents
   || l.no_cmr_legacy || l.lazy_counters || l.pubkey_events_kind || l.transaction_per_event
-  || l.delete_superseded || l.kind_allowlist <> None
+  || l.delete_superseded || l.kind_allowlist <> None || l.thread_parents_view || l.delete_derived || l.basic_tags_at_import
+  || l.no_action_tables || l.pointer_views || l.pubkey_stats || l.no_ln_address || l.zap_merge || l.contact_list_versions > 0
 
 let keys =
   [ "enabled"; "no_event_created_at"; "no_hashtags"; "no_pubkey_ids"; "no_thread_parents"; "no_cmr_legacy";
     "lazy_counters"; "pubkey_events_kind"; "transaction_per_event"; "delete_superseded"; "keep_versions_kinds";
-    "kind_allowlist"; "hooks_expire_days" ]
+    "kind_allowlist"; "hooks_expire_days"; "thread_parents_view"; "delete_derived"; "basic_tags_at_import"; "no_action_tables";
+    "pointer_views"; "pubkey_stats"; "no_ln_address"; "zap_merge"; "contact_list_versions" ]
 
 (* Parse the [lean] object. Every key is optional (absent or null = default); an unknown key or a
    wrongly typed value is an error, so a typo can't silently leave a flag off. *)
@@ -92,6 +115,19 @@ let of_json (j : Yojson.Safe.t) : (t, string) result =
                   | None -> off.hooks_expire_days
                   | Some (`Int d) when d > 0 -> d
                   | Some _ -> failwith "lean.hooks_expire_days: expected a positive int");
+                thread_parents_view = bool "thread_parents_view" false;
+                delete_derived = bool "delete_derived" false;
+                basic_tags_at_import = bool "basic_tags_at_import" false;
+                no_action_tables = bool "no_action_tables" false;
+                pointer_views = bool "pointer_views" false;
+                pubkey_stats = bool "pubkey_stats" false;
+                no_ln_address = bool "no_ln_address" false;
+                zap_merge = bool "zap_merge" false;
+                contact_list_versions =
+                  (match get "contact_list_versions" with
+                  | None -> 0
+                  | Some (`Int n) when n >= 0 -> n
+                  | Some _ -> failwith "lean.contact_list_versions: expected a non-negative int");
               }
           with Failure msg -> Error msg))
   | _ -> Error "lean: expected an object or null"
@@ -108,7 +144,7 @@ let kind_allowed (l : t) (k : int) : bool =
 (* Kinds whose versions replace each other (one current version per pointer). *)
 let is_versioned_kind (k : int) : bool = k = 0 || k = 3 || (10000 <= k && k < 20000) || (30000 <= k && k < 40000)
 
-let keeps_versions (l : t) (k : int) : bool = List.mem k l.keep_versions_kinds
+let keeps_versions (l : t) (k : int) : bool = List.mem k l.keep_versions_kinds || (k = 3 && l.contact_list_versions > 0)
 
 (* NIP-01: of two versions, the one with the greater created_at wins; on a tie, the lower id. Ids
    are raw 32-byte strings, whose byte order is the order of their hex. *)

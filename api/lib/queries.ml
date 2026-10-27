@@ -240,6 +240,19 @@ let metadata_events (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string * 
 (* Julia ext_event_response(md) = event_media_response + event_preview_response, keyed by pubkey *)
 let metadata_extras (c : Db.cache Db.conn) ~(pubkeys_json : string) : (string * string) list =
   let dbh = Db.raw c in
+  if Lean.pointer_views () then
+    (* the same rows without the outer meta_data self-join (r's rows are meta_data rows already): over
+       the meta_data view, whose rows each check for a newer version, that join became a hash join over
+       every kind-0 event *)
+    [%pgsql dbh
+      "select encode(r.k, 'hex'), r.e::text from \
+         (select m.key as k, x.e from meta_data m, event_media_response(m.value) x(e) \
+          where m.key = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a))) \
+          union all \
+          select m.key, x.e from meta_data m, event_preview_response(m.value) x(e) \
+          where m.key = any(array(select decode(a::text, 'hex') from jsonb_array_elements_text($pubkeys_json::jsonb) x(a)))) r"]
+    |> List.filter_map (function Some k, Some e -> Some (k, e) | _ -> None)
+  else
   [%pgsql dbh
     "select encode(md.key, 'hex'), r.e::text from meta_data md, \
        (select m.value as v, m.key as k, x.e from meta_data m, event_media_response(m.value) x(e) \
@@ -1356,11 +1369,6 @@ let ln_address_pubkey (c : Db.cache Db.conn) ~(ln_address : string) : string opt
   let dbh = Db.raw c in
   match [%pgsql dbh "select pubkey from pubkey_ln_address where ln_address = $ln_address limit 1"] with Some p :: _ -> Some p | _ -> None
 
-let relays_top (c : Db.cache Db.conn) ~limit : (string * int64) list =
-  let dbh = Db.raw c in
-  let limit = i64 limit in
-  [%pgsql dbh "select url, times_referenced from relays order by times_referenced desc limit $limit"]
-
 let trustrank_top (c : Db.cache Db.conn) ~limit : (string * float) list =
   let dbh = Db.raw c in
   let limit = i64 limit in
@@ -1628,6 +1636,15 @@ let important_notes (c : Db.cache Db.conn) ~user_pubkey ~reposted_after ~since ~
 let muted_threads (c : Db.cache Db.conn) ~user_pubkey ~since ~until ~limit ~offset : (string * int64) list =
   let dbh = Db.raw c in
   let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  if Lean.pointer_views () then
+    (* lean schema iteration 2: the mute list is the newest kind-10000 event (no pointer table) *)
+    [%pgsql dbh
+      "select encode(es.id, 'hex'), es.created_at from basic_tags bt, events es \
+       where bt.id = (select id from event where pubkey = $user_pubkey and kind = 10000 order by created_at desc, id limit 1) \
+         and bt.tag = 'e' and bt.arg1 = es.id and es.created_at >= $since and es.created_at <= $until \
+       order by es.created_at desc limit $limit offset $offset"]
+    |> List.filter_map (function Some id, Some t -> Some (id, t) | _ -> None)
+  else
   [%pgsql dbh
     "select encode(es.id, 'hex'), es.created_at from replaceable_events re, basic_tags bt, events es \
      where re.pubkey = $user_pubkey and re.kind = 10000 and re.event_id = bt.id and bt.tag = 'e' and bt.arg1 = es.id \

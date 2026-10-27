@@ -404,7 +404,10 @@ them inert values, e.g. a zero key for `dvm_requester_pubkey`). Exceptions: `dag
 
 `{"enabled": true}` switches on the behaviours for a lean cache schema (fewer redundant tables
 and rows); absent, `null` or `{"enabled": false}` keeps the behaviour above exactly. `enabled` is
-required in the object and any other key is an error.
+required in the object; the only other keys allowed are the iteration-2 ones (lean schema
+iteration 2, each false when absent): `no_note_length` (the `note_length` node is skipped: a view over
+`event`), `pointer_views` (`reads_node` stops writing `reads_versions`: a view over the kind-30023
+events), `pubkey_stats` (`pubkey_media_cnt` and `pubkey_content_zap_cnt` add to `pubkey_stats`).
 
 | Role | With `enabled` |
 |---|---|

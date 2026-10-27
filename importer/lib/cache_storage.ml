@@ -654,7 +654,10 @@ let init_event_pubkey_action (est : est) ~(eid : string) ~(re : Nostr.t) : unit 
          replied, liked, reposted, zapped) values ($event_id, $pubkey, $created_at, 0, 0, \
          0, 0, 0) on conflict (event_id, pubkey) do nothing"]
 
+(* lean.no_action_tables: nothing written; the actions are read from basic_tags (the acting event's
+   e tags), event_replies and the zap receipts *)
 let event_pubkey_action (est : est) ~(eid : string) ~(re : Nostr.t) ~(action : string) : unit =
+  if est.cfg.lean.no_action_tables then () else begin
   init_event_pubkey_action est ~eid ~re;
   let dbh = est.dbh in
   let event_id = eid and pubkey = re.pubkey and updated_at = i64 re.created_at in
@@ -672,6 +675,7 @@ let event_pubkey_action (est : est) ~(eid : string) ~(re : Nostr.t) ~(action : s
         "insert into event_pubkey_action_refs_1_f32e1ff589 (event_id, ref_event_id, ref_pubkey, \
          ref_created_at, ref_kind) values ($event_id, $ref_event_id, $ref_pubkey, \
          $ref_created_at, $ref_kind)"]
+  end
 
 (* {1 Zap helpers} (Julia zap_sender / parse_bolt11) *)
 
@@ -713,10 +717,59 @@ let parse_bolt11 (b : string) : int option =
   end
   else None
 
+(* {1 Lean: current versions read from event} (lean.pointer_views)
+
+   With delete_superseded, event keeps one version per replaceable key (pubkey, kind) and per
+   addressable key (pubkey, kind, first d tag), the keep_versions_kinds apart, so the current version
+   is the newest event of its key (NIP-01: greater created_at, then the lower id) and the pointer
+   tables need not be written. Read through event_pubkey_kind_created_at_idx and event_addressable_idx
+   (an index on event_d_tag(tags)); the literal kind range lets a generic plan use that partial
+   index. [exclude]: an id to leave out (the version being imported, already stored). *)
+let current_replaceable ?(exclude = "") (est : est) ~(pubkey : string) ~(kind : int) : (string * int64) option =
+  let dbh = est.dbh and k = i64 kind in
+  match
+    [%pgsql dbh "select id, created_at from event where pubkey = $pubkey and kind = $k and id <> $exclude order by created_at desc, id limit 1"]
+  with
+  | r :: _ -> Some r
+  | [] -> None
+
+let current_addressable ?(exclude = "") (est : est) ~(pubkey : string) ~(kind : int) ~(identifier : string) : (string * int64) option =
+  let dbh = est.dbh and k = i64 kind in
+  match
+    [%pgsql dbh
+      "select id, created_at from event where kind between 30000 and 39999 and kind = $k and pubkey = $pubkey \
+       and event_d_tag(tags) = $identifier and id <> $exclude order by created_at desc, id limit 1"]
+  with
+  | r :: _ -> Some r
+  | [] -> None
+
+(* [current_replaceable]'s event, read *)
+let current_replaceable_event ?exclude (est : est) ~pubkey ~kind : Nostr.t option =
+  match current_replaceable ?exclude est ~pubkey ~kind with Some (id, _) -> get_event est id | None -> None
+
+(* lean.delete_derived: the rows other tables hold for a deleted event (its tags, mentions,
+   hashtags, feed row, search row, reply link); each by an index on the event id *)
+let delete_derived_rows (est : est) (id : string) : unit =
+  if est.cfg.lean.delete_derived then begin
+    let dbh = est.dbh in
+    ignore [%pgsql dbh "delete from basic_tags_6_62c3d17c2f where id = $id"];
+    ignore [%pgsql dbh "delete from a_tags_1_7d98c5333f where eid = $id"];
+    ignore [%pgsql dbh "delete from event_mentions_1_a056fb6737 where eid = $id"];
+    ignore [%pgsql dbh "delete from event_hashtags_1_295f217c0e where event_id = $id"];
+    ignore [%pgsql dbh "delete from pubkey_events_1_1dcbfe1466 where event_id = $id"];
+    ignore [%pgsql dbh "delete from advsearch_5_d7da6f551e where id = $id"];
+    ignore [%pgsql dbh "delete from event_replies_1_9d033b5bb3 where reply_event_id = $id"]
+  end
+
+(* lean.basic_tags_at_import: Dag_index.import_basic_tags, set by Dag_index at its initialization
+   (it depends on this module) *)
+let basic_tags_hook : (est -> Nostr.t -> unit) ref = ref (fun _ _ -> ())
+
 (* {1 Parametrized replaceable lookup / parent eid} (Julia lookup_* / parse_parent_eid) *)
 
 let lookup_parametrized_replaceable_event (est : est) ~kind ~pubkey ~identifier : string option =
   let q () =
+    if est.cfg.lean.pointer_views then Option.map fst (current_addressable est ~pubkey ~kind ~identifier) else
     let dbh = est.dbh in
     let k = i64 kind in
     match
@@ -832,6 +885,9 @@ let pubkey_known (est : est) (pubkey : string) : bool =
 (* Julia get(est.pubkey_followers_cnt, pubkey, 0). *)
 let pubkey_followers_cnt (est : est) (pubkey : string) : int =
   let dbh = est.dbh in
+  if est.cfg.lean.pubkey_stats then
+    match [%pgsql dbh "select followers from pubkey_stats where pubkey = $pubkey"] with v :: _ -> Int64.to_int v | [] -> 0
+  else
   match [%pgsql dbh "select value from pubkey_followers_cnt_1_a6f7e200e7 where key = $pubkey"] with
   | v :: _ -> Int64.to_int v
   | [] -> 0
@@ -913,6 +969,13 @@ let event_stats_init (est : est) (e : Nostr.t) : unit =
 
 let insert_event_reply (est : est) ~parent ~reply ~reply_created_at : unit =
   let dbh = est.dbh in
+  if est.cfg.lean.no_thread_parents || est.cfg.lean.thread_parents_view then
+    (* event_replies is then also the parent of each reply (event_thread_parents is a view over it,
+       unique on reply_event_id): a reply imported twice keeps its first row *)
+    ignore
+      [%pgsql dbh "insert into event_replies_1_9d033b5bb3 (event_id, reply_event_id, reply_created_at) values ($parent, $reply, $reply_created_at) \
+                   on conflict (reply_event_id) do nothing"]
+  else
   ignore
     [%pgsql dbh "insert into event_replies_1_9d033b5bb3 (event_id, reply_event_id, reply_created_at) values ($parent, $reply, $reply_created_at)"]
 
@@ -924,6 +987,7 @@ let set_event_thread_parent (est : est) ~event_id ~parent : unit =
 (* {1 Replaceable / parametrized replaceable} (Julia 1399-1422) *)
 
 let store_replaceable_event (est : est) (e : Nostr.t) : unit =
+  if est.cfg.lean.pointer_views then () else
   let dbh = est.dbh in
   let pubkey = e.pubkey and kind = i64 e.kind and event_id = e.id in
   ignore
@@ -936,6 +1000,7 @@ let first_d_tag (e : Nostr.t) : string option =
 
 let store_parametrized_replaceable_event (est : est) (e : Nostr.t) : unit =
   (* find the first d tag *)
+  if est.cfg.lean.pointer_views then () else
   match first_d_tag e with
   | None -> ()
   | Some identifier ->
@@ -958,7 +1023,26 @@ type version_check =
   | Newest of string option (* the previous version's id, if any *)
   | Older
 
+(* lean.pointer_views: the same decision against the newest other version in event *)
+let version_check_events (est : est) (e : Nostr.t) : version_check =
+  let decide = function
+    | None -> Newest None
+    | Some (old_id, old_created_at) ->
+        if Lean.newer ~created_at:e.created_at ~id:e.id ~old_created_at:(Int64.to_int old_created_at) ~old_id then
+          Newest (Some old_id)
+        else Older
+  in
+  let k = e.kind in
+  if k = Nostr.kind_set_metadata || k = Nostr.kind_contact_list || (10000 <= k && k < 20000) then
+    decide (current_replaceable ~exclude:e.id est ~pubkey:e.pubkey ~kind:k)
+  else if 30000 <= k && k < 40000 then
+    match first_d_tag e with
+    | None -> No_pointer
+    | Some identifier -> decide (current_addressable ~exclude:e.id est ~pubkey:e.pubkey ~kind:k ~identifier)
+  else No_pointer
+
 let version_check (est : est) (e : Nostr.t) : version_check =
+  if est.cfg.lean.pointer_views then version_check_events est e else
   let dbh = est.dbh and pubkey = e.pubkey and k = e.kind in
   let decide = function
     | [] -> Newest None
@@ -990,6 +1074,7 @@ let version_check (est : est) (e : Nostr.t) : version_check =
 (* the pointer move of a newer addressable version when its predecessor's row is known: one
    UPDATE instead of DELETE + INSERT *)
 let move_parametrized_replaceable_pointer (est : est) (e : Nostr.t) ~(exists : bool) : unit =
+  if est.cfg.lean.pointer_views then () else
   match first_d_tag e with
   | None -> ()
   | Some identifier ->
@@ -1004,14 +1089,30 @@ let move_parametrized_replaceable_pointer (est : est) (e : Nostr.t) ~(exists : b
 let delete_superseded_row (est : est) (id : string) : unit =
   let dbh = est.dbh in
   ignore [%pgsql dbh "delete from event where id = $id"];
+  delete_derived_rows est id;
   memo_forget id;
   Lean.Superseded.add id;
   Atomic.incr Lean.superseded_deleted
+
+(* lean.contact_list_versions: a pubkey's kind-3 versions other than the current one and the ones
+   membership_recovery_contact_lists shows (per day the one with most tags, then the lower id; the
+   newest [n] days), deleted like superseded versions. The current one is the newest (NIP-01 order)
+   and, without the pointer views, also the one contact_lists names (same-second versions). *)
+let prune_contact_list_versions (est : est) ~(pubkey : string) ~(n : int) : unit =
+  let dbh = est.dbh and n = i64 n in
+  [%pgsql dbh
+    "select id from event where pubkey = $pubkey and kind = 3 \
+       and id <> (select id from event where pubkey = $pubkey and kind = 3 order by created_at desc, id limit 1) \
+       and id not in (select value from contact_lists_1_1abdf474bd where key = $pubkey) \
+       and id not in (select distinct on (created_at/(24*3600)::int8) id from event where pubkey = $pubkey and kind = 3 \
+                      order by created_at/(24*3600)::int8 desc, jsonb_array_length(tags) desc, id limit $n)"]
+  |> List.iter (delete_superseded_row est)
 
 (* {1 Replaceable single-event dict writes (meta_data, mute lists, contact_lists)} *)
 
 let upsert_pubkey_event_id (est : est) ~(table : [ `Meta_data | `Contact_lists | `Mute_list | `Mute_list_2 | `Mute_lists | `Allow_list ]) ~key ~value : unit =
   let dbh = est.dbh in
+  if est.cfg.lean.pointer_views then () else
   match table with
   | `Meta_data -> ignore [%pgsql dbh "insert into meta_data_1_323bc43167 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
   | `Contact_lists -> ignore [%pgsql dbh "insert into contact_lists_1_1abdf474bd (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
@@ -1020,7 +1121,9 @@ let upsert_pubkey_event_id (est : est) ~(table : [ `Meta_data | `Contact_lists |
   | `Mute_lists -> ignore [%pgsql dbh "insert into mute_lists_1_d90e559628 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
   | `Allow_list -> ignore [%pgsql dbh "insert into allow_list_1_f1da08e9c8 (key, value) values ($key, $value) on conflict (key) do update set value = excluded.value"]
 
+(* lean.pointer_views: reached only when the version check could not decide; update *)
 let meta_data_should_update (est : est) ~pubkey ~created_at : bool =
+  est.cfg.lean.pointer_views ||
   let dbh = est.dbh in
   let key = pubkey in
   match [%pgsql dbh "select e.created_at from meta_data_1_323bc43167 m, event e where m.key = $key and e.id = m.value"] with
@@ -1028,6 +1131,7 @@ let meta_data_should_update (est : est) ~pubkey ~created_at : bool =
   | old :: _ -> i64 created_at > old
 
 let contact_list_should_update (est : est) ~pubkey ~created_at : bool =
+  est.cfg.lean.pointer_views ||
   let dbh = est.dbh in
   let key = pubkey in
   match [%pgsql dbh "select e.created_at from contact_lists_1_1abdf474bd c, event e where c.key = $key and e.id = c.value"] with
@@ -1036,6 +1140,7 @@ let contact_list_should_update (est : est) ~pubkey ~created_at : bool =
 
 (* Julia update_pubkey_ln_address: parse lud16 out of the pubkey's current metadata event. *)
 let get_meta_data_event (est : est) (pubkey : string) : Nostr.t option =
+  if est.cfg.lean.pointer_views then current_replaceable_event est ~pubkey ~kind:Nostr.kind_set_metadata else
   let dbh = est.dbh in
   match [%pgsql dbh "select value from meta_data_1_323bc43167 where key = $pubkey"] with
   | mid :: _ -> get_event est mid
@@ -1048,6 +1153,7 @@ let rec update_pubkey_ln_address (est : est) (pubkey : string) : unit =
 
 (* [me] = the pubkey's current metadata event (lean: the kind 0 just imported, no re-read) *)
 and update_pubkey_ln_address_from (est : est) (pubkey : string) (me : Nostr.t) : unit =
+  if est.cfg.lean.no_ln_address then () else
   match Yojson.Safe.from_string me.content with
   | `Assoc kv -> (
       match List.assoc_opt "lud16" kv with
@@ -1066,7 +1172,9 @@ let contact_list_follows (e : Nostr.t) : string list =
     (fun tg -> match (Nostr.tag_name tg, Nostr.tag_field tg 1) with Some "p", Some h -> decode32 h | _ -> None)
     e.tags
 
-let get_contact_list_event (est : est) (pubkey : string) : Nostr.t option =
+(* [exclude] (lean.pointer_views): the version being imported, already in event *)
+let get_contact_list_event ?exclude (est : est) (pubkey : string) : Nostr.t option =
+  if est.cfg.lean.pointer_views then current_replaceable_event ?exclude est ~pubkey ~kind:Nostr.kind_contact_list else
   let dbh = est.dbh in
   match [%pgsql dbh "select value from contact_lists_1_1abdf474bd where key = $pubkey"] with
   | clid :: _ -> get_event est clid
@@ -1076,7 +1184,7 @@ module SS = Set.Make (String)
 
 let rec import_contact_list (est : est) (e : Nostr.t) : unit =
   let old_follows =
-    match get_contact_list_event est e.pubkey with Some old_e -> contact_list_follows old_e | None -> []
+    match get_contact_list_event ~exclude:e.id est e.pubkey with Some old_e -> contact_list_follows old_e | None -> []
   in
   import_contact_list_diff est e ~old_follows
 
@@ -1084,7 +1192,12 @@ let rec import_contact_list (est : est) (e : Nostr.t) : unit =
    the "is it newer" check and the follow diff (the classic path reads it three times). *)
 and import_contact_list_lean (est : est) (e : Nostr.t) ~(newer_known : bool) : unit =
   let dbh = est.dbh and key = e.pubkey in
-  let old = [%pgsql dbh "select ev.created_at, ev.tags from contact_lists_1_1abdf474bd c, event ev where c.key = $key and ev.id = c.value"] in
+  let old =
+    if est.cfg.lean.pointer_views then
+      let eid = e.id in
+      [%pgsql dbh "select created_at, tags from event where pubkey = $key and kind = 3 and id <> $eid order by created_at desc, id limit 1"]
+    else [%pgsql dbh "select ev.created_at, ev.tags from contact_lists_1_1abdf474bd c, event ev where c.key = $key and ev.id = c.value"]
+  in
   let newer = newer_known || (match old with [] -> true | (oc, _) :: _ -> i64 e.created_at > oc) in
   if newer then begin
     let old_follows =
@@ -1104,7 +1217,9 @@ and import_contact_list_diff (est : est) (e : Nostr.t) ~(old_follows : string li
         let follower_pubkey = e.pubkey and follower_contact_list_event_id = e.id in
         ignore [%pgsql dbh "insert into pubkey_followers_1_d52305fb47 (pubkey, follower_pubkey, follower_contact_list_event_id) values ($follow_pubkey, $follower_pubkey, $follower_contact_list_event_id)"];
         if trusted then begin
-          if est.cfg.lean.lazy_counters then
+          if est.cfg.lean.pubkey_stats then
+            ignore [%pgsql dbh "insert into pubkey_stats (pubkey, followers) values ($follow_pubkey, 1) on conflict (pubkey) do update set followers = pubkey_stats.followers + 1"]
+          else if est.cfg.lean.lazy_counters then
             (* lean: the first follower creates the row (no zero row per pubkey) *)
             ignore [%pgsql dbh "insert into pubkey_followers_cnt_1_a6f7e200e7 (key, value) values ($follow_pubkey, 1) on conflict (key) do update set value = pubkey_followers_cnt_1_a6f7e200e7.value + 1"]
           else
@@ -1119,6 +1234,9 @@ and import_contact_list_diff (est : est) (e : Nostr.t) ~(old_follows : string li
         let follower_pubkey = e.pubkey in
         ignore [%pgsql dbh "delete from pubkey_followers_1_d52305fb47 where pubkey = $follow_pubkey and follower_pubkey = $follower_pubkey"];
         if trusted then begin
+          if est.cfg.lean.pubkey_stats then
+            ignore [%pgsql dbh "update pubkey_stats set followers = greatest(0, followers - 1) where pubkey = $follow_pubkey"]
+          else
           ignore [%pgsql dbh "update pubkey_followers_cnt_1_a6f7e200e7 set value = greatest(0, value - 1) where key = $follow_pubkey"];
           (* notification() drops USER_UNFOLLOWED_YOU (cache_storage_ext.jl:630); kept for fidelity. *)
           (!ext).notification est follow_pubkey e.created_at Notif.user_unfollowed_you [ Apk e.pubkey ]
@@ -1176,6 +1294,7 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
     let deletion_event_id = e.id in
     ignore [%pgsql dbh "insert into deleted_events_1_0249f47b16 (event_id, deletion_event_id) values ($eid, $deletion_event_id) on conflict (event_id) do update set deletion_event_id = excluded.deletion_event_id"];
     ignore [%pgsql dbh "delete from event where id = $eid"];
+    delete_derived_rows est eid;
     memo_forget eid
   in
   (* lean: the author check needs pubkey and kind only; the tags only for a repost *)
@@ -1207,8 +1326,10 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
                             | None -> ()
                             | Some reid ->
                                 let depk = de.pubkey and deid = de.id in
-                                ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set reposted = 0 where event_id = $reid and pubkey = $depk"];
-                                ignore [%pgsql dbh "delete from event_pubkey_action_refs_1_f32e1ff589 where ref_event_id = $deid and ref_pubkey = $depk"];
+                                if not est.cfg.lean.no_action_tables then begin
+                                  ignore [%pgsql dbh "update event_pubkey_actions_1_d62afee35d set reposted = 0 where event_id = $reid and pubkey = $depk"];
+                                  ignore [%pgsql dbh "delete from event_pubkey_action_refs_1_f32e1ff589 where ref_event_id = $deid and ref_pubkey = $depk"]
+                                end;
                                 if lean_stats est then stats_add est reid (fun d -> d.reposts <- d.reposts - 1)
                                 else
                                 ignore [%pgsql dbh "update event_stats_1_1b380f4869 set reposts = reposts - 1 where event_id = $reid"])
@@ -1222,6 +1343,14 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
           | Some (_, pk, _) when pk <> e.pubkey -> ()
           | Some (kind, pk, identifier) ->
               let k = i64 kind in
+              if est.cfg.lean.pointer_views then begin
+                (* every stored version of the coordinate (one, or all of a kept kind's) *)
+                List.iter (fun eid -> delete_event eid)
+                  [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = $k and pubkey = $pk and event_d_tag(tags) = $identifier"];
+                if kind = Nostr.kind_long_form_content then
+                  ignore [%pgsql dbh "delete from reads_12_68c6bbfccd where pubkey = $pk and identifier = $identifier"]
+              end
+              else begin
               (match [%pgsql dbh "select event_id from parametrized_replaceable_events_1_cbe75c8d53 where pubkey = $pk and kind = $k and identifier = $identifier limit 1"] with
                | eid :: _ -> delete_event eid
                | [] -> ());
@@ -1232,6 +1361,7 @@ let import_delete_event (est : est) (e : Nostr.t) : unit =
                   [%pgsql dbh "select eid from reads_versions_12_b537d4df66 where pubkey = $pk and identifier = $identifier"];
                 ignore [%pgsql dbh "delete from reads_12_68c6bbfccd where pubkey = $pk and identifier = $identifier"];
                 ignore [%pgsql dbh "delete from reads_versions_12_b537d4df66 where pubkey = $pk and identifier = $identifier"]
+              end
               end)
       | _ -> ())
     e.tags
@@ -1253,7 +1383,7 @@ let handle_note_reply (est : est) (e : Nostr.t) : unit =
         event_hook est parent (Event_stats_cb ("replies", 1));
       insert_event_reply est ~parent ~reply:e.id ~reply_created_at:(i64 e.created_at);
       event_pubkey_action est ~eid:parent ~re:e ~action:"replied";
-      if not est.cfg.lean.no_thread_parents then set_event_thread_parent est ~event_id:e.id ~parent;
+      if not (est.cfg.lean.no_thread_parents || est.cfg.lean.thread_parents_view) then set_event_thread_parent est ~event_id:e.id ~parent;
       (!ext).ext_reply est e parent
   | None -> ());
   (!ext).import_reply_notifications est e
@@ -1460,6 +1590,7 @@ let handle_categorized_people (est : est) (e : Nostr.t) : unit =
           | Some "allowlist" ->
               upsert_pubkey_event_id est ~table:`Allow_list ~key:e.pubkey ~value:e.id;
               (!ext).update_content_moderation_rules est e.pubkey
+          | Some _ when est.cfg.lean.pointer_views -> () (* the list is a view over event *)
           | Some identifier ->
               let dbh = est.dbh in
               let pubkey = e.pubkey and created_at = i64 e.created_at and event_id = e.id in
@@ -1473,6 +1604,7 @@ let handle_categorized_people (est : est) (e : Nostr.t) : unit =
 (* {1 Relay list metadata / bookmarks} (Julia 1338-1353) *)
 
 let store_relay_list_metadata ?(force = false) (est : est) (e : Nostr.t) : unit =
+  if est.cfg.lean.pointer_views then () else
   let dbh = est.dbh in
   let pubkey = e.pubkey and event_id = e.id in
   let newer =
@@ -1494,6 +1626,8 @@ let user_relay_urls (est : est) (pubkey : string) : string list =
   let dbh = est.dbh in
   let from_relay_list =
     match
+      if est.cfg.lean.pointer_views then current_replaceable_event est ~pubkey ~kind:Nostr.kind_relay_list_metadata
+      else
       (match [%pgsql dbh "select event_id from relay_list_metadata_1_801a17fc93 where pubkey = $pubkey"] with
        | eid :: _ -> get_event est eid
        | [] -> None)
@@ -1533,6 +1667,9 @@ let user_relay_urls_lean (est : est) (pubkey : string) : string list =
   let dbh = est.dbh in
   let from_relay_list =
     match
+      if est.cfg.lean.pointer_views then
+        [%pgsql dbh "select tags from event where pubkey = $pubkey and kind = 10002 order by created_at desc, id limit 1"]
+      else
       [%pgsql dbh "select ev.tags from relay_list_metadata_1_801a17fc93 r, event ev where r.pubkey = $pubkey and ev.id = r.event_id"]
     with
     | tags :: _ ->
@@ -1546,7 +1683,11 @@ let user_relay_urls_lean (est : est) (pubkey : string) : string list =
   in
   if from_relay_list <> [] then from_relay_list
   else
-    match [%pgsql dbh "select ev.content from contact_lists_1_1abdf474bd c, event ev where c.key = $pubkey and ev.id = c.value"] with
+    match
+      if est.cfg.lean.pointer_views then
+        [%pgsql dbh "select content from event where pubkey = $pubkey and kind = 3 order by created_at desc, id limit 1"]
+      else [%pgsql dbh "select ev.content from contact_lists_1_1abdf474bd c, event ev where c.key = $pubkey and ev.id = c.value"]
+    with
     | [] -> []
     | content :: _ -> (
         match Yojson.Safe.from_string content with
@@ -1637,12 +1778,15 @@ let store_bookmarks ?(force = false) (est : est) (e : Nostr.t) : unit =
   (* Julia compares against the previous bookmark event and only notifies newly-added eids
      (cache_storage.jl:1343-1353). *)
   let old_be =
+    if est.cfg.lean.pointer_views then current_replaceable_event ~exclude:event_id est ~pubkey ~kind:Nostr.kind_bookmarks
+    else
     match [%pgsql dbh "select event_id from bookmarks_1_43f5248b56 where pubkey = $pubkey"] with
     | beid :: _ -> get_event est beid
     | [] -> None
   in
   let newer = force || match old_be with None -> true | Some be -> e.created_at > be.created_at in
   if newer then begin
+    if not est.cfg.lean.pointer_views then
     ignore
       [%pgsql dbh "insert into bookmarks_1_43f5248b56 (pubkey, event_id) values ($pubkey, $event_id) on conflict (pubkey) do update set event_id = excluded.event_id"];
     import_pubkey_bookmarks est e;
@@ -1777,6 +1921,7 @@ let import_event_lean (est : est) (e : Nostr.t) : import_result =
                derived row is written *)
             guard "superseded" (fun () -> delete_superseded_row est e.id)
           else begin
+            if l.basic_tags_at_import then guard "basic_tags" (fun () -> !basic_tags_hook est e);
             if not l.no_event_created_at then set_event_created_at est e;
             if l.no_pubkey_ids || l.lazy_counters then track_pubkey_lean est e.pubkey else track_pubkey est e.pubkey;
             if is_pubkey_event_kind e.kind then
@@ -1801,6 +1946,8 @@ let import_event_lean (est : est) (e : Nostr.t) : import_result =
                     guard "superseded" (fun () -> delete_superseded_row est old_id)
                 | _ -> ())
           end;
+          if e.kind = Nostr.kind_contact_list && l.contact_list_versions > 0 && check <> No_pointer then
+            guard "contact_list_versions" (fun () -> prune_contact_list_versions est ~pubkey:e.pubkey ~n:l.contact_list_versions);
           guard "event_hooks" (fun () -> fire_event_hooks est e))
     in
     if l.transaction_per_event then run_event_tx est side_effects else side_effects ();

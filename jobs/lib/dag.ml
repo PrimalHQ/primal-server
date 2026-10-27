@@ -43,7 +43,7 @@ let with_est (p : pools) (f : CS.est -> 'a) : 'a =
 
 (* [lean] (config "lean"): half-open windows and segments, [since, until) instead of [since, until]
    (process_segments), and the lean variants of some nodes *)
-type run = { since : int; until : int; running : bool Atomic.t; dry_run : bool; ignore_coverage : bool; tasks : int; stop : unit Promise.t; pools : pools; poll_votes : bool; verbose : bool; lean : bool }
+type run = { since : int; until : int; running : bool Atomic.t; dry_run : bool; ignore_coverage : bool; tasks : int; stop : unit Promise.t; pools : pools; poll_votes : bool; verbose : bool; lean : bool; lean2 : Config.lean2 }
 
 let coverages (dbh : Postgres.dbh) ~(cov : string) : (int * int) list =
   [%pgsql dbh "select t, t2 from coverages_1_8656fc443b where name = $cov"] |> List.map (fun (t, t2) -> (Int64.to_int t, Int64.to_int t2))
@@ -195,7 +195,7 @@ let basic_tags_node (r : run) =
              returning pubkey, kind, tag, arg1) \
            insert into reads_interactions (pubkey, eid) \
            select distinct ins.pubkey, ins.arg1 from ins \
-           where ins.tag = 'e' and ins.kind in (1, 6, 7) and exists (select 1 from reads_versions_12_b537d4df66 rv where rv.eid = ins.arg1) \
+           where ins.tag = 'e' and ins.kind in (1, 6, 7) and exists (select 1 from reads_versions rv where rv.eid = ins.arg1) \
            on conflict do nothing"])
 
 let zap_receipts_node (r : run) =
@@ -271,7 +271,8 @@ let reads_node (r : run) =
                   [%pgsql dbh
                     "update reads_12_68c6bbfccd set latest_created_at = $created_at, latest_eid = $eid, words = $words, lang = $lang, lang_prob = $lang_prob, image = $image, summary = $summary \
                      where pubkey = $pubkey and identifier = $identifier"]);
-          ignore [%pgsql dbh "insert into reads_versions_12_b537d4df66 (pubkey, identifier, eid) values ($pubkey, $identifier, $eid) on conflict do nothing"];
+          if not r.lean2.Config.pointer_views then
+            ignore [%pgsql dbh "insert into reads_versions_12_b537d4df66 (pubkey, identifier, eid) values ($pubkey, $identifier, $eid) on conflict do nothing"];
           (* the kind 1/6/7 `e` tags that reached this version before it was stored (migration 2007) *)
           ignore
             [%pgsql dbh
@@ -286,7 +287,7 @@ let reads_node (r : run) =
       let t1 = i64 t1 and t2 = i64 t2 in
       ignore
         [%pgsql dbh
-          "with a as (select rv.pubkey, rv.identifier, count(1) as zaps, sum(zr.satszapped) as satszapped from reads_versions_12_b537d4df66 rv, zap_receipts_1_9fe40119b2 zr \
+          "with a as (select rv.pubkey, rv.identifier, count(1) as zaps, sum(zr.satszapped) as satszapped from reads_versions rv, zap_receipts zr \
                       where zr.imported_at >= $t1 and zr.imported_at <= $t2 and zr.target_eid = rv.eid group by (rv.pubkey, rv.identifier)) \
            update reads_12_68c6bbfccd set zaps = reads_12_68c6bbfccd.zaps + a.zaps, satszapped = reads_12_68c6bbfccd.satszapped + a.satszapped from a \
            where reads_12_68c6bbfccd.pubkey = a.pubkey and reads_12_68c6bbfccd.identifier = a.identifier"]);
@@ -296,7 +297,7 @@ let reads_node (r : run) =
       let t1 = i64 t1 and t2 = i64 t2 in
       ignore
         [%pgsql dbh
-          "with a as (select rv.pubkey, rv.identifier, count(1) as cnt from reads_versions_12_b537d4df66 rv, basic_tags_6_62c3d17c2f bt \
+          "with a as (select rv.pubkey, rv.identifier, count(1) as cnt from reads_versions rv, basic_tags_6_62c3d17c2f bt \
                       where bt.imported_at >= $t1 and bt.imported_at <= $t2 and bt.kind = 7 and bt.arg1 = rv.eid group by (rv.pubkey, rv.identifier)) \
            update reads_12_68c6bbfccd set likes = likes + a.cnt from a where reads_12_68c6bbfccd.pubkey = a.pubkey and reads_12_68c6bbfccd.identifier = a.identifier"]);
   (* phase 4: replies (direct ones: every e/a tag of the reply marked root) *)
@@ -305,7 +306,7 @@ let reads_node (r : run) =
       let t1 = i64 t1 and t2 = i64 t2 in
       let rows =
         [%pgsql dbh
-          "with a as (select rv.pubkey, rv.identifier, er.reply_event_id from reads_versions_12_b537d4df66 rv, event_replies er \
+          "with a as (select rv.pubkey, rv.identifier, er.reply_event_id from reads_versions rv, event_replies er \
                       where rv.eid = er.event_id and er.reply_created_at >= $t1 and er.reply_created_at <= $t2), \
                 b as (select at.ref_pubkey as pubkey, at.ref_identifier as identifier, at.eid as reply_event_id from a_tags_1_7d98c5333f at \
                       where at.kind = 1 and at.ref_kind = 30023 and at.created_at >= $t1 and at.created_at <= $t2) \
@@ -331,7 +332,7 @@ let reads_node (r : run) =
       let t1 = i64 t1 and t2 = i64 t2 in
       ignore
         [%pgsql dbh
-          "with a as (select rv.pubkey, rv.identifier, count(1) as cnt from reads_versions_12_b537d4df66 rv, basic_tags_6_62c3d17c2f bt \
+          "with a as (select rv.pubkey, rv.identifier, count(1) as cnt from reads_versions rv, basic_tags_6_62c3d17c2f bt \
                       where bt.imported_at >= $t1 and bt.imported_at <= $t2 and bt.kind = 6 and bt.arg1 = rv.eid group by (rv.pubkey, rv.identifier)) \
            update reads_12_68c6bbfccd set reposts = reposts + a.cnt from a where reads_12_68c6bbfccd.pubkey = a.pubkey and reads_12_68c6bbfccd.identifier = a.identifier"])
 
@@ -339,6 +340,14 @@ let pubkey_media_cnt_node (r : run) =
   process_segments r ~cov:(T.cov T.pubkey_media_cnt ^ "/1") ~step:(90 * day) (fun est t1 t2 ->
       let dbh = est.CS.dbh in
       let t1 = i64 t1 and t2 = i64 t2 in
+      if r.lean2.Config.pubkey_stats then
+        ignore
+          [%pgsql dbh
+            "with a as (select es.pubkey, count(distinct es.id) as cnt from event es, event_media em \
+                        where es.imported_at >= $t1 and es.imported_at <= $t2 and es.id = em.event_id and es.kind = 1 group by (es.pubkey)) \
+             insert into pubkey_stats (pubkey, media_cnt) select pubkey, cnt from a \
+             on conflict (pubkey) do update set media_cnt = pubkey_stats.media_cnt + excluded.media_cnt"]
+      else
       ignore
         [%pgsql dbh
           "with a as (select es.pubkey, count(distinct es.id) as cnt from event es, event_media em \
@@ -350,9 +359,16 @@ let pubkey_content_zap_cnt_node (r : run) =
   process_segments r ~cov:(T.cov T.pubkey_content_zap_cnt ^ "/1") ~step:(90 * day) (fun est t1 t2 ->
       let dbh = est.CS.dbh in
       let t1 = i64 t1 and t2 = i64 t2 in
+      if r.lean2.Config.pubkey_stats then
+        ignore
+          [%pgsql dbh
+            "with a as (select zr.sender, count(1) as cnt from zap_receipts zr where zr.imported_at >= $t1 and zr.imported_at <= $t2 group by (zr.sender)) \
+             insert into pubkey_stats (pubkey, content_zap_cnt) select sender, cnt from a \
+             on conflict (pubkey) do update set content_zap_cnt = pubkey_stats.content_zap_cnt + excluded.content_zap_cnt"]
+      else
       ignore
         [%pgsql dbh
-          "with a as (select zr.sender, count(1) as cnt from zap_receipts_1_9fe40119b2 zr where zr.imported_at >= $t1 and zr.imported_at <= $t2 group by (zr.sender)) \
+          "with a as (select zr.sender, count(1) as cnt from zap_receipts zr where zr.imported_at >= $t1 and zr.imported_at <= $t2 group by (zr.sender)) \
            insert into pubkey_content_zap_cnt_1_236df2f369 (pubkey, cnt) select sender, cnt from a \
            on conflict (pubkey) do update set cnt = pubkey_content_zap_cnt_1_236df2f369.cnt + excluded.cnt"])
 
@@ -425,6 +441,7 @@ let event_mentions_node (r : run) =
       List.iter (fun e -> DI.import_event_mentions est e) (events_in_window est.CS.dbh ~t1 ~t2 ~kinds:[ 1; 30023; 6 ]))
 
 let note_length_node (r : run) ~now =
+  if r.lean2.Config.no_note_length then () else
   process_segments r ~cov:(T.cov T.note_length ^ "/1") ~step:day ~since:(max r.since (now - (15 * day))) (fun est t1 t2 ->
       let dbh = est.CS.dbh in
       let t1 = i64 t1 and t2 = i64 t2 in
@@ -509,7 +526,7 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
   if cfg.dag_dry_run && cfg.dag_dry_run_window_s > 0 then begin
     (* one exercise of every node over the last [dag_dry_run_window_s] seconds, coverage ignored, all rolled back *)
     let until = Utils.current_time () in
-    let r = { since = until - cfg.dag_dry_run_window_s; until; running = Atomic.make true; dry_run = true; ignore_coverage = true; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = true; lean = cfg.lean } in
+    let r = { since = until - cfg.dag_dry_run_window_s; until; running = Atomic.make true; dry_run = true; ignore_coverage = true; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = true; lean = cfg.lean; lean2 = cfg.lean2 } in
     let t0 = Unix.gettimeofday () in
     run_pipeline r;
     log "dry run over %d s %s in %.1fs; idling" cfg.dag_dry_run_window_s (if Atomic.get r.running then "ok" else "FAILED") (Unix.gettimeofday () -. t0);
@@ -544,7 +561,7 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
       let rec fit sp = if sp <= 10 || count_events since_ (since_ + sp) <= max_events then sp else fit (sp / 2) in
       let sp = if since_ + !span >= now - margin then !span else fit !span in
       let until = min (now - margin) (since_ + sp) in
-      let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log; lean = cfg.lean } in
+      let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log; lean = cfg.lean; lean2 = cfg.lean2 } in
       let t0 = Unix.gettimeofday () in
       run_pipeline r;
       let ok = Atomic.get r.running in

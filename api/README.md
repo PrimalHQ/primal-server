@@ -81,7 +81,7 @@ matches it exhaustively, so a constructor without a handler arm does not compile
 | Explore, trending, search | `explore`, `explore_media`, `explore_zaps`, `explore_people`, `explore_topics`, `explore_legend_counts`, `explore_global_trending_24h`, `explore_global_mostzapped_4h`, `scored`, `scored_users`, `scored_users_24h`, `trending_hashtags`, `trending_hashtags_4h`, `trending_hashtags_7d`, `trending_images`, `trending_images_4h`, `search`, `advanced_search`, `advanced_feed`, `parse_advanced_search_query` |
 | Zaps, reactions | `zaps_feed`, `user_zaps`, `user_zaps_by_satszapped`, `user_zaps_sent`, `event_zaps_by_satszapped`, `event_actions`, `invoices_to_zap_receipts` |
 | Notifications, DMs | `get_notifications`, `set_notifications_seen`, `get_notifications_seen`, `notifications`, `notification_counts`, `notification_counts_2`, `get_directmsgs`, `get_directmsg_contacts`, `directmsg_count`, `directmsg_count_2`, `reset_directmsg_count`, `reset_directmsg_counts` |
-| Settings, app config | `get_default_app_settings`, `get_app_settings`, `get_app_settings_2`, `set_app_settings`, `get_default_app_subsettings`, `get_app_subsettings`, `set_app_subsettings`, `get_app_releases`, `client_config`, `get_default_relays`, `get_recommended_blossom_servers`, `relays`, `server_name`, `set_last_time_user_was_online`, `update_push_notification_token`, `update_push_notification_token_for_nip46` |
+| Settings, app config | `get_default_app_settings`, `get_app_settings`, `get_app_settings_2`, `set_app_settings`, `get_default_app_subsettings`, `get_app_subsettings`, `set_app_subsettings`, `get_app_releases`, `client_config`, `get_default_relays`, `get_recommended_blossom_servers`, `server_name`, `set_last_time_user_was_online`, `update_push_notification_token`, `update_push_notification_token_for_nip46` |
 | Moderation | `check_filterlist`, `get_filterlist`, `search_filterlist`, `is_hidden_by_content_moderation`, `report_user`, `report_note` |
 | Live events | `live_feed`, `live_events_from_follows`, `find_live_events` |
 | Stats | `net_stats`, `network_stats`, `nostr_stats` (always `NOTICE "error"`), `rebroadcasting_status` |
@@ -252,9 +252,11 @@ Content and services:
 
 ### `lean`
 
-`{"enabled": bool, "follows_count_from_followers": bool, "thread_parents_from_basic_tags": bool}`, each
-key optional (false), unknown keys rejected (`lib/lean.ml`). Without the object every statement is
-the same as before. The two sub-flags act only with `enabled`.
+`{"enabled": bool, "follows_count_from_followers": bool, "thread_parents_from_basic_tags": bool, "pointer_views": bool}`,
+each key optional (false), unknown keys rejected (`lib/lean.ml`). Without the object every statement
+is the same as before. The sub-flags act only with `enabled`. `pointer_views` (lean schema iteration
+2, with the importer's flag of that name): the mute lists of content moderation and of the muted-threads
+feed are the newest events of their kind, not pointer-table rows.
 
 `enabled` switches on:
 

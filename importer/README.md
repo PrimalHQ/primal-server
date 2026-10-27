@@ -345,6 +345,17 @@ table) and one on `event_pubkey_action_refs(event_id, ref_pubkey, ref_kind)` (th
 | `keep_versions_kinds` | int[] | Kinds never deleted by `delete_superseded` (default `[30023]`, whose versions back `reads_versions`). |
 | `kind_allowlist` | int[], nullable | When set, kinds 0, 3, 10000–19999 and 30000–39999 are imported only if listed (**list 0 and 3**, or profiles and follows stop); other kinds keep `accepted_kind`. Refusals count as rejected (and in `krej`). The syncer skips them without fetching. |
 | `hooks_expire_days` | int | With `enabled`: pending `event_hooks` older than this are deleted, hourly, in the hooks loop (default 30). |
+| `thread_parents_view` | bool | Stop writing `event_thread_parents`: it is a view over `event_replies` (unique on `reply_event_id`; a reply imported twice keeps its first row). Reply-chain notifications walk it as before (`no_thread_parents` changes that walk; this flag doesn't). |
+| `delete_derived` | bool | A deleted event (superseded, or by a kind-5 deletion) also loses its `basic_tags`, `a_tags`, `event_mentions`, `event_hashtags`, `pubkey_events`, `advsearch` rows and its `event_replies` link. |
+| `basic_tags_at_import` | bool | The event's `p`/`P`/`e` tags go to `basic_tags` when it is stored (before dispatch, in its transaction), not minutes later by the DAG (whose insert of the same rows then does nothing). Needed by `no_action_tables`. |
+| `no_action_tables` | bool | Stop writing `event_pubkey_actions` and `event_pubkey_action_refs`: they are views over `basic_tags`, `event_replies` and `og_zap_receipts` (likes by their content, replies to their direct parent). The score's duplicate check looks for the initiator's earlier action there. |
+| `pointer_views` | bool | Stop writing the pointer tables (`meta_data`, `contact_lists`, `replaceable_events`, `parametrized_replaceable_events`, the mute/allow lists, `relay_list_metadata`, `bookmarks`, `parameterized_replaceable_list`): with `delete_superseded` the current version is the newest event of its key, read from `event` (an index on `event_d_tag(tags)` for addressable kinds). Their plain-name views read `event`. |
+| `pubkey_stats` | bool | The follower and zap counters go to `pubkey_stats` (one row per pubkey); `pubkey_followers_cnt` and `pubkey_zapped` are views over it. |
+| `no_ln_address` | bool | Stop writing `pubkey_ln_address` (a view over the current kind-0 events). |
+| `zap_merge` | bool | Write `og_zap_receipts`' rows into `zap_receipts` (its `og_sender`, `og_amount_sats`, `og_event_id`; the DAG fills `target_eid`, `sender`, `satszapped` of the same row). `og_zap_receipts` is then a view of the rows with `og_amount_sats`, `zap_receipts` one of the rows with `sender`. |
+| `contact_list_versions` | int | > 0: kind 3 keeps the versions `membership_recovery_contact_lists` (Contact List Backup) shows, the list with most tags of each of the newest this-many days, plus the current one (and the one `contact_lists` names); the others are deleted like superseded versions when a new list arrives. 0 (default): kind 3 is like any replaceable kind. |
+
+The last nine are the lean schema's iteration 2 (infrastructure `docs/proposal-lean-schema-iteration2-20261026.md`); they need its objects (`primal_services/lean_schema/sql/50-*`, `zap_merge` also `sql/57-*`).
 
 What `enabled` changes (same rows written, fewer statements and reads):
 

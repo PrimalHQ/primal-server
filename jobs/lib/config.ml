@@ -74,6 +74,13 @@ type t = {
   blossom : Primal_jobs_media.Blossom.config option; (* the "blossom" object: the Blossom server role (needs "media" too) *)
   ext : Yojson.Safe.t; (* the "ext" object for the private extensions; `Null when absent *)
   lean : bool; (* the optional "lean" object's [enabled]: the lean-schema behaviours (README, "The lean object"); false when absent or null *)
+  lean2 : lean2; (* the lean object's lean-schema iteration-2 keys (each false when absent) *)
+}
+
+and lean2 = {
+  no_note_length : bool; (* skip the note_length node (note_length is a view over event) *)
+  pointer_views : bool; (* stop writing reads_versions (a view over the kind-30023 events) *)
+  pubkey_stats : bool; (* the media and zaps-sent counts into pubkey_stats *)
 }
 
 let field j key = match j with `Assoc f -> ( match List.assoc_opt key f with Some v -> v | None -> raise (Config_error ("missing key " ^ key))) | _ -> raise (Config_error "config must be an object")
@@ -99,17 +106,25 @@ let proxy_of_json j k =
       | Some i -> ( match int_of_string_opt (String.sub p (i + 1) (String.length p - i - 1)) with Some port -> Some (String.sub p 0 i, port) | None -> raise (Config_error (k ^ ": expected host:port")))
       | None -> raise (Config_error (k ^ ": expected host:port")))
 
-(* "lean": absent or null = off; otherwise an object with exactly the key "enabled" (a boolean) *)
+let lean2_keys = [ "no_note_length"; "pointer_views"; "pubkey_stats" ]
+
+(* "lean": absent or null = off; otherwise an object with the key "enabled" (a boolean) and,
+   optionally, the iteration-2 keys (lean2_of_json) *)
 let lean_of_json (j : Yojson.Safe.t) : bool =
   match (match j with `Assoc f -> Option.value (List.assoc_opt "lean" f) ~default:`Null | _ -> `Null) with
   | `Null -> false
   | `Assoc f -> (
-      List.iter (fun (k, _) -> if k <> "enabled" then raise (Config_error ("lean: unknown key " ^ k))) f;
+      List.iter (fun (k, _) -> if k <> "enabled" && not (List.mem k lean2_keys) then raise (Config_error ("lean: unknown key " ^ k))) f;
       match List.assoc_opt "enabled" f with
       | Some (`Bool b) -> b
       | Some _ -> raise (Config_error "lean.enabled: expected a boolean")
       | None -> raise (Config_error "lean: missing key enabled"))
   | _ -> raise (Config_error "lean: expected an object or null")
+
+let lean2_of_json (j : Yojson.Safe.t) : lean2 =
+  let f = match (match j with `Assoc f -> Option.value (List.assoc_opt "lean" f) ~default:`Null | _ -> `Null) with `Assoc f -> f | _ -> [] in
+  let b k = match List.assoc_opt k f with None | Some `Null -> false | Some (`Bool v) -> v | Some _ -> raise (Config_error ("lean." ^ k ^ ": expected a boolean")) in
+  { no_note_length = b "no_note_length"; pointer_views = b "pointer_views"; pubkey_stats = b "pubkey_stats" }
 
 let of_json (j : Yojson.Safe.t) : t =
   {
@@ -159,6 +174,7 @@ let of_json (j : Yojson.Safe.t) : t =
     pushgateway = (match field j "pushgateway" with `Null -> None | o -> Some (rstr o "host", rint o "port", rstr o "job"));
     membership_discovery_url = rstr_opt j "membership_discovery_url";
     lean = lean_of_json j;
+    lean2 = lean2_of_json j;
     ext = (match j with `Assoc f -> Option.value (List.assoc_opt "ext" f) ~default:`Null | _ -> `Null);
     blossom = (match (match j with `Assoc f -> Option.value (List.assoc_opt "blossom" f) ~default:`Null | _ -> `Null) with `Null -> None | o -> ( try Some (Primal_jobs_media.Blossom.config_of_json o) with Primal_jobs_media.Blossom.Config_error m -> raise (Config_error m)));
     media = (match (match j with `Assoc f -> Option.value (List.assoc_opt "media" f) ~default:`Null | _ -> `Null) with `Null -> None | o -> ( try Some (Primal_jobs_media.Media_config.of_json o) with Primal_jobs_media.Media_config.Config_error m -> raise (Config_error m)));

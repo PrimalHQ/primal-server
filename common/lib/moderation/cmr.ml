@@ -54,9 +54,21 @@ type t = {
 
 let empty () = { cmr_pubkeys = Hashtbl.create 1; cmr_groups = []; cmr_pubkeys_allowed = []; cmr_threads = []; cmr_hashtags = []; cmr_words = [] }
 
-(* est.mute_list / mute_list_2 / mute_lists / allow_list: the latest list event of a pubkey *)
-let list_event_id ~(dbh : Postgres.dbh) table (key : string) : string option =
+(* est.mute_list / mute_list_2 / mute_lists / allow_list: the latest list event of a pubkey.
+   [pointer_views] (lean schema, iteration 2): the pointer tables are not written; the newest version
+   in event (kind 10000, or 30000 with that first d tag) *)
+let list_event_id ?(pointer_views = false) ~(dbh : Postgres.dbh) table (key : string) : string option =
   let r =
+    if pointer_views then
+      match table with
+      | `Mute_list -> [%pgsql dbh "select id from event where pubkey = $key and kind = 10000 order by created_at desc, id limit 1"]
+      | `Mute_list_2 ->
+          [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'mute' order by created_at desc, id limit 1"]
+      | `Mute_lists ->
+          [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'mutelists' order by created_at desc, id limit 1"]
+      | `Allow_list ->
+          [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'allowlist' order by created_at desc, id limit 1"]
+    else
     match table with
     | `Mute_list -> [%pgsql dbh "select value from mute_list_1_f693a878b9 where key = $key"]
     | `Mute_list_2 -> [%pgsql dbh "select value from mute_list_2_1_949b3d746b where key = $key"]
@@ -71,7 +83,7 @@ let uniq (l : string list) : string list =
   let seen = Hashtbl.create 16 in
   List.filter (fun x -> if Hashtbl.mem seen x then false else (Hashtbl.add seen x (); true)) (List.rev l)
 
-let compile ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(defaults : Yojson.Safe.t) ~(get_event : string -> Nostr.t option) (pubkey : string) : t =
+let compile ?pointer_views ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(defaults : Yojson.Safe.t) ~(get_event : string -> Nostr.t option) (pubkey : string) : t =
   let event_tags eid = match get_event eid with Some e -> e.Nostr.tags | None -> [] in
   let settings = user_settings ~mem_dbh ~defaults pubkey in
   let member k j = try Yojson.Safe.Util.member k j with _ -> `Null in
@@ -82,7 +94,7 @@ let compile ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(defaults : Yojson.
     (* mute_lists (kind 30000, d=mutelists): the mute lists of OTHER users this user applies, with
        per-entry scopes in the 5th tag field. *)
     let ml_pubkeys : (string, string list) Hashtbl.t = Hashtbl.create 8 in
-    (match list_event_id ~dbh `Mute_lists pubkey with
+    (match list_event_id ?pointer_views ~dbh `Mute_lists pubkey with
     | Some mlseid ->
         List.iter
           (fun tg ->
@@ -105,7 +117,7 @@ let compile ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(defaults : Yojson.
       (fun ppk ->
         List.iter
           (fun table ->
-            match list_event_id ~dbh table ppk with
+            match list_event_id ?pointer_views ~dbh table ppk with
             | Some eid ->
                 List.iter
                   (fun tg ->
@@ -137,7 +149,7 @@ let compile ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(defaults : Yojson.
       | _ -> []
     in
     let allowed =
-      match list_event_id ~dbh `Allow_list pubkey with
+      match list_event_id ?pointer_views ~dbh `Allow_list pubkey with
       | Some eid ->
           List.filter_map (fun tg -> if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "p" then Option.bind (Nostr.tag_field tg 1) decode32 else None) (event_tags eid)
       | None -> []
