@@ -1044,6 +1044,45 @@ let scored_pass (c : Db.cache Db.conn) ~(posts_json : string) ~(domains_json : s
             and coalesce((select pfc.value from pubkey_followers_cnt pfc where pfc.key = decode(p->>1, 'hex')), 0) >= 5)"]
   |> List.filter_map Fun.id
 
+(* app.jl enrich_feed_events_pg's reordering: the [select distinct] loses enrich_feed_events' order, so
+   the events the (last) range names come first, in its [elements] order, then the rest as they came.
+   Clients that build the feed from the event order (iOS) depend on it. *)
+let order_by_range (msgs : string list) : string list =
+  let parsed = List.map (fun m -> (m, try Some (Yojson.Safe.from_string m) with _ -> None)) msgs in
+  let field f = function Some (`Assoc l) -> List.assoc_opt f l | _ -> None in
+  let elements =
+    List.fold_left
+      (fun acc (_, j) ->
+        match (field "kind" j, field "content" j) with
+        | Some (`Int k), Some (`String content) when k = Kind.range -> (
+            match Yojson.Safe.from_string content with
+            | `Assoc l -> (
+                match List.assoc_opt "elements" l with
+                | Some (`List es) -> Some (List.filter_map (function `String s -> Some s | _ -> None) es)
+                | _ -> acc)
+            | _ -> acc
+            | exception _ -> acc)
+        | _ -> acc)
+      None parsed
+  in
+  match elements with
+  | None | Some [] -> msgs
+  | Some elements ->
+      let wanted = Hashtbl.create 64 in
+      List.iter (fun e -> Hashtbl.replace wanted e ()) elements;
+      let by_id = Hashtbl.create 64 in
+      let rest =
+        List.filter_map
+          (fun (m, j) ->
+            match field "id" j with
+            | Some (`String id) when Hashtbl.mem wanted id ->
+                Hashtbl.replace by_id id m;
+                None
+            | _ -> Some m)
+          parsed
+      in
+      List.filter_map (Hashtbl.find_opt by_id) elements @ rest
+
 (* enrich_feed_events over (event hex, value) pairs; the value plays created_at in the SQL *)
 let enrich_posts (c : Db.cache Db.conn) ~(posts_json : string) ~user_pubkey ~apply_humaness_check : string list =
   let dbh = Db.raw c in
@@ -1051,7 +1090,7 @@ let enrich_posts (c : Db.cache Db.conn) ~(posts_json : string) ~user_pubkey ~app
     "select distinct e::text from enrich_feed_events( \
        array(select row(decode(p->>0, 'hex'), (p->>1)::int8)::post from jsonb_array_elements($posts_json::jsonb) x(p)), \
        $?user_pubkey, $apply_humaness_check, 'created_at') f(e) where e is not null"]
-  |> List.filter_map Fun.id
+  |> List.filter_map Fun.id |> order_by_range
 
 (* advanced_search: enrich_feed_events over (event hex, orderkey) pairs with Julia's orderby name *)
 let enrich_posts_ordered (c : Db.cache Db.conn) ~(posts_json : string) ~user_pubkey ~apply_humaness_check ~(orderby : string) : string list =
@@ -1060,7 +1099,7 @@ let enrich_posts_ordered (c : Db.cache Db.conn) ~(posts_json : string) ~user_pub
     "select distinct e::text from enrich_feed_events( \
        array(select row(decode(p->>0, 'hex'), (p->>1)::int8)::post from jsonb_array_elements($posts_json::jsonb) x(p)), \
        $?user_pubkey, $apply_humaness_check, $orderby) f(e) where e is not null"]
-  |> List.filter_map Fun.id
+  |> List.filter_map Fun.id |> order_by_range
 
 (* app_ext.jl scored_users: best score24h per author since [since] *)
 let scored_users (c : Db.cache Db.conn) ~since ~limit : (string * int64) list =

@@ -117,6 +117,22 @@ let test_range_msg () =
     {|{"kind":10000113,"content":"{\"since\":5,\"until\":100,\"order_by\":\"amount_sats\",\"elements\":[\"a\",\"c\",\"b\"]}"}|}
     (H.range_msg ~order_by:"amount_sats" [ ("a", 100L); ("c", 50L); ("b", 5L) ])
 
+let test_order_by_range () =
+  let q = Primal_api.Queries.order_by_range in
+  let ev id = Printf.sprintf {|{"id": "%s", "kind": 1}|} id in
+  let range els =
+    Yojson.Safe.to_string
+      (`Assoc [ ("kind", `Int 10000113); ("content", `String (Yojson.Safe.to_string (`Assoc [ ("order_by", `String "created_at"); ("elements", `List (List.map (fun e -> `String e) els)) ]))) ])
+  in
+  let meta = {|{"kind": 0, "pubkey": "p"}|} in
+  let r = range [ "a"; "b"; "c" ] in
+  Alcotest.(check (list string)) "named events in elements order, the rest after as they came"
+    [ ev "a"; ev "b"; ev "c"; meta; ev "x"; r ]
+    (q [ ev "c"; meta; ev "a"; ev "x"; r; ev "b" ]);
+  Alcotest.(check (list string)) "no range: unchanged" [ ev "b"; ev "a" ] (q [ ev "b"; ev "a" ]);
+  Alcotest.(check (list string)) "empty elements: unchanged" [ ev "b"; range [] ] (q [ ev "b"; range [] ]);
+  Alcotest.(check (list string)) "missing element skipped" [ ev "c"; r ] (q [ r; ev "c" ])
+
 let test_moderation_scope () =
   Alcotest.(check bool) "feed is content scope" true (M.scope_of_funcall "feed" = M.Content);
   Alcotest.(check bool) "scored is trending scope" true (M.scope_of_funcall "scored" = M.Trending);
@@ -366,6 +382,7 @@ let () =
           Alcotest.test_case "nip19 ser" `Quick test_nip19;
           Alcotest.test_case "relays normalize" `Quick test_relays_normalize;
           Alcotest.test_case "range msg" `Quick test_range_msg;
+          Alcotest.test_case "order by range" `Quick test_order_by_range;
           Alcotest.test_case "moderation scope" `Quick test_moderation_scope;
           Alcotest.test_case "event_from_user" `Quick test_event_from_user;
           Alcotest.test_case "notif json" `Quick test_notif_json;
