@@ -30,6 +30,10 @@ let test_lean_parse () =
   Alcotest.(check bool) "zero days" true (is_error {|{"hooks_expire_days": 0}|});
   Alcotest.(check bool) "not an object" true (is_error {|[1]|})
 
+let test_media_url_limit () =
+  Alcotest.(check bool) "2048 bytes pass" false (Primal_common.Media_url.too_long (String.make 2048 'a'));
+  Alcotest.(check bool) "2049 bytes refused" true (Primal_common.Media_url.too_long (String.make 2049 'a'))
+
 let test_lean_contact_list_versions () =
   let l = ok {|{"delete_superseded": true, "zap_merge": true, "contact_list_versions": 30}|} in
   Alcotest.(check bool) "zap_merge" true l.zap_merge;
@@ -167,6 +171,7 @@ let () =
         [
           Alcotest.test_case "parse" `Quick test_lean_parse;
           Alcotest.test_case "contact list versions" `Quick test_lean_contact_list_versions;
+          Alcotest.test_case "media url limit" `Quick test_media_url_limit;
           Alcotest.test_case "config" `Quick test_config;
           Alcotest.test_case "kind allowlist" `Quick test_kind_allowlist;
           Alcotest.test_case "newer" `Quick test_newer;

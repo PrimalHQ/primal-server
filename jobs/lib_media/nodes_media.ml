@@ -319,12 +319,20 @@ let import_media_hls_pn (ctx : ctx) (n : node) : Pgj.t =
     end
   end
 
+(* A node whose URL (the args tuple's element [pos]) is past Media_url.max_bytes ends as
+   :url_too_long, like :low_trust_user, without downloading or inserting anything: the media tables
+   key on the URL. Covers every source of these nodes (the importer, uploads, the kernel). *)
+let url_guarded ~pos f (ctx : ctx) (n : node) : Pgj.t =
+  match List.nth_opt (as_args n) pos with
+  | Some u -> ( match Pgj.as_string u with Some url when Media_url.too_long url -> Pgj.symbol "url_too_long" | _ -> f ctx n)
+  | None -> f ctx n
+
 let register () =
-  register ~mod_:"PrimalServer.Media" ~func:"media_variants_pn" media_variants_pn;
-  register ~mod_:"PrimalServer.Media" ~func:"media_variant_fast_pn" media_variant_fast_pn;
-  register ~mod_:"PrimalServer.DB" ~func:"import_media_pn" import_media_pn;
+  register ~mod_:"PrimalServer.Media" ~func:"media_variants_pn" (url_guarded ~pos:1 media_variants_pn);
+  register ~mod_:"PrimalServer.Media" ~func:"media_variant_fast_pn" (url_guarded ~pos:1 media_variant_fast_pn);
+  register ~mod_:"PrimalServer.DB" ~func:"import_media_pn" (url_guarded ~pos:2 import_media_pn);
   register ~mod_:"PrimalServer.DB" ~func:"import_media_variant_pn" import_media_variant_pn;
-  register ~mod_:"PrimalServer.DB" ~func:"import_media_fast_pn" import_media_fast_pn;
-  register ~mod_:"PrimalServer.DB" ~func:"import_media_fast_pn_2" import_media_fast_pn;
-  register ~mod_:"PrimalServer.DB" ~func:"import_preview_pn" import_preview_pn;
+  register ~mod_:"PrimalServer.DB" ~func:"import_media_fast_pn" (url_guarded ~pos:2 import_media_fast_pn);
+  register ~mod_:"PrimalServer.DB" ~func:"import_media_fast_pn_2" (url_guarded ~pos:2 import_media_fast_pn);
+  register ~mod_:"PrimalServer.DB" ~func:"import_preview_pn" (url_guarded ~pos:2 import_preview_pn);
   register ~mod_:"PrimalServer.DB" ~func:"import_media_hls_pn" import_media_hls_pn

@@ -285,6 +285,8 @@ let re_url =
 (* Julia for_urls: every URL in the content, plus the imeta "url ..." entries of picture / video
    events. *)
 let for_urls (e : Nostr.t) (body : string -> unit) : unit =
+  (* URLs past Media_url.max_bytes are not queued: the media tables key on them *)
+  let body u = if not (Media_url.too_long u) then body u in
   List.iter (fun g -> body (Re.Group.get g 0)) (Re.all re_url e.content);
   if e.kind = Nostr.kind_picture || e.kind = Nostr.kind_video_long_form || e.kind = Nostr.kind_video_short_form
   then
