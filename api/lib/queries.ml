@@ -1570,9 +1570,14 @@ let domain_hidden_pubkeys (c : Db.cache Db.conn) ~(pubkeys_json : string) ~(doma
 let media_note_ids (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset : (string * int64) list =
   let dbh = Db.raw c in
   let since = i64 since and until = i64 until and limit = i64 limit and offset = i64 offset in
+  (* exists, not a join + distinct: the (pubkey, kind, created_at) index is walked newest first and
+     stops after limit + offset media notes. The join read every note of the author before the limit
+     (140k notes, 843k pages: 1.3 s warm, 10-25 s cold; this: 25-30 ms), same rows in the same order.
+     No id tie-breaker in the order: the planner then sorts all of them again. *)
   [%pgsql dbh
-    "select distinct encode(es.id, 'hex'), es.created_at from events es, event_media em \
-     where es.pubkey = $pubkey and es.kind = 1 and es.id = em.event_id and es.created_at >= $since and es.created_at <= $until \
+    "select encode(es.id, 'hex'), es.created_at from events es \
+     where es.pubkey = $pubkey and es.kind = 1 and es.created_at >= $since and es.created_at <= $until \
+     and exists (select 1 from event_media em where em.event_id = es.id) \
      order by es.created_at desc limit $limit offset $offset"]
   |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
 
