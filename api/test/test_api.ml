@@ -276,6 +276,15 @@ let test_internal_http () =
   Alcotest.(check string) "title" "T & U" p.Link_preview.title;
   Alcotest.(check string) "description" "D" p.Link_preview.description;
   Alcotest.(check string) "image joined" "https://ex.com/a/img/p.png" p.Link_preview.image;
+  let img h = (Link_preview.parse ~url:"https://ex.com/a/b.html" ("<html><head>" ^ h ^ "</head></html>")).Link_preview.image in
+  Alcotest.(check string) "empty og:image" "" (img {|<meta property="og:title" content="T"><meta property="og:image" content="">|});
+  Alcotest.(check string) "data: og:image" "" (img {|<meta property="og:image" content="data:,">|});
+  Alcotest.(check string) "data: twitter image" "" (img {|<meta name="twitter:image:src" content=" DATA:image/png;base64,AA">|});
+  Alcotest.(check string) "junk keeps the icon" "https://ex.com/fav.ico" (img {|<link rel="icon" href="/fav.ico"><meta property="og:image" content="data:;">|});
+  Alcotest.(check string) "junk keeps an earlier og:image" "https://ex.com/a/i.jpg" (img {|<meta property="og:image" content="i.jpg"><meta name="twitter:image:src" content="">|});
+  Alcotest.(check string) "non-http scheme" "" (img {|<meta property="og:image" content="javascript:alert(1)">|});
+  Alcotest.(check string) "protocol-relative" "https://cdn.ex.com/i.png" (img {|<meta property="og:image" content="//cdn.ex.com/i.png">|});
+  Alcotest.(check string) "absolute https" "HTTPS://img.ex.org/x.jpg" (img {|<meta property="og:image" content="HTTPS://img.ex.org/x.jpg">|});
   Alcotest.(check (option string)) "oembed youtu.be" (Some "https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fyoutu.be%2FKLfb%3Fsi%3Dx") (Link_preview.oembed_url "https://youtu.be/KLfb?si=x");
   Alcotest.(check bool) "oembed m.youtube.com" true (Link_preview.oembed_url "https://m.youtube.com/watch?v=a" <> None);
   Alcotest.(check (option string)) "no oembed elsewhere" None (Link_preview.oembed_url "https://notyoutube.com/watch?v=a");

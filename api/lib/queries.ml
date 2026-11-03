@@ -1573,11 +1573,18 @@ let media_note_ids (c : Db.cache Db.conn) ~pubkey ~since ~until ~limit ~offset :
   (* exists, not a join + distinct: the (pubkey, kind, created_at) index is walked newest first and
      stops after limit + offset media notes. The join read every note of the author before the limit
      (140k notes, 843k pages: 1.3 s warm, 10-25 s cold; this: 25-30 ms), same rows in the same order.
-     No id tie-breaker in the order: the planner then sorts all of them again. *)
+     No id tie-breaker in the order: the planner then sorts all of them again.
+     A media note has an image or video of its own text: an event_media URL that the content contains
+     and that has an image/video media row. event_media also holds a link preview's og:image (the
+     preview job imports it under the note's id), so a link-only note was listed, and the iOS grid,
+     which shows only media named in the text, drew an empty square for it (53% of recent media-tab
+     notes on one cache host); a junk og:image (the page itself) has no media row. *)
   [%pgsql dbh
     "select encode(es.id, 'hex'), es.created_at from events es \
      where es.pubkey = $pubkey and es.kind = 1 and es.created_at >= $since and es.created_at <= $until \
-     and exists (select 1 from event_media em where em.event_id = es.id) \
+     and exists (select 1 from event_media em where em.event_id = es.id and strpos(es.content, em.url) > 0 \
+                 and exists (select 1 from media m where m.url = em.url \
+                             and (m.mimetype like 'image/%' or m.mimetype like 'video/%'))) \
      order by es.created_at desc limit $limit offset $offset"]
   |> List.filter_map (function Some e, Some t -> Some (e, t) | _ -> None)
 

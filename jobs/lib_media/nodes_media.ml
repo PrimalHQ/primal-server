@@ -62,9 +62,15 @@ let media_variants_pn (ctx : ctx) (n : node) : Pgj.t =
         (murl, T.mimetype_ext mt, mt, data)
   in
   elog ctx n [ ("url", `String url); ("orig_media_url", `String orig_media_url); ("ext", `String orig_ext) ];
-  if orig_ext = ".bin" then `Assoc [ ("variants", `List []) ]
+  let starts p s = String.length s >= String.length p && String.sub s 0 (String.length p) = p in
+  (* only images and videos have variants: import_media_pn records event_media for a URL with any,
+     and a page (text/html, ".html") made a link-only note a "media" note (a link preview's og:image
+     that was the page itself) without any media row to show *)
+  if orig_ext = ".bin" || not (starts "image/" mimetype || starts "video/" mimetype) then begin
+    elog ctx n [ ("url", `String url); ("step", `String "not_media"); ("mimetype", `String mimetype) ];
+    `Assoc [ ("variants", `List []) ]
+  end
   else begin
-    let starts p s = String.length s >= String.length p && String.sub s 0 (String.length p) = p in
     let variants = ref [] in
     List.iter
       (fun (size, animated) ->

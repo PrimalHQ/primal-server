@@ -49,13 +49,35 @@ let empty = { mimetype = ""; title = ""; image = ""; description = ""; icon_url 
 (* sites serve their OpenGraph tags to link-preview bots *)
 let user_agent = "WhatsApp/2"
 
+(* An image reference from a tag, resolved against the page: none for an empty value or a URI of
+   another scheme than http(s) (data:, javascript:, ...), and only an http(s) result. Http.urljoin
+   made the page's directory of an empty og:image and "<page dir>/data:," of a data: placeholder; the
+   media job then imported those pages as the note's media (an event_media row, so a link-only note
+   was listed in the profile's media tab). *)
+let re_scheme = Str.regexp "\\([a-zA-Z][a-zA-Z0-9+.-]*\\):"
+
+let image_ref ~(url : string) (c : string) : string option =
+  let c = String.trim c in
+  let has_prefix p s = String.starts_with ~prefix:p (String.lowercase_ascii s) in
+  let scheme = if Str.string_match re_scheme c 0 then Some (String.lowercase_ascii (Str.matched_group 1 c)) else None in
+  if c = "" then None
+  else
+    match scheme with
+    | Some ("http" | "https") -> Some c (* absolute; urljoin knows only lower-case schemes *)
+    | Some _ -> None
+    | None ->
+    let u = Http.urljoin url c in
+    if has_prefix "http://" u || has_prefix "https://" u then Some u else None
+
 let parse ~(url : string) (html : string) : t =
   let head = match Str.search_forward re_head_end html 0 with i -> String.sub html 0 i | exception Not_found -> html in
   let title = ref "" and image = ref "" and description = ref "" in
+  (* a junk reference leaves an earlier good one in place *)
+  let set_image c = match image_ref ~url c with Some u -> image := u | None -> () in
   List.iter
     (fun a ->
       match (List.assoc_opt "rel" a, List.assoc_opt "href" a) with
-      | Some rel, Some href when String.split_on_char ' ' (String.trim rel) |> List.filter (fun s -> s <> "") = [ "icon" ] -> image := Http.urljoin url href
+      | Some rel, Some href when String.split_on_char ' ' (String.trim rel) |> List.filter (fun s -> s <> "") = [ "icon" ] -> set_image href
       | _ -> ())
     (tag_attrs head "link");
   List.iter
@@ -64,21 +86,21 @@ let parse ~(url : string) (html : string) : t =
       | Some p, _, Some c -> (
           match p with
           | "og:title" -> title := c
-          | "og:image" -> image := Http.urljoin url c
+          | "og:image" -> set_image c
           | "og:description" -> description := c
           | "twitter:title" -> title := c
           | "twitter:description" -> description := c
-          | "twitter:image:src" -> image := Http.urljoin url c
+          | "twitter:image:src" -> set_image c
           | _ -> ())
       | None, Some n, Some c -> (
           match n with
           | "description" -> description := c
           | "og:title" -> title := c
-          | "og:image" -> image := Http.urljoin url c
+          | "og:image" -> set_image c
           | "og:description" -> description := c
           | "twitter:title" -> title := c
           | "twitter:description" -> description := c
-          | "twitter:image:src" -> image := Http.urljoin url c
+          | "twitter:image:src" -> set_image c
           | _ -> ())
       | _ -> ())
     (tag_attrs head "meta");
