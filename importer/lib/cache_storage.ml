@@ -1094,6 +1094,28 @@ let delete_superseded_row (est : est) (id : string) : unit =
   Lean.Superseded.add id;
   Atomic.incr Lean.superseded_deleted
 
+(* Every stored version of [e]'s key older than [e] (NIP-01 order), not only the one version_check
+   saw: versions of one key imported at the same time each store their row first, so the newest one's
+   check can name the other new one, already deleted by its own (older) check, and the version before
+   both was never deleted (bots that publish a few proof-of-work kind-0 versions at once kept every
+   such one: 1,100 kind-0 rows of one author). Bounded per event; the next version takes the rest. *)
+let older_versions (est : est) (e : Nostr.t) : string list =
+  let dbh = est.dbh and k = i64 e.kind and pubkey = e.pubkey and eid = e.id and ca = i64 e.created_at in
+  let k_ = e.kind in
+  if k_ = Nostr.kind_set_metadata || k_ = Nostr.kind_contact_list || (10000 <= k_ && k_ < 20000) then
+    [%pgsql dbh
+      "select id from event where pubkey = $pubkey and kind = $k and id <> $eid \
+       and (created_at < $ca or (created_at = $ca and id > $eid)) limit 1000"]
+  else if 30000 <= k_ && k_ < 40000 then
+    match first_d_tag e with
+    | None -> []
+    | Some identifier ->
+        [%pgsql dbh
+          "select id from event where kind between 30000 and 39999 and kind = $k and pubkey = $pubkey \
+           and event_d_tag(tags) = $identifier and id <> $eid \
+           and (created_at < $ca or (created_at = $ca and id > $eid)) limit 1000"]
+  else []
+
 (* lean.contact_list_versions: a pubkey's kind-3 versions other than the current one and the ones
    membership_recovery_contact_lists shows (per day the one with most tags, then the lower id; the
    newest [n] days), deleted like superseded versions. The current one is the newest (NIP-01 order)
@@ -1942,8 +1964,12 @@ let import_event_lean (est : est) (e : Nostr.t) : import_result =
                       | _ -> store_parametrized_replaceable_event est e);
                 (match check with
                 | Newest (Some old_id) when not keep ->
-                    (* after dispatch: kind 3's follow diff has read the previous list *)
-                    guard "superseded" (fun () -> delete_superseded_row est old_id)
+                    (* after dispatch: kind 3's follow diff has read the previous list. With the
+                       pointer views, every older version of the key (older_versions), not only the
+                       one the check saw. *)
+                    guard "superseded" (fun () ->
+                        let olds = if est.cfg.lean.pointer_views then older_versions est e else [ old_id ] in
+                        List.iter (delete_superseded_row est) (if List.mem old_id olds then olds else old_id :: olds))
                 | _ -> ())
           end;
           if e.kind = Nostr.kind_contact_list && l.contact_list_versions > 0 && check <> No_pointer then
