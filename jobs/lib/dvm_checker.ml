@@ -56,52 +56,102 @@ let upsert (dbh : Postgres.dbh) ~pubkey ~(identifier : string) ~(results_json : 
 
 let hexes_json (l : string list) = Yojson.Safe.to_string (`List (List.map (fun h -> `String h) l))
 
+(* Handlers that don't answer are checked less often. Every round used to check every handler, each
+   failure costing [dvm_timeout_s] (plus the randomized delay) in one of [dvm_parallel] fibers: when
+   ~500 dead handlers appeared at once, a round took ~5 h, longer than the hour a row stays fresh
+   for the API (Queries.dvm_feed_eids), and the working feeds dropped out of the featured list.
+   After the n-th failure in a row a handler waits min(max_s, period * 2^(n-1)) before its next
+   check (the first failure: the next round), keyed by (pubkey, d) so a republished handler event
+   doesn't start over. An answer resets it. In memory only: a restart checks everything once. *)
+module Backoff = struct
+  type entry = { failures : int; last : float }
+  type t = (string * string, entry) Hashtbl.t
+
+  let create () : t = Hashtbl.create 1024
+  let delay ~period ~max_s n = if n <= 0 then 0.0 else Float.min max_s (period *. (2.0 ** float_of_int (n - 1)))
+
+  let due (t : t) ~period ~max_s ~now key =
+    max_s <= 0.0 || match Hashtbl.find_opt t key with None -> true | Some e -> now >= e.last +. delay ~period ~max_s e.failures
+
+  let succeeded (t : t) key = Hashtbl.remove t key
+
+  let failed (t : t) ~now key =
+    let n = match Hashtbl.find_opt t key with Some e -> e.failures | None -> 0 in
+    Hashtbl.replace t key { failures = n + 1; last = now }
+
+  (* the round's handlers in check order: the due ones, those without failures (answered last time,
+     or new) first; the entries of handlers no longer listed are dropped *)
+  let plan (t : t) ~period ~max_s ~now (items : ('k * 'a) list) : ('k * 'a) list * int =
+    let listed = Hashtbl.create (List.length items) in
+    List.iter (fun (k, _) -> Hashtbl.replace listed k ()) items;
+    Hashtbl.filter_map_inplace (fun k e -> if Hashtbl.mem listed k then Some e else None) t;
+    let due, skipped = List.partition (fun (k, _) -> due t ~period ~max_s ~now k) items in
+    let ok, failing = List.partition (fun (k, _) -> not (Hashtbl.mem t k)) due in
+    (ok @ failing, List.length skipped)
+end
+
+type handler = { dvm_pubkey : string; dvm_id : string; personalized : bool; relay : string list }
+
+(* the kind-31990 handler event's parts the check needs *)
+let handler_of ~(cfg : Config.t) (dbh : Postgres.dbh) ~event_id : handler option =
+  match (event_json dbh ~event_id, if cfg.lean then None else relay_url dbh ~event_id) with
+  | Some (`Assoc f), relay when (match List.assoc_opt "kind" f with Some (`Int 31990) -> true | _ -> false) -> (
+      let tags = match List.assoc_opt "tags" f with Some (`List l) -> l | _ -> [] in
+      let relay = if cfg.lean then relay_hints tags else Option.to_list relay in
+      let dvm_id = List.find_map (function `List (`String "d" :: `String v :: _) -> Some v | _ -> None) tags in
+      let dvm_pubkey = match List.assoc_opt "pubkey" f with Some (`String pk) -> Hex_util.decode_opt pk | _ -> None in
+      match (dvm_id, dvm_pubkey) with
+      | Some dvm_id, Some dvm_pubkey ->
+          let personalized =
+            match List.assoc_opt "content" f with
+            | Some (`String c) -> ( match Yojson.Safe.from_string c with `Assoc d -> List.assoc_opt "personalized" d = Some (`Bool true) | _ -> false | exception _ -> false)
+            | _ -> false
+          in
+          Some { dvm_pubkey; dvm_id; personalized; relay }
+      | _ -> None)
+  | _ -> None
+
 (* run_dvm_checks *)
-let run_checks ~(cfg : Config.t) ~net ~clock ~(pool : Postgres.pool) ~(stop : unit Promise.t) : unit =
+let run_checks ~(cfg : Config.t) ~(backoff : Backoff.t) ~net ~clock ~(pool : Postgres.pool) ~(stop : unit Promise.t) : unit =
   let now = Utils.current_time () in
   let eids = Postgres.use pool (fun dbh -> handler_eids dbh ~since:(now - (90 * 24 * 3600))) in
+  let handlers =
+    Postgres.use pool (fun dbh -> List.filter_map (fun eid_hex -> handler_of ~cfg dbh ~event_id:(Hex_util.decode_exn eid_hex)) eids)
+    |> List.map (fun h -> ((h.dvm_pubkey, h.dvm_id), h))
+    |> List.sort_uniq (fun (a, _) (b, _) -> compare a b)
+  in
+  let todo, skipped = Backoff.plan backoff ~period:cfg.dvm_check_period_s ~max_s:cfg.dvm_backoff_max_s ~now:(Unix.gettimeofday ()) handlers in
   let good = Atomic.make 0 and bad = Atomic.make 0 in
   Fiber.List.iter ~max_fibers:cfg.dvm_parallel
-    (fun eid_hex ->
+    (fun (key, h) ->
       if not (Promise.is_resolved stop) then begin
-        let event_id = Hex_util.decode_exn eid_hex in
-        match Postgres.use pool (fun dbh -> (event_json dbh ~event_id, if cfg.lean then None else relay_url dbh ~event_id)) with
-        | Some (`Assoc f as e), relay when (match List.assoc_opt "kind" f with Some (`Int 31990) -> true | _ -> false) -> (
-            let tags = match List.assoc_opt "tags" f with Some (`List l) -> l | _ -> [] in
-            let relay = if cfg.lean then relay_hints tags else Option.to_list relay in
-            let dvm_id = List.find_map (function `List (`String "d" :: `String v :: _) -> Some v | _ -> None) tags in
-            let dvm_pubkey = match List.assoc_opt "pubkey" f with Some (`String pk) -> Hex_util.decode_opt pk | _ -> None in
-            match (dvm_id, dvm_pubkey) with
-            | Some dvm_id, Some dvm_pubkey ->
-                if cfg.dvm_randomized_delays then Eio.Time.sleep clock (Random.float 1.0 *. cfg.dvm_check_period_s *. 0.8);
-                let personalized =
-                  match List.assoc_opt "content" f with
-                  | Some (`String c) -> ( match Yojson.Safe.from_string c with `Assoc d -> List.assoc_opt "personalized" d = Some (`Bool true) | _ -> false | exception _ -> false)
-                  | _ -> false
-                in
-                let relays = List.sort_uniq compare (cfg.dvm_relays @ relay) in
-                let jobreq = Dvm_client.job_request ~seckey:cfg.dvm_requester_seckey ~dvm_pubkey ~relays ~user:(if personalized then Some cfg.dvm_requester_pubkey else None) ~now:(Utils.current_time ()) in
-                let t0 = Unix.gettimeofday () in
-                let r = Dvm_client.request ~net ~clock ?proxy:cfg.relay_proxy ~relays ~jobreq ~timeout:cfg.dvm_timeout_s () in
-                if cfg.dvm_log then log "%s %s %s %.1fs" (Hex_util.encode dvm_pubkey) dvm_id (match r with Ok _ -> "+" | Error _ -> "X") (Unix.gettimeofday () -. t0);
-                Postgres.use pool (fun dbh ->
-                    match r with
-                    | Ok ids ->
-                        Atomic.incr good;
-                        let ps = if ids = [] then [] else posts dbh ~ids_json:(hexes_json ids) in
-                        let ps = List.stable_sort (fun (_, _, a) (_, _, b) -> compare b a) ps |> List.filteri (fun i _ -> i < 20) in
-                        let notes = List.length (List.filter (fun (_, k, _) -> k = 1L) ps) and reads = List.length (List.filter (fun (_, k, _) -> k = 30023L) ps) in
-                        let results = List.filter_map (fun (h, k, _) -> if k = 1L || k = 30023L then Some h else None) ps in
-                        upsert dbh ~pubkey:dvm_pubkey ~identifier:dvm_id ~results_json:(hexes_json results) ~kind:(if notes >= reads then "notes" else "reads") ~personalized ~ok:(notes + reads > 0)
-                    | Error _ ->
-                        Atomic.incr bad;
-                        upsert dbh ~pubkey:dvm_pubkey ~identifier:dvm_id ~results_json:"null" ~kind:"" ~personalized ~ok:false)
-            | _ -> ignore e)
-        | _ -> ()
+        if cfg.dvm_randomized_delays then Eio.Time.sleep clock (Random.float 1.0 *. cfg.dvm_check_period_s *. 0.8);
+        let relays = List.sort_uniq compare (cfg.dvm_relays @ h.relay) in
+        let jobreq =
+          Dvm_client.job_request ~seckey:cfg.dvm_requester_seckey ~dvm_pubkey:h.dvm_pubkey ~relays ~user:(if h.personalized then Some cfg.dvm_requester_pubkey else None) ~now:(Utils.current_time ())
+        in
+        let t0 = Unix.gettimeofday () in
+        let r = Dvm_client.request ~net ~clock ?proxy:cfg.relay_proxy ~relays ~jobreq ~timeout:cfg.dvm_timeout_s () in
+        if cfg.dvm_log then log "%s %s %s %.1fs" (Hex_util.encode h.dvm_pubkey) h.dvm_id (match r with Ok _ -> "+" | Error _ -> "X") (Unix.gettimeofday () -. t0);
+        (match r with Ok _ -> Backoff.succeeded backoff key | Error _ -> Backoff.failed backoff ~now:(Unix.gettimeofday ()) key);
+        Postgres.use pool (fun dbh ->
+            match r with
+            | Ok ids ->
+                Atomic.incr good;
+                let ps = if ids = [] then [] else posts dbh ~ids_json:(hexes_json ids) in
+                let ps = List.stable_sort (fun (_, _, a) (_, _, b) -> compare b a) ps |> List.filteri (fun i _ -> i < 20) in
+                let notes = List.length (List.filter (fun (_, k, _) -> k = 1L) ps) and reads = List.length (List.filter (fun (_, k, _) -> k = 30023L) ps) in
+                let results = List.filter_map (fun (h, k, _) -> if k = 1L || k = 30023L then Some h else None) ps in
+                upsert dbh ~pubkey:h.dvm_pubkey ~identifier:h.dvm_id ~results_json:(hexes_json results) ~kind:(if notes >= reads then "notes" else "reads") ~personalized:h.personalized
+                  ~ok:(notes + reads > 0)
+            | Error _ ->
+                Atomic.incr bad;
+                upsert dbh ~pubkey:h.dvm_pubkey ~identifier:h.dvm_id ~results_json:"null" ~kind:"" ~personalized:h.personalized ~ok:false)
       end)
-    eids;
-  log "checked %d handlers: %d good, %d bad" (List.length eids) (Atomic.get good) (Atomic.get bad)
+    todo;
+  log "checked %d of %d handlers: %d good, %d bad, %d backing off" (List.length todo) (List.length handlers) (Atomic.get good) (Atomic.get bad) skipped
 
 let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
   let pool = Postgres.make_pool ~size:(cfg.dvm_parallel + 1) cfg.cache_db in
-  Periodic.run ~clock ~stop ~period:cfg.dvm_check_period_s ~label:"dvm_checker" (fun () -> run_checks ~cfg ~net ~clock ~pool ~stop)
+  let backoff = Backoff.create () in
+  Periodic.run ~clock ~stop ~period:cfg.dvm_check_period_s ~label:"dvm_checker" (fun () -> run_checks ~cfg ~backoff ~net ~clock ~pool ~stop)

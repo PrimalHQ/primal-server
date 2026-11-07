@@ -1,5 +1,5 @@
 (* The pure parts of the "lean" config behaviours: config parsing, the DAG's segments (closed and
-   half-open), the DVM checker's relay hints and pg_listener's pair set. *)
+   half-open), the DVM checker's relay hints and backoff, and pg_listener's pair set. *)
 open Primal_jobs
 
 let lean_config () =
@@ -116,9 +116,36 @@ let seen_prune () =
   S.add t en "c-1";
   Alcotest.(check int) "add is idempotent" ((S.max_pairs / 2) + 10) t.S.pairs
 
+(* failing handlers wait 1, 2, 4, ... periods (capped), answering ones and new ones go first *)
+let backoff () =
+  let module B = Dvm_checker.Backoff in
+  let period = 600.0 and max_s = 3600.0 in
+  let fl = Alcotest.(check (float 1e-9)) in
+  fl "n=0" 0.0 (B.delay ~period ~max_s 0);
+  fl "n=1" 600.0 (B.delay ~period ~max_s 1);
+  fl "n=2" 1200.0 (B.delay ~period ~max_s 2);
+  fl "n=3" 2400.0 (B.delay ~period ~max_s 3);
+  fl "capped" 3600.0 (B.delay ~period ~max_s 4);
+  let t = B.create () in
+  let a = ("pa", "a") and b = ("pb", "b") and c = ("pc", "c") in
+  B.failed t ~now:0.0 a;
+  B.failed t ~now:0.0 a;
+  B.failed t ~now:0.0 b;
+  let keys (l, n) = (List.map fst l, n) in
+  let items = [ (a, ()); (b, ()); (c, ()) ] in
+  let pl now = keys (B.plan t ~period ~max_s ~now items) in
+  let chk = Alcotest.(check (pair (list (pair string string)) int)) in
+  chk "b due after one period, a not yet" ([ c; b ], 1) (pl 700.0);
+  chk "both due later, the new one first" ([ c; a; b ], 0) (pl 1300.0);
+  B.succeeded t a;
+  chk "an answer resets" ([ a; c; b ], 0) (pl 1300.0);
+  chk "off: every handler" ([ a; c; b ], 0) (keys (B.plan t ~period ~max_s:0.0 ~now:0.0 items));
+  ignore (B.plan t ~period ~max_s ~now:0.0 [ (a, ()) ]);
+  Alcotest.(check bool) "unlisted entries dropped" false (Hashtbl.mem t b)
+
 let () =
   Alcotest.run "primal_jobs_lean"
     [ ("config", [ Alcotest.test_case "lean object" `Quick lean_config ]);
       ("dag", [ Alcotest.test_case "closed unchanged" `Quick closed_unchanged; Alcotest.test_case "half-open once" `Quick half_open_once; Alcotest.test_case "half-open covered" `Quick half_open_covered ]);
-      ("dvm_checker", [ Alcotest.test_case "relay hints" `Quick relay_hints ]);
+      ("dvm_checker", [ Alcotest.test_case "relay hints" `Quick relay_hints; Alcotest.test_case "backoff" `Quick backoff ]);
       ("pg_listener", [ Alcotest.test_case "seen prune" `Quick seen_prune ]) ]

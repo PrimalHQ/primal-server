@@ -133,6 +133,13 @@ answer that exist in the cache (newest first), `kind` `notes` or `reads` by majo
 was found; a failed request stores `results` null and `ok` false. The request code
 (`Dvm_client`) is shared with the API's `dvm_feed`.
 
+A handler that keeps failing is checked less often: after its n-th failure in a row it waits
+min(`dvm_backoff_max_s`, period × 2^(n-1)) (the first failure: the next round), keyed by (pubkey,
+`d`); an answer resets it. Each round checks the handlers without failures first. Without it, a
+flood of dead handlers (~500 at once) stretched a round past the hour a `dvm_feeds` row stays fresh
+for the API, and the working feeds dropped out of `get_featured_dvm_feeds`. The state is in memory:
+after a restart every handler is checked once. The round's log line says how many are backing off.
+
 ### `dvm_provider`
 
 Primal's own content-discovery DVMs, one per feed of `Dvm_provider.feeds` (25 feeds in the code:
@@ -368,6 +375,7 @@ them inert values, e.g. a zero key for `dvm_requester_pubkey`). Exceptions: `dag
 | `dvm_parallel` | int | dvm_checker | concurrent checks (usually 8) |
 | `dvm_randomized_delays` | bool | dvm_checker | random start delay per check |
 | `dvm_log` | bool | dvm_checker | log every check |
+| `dvm_backoff_max_s` | number, optional | dvm_checker | longest backoff of a failing handler (default 21600; 0 = none) |
 | `dvm_provider_keypair_salt` | hex or null | dvm_provider | key salt; `null` = role off |
 | `dvm_provider_relays` | string list | dvm_provider | relays to serve on and answer to |
 | `dvm_provider_announce_created_at` | int | dvm_provider | `created_at` of the announcements |

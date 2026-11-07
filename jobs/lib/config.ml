@@ -38,6 +38,7 @@ type t = {
   dvm_parallel : int; (* asyncmap ntasks 8 *)
   dvm_randomized_delays : bool;
   dvm_log : bool;
+  dvm_backoff_max_s : float; (* longest wait before re-checking a handler that keeps failing; 0 = check every handler every round *)
   (* dvm_provider (dvm_service_provider.jl) *)
   dvm_provider_keypair_salt : string option; (* raw bytes; PRIMAL_DVM_KEYPAIR_SALT: each feed's key is sha256(salt ‖ feed id) *)
   dvm_provider_relays : string list; (* RELAY_URLS: connected for job requests, and where answers and announcements go *)
@@ -142,6 +143,7 @@ let of_json (j : Yojson.Safe.t) : t =
     dvm_parallel = rint j "dvm_parallel";
     dvm_randomized_delays = rbool j "dvm_randomized_delays";
     dvm_log = rbool j "dvm_log";
+    dvm_backoff_max_s = (match j with `Assoc f when List.mem_assoc "dvm_backoff_max_s" f -> rfloat j "dvm_backoff_max_s" | _ -> 21600.0);
     dvm_provider_keypair_salt =
       (match rstr_opt j "dvm_provider_keypair_salt" with
       | None -> None
