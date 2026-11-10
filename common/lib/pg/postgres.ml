@@ -223,9 +223,23 @@ let use ?acquire (p : pool) (f : dbh -> 'a) : 'a =
     match acquire with
     | None -> take ()
     | Some (clock, timeout) -> (
-        match Eio.Time.with_timeout clock timeout (fun () -> Ok (take ())) with
+        (* with_timeout is Fiber.first, and both sides can succeed: the take can get a connection
+           (or connect) while the timer's result is already chosen, and Fiber.first then drops the
+           later result. That connection was out of the stream for good, one slot less each time,
+           until no slot was left (jobs' API pool, 2026-11-10: every lease a Pool_timeout). Both
+           fibers have finished when with_timeout returns, so a connection taken by a losing take
+           is in [got]: put it back. *)
+        let got = ref None in
+        match
+          Eio.Time.with_timeout clock timeout (fun () ->
+              let d = take () in
+              got := Some d;
+              Ok d)
+        with
         | Ok d -> d
-        | Error `Timeout -> raise Pool_timeout)
+        | Error `Timeout ->
+            (match !got with Some d -> Eio.Stream.add p.conns (Some d) | None -> ());
+            raise Pool_timeout)
   in
   match f dbh with
   | v ->
