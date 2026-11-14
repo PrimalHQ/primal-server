@@ -89,14 +89,22 @@ let run_once ~(cfg : Config.t) ~(api_cfg : Primal_api.Config.t) ~net ~clock ~pro
   let report = ref [ Printf.sprintf "updated at %s" (Procinfo.timestamp ()) ] in
   let report_lock = Mutex.create () in
   let cached : (string, string * string) Hashtbl.t = Hashtbl.create 64 in
-  let process_content (content : string) : string * string =
+  (* A failed classification (timeout, HTTP error) leaves the note unflagged and is not cached, so
+     another selector asks again; it used to abort the whole selector, whose cache key then kept the
+     previous run's list. [failed] counts them per selector. *)
+  let process_content ~(failed : int ref) (content : string) : string * string =
     match Hashtbl.find_opt cached content with
     | Some r -> r
-    | None ->
+    | None -> (
         let c = Str.global_replace re_url "" (Str.global_replace re_mention "" content) in
-        let r = (c, does_note_game_trending ~net ~clock ~ollama_host:(Option.get cfg.ollama_host) c) in
-        Hashtbl.replace cached content r;
-        r
+        match does_note_game_trending ~net ~clock ~ollama_host:(Option.get cfg.ollama_host) c with
+        | r ->
+            Hashtbl.replace cached content (c, r);
+            (c, r)
+        | exception (Eio.Cancel.Cancelled _ as e) -> raise e
+        | exception _ ->
+            incr failed;
+            (c, ""))
   in
   Fiber.List.iter ~max_fibers:8
     (fun (selector, gaming_detection) ->
@@ -104,6 +112,7 @@ let run_once ~(cfg : Config.t) ~(api_cfg : Primal_api.Config.t) ~net ~clock ~pro
         let gaming_detection = gaming_detection && cfg.ollama_host <> None in
         let a = match scored_args selector with Some a -> a | None -> failwith selector in
         let msgs = match H.scored_content ctx a with Some m -> m | None -> failwith (selector ^ ": scored_content failed") in
+        let failed = ref 0 in
         let msgs =
           List.map
             (fun m ->
@@ -111,7 +120,7 @@ let run_once ~(cfg : Config.t) ~(api_cfg : Primal_api.Config.t) ~net ~clock ~pro
               | `Assoc f when gaming_detection && List.assoc_opt "kind" f = Some (`Int 1) -> (
                   match List.assoc_opt "content" f with
                   | Some (`String content) ->
-                      let c, r = process_content content in
+                      let c, r = process_content ~failed content in
                       if String.starts_with ~prefix:"yes" (String.lowercase_ascii r) then begin
                         Mutex.lock report_lock;
                         report := r :: "------" :: c :: "-------------------------------" :: !report;
@@ -125,7 +134,8 @@ let run_once ~(cfg : Config.t) ~(api_cfg : Primal_api.Config.t) ~net ~clock ~pro
         in
         let kept = List.filter (fun m -> match message_kind m with Some k -> List.mem k kept_kinds | None -> false) msgs in
         H.with_cache ctx (fun c -> cache_set (Primal_api_db.Db.raw c) ~key:("precalculated_analytics_" ^ selector ^ cfg.analytics_key_suffix) ~value_json:("[" ^ String.concat "," kept ^ "]"));
-        log "%s: %d messages" selector (List.length kept)
+        if !failed > 0 then log "%s: %d messages, %d gaming checks failed (left unflagged)" selector (List.length kept) !failed
+        else log "%s: %d messages" selector (List.length kept)
       with
       | Eio.Cancel.Cancelled _ as e -> raise e
       | exn -> log "%s: %s" selector (Printexc.to_string exn))
