@@ -90,7 +90,23 @@ let run (ctx : ctx) ~(stop : unit Promise.t) : unit =
       end;
       if now -. !last_refresh >= cfg.refresh_matview_period_s then begin
         last_refresh := now;
-        Fiber.fork ~sw (fun () -> try ignore (Postgres.use ctx.cache (fun dbh -> Postgres.query dbh "refresh materialized view concurrently pn_time_for_pubkeys" [])) with Eio.Cancel.Cancelled e -> raise (Eio.Cancel.Cancelled e) | exn -> log "refresh pn_time_for_pubkeys: %s" (Printexc.to_string exn))
+        (* without the pool's statement timeout (30 s): a day of processing_nodes can take longer, and a
+           refresh cut off at the limit left the throttle list stale every time; set local, so the
+           pooled connection gets its limit back at commit/rollback *)
+        Fiber.fork ~sw (fun () ->
+            try
+              Postgres.use ctx.cache (fun dbh ->
+                  Postgres.exec dbh "begin";
+                  match
+                    Postgres.exec dbh "set local statement_timeout = 0";
+                    Postgres.exec dbh "refresh materialized view concurrently pn_time_for_pubkeys";
+                    Postgres.exec dbh "commit"
+                  with
+                  | () -> ()
+                  | exception e ->
+                      (try Postgres.exec dbh "rollback" with _ -> ());
+                      raise e)
+            with Eio.Cancel.Cancelled e -> raise (Eio.Cancel.Cancelled e) | exn -> log "refresh pn_time_for_pubkeys: %s" (Printexc.to_string exn))
       end;
       match Fiber.first (fun () -> Promise.await stop; `Stop) (fun () -> Eio.Time.sleep ctx.clock cfg.scheduler_period_s; `Tick) with `Stop -> () | `Tick -> loop ()
     end

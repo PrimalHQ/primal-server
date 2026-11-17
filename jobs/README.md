@@ -208,7 +208,8 @@ domains, each with its own DB pools (`worker_pool_size` cache-DB connections, 3 
 start, the claimed funcs' nodes that are started but unfinished and under 2 days old are reset to
 pending (nodes interrupted by a stop are resumed this way). Every 60 s it logs, per func, pending
 (last 48 h), running, completed and failed; every `refresh_matview_period_s` it refreshes the
-materialized view `pn_time_for_pubkeys` concurrently.
+materialized view `pn_time_for_pubkeys` concurrently, in a transaction without the pool's 30 s
+statement timeout (a day of `processing_nodes` can take longer).
 
 **Execution.** A run sets `started_at`, then stores the result, or `{"error": msg}` with
 `exception` true, and `finished_at`, and deletes the binary-cache files its arguments referenced.
