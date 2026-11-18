@@ -828,6 +828,22 @@ let note_mentions_count (ctx : ctx) (kw : Kw.t) : outcome =
 
 (* {2 search} (app_ext.jl user_search) *)
 
+(* The user search's tsquery: every word of [query] as a quoted prefix lexeme, all required (for
+   the query Christoph Ono: christoph and ono, each quoted and with :*, joined by &). Julia (and this
+   API until 2026-11) passed the query with ":*" appended to to_tsquery,
+   which fails on a space, a quote, a colon or any other tsquery syntax (about 600 errors a day). A
+   word is a run of ASCII letters and digits or of any non-ASCII bytes (UTF-8 letters of any script
+   stay whole); None when the query has no word. *)
+let user_search_tsquery (query : string) : string option =
+  let is_word c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || Char.code c >= 0x80 in
+  let words = ref [] and buf = Buffer.create 16 in
+  let flush () = if Buffer.length buf > 0 then (words := Buffer.contents buf :: !words; Buffer.clear buf) in
+  String.iter (fun c -> if is_word c then Buffer.add_char buf c else flush ()) query;
+  flush ();
+  match List.rev !words with
+  | [] -> None
+  | ws -> Some (String.concat " & " (List.map (fun w -> "'" ^ w ^ "':*") ws))
+
 let user_search (ctx : ctx) (kw : Kw.t) : outcome =
   let query = Kw.str_exn kw "query" in
   let limit = min 100 (Kw.int kw "limit" ~default:10) in
@@ -837,16 +853,18 @@ let user_search (ctx : ctx) (kw : Kw.t) : outcome =
     let rec go i = i + m <= n && (String.sub query i m = "lolicon" || go (i + 1)) in
     go 0
   in
+  let tsq = user_search_tsquery query in
   if contains_lolicon || String.length query < 1 then Handled empty
   else
     with_cache ctx (fun c ->
-        let q = query ^ ":*" in
+        let q = Option.value tsq ~default:"" in
         let users : (string * int64) list option =
           match Bech32.nip19_decode query with
           | Some (Bech32.Npub pk) -> (
               match Queries.follower_count c ~pubkey:pk with
               | Some cnt -> Some [ (Hex_util.encode pk, cnt) ]
               | None -> None (* Julia: KeyError *))
+          | _ when tsq = None -> Some [] (* no word to search for *)
           | _ -> (
               match pubkey with
               | None -> Some (Queries.user_search_query c ~q ~limit)

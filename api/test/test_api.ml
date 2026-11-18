@@ -366,6 +366,16 @@ let test_lean () =
   Alcotest.(check bool) "zero-matching stat: lateral" true (has (sql "bitcoin maxlikes:3") "lateral (select advsearch.id as event_id");
   Alcotest.(check bool) "orderby interactions: lateral" true (has (sql "bitcoin orderby:interactions") "lateral")
 
+let test_user_search_tsquery () =
+  let t = Primal_api.Handlers.user_search_tsquery in
+  let chk name q want = Alcotest.(check (option string)) name want (t q) in
+  chk "one word" "jack" (Some "'jack':*");
+  chk "two words" "Christoph Ono" (Some "'Christoph':* & 'Ono':*");
+  chk "syntax stripped" "a:b & 'c' (d) | !e\\" (Some "'a':* & 'b':* & 'c':* & 'd':* & 'e':*");
+  chk "utf-8 kept whole" "Ćirić ñandú" (Some "'Ćirić':* & 'ñandú':*");
+  chk "no word" " :*&| " None;
+  chk "email-ish" "bob@primal.net" (Some "'bob':* & 'primal':* & 'net':*")
+
 let () =
   Alcotest.run "primal_api"
     [
@@ -401,5 +411,6 @@ let () =
           Alcotest.test_case "kw" `Quick test_kw;
           Alcotest.test_case "fixup live p tags" `Quick test_fixup;
           Alcotest.test_case "funcall names" `Quick test_funcall_names;
+          Alcotest.test_case "user_search tsquery" `Quick test_user_search_tsquery;
         ] );
     ]
