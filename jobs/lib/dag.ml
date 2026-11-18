@@ -24,15 +24,18 @@ module T = struct
   let poll_user_votes = "poll_user_votes_1_5fa4d82e64"
   let a_tags = "a_tags_1_7d98c5333f"
   let reads = "reads_12_68c6bbfccd"
-  let reads_versions = "reads_versions_12_b537d4df66"
+  (* the coverage keys of the two nodes that write pubkey_stats' media_cnt / content_zap_cnt: named
+     after the tables they wrote before the lean schema (dropped), kept so their coverage goes on *)
   let pubkey_media_cnt = "pubkey_media_cnt_1_b5e2a488b1"
   let pubkey_content_zap_cnt = "pubkey_content_zap_cnt_1_236df2f369"
   let advsearch = "advsearch_5_d7da6f551e"
   let event_mentions = "event_mentions_1_a056fb6737"
-  let note_length = "note_length_1_15d66ffae6"
   let note_stats = "note_stats_1_07d205f278"
   let coverages = "coverages_1_8656fc443b"
-  let all = [ basic_tags; zap_receipts; poll_stats; poll_user_votes; a_tags; reads; reads_versions; pubkey_media_cnt; pubkey_content_zap_cnt; advsearch; event_mentions; note_length; note_stats; coverages ]
+  (* every node's coverage key *)
+  let all = [ basic_tags; zap_receipts; poll_stats; poll_user_votes; a_tags; reads; pubkey_media_cnt; pubkey_content_zap_cnt; advsearch; event_mentions; note_stats; coverages ]
+  (* the tables the nodes write, checked at start *)
+  let tables = [ basic_tags; zap_receipts; poll_stats; poll_user_votes; a_tags; reads; "pubkey_stats"; advsearch; event_mentions; note_stats; coverages ]
   let cov t = "postgres-p0-" ^ t
 end
 
@@ -41,9 +44,8 @@ type pools = { cache : Postgres.pool; mem : Postgres.pool }
 let with_est (p : pools) (f : CS.est -> 'a) : 'a =
   Postgres.use p.cache (fun dbh -> Postgres.use p.mem (fun mem_dbh -> f { CS.cfg = CS.default_config; dbh; mem_dbh }))
 
-(* [lean] (config "lean"): half-open windows and segments, [since, until) instead of [since, until]
-   (process_segments), and the lean variants of some nodes *)
-type run = { since : int; until : int; running : bool Atomic.t; dry_run : bool; ignore_coverage : bool; tasks : int; stop : unit Promise.t; pools : pools; poll_votes : bool; verbose : bool; lean : bool; lean2 : Config.lean2 }
+(* A run covers the half-open window [since, until) (process_segments). *)
+type run = { since : int; until : int; running : bool Atomic.t; dry_run : bool; ignore_coverage : bool; tasks : int; stop : unit Promise.t; pools : pools; poll_votes : bool; verbose : bool }
 
 let coverages (dbh : Postgres.dbh) ~(cov : string) : (int * int) list =
   [%pgsql dbh "select t, t2 from coverages_1_8656fc443b where name = $cov"] |> List.map (fun (t, t2) -> (Int64.to_int t, Int64.to_int t2))
@@ -56,10 +58,10 @@ let coverages (dbh : Postgres.dbh) ~(cov : string) : (int * int) list =
    writes no coverage then, so its old coverage would pin the frontier where it was disabled). *)
 let coverage_frontier ~(poll_votes : bool) (dbh : Postgres.dbh) : int option =
   let rows = [%pgsql dbh "select name, t, t2 from coverages_1_8656fc443b order by name, t"] in
-  (* nodes with their own lookback (advsearch 30 d, note_length 15 d, note_stats 30 d, update_user_search
-     3 d) never cover history contiguously and bound themselves anyway *)
+  (* nodes with their own lookback (advsearch 30 d, note_stats 30 d, update_user_search 3 d) never cover
+     history contiguously and bound themselves anyway *)
   let full_history =
-    List.filter (fun t -> t <> T.advsearch && t <> T.note_length && t <> T.note_stats && t <> T.coverages && (poll_votes || t <> T.poll_stats)) T.all
+    List.filter (fun t -> t <> T.advsearch && t <> T.note_stats && t <> T.coverages && (poll_votes || t <> T.poll_stats)) T.all
   in
   let current name = List.exists (fun t -> String.starts_with ~prefix:(T.cov t) name) full_history in
   let by_name = Hashtbl.create 32 in
@@ -77,16 +79,12 @@ let set_coverage (dbh : Postgres.dbh) ~(cov : string) ~t ~t2 : unit =
   ignore [%pgsql dbh "insert into coverages_1_8656fc443b (name, t, t2) values ($cov, $t, $t2) on conflict (name, t) do update set t = $t, t2 = $t2"]
 
 (* The segments (coverage key t, start, end) of [since, until] in steps of [step]: the step-aligned
-   pieces that [done_] (coverage rows (t, t2)) does not cover yet, in time order.
-   Closed (default): a segment [t1, t2] is recorded as covering up to t2 and the next segment or run
-   starts at t2, so the boundary second is processed twice (the additive nodes count its events
-   twice). Half-open ([lean]): a segment is [t1, t2), coverage (t, t2) means everything before t2 is
-   done, and the next segment or run starts at t2: every second is processed exactly once; empty
-   segments are dropped. Coverage rows written closed before the switch make the first half-open run
-   process their end second once more. *)
-let segments ~lean ~since ~until ~step ~(done_ : (int * int) list) : (int * int * int) list =
+   pieces that [done_] (coverage rows (t, t2)) does not cover yet, in time order. A segment is
+   [t1, t2), coverage (t, t2) means everything before t2 is done, and the next segment or run starts
+   at t2: every second is processed exactly once; empty segments are dropped. *)
+let segments ~since ~until ~step ~(done_ : (int * int) list) : (int * int * int) list =
   let rec go t acc =
-    if t > until || (lean && t >= until) then acc
+    if t >= until then acc
     else
       let acc =
         match List.assoc_opt t done_ with
@@ -99,24 +97,24 @@ let segments ~lean ~since ~until ~step ~(done_ : (int * int) list) : (int * int 
       go (t + step) acc
   in
   let segs = List.rev (go (since / step * step) []) in
-  if lean then List.filter (fun (_, t1, t2) -> t1 < t2) segs else segs
+  List.filter (fun (_, t1, t2) -> t1 < t2) segs
 
 (* process_segments: the uncovered pieces of [since, until] in steps of [step] (one segment when
    [step] is None; see [segments]), each run by [f] inside a transaction on its own connections.
    [f est t1 t2] processes the whole seconds t1 .. t2, both included (the nodes' SQL compares
-   integer imported_at/created_at with >= t1 and <= t2); half-open ([r.lean]) it gets t1 .. t2 - 1
-   of the segment [t1, t2). *)
+   integer imported_at/created_at with >= t1 and <= t2): the half-open segment [t1, t2) gives it
+   t1 .. t2 - 1. *)
 let process_segments (r : run) ~(cov : string) ?since ?until ?step ?(sequential = false) ?(parallel_workers = 0) (f : CS.est -> int -> int -> unit) : unit =
   let since = Option.value since ~default:r.since and until = Option.value until ~default:r.until in
   if not (since = 0 && until = 0) && Atomic.get r.running then begin
     let segs =
       match step with
-      | None -> if r.lean && since >= until then [] else [ (-1, since, until) ]
+      | None -> if since >= until then [] else [ (-1, since, until) ]
       | Some step ->
           let done_ = if r.ignore_coverage then [] else with_est r.pools (fun est -> coverages est.CS.dbh ~cov) in
-          segments ~lean:r.lean ~since ~until ~step ~done_
+          segments ~since ~until ~step ~done_
     in
-    let last t2 = if r.lean then t2 - 1 else t2 in
+    let last t2 = t2 - 1 in
     let run_one (t, t1, t2) =
       if Atomic.get r.running && not (Promise.is_resolved r.stop) then
         try
@@ -271,8 +269,6 @@ let reads_node (r : run) =
                   [%pgsql dbh
                     "update reads_12_68c6bbfccd set latest_created_at = $created_at, latest_eid = $eid, words = $words, lang = $lang, lang_prob = $lang_prob, image = $image, summary = $summary \
                      where pubkey = $pubkey and identifier = $identifier"]);
-          if not r.lean2.Config.pointer_views then
-            ignore [%pgsql dbh "insert into reads_versions_12_b537d4df66 (pubkey, identifier, eid) values ($pubkey, $identifier, $eid) on conflict do nothing"];
           (* the kind 1/6/7 `e` tags that reached this version before it was stored (migration 2007) *)
           ignore
             [%pgsql dbh
@@ -340,37 +336,22 @@ let pubkey_media_cnt_node (r : run) =
   process_segments r ~cov:(T.cov T.pubkey_media_cnt ^ "/1") ~step:(90 * day) (fun est t1 t2 ->
       let dbh = est.CS.dbh in
       let t1 = i64 t1 and t2 = i64 t2 in
-      if r.lean2.Config.pubkey_stats then
         ignore
           [%pgsql dbh
             "with a as (select es.pubkey, count(distinct es.id) as cnt from event es, event_media em \
                         where es.imported_at >= $t1 and es.imported_at <= $t2 and es.id = em.event_id and es.kind = 1 group by (es.pubkey)) \
              insert into pubkey_stats (pubkey, media_cnt) select pubkey, cnt from a \
-             on conflict (pubkey) do update set media_cnt = pubkey_stats.media_cnt + excluded.media_cnt"]
-      else
-      ignore
-        [%pgsql dbh
-          "with a as (select es.pubkey, count(distinct es.id) as cnt from event es, event_media em \
-                      where es.imported_at >= $t1 and es.imported_at <= $t2 and es.id = em.event_id and es.kind = 1 group by (es.pubkey)) \
-           insert into pubkey_media_cnt_1_b5e2a488b1 (pubkey, cnt) select pubkey, cnt from a \
-           on conflict (pubkey) do update set cnt = pubkey_media_cnt_1_b5e2a488b1.cnt + excluded.cnt"])
+             on conflict (pubkey) do update set media_cnt = pubkey_stats.media_cnt + excluded.media_cnt"])
 
 let pubkey_content_zap_cnt_node (r : run) =
   process_segments r ~cov:(T.cov T.pubkey_content_zap_cnt ^ "/1") ~step:(90 * day) (fun est t1 t2 ->
       let dbh = est.CS.dbh in
       let t1 = i64 t1 and t2 = i64 t2 in
-      if r.lean2.Config.pubkey_stats then
         ignore
           [%pgsql dbh
             "with a as (select zr.sender, count(1) as cnt from zap_receipts zr where zr.imported_at >= $t1 and zr.imported_at <= $t2 group by (zr.sender)) \
              insert into pubkey_stats (pubkey, content_zap_cnt) select sender, cnt from a \
-             on conflict (pubkey) do update set content_zap_cnt = pubkey_stats.content_zap_cnt + excluded.content_zap_cnt"]
-      else
-      ignore
-        [%pgsql dbh
-          "with a as (select zr.sender, count(1) as cnt from zap_receipts zr where zr.imported_at >= $t1 and zr.imported_at <= $t2 group by (zr.sender)) \
-           insert into pubkey_content_zap_cnt_1_236df2f369 (pubkey, cnt) select sender, cnt from a \
-           on conflict (pubkey) do update set cnt = pubkey_content_zap_cnt_1_236df2f369.cnt + excluded.cnt"])
+             on conflict (pubkey) do update set content_zap_cnt = pubkey_stats.content_zap_cnt + excluded.content_zap_cnt"])
 
 let image_exts = [ ".png"; ".gif"; ".jpg"; ".jpeg"; ".webp" ]
 let video_exts = [ ".mp4"; ".mov"; ".3gp" ]
@@ -440,27 +421,15 @@ let event_mentions_node (r : run) =
   process_segments r ~cov:(T.cov T.event_mentions ^ "/1") ~step:day (fun est t1 t2 ->
       List.iter (fun e -> DI.import_event_mentions est e) (events_in_window est.CS.dbh ~t1 ~t2 ~kinds:[ 1; 30023; 6 ]))
 
-let note_length_node (r : run) ~now =
-  if r.lean2.Config.no_note_length then () else
-  process_segments r ~cov:(T.cov T.note_length ^ "/1") ~step:day ~since:(max r.since (now - (15 * day))) (fun est t1 t2 ->
-      let dbh = est.CS.dbh in
-      let t1 = i64 t1 and t2 = i64 t2 in
-      ignore
-        [%pgsql dbh
-          "insert into note_length_1_15d66ffae6 (eid, length) select id as eid, length(content) from event \
-           where imported_at >= $t1 and imported_at <= $t2 and (kind = 1 or kind = 30023 or kind = 6) on conflict do nothing"])
-
 let note_stats_node (r : run) ~now =
   process_segments r ~cov:(T.cov T.note_stats ^ "/1") ~step:day ~since:(max r.since (now - (30 * day))) (fun est t1 t2 ->
       let dbh = est.CS.dbh in
       let rank = match [%pgsql dbh "select humaness_threshold_trustrank()"] with Some r :: _ -> r | _ -> 0.0 in
       let peids = ref [] in
       let events = events_in_window dbh ~t1 ~t2 ~kinds:[ 1 ] in
-      (* lean: the length test (pure) first, then one trustrank query for the authors of the long
+      (* the length test (pure) first, then one trustrank query for the authors of the long
          notes instead of one per note; the same notes pass *)
       let events, is_human =
-        if not r.lean then (events, fun pubkey -> [%pgsql dbh "select 1 from pubkey_trustrank where pubkey = $pubkey and rank >= $rank"] <> [])
-        else
           let events = List.filter (fun (e : Nostr.t) -> utf8_length e.content >= 600) events in
           let pks_json = hexes_json (List.sort_uniq compare (List.map (fun (e : Nostr.t) -> e.pubkey) events)) in
           let humans = Hashtbl.create 64 in
@@ -486,7 +455,7 @@ let update_user_search_node (r : run) ~now =
       let dbh = est.CS.dbh in
       (* added_at is a timestamptz: half-open, the segment ends at the instant t2 + 1 (included here:
          the node is idempotent, so the one shared instant is harmless) *)
-      let t2 = if r.lean then t2 + 1 else t2 in
+      let t2 = t2 + 1 in
       let t1 = float_of_int t1 and t2 = float_of_int t2 in
       let pks = [%pgsql dbh "select ho.pubkey from human_override ho where ho.added_at >= to_timestamp($t1) and ho.added_at <= to_timestamp($t2) order by ho.pubkey"] in
       List.iter (fun pk -> ignore (CSE.update_user_search est pk)) pks)
@@ -503,13 +472,13 @@ let run_pipeline (r : run) : unit =
       end)
     [ ("basic_tags", fun () -> basic_tags_node r); ("zap_receipts", fun () -> zap_receipts_node r); ("poll_stats", fun () -> poll_stats_node r); ("a_tags", fun () -> a_tags_node r);
       ("reads", fun () -> reads_node r); ("pubkey_media_cnt", fun () -> pubkey_media_cnt_node r); ("pubkey_content_zap_cnt", fun () -> pubkey_content_zap_cnt_node r);
-      ("advsearch", fun () -> advsearch_node r ~now); ("event_mentions", fun () -> event_mentions_node r); ("note_length", fun () -> note_length_node r ~now);
+      ("advsearch", fun () -> advsearch_node r ~now); ("event_mentions", fun () -> event_mentions_node r);
       ("note_stats", fun () -> note_stats_node r ~now); ("update_user_search", fun () -> update_user_search_node r ~now) ]
 
 let assert_tables (dbh : Postgres.dbh) : unit =
   List.iter
     (fun t -> match [%pgsql dbh "select 1 from information_schema.tables where table_schema::text = 'public' and table_name::text = $t"] with [] -> failwith ("dag: output table missing: " ^ t) | _ -> ())
-    T.all
+    T.tables
 
 let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
   let statement_timeout_ms = cfg.dag_statement_timeout_s * 1000 in
@@ -526,7 +495,7 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
   if cfg.dag_dry_run && cfg.dag_dry_run_window_s > 0 then begin
     (* one exercise of every node over the last [dag_dry_run_window_s] seconds, coverage ignored, all rolled back *)
     let until = Utils.current_time () in
-    let r = { since = until - cfg.dag_dry_run_window_s; until; running = Atomic.make true; dry_run = true; ignore_coverage = true; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = true; lean = cfg.lean; lean2 = cfg.lean2 } in
+    let r = { since = until - cfg.dag_dry_run_window_s; until; running = Atomic.make true; dry_run = true; ignore_coverage = true; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = true } in
     let t0 = Unix.gettimeofday () in
     run_pipeline r;
     log "dry run over %d s %s in %.1fs; idling" cfg.dag_dry_run_window_s (if Atomic.get r.running then "ok" else "FAILED") (Unix.gettimeofday () -. t0);
@@ -549,19 +518,19 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
           | Some n :: _ -> n
           | _ -> 0L)
     in
-    (* lean: the window is half-open and ends at most at now - 1, so the run processes up to second
-       now - 2: the current second is still being imported, and an event's imported_at is taken
-       before its import transaction commits *)
-    let margin = if cfg.lean then 1 else 0 in
+    (* the window is half-open and ends at most at now - 1, so the run processes up to second now - 2:
+       the current second is still being imported, and an event's imported_at is taken before its
+       import transaction commits *)
+    let margin = 1 in
     let one_run () =
       let now = Utils.current_time () in
       let since_ = max !since 1672531200 in
-      if cfg.lean && since_ >= now - margin then (true, 0.0, 0)
+      if since_ >= now - margin then (true, 0.0, 0)
       else
       let rec fit sp = if sp <= 10 || count_events since_ (since_ + sp) <= max_events then sp else fit (sp / 2) in
       let sp = if since_ + !span >= now - margin then !span else fit !span in
       let until = min (now - margin) (since_ + sp) in
-      let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log; lean = cfg.lean; lean2 = cfg.lean2 } in
+      let r = { since = since_; until; running = Atomic.make true; dry_run = cfg.dag_dry_run; ignore_coverage = false; tasks = cfg.dag_tasks; stop; pools; poll_votes = cfg.dag_poll_votes_enabled; verbose = cfg.dag_log } in
       let t0 = Unix.gettimeofday () in
       run_pipeline r;
       let ok = Atomic.get r.running in
@@ -574,7 +543,7 @@ let run ~(cfg : Config.t) ~net ~clock ~(stop : unit Promise.t) : unit =
       let lag = now - margin - until in
       if dur >= 1.0 || lag <= 0 || not ok then
         log "run %s in %.1fs (window %s, next span %ds%s)" (if ok then "ok" else "FAILED") dur
-          (if cfg.lean then Printf.sprintf "[%d, %d)" r.since until else Printf.sprintf "%d .. %d" r.since until) !span
+          (Printf.sprintf "[%d, %d)" r.since until) !span
           (if lag > 0 then Printf.sprintf ", lag %ds" lag else "");
       (ok, dur, lag)
     in

@@ -54,26 +54,18 @@ type t = {
 
 let empty () = { cmr_pubkeys = Hashtbl.create 1; cmr_groups = []; cmr_pubkeys_allowed = []; cmr_threads = []; cmr_hashtags = []; cmr_words = [] }
 
-(* est.mute_list / mute_list_2 / mute_lists / allow_list: the latest list event of a pubkey.
-   [pointer_views] (lean schema, iteration 2): the pointer tables are not written; the newest version
-   in event (kind 10000, or 30000 with that first d tag) *)
-let list_event_id ?(pointer_views = false) ~(dbh : Postgres.dbh) table (key : string) : string option =
+(* est.mute_list / mute_list_2 / mute_lists / allow_list: the latest list event of a pubkey, the
+   newest version in event (kind 10000, or 30000 with that first d tag) *)
+let list_event_id ~(dbh : Postgres.dbh) table (key : string) : string option =
   let r =
-    if pointer_views then
-      match table with
-      | `Mute_list -> [%pgsql dbh "select id from event where pubkey = $key and kind = 10000 order by created_at desc, id limit 1"]
-      | `Mute_list_2 ->
-          [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'mute' order by created_at desc, id limit 1"]
-      | `Mute_lists ->
-          [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'mutelists' order by created_at desc, id limit 1"]
-      | `Allow_list ->
-          [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'allowlist' order by created_at desc, id limit 1"]
-    else
     match table with
-    | `Mute_list -> [%pgsql dbh "select value from mute_list_1_f693a878b9 where key = $key"]
-    | `Mute_list_2 -> [%pgsql dbh "select value from mute_list_2_1_949b3d746b where key = $key"]
-    | `Mute_lists -> [%pgsql dbh "select value from mute_lists_1_d90e559628 where key = $key"]
-    | `Allow_list -> [%pgsql dbh "select value from allow_list_1_f1da08e9c8 where key = $key"]
+    | `Mute_list -> [%pgsql dbh "select id from event where pubkey = $key and kind = 10000 order by created_at desc, id limit 1"]
+    | `Mute_list_2 ->
+        [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'mute' order by created_at desc, id limit 1"]
+    | `Mute_lists ->
+        [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'mutelists' order by created_at desc, id limit 1"]
+    | `Allow_list ->
+        [%pgsql dbh "select id from event where kind between 30000 and 39999 and kind = 30000 and pubkey = $key and event_d_tag(tags) = 'allowlist' order by created_at desc, id limit 1"]
   in
   match r with v :: _ -> Some v | [] -> None
 
@@ -83,7 +75,7 @@ let uniq (l : string list) : string list =
   let seen = Hashtbl.create 16 in
   List.filter (fun x -> if Hashtbl.mem seen x then false else (Hashtbl.add seen x (); true)) (List.rev l)
 
-let compile ?pointer_views ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(defaults : Yojson.Safe.t) ~(get_event : string -> Nostr.t option) (pubkey : string) : t =
+let compile ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(defaults : Yojson.Safe.t) ~(get_event : string -> Nostr.t option) (pubkey : string) : t =
   let event_tags eid = match get_event eid with Some e -> e.Nostr.tags | None -> [] in
   let settings = user_settings ~mem_dbh ~defaults pubkey in
   let member k j = try Yojson.Safe.Util.member k j with _ -> `Null in
@@ -94,7 +86,7 @@ let compile ?pointer_views ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(def
     (* mute_lists (kind 30000, d=mutelists): the mute lists of OTHER users this user applies, with
        per-entry scopes in the 5th tag field. *)
     let ml_pubkeys : (string, string list) Hashtbl.t = Hashtbl.create 8 in
-    (match list_event_id ?pointer_views ~dbh `Mute_lists pubkey with
+    (match list_event_id ~dbh `Mute_lists pubkey with
     | Some mlseid ->
         List.iter
           (fun tg ->
@@ -117,7 +109,7 @@ let compile ?pointer_views ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(def
       (fun ppk ->
         List.iter
           (fun table ->
-            match list_event_id ?pointer_views ~dbh table ppk with
+            match list_event_id ~dbh table ppk with
             | Some eid ->
                 List.iter
                   (fun tg ->
@@ -149,7 +141,7 @@ let compile ?pointer_views ~(dbh : Postgres.dbh) ~(mem_dbh : Postgres.dbh) ~(def
       | _ -> []
     in
     let allowed =
-      match list_event_id ?pointer_views ~dbh `Allow_list pubkey with
+      match list_event_id ~dbh `Allow_list pubkey with
       | Some eid ->
           List.filter_map (fun tg -> if Nostr.tag_len tg >= 2 && Nostr.tag_name tg = Some "p" then Option.bind (Nostr.tag_field tg 1) decode32 else None) (event_tags eid)
       | None -> []
@@ -171,8 +163,8 @@ let make_tsquery (ws : string list) : string =
 let both_scopes = [ Content; Trending ]
 let scopes_of (l : string list) = if l = [] then both_scopes else List.filter_map cmr_scope_of_string_opt l
 
-(* Set by a daemon whose caller may already hold a transaction on [dbh] (the importer's
-   lean.transaction_per_event): then [in_transaction] runs [f] inside that one. Default: never. *)
+(* Set by a daemon whose caller may already hold a transaction on [dbh] (the importer's event
+   transaction): then [in_transaction] runs [f] inside that one. Default: never. *)
 let already_in_transaction : (Postgres.dbh -> bool) ref = ref (fun _ -> false)
 
 (* Run [f] inside a transaction on [dbh]; rollback on any exception (re-raised). *)
@@ -187,27 +179,19 @@ let in_transaction (dbh : Postgres.dbh) (f : unit -> unit) : unit =
       raise e
   end
 
-(* [legacy] (default true): also write cmr_pubkeys_parent, cmr_words and cmr_hashtags, which nothing
-   reads any more (the _2 tables replaced the last two); the importer's lean.no_cmr_legacy passes
-   false. *)
-let import ?(legacy = true) ~(dbh : Postgres.dbh) (user_pubkey : string) (cmr : t) : unit =
+let import ~(dbh : Postgres.dbh) (user_pubkey : string) (cmr : t) : unit =
   in_transaction dbh (fun () ->
       ignore [%pgsql dbh "delete from cmr_pubkeys_scopes where user_pubkey = $user_pubkey"];
-      if legacy then ignore [%pgsql dbh "delete from cmr_pubkeys_parent where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_groups where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_pubkeys_allowed where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_threads where user_pubkey = $user_pubkey"];
-      if legacy then ignore [%pgsql dbh "delete from cmr_hashtags where user_pubkey = $user_pubkey"];
-      if legacy then ignore [%pgsql dbh "delete from cmr_words where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_hashtags_2 where user_pubkey = $user_pubkey"];
       ignore [%pgsql dbh "delete from cmr_words_2 where user_pubkey = $user_pubkey"];
       Hashtbl.iter
-        (fun pubkey (parent, scopes) ->
+        (fun pubkey (_parent, scopes) ->
           List.iter
             (fun scope -> ignore [%pgsql dbh "insert into cmr_pubkeys_scopes (user_pubkey, pubkey, scope) values ($user_pubkey, $pubkey, $scope)"])
-            (scopes_of scopes);
-          if legacy then
-            ignore [%pgsql dbh "insert into cmr_pubkeys_parent (user_pubkey, pubkey, parent) values ($user_pubkey, $pubkey, $parent)"])
+            (scopes_of scopes))
         cmr.cmr_pubkeys;
       List.iter
         (fun (name, scopes) ->
@@ -220,10 +204,6 @@ let import ?(legacy = true) ~(dbh : Postgres.dbh) (user_pubkey : string) (cmr : 
       List.iter
         (fun scope ->
           List.iter (fun event_id -> ignore [%pgsql dbh "insert into cmr_threads (user_pubkey, event_id, scope) values ($user_pubkey, $event_id, $scope)"]) cmr.cmr_threads;
-          if legacy then begin
-            List.iter (fun hashtag -> ignore [%pgsql dbh "insert into cmr_hashtags (user_pubkey, hashtag, scope) values ($user_pubkey, $hashtag, $scope)"]) cmr.cmr_hashtags;
-            List.iter (fun word -> ignore [%pgsql dbh "insert into cmr_words (user_pubkey, word, scope) values ($user_pubkey, $word, $scope)"]) cmr.cmr_words
-          end;
           if cmr.cmr_hashtags <> [] then begin
             let q = make_tsquery cmr.cmr_hashtags in
             ignore [%pgsql dbh "insert into cmr_hashtags_2 (user_pubkey, scope, hashtags) values ($user_pubkey, $scope, to_tsquery('simple', $q))"]

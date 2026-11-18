@@ -248,17 +248,12 @@ Content and services:
 | `cloudflare` | `{zone_id, api_key}` \| null | cache purge on `/purge-media` |
 | `media_paths` | list of `{"type": "local", "root", "label"}` \| `{"type": "s3", "provider", "label"}` | storage a purge walks; `label` (may be null: `local` or the provider name) is the storage provider name in the DB |
 | `ext` | object, optional | settings of a private extension |
-| `lean` | object \| null, optional | query paths for a slimmer cache DB schema (below); absent or null = off |
 
-### `lean`
+### The lean cache schema
 
-`{"enabled": bool, "follows_count_from_followers": bool, "thread_parents_from_basic_tags": bool, "pointer_views": bool}`,
-each key optional (false), unknown keys rejected (`lib/lean.ml`). Without the object every statement
-is the same as before. The sub-flags act only with `enabled`. `pointer_views` (lean schema iteration
-2, with the importer's flag of that name): the mute lists of content moderation and of the muted-threads
-feed are the newest events of their kind, not pointer-table rows.
-
-`enabled` switches on:
+The API's queries read the lean cache schema (infrastructure `primal_services/lean_schema/`), the
+only one since 2026-11; the classic queries and the `lean` config object that chose between them are
+gone (a config still carrying `lean` fails its check). What that means for the answers:
 
 - **Lazy counter rows.** A missing `event_stats`, `pubkey_followers_cnt` or `pubkey_zapped` row
   reads as zeros (left joins, `coalesce`), so the importer may stop inserting all-zero rows: profile
@@ -282,17 +277,11 @@ feed are the newest events of their kind, not pointer-table rows.
   `get_featured_dvm_feeds` for the anonymous viewer.
 - `reset_directmsg_counts` leaves rows already at 0 alone.
 
-`follows_count_from_followers`: `user_profile`'s follows count is `least(5000, count)` of
-`pubkey_followers` instead of the contact list's p tags (differs where `pubkey_followers` has
-duplicate or stale rows).
+- The mute lists of content moderation and of the muted-threads feed are the newest events of their
+  kind (no pointer tables).
 
-`thread_parents_from_basic_tags`: `long_form_content_thread_view`'s parent chain without
-`event_thread_parents`: each parent derived from the event's tags as the importer's
-`parse_parent_eid` does (last `reply` marker, else first `root`, else last unmarked e/a tag with 4+
-fields; `a` tags resolved through `parametrized_replaceable_events`).
-
-The cache DB's SQL functions (`enrich_feed_events`, `thread_view`, ...) have their own lean versions,
-installed in the DB, not switched here.
+The cache DB's SQL functions (`enrich_feed_events`, `thread_view`, ...) are the lean versions in
+`../schema/cache.sql`.
 
 ## Operation
 
@@ -349,7 +338,7 @@ primalctl req <ws-url> <funcall> ['{kwargs}'] [--zlib]   # one request, frames p
 primalctl status|metrics|drain [<admin-url>]               # the admin endpoints (default: the selfhost admin port, http://127.0.0.1:8811)
 primalctl replay <corpus.jsonl> --a <ws-url> --b <ws-url> [--only f1,f2] [--all]
                  [--per-funcall N] [--workers K] [--timeout S] [--report diffs.jsonl]
-primalctl advsearch-sql <user-hex> '<query>' <since> <until> [kinds]   # one advanced-search window's SQL, params inlined (PRIMAL_LEAN=1: the lean SQL)
+primalctl advsearch-sql <user-hex> '<query>' <since> <until> [kinds]   # one advanced-search window's SQL, params inlined
 primalctl sign <nsec-file> <kind> <content> ['[tags]']   # a signed event as JSON (for event_from_user kwargs)
 ```
 

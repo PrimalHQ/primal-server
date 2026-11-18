@@ -1,60 +1,27 @@
-(* The pure parts of the "lean" config behaviours: config parsing, the DAG's segments (closed and
-   half-open), the DVM checker's relay hints and backoff, and pg_listener's pair set. *)
+(* The pure parts of the lean-schema behaviours: the retired "lean" config key, the DAG's half-open
+   segments, the DVM checker's relay hints and backoff, and pg_listener's pair set. *)
 open Primal_jobs
 
 let lean_config () =
-  let parse s = Config.lean_of_json (Yojson.Safe.from_string s) in
-  let err s = match parse s with _ -> Alcotest.failf "%s: accepted" s | exception Config.Config_error _ -> () in
-  Alcotest.(check bool) "absent" false (parse {|{"roles": []}|});
-  Alcotest.(check bool) "null" false (parse {|{"lean": null}|});
-  Alcotest.(check bool) "on" true (parse {|{"lean": {"enabled": true}}|});
-  Alcotest.(check bool) "off" false (parse {|{"lean": {"enabled": false}}|});
-  err {|{"lean": {}}|};
-  err {|{"lean": {"enabled": true, "enable": true}}|};
-  err {|{"lean": {"enabled": 1}}|};
-  err {|{"lean": true}|}
-
-(* the segment rule as it was before the lean switch (closed segments) *)
-let old_segments ~since ~until ~step ~done_ =
-  let rec go t acc =
-    if t > until then acc
-    else
-      let acc =
-        match List.assoc_opt t done_ with
-        | None -> (t, max t since, min (t + step) until) :: acc
-        | Some t2 when t2 - t < step && max t2 since < min (t + step) until -> (t, max t2 since, min (t + step) until) :: acc
-        | Some _ -> acc
-      in
-      go (t + step) acc
-  in
-  List.rev (go (since / step * step) [])
-
-let closed_unchanged () =
-  Random.init 7;
-  for _ = 1 to 2000 do
-    let step = 1 + Random.int 50 in
-    let since = Random.int 500 in
-    let until = since + Random.int 200 in
-    let done_ = List.init (Random.int 6) (fun _ -> let t = Random.int 20 * step in (t, t + Random.int (step + 3))) in
-    let done_ = List.sort_uniq (fun (a, _) (b, _) -> compare a b) done_ in
-    Alcotest.(check (list (triple int int int))) "same segments" (old_segments ~since ~until ~step ~done_) (Dag.segments ~lean:false ~since ~until ~step ~done_)
-  done
+  let parse s = Config.of_json (Yojson.Safe.from_string s) in
+  match parse {|{"lean": {"enabled": true}}|} with
+  | _ -> Alcotest.fail "the retired lean object was accepted"
+  | exception Config.Config_error m -> Alcotest.(check string) "the lean key first" "lean" (String.sub m 0 4)
 
 (* consecutive runs over [since, until) windows with the coverage they record: how often each
    second is processed *)
-let simulate ~lean ~step ~windows =
+let simulate ~step ~windows =
   let cov = Hashtbl.create 16 and counts = Hashtbl.create 1024 in
   List.iter
     (fun (since, until) ->
       let done_ = Hashtbl.fold (fun t t2 acc -> (t, t2) :: acc) cov [] in
       List.iter
         (fun (t, t1, t2) ->
-          let last = if lean then t2 - 1 else t2 in
-          for s = t1 to last do
+          for s = t1 to t2 - 1 do
             Hashtbl.replace counts s (1 + Option.value (Hashtbl.find_opt counts s) ~default:0)
           done;
           Hashtbl.replace cov t t2)
-        (Dag.segments ~lean ~since ~until ~step ~done_))
+        (Dag.segments ~since ~until ~step ~done_))
     windows;
   counts
 
@@ -68,22 +35,19 @@ let half_open_once () =
     (fun step ->
       let ws = windows ~start:1000 ~n:300 in
       let final = snd (List.nth ws (List.length ws - 1)) in
-      let counts = simulate ~lean:true ~step ~windows:ws in
+      let counts = simulate ~step ~windows:ws in
       for s = 1000 to final - 1 do
         Alcotest.(check int) (Printf.sprintf "step %d second %d" step s) 1 (Option.value (Hashtbl.find_opt counts s) ~default:0)
       done;
-      Alcotest.(check bool) "nothing at or after until" false (Hashtbl.mem counts final);
-      (* closed: the boundary seconds come twice *)
-      let counts = simulate ~lean:false ~step ~windows:ws in
-      Alcotest.(check bool) "closed repeats boundaries" true (Hashtbl.fold (fun _ c acc -> acc || c > 1) counts false))
+      Alcotest.(check bool) "nothing at or after until" false (Hashtbl.mem counts final))
     [ 7; 60; 86_400 ]
 
 (* a window again over what is covered: nothing to do; an empty window: nothing *)
 let half_open_covered () =
-  let segs = Dag.segments ~lean:true ~since:100 ~until:120 ~step:60 ~done_:[ (60, 120) ] in
+  let segs = Dag.segments ~since:100 ~until:120 ~step:60 ~done_:[ (60, 120) ] in
   Alcotest.(check (list (triple int int int))) "covered" [] segs;
-  Alcotest.(check (list (triple int int int))) "empty" [] (Dag.segments ~lean:true ~since:120 ~until:120 ~step:60 ~done_:[]);
-  Alcotest.(check (list (triple int int int))) "step boundary" [ (60, 110, 120); (120, 120, 125) ] (Dag.segments ~lean:true ~since:110 ~until:125 ~step:60 ~done_:[ (60, 110) ])
+  Alcotest.(check (list (triple int int int))) "empty" [] (Dag.segments ~since:120 ~until:120 ~step:60 ~done_:[]);
+  Alcotest.(check (list (triple int int int))) "step boundary" [ (60, 110, 120); (120, 120, 125) ] (Dag.segments ~since:110 ~until:125 ~step:60 ~done_:[ (60, 110) ])
 
 let relay_hints () =
   let tags =
@@ -145,7 +109,7 @@ let backoff () =
 
 let () =
   Alcotest.run "primal_jobs_lean"
-    [ ("config", [ Alcotest.test_case "lean object" `Quick lean_config ]);
-      ("dag", [ Alcotest.test_case "closed unchanged" `Quick closed_unchanged; Alcotest.test_case "half-open once" `Quick half_open_once; Alcotest.test_case "half-open covered" `Quick half_open_covered ]);
+    [ ("config", [ Alcotest.test_case "retired lean object" `Quick lean_config ]);
+      ("dag", [ Alcotest.test_case "half-open once" `Quick half_open_once; Alcotest.test_case "half-open covered" `Quick half_open_covered ]);
       ("dvm_checker", [ Alcotest.test_case "relay hints" `Quick relay_hints; Alcotest.test_case "backoff" `Quick backoff ]);
       ("pg_listener", [ Alcotest.test_case "seen prune" `Quick seen_prune ]) ]

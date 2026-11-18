@@ -40,16 +40,15 @@ the nodes, in this order:
 | `zap_receipts` | 1 day | | kind 9735 through the importer's zap-receipt indexer (`zap_receipts_1_9fe40119b2`) |
 | `poll_stats` | 1 day | | poll statistics of polls referenced by kind 1018/9735 events (only with `dag_poll_votes_enabled`) |
 | `a_tags` | 90 days, sequential, 8 parallel Postgres workers | | `a_tags_1_7d98c5333f` |
-| `reads` | 90 days, 5 phases | | `reads_12_68c6bbfccd`, `reads_versions_12_b537d4df66`: articles (kind 30023 with `d` and `published_at`; language from `Langid`), then their zaps, likes, direct replies and reposts |
-| `pubkey_media_cnt` | 90 days | | `pubkey_media_cnt_1_b5e2a488b1` (added to) |
-| `pubkey_content_zap_cnt` | 90 days | | `pubkey_content_zap_cnt_1_236df2f369` (added to) |
+| `reads` | 90 days, 5 phases | | `reads_12_68c6bbfccd`: articles (kind 30023 with `d` and `published_at`; language from `Langid`), then their zaps, likes, direct replies and reposts |
+| `pubkey_media_cnt` | 90 days | | `pubkey_stats.media_cnt` (added to) |
+| `pubkey_content_zap_cnt` | 90 days | | `pubkey_stats.content_zap_cnt` (added to) |
 | `advsearch` | 1 day | 30 days | `advsearch_5_d7da6f551e`: search vectors of content, hashtags, reply target, mentions, media/link filters and URLs (kinds 1, 20, 1068, 1111, 6969, 30023, 34235, 34236; content up to 200 kB) |
 | `event_mentions` | 1 day | | kinds 1/6/30023 through the importer's mention indexer |
-| `note_length` | 1 day | 15 days | `note_length_1_15d66ffae6` |
 | `note_stats` | 1 day | 30 days | `note_stats_1_07d205f278.long_replies`: replies of 600+ characters by authors at or above the humaness threshold |
 | `update_user_search` | 1 day | 3 days | user search entries of pubkeys added to `human_override` |
 
-The output tables are asserted at start; a missing one stops the daemon.
+The output tables are asserted at start (`T.tables`); a missing one stops the daemon.
 
 **Segments and coverage.** Each node splits its window into segments aligned to its step and skips
 what `coverages_1_8656fc443b` already records as covered (coverage names are `postgres-p0-<table>`,
@@ -359,7 +358,7 @@ parses it, runs the extensions' initialisation, checks that every role is known,
 
 **Every top-level key is required**, including those of roles the instance does not run (give
 them inert values, e.g. a zero key for `dvm_requester_pubkey`). Exceptions: `dag_statement_timeout_s`
-(default 30), `media`, `blossom`, `ext` and `lean` may be absent. Unknown keys are ignored. A conninfo is
+(default 30), `media`, `blossom` and `ext` may be absent. Unknown keys are ignored, except `lean` (the retired lean object, below), which is an error. A conninfo is
 `{"host", "port", "user", "database"}`.
 
 | Key | Type | Used by | Meaning |
@@ -407,20 +406,18 @@ them inert values, e.g. a zero key for `dvm_requester_pubkey`). Exceptions: `dag
 | `media` | object, optional | media, blossom | below |
 | `blossom` | object, optional | blossom | below |
 | `ext` | any, optional | extensions | settings of extension roles |
-| `lean` | object or null, optional | dag, pg_listener, dvm_checker, trustrank | below; absent or `null` = off |
 
-### The `lean` object
+### The lean cache schema
 
-`{"enabled": true}` switches on the behaviours for a lean cache schema (fewer redundant tables
-and rows); absent, `null` or `{"enabled": false}` keeps the behaviour above exactly. `enabled` is
-required in the object; the only other keys allowed are the iteration-2 ones (lean schema
-iteration 2, each false when absent): `no_note_length` (the `note_length` node is skipped: a view over
-`event`), `pointer_views` (`reads_node` stops writing `reads_versions`: a view over the kind-30023
-events), `pubkey_stats` (`pubkey_media_cnt` and `pubkey_content_zap_cnt` add to `pubkey_stats`).
+The jobs write and read the lean cache schema (infrastructure `primal_services/lean_schema/`), the
+only one since 2026-11; the `lean` object that switched to it is gone (a config still carrying it
+fails its check). `pubkey_media_cnt` and `pubkey_content_zap_cnt` add to `pubkey_stats` (their
+coverage keys keep the old table names); `reads_node` writes no `reads_versions` (a view over the
+kind-30023 events); there is no `note_length` node (a view over `event`).
 
-| Role | With `enabled` |
+| Role | Behaviour |
 |---|---|
-| `dag` | **Half-open windows.** Each run's window is `[since, until)` with `until` at most now − 1 (the current second is still being imported, and an event's `imported_at` is taken before its import commits), and so is every segment: coverage `(t, t2)` means everything before `t2` is done and the next segment or run starts at `t2`, so each second is processed once. Closed, the boundary second of every run and segment was processed twice and the adding nodes (`pubkey_media_cnt`, `pubkey_content_zap_cnt`, the zaps/likes/replies/reposts of `reads`, `note_stats`) counted its events twice. The first run after switching processes the end second of the closed coverage once more. |
+| `dag` | **Half-open windows.** Each run's window is `[since, until)` with `until` at most now − 1 (the current second is still being imported, and an event's `imported_at` is taken before its import commits), and so is every segment: coverage `(t, t2)` means everything before `t2` is done and the next segment or run starts at `t2`, so each second is processed once. (Closed windows, before the lean schema, processed the boundary second of every run and segment twice.) |
 | `dag` | `note_stats`: the 600-character test first, then one `pubkey_trustrank` query for the authors of the long notes (instead of one per kind-1 event). |
 | `pg_listener` | Per live event, the followers that have a `live_event_notification_created` row are kept in memory (loaded with one query at the event's first update since start): an update tries the insert only for followers not in it, instead of an insert probe for every follower on every update. Events without an update for a day are forgotten, and the least recently updated ones above 500,000 pairs. |
 | `dvm_checker` | The handler's relays are the configured `dvm_relays` plus the handler event's own hints (values of a `relays` tag, first values of `relay`/`r` tags; `ws(s)://` only, at most 3), not `event_relay`. |
@@ -592,6 +589,5 @@ against a membership DB (its `dune` sets `PGDATABASE` to the membership referenc
 
 The tests (`test/test_media.ml`) cover float formatting, storage key hashes, the typed node JSON,
 Blossom paths, external processes, and the download rules (direct hosts, refusal of private
-addresses). `test/test_lean.ml` covers the `lean` object's parsing, the DAG's closed and half-open
-segments (closed as before; half-open runs process every second once), the DVM checker's relay
-hints and pg_listener's pair set.
+addresses). `test/test_lean.ml` covers the retired `lean` key, the DAG's half-open segments (every second
+processed once), the DVM checker's relay hints and pg_listener's pair set.

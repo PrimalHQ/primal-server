@@ -43,7 +43,7 @@ Fibers and domains:
 | `num_workers` domains | Take jobs from a queue of `queue_capacity`. A full queue blocks the producer; nothing is dropped. Each runs the spam detector on firehose lines, then `import_event`. |
 | 4 zap-verifier domains | LNURL verification of zap receipts, off the import path. |
 | event syncer / backfill | Feed peer events into the same queue. |
-| hooks loop, every 60 s | Due `scheduled_hooks`, then `expire_scores`. |
+| periodic loop, every 60 s | `expire_scores`; hourly, pending `event_hooks` older than `hooks_expire_days`. |
 | import listener | Synchronous imports for the API. |
 | push sender / push intake | Device push notifications. |
 | pushgateway, reporter | Metrics; the status line and stall watchdog. |
@@ -124,11 +124,9 @@ initiator already has more than one action of that kind on the event. A positive
 `score`; an engagement under 24 h old also adds to `score24h` with a `score_expiry` row due 24 h
 after it.
 
-The hooks loop runs two jobs; exactly one importer per cache DB may enable each.
-`expire_scores_enabled` subtracts the due `score_expiry` sums from `score24h` and deletes those
-rows. `scheduled_hooks_enabled` claims due `scheduled_hooks` with `DELETE .. RETURNING` (20,000 per
-batch, up to 50 batches per round) and sums the hashtag decrements (`expire_hashtag_score_cb`, the
-only kind) per hashtag.
+The periodic loop: `expire_scores_enabled` (exactly one importer per cache DB) subtracts the due
+`score_expiry` sums from `score24h` and deletes those rows; every hour it deletes pending
+`event_hooks` older than `hooks_expire_days` in bounded batches.
 
 **Spam detection** (firehose lines only; the event is imported either way) clusters signed kind-1
 notes of 3+ words by authors with under 50 followers: over 90% shared words and a word count within
@@ -282,8 +280,8 @@ Push and file errors are logged and skipped.
 
 ## Configuration
 
-One JSON object. **Every key is required** (except `lean`, below); *nullable* keys take `null`. Unknown keys are
-ignored. Pubkeys are 64-char hex; entries that don't decode are dropped. In parentheses: the
+One JSON object. **Every key is required** (except the import rules, below); *nullable* keys take `null`. Unknown keys are
+ignored, except `lean`, which is an error (the retired lean-mode object: see Import rules). Pubkeys are 64-char hex; entries that don't decode are dropped. In parentheses: the
 values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
 
 | Key | Type | Meaning |
@@ -302,7 +300,7 @@ values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
 | `event_sync_enabled`, `event_sync_remotes` | bool, string[] | Event syncer; peer cache-DB hosts. |
 | `event_sync_interval`, `event_sync_overlap` | number, int | Seconds between cycles (60); initial lookback (600). |
 | `event_sync_backfill` | object, nullable | `{remote, from_ts, to_ts, batch, state_file}`. |
-| `scheduled_hooks_enabled`, `expire_scores_enabled` | bool | One importer per cache DB. |
+| `expire_scores_enabled` | bool | One importer per cache DB. |
 | `content_moderation_rules_enabled` | bool | Recompute `cmr_*` on list changes. |
 | `default_settings_file` | string, nullable | The app's `default-settings.json`. |
 | `import_listener_enabled`, `import_listener_host`, `import_listener_port` | bool, string, int | Host `0.0.0.0`, `127.0.0.1`/`localhost` or an IP. |
@@ -316,75 +314,72 @@ values of `Config.from_env` (a dev-tool helper), which are not fallbacks.
 | `pushgateway_job` | string | `job` label (`exported_job` in Prometheus). |
 | `pushgateway_stats_file` | string | JSON file holding the `cache_any` total. |
 | `pushgateway_interval` | number | Seconds (15). |
-| `lean` | object, optional | The lean write path (next section). Absent or `null`: the classic path, statement for statement. |
+| `kind_allowlist`, `keep_versions_kinds`, `hooks_expire_days`, `contact_list_versions` | optional | The import rules (next section). |
 
-### Lean mode (`lean`)
+### Import rules and the lean cache schema
 
-An optional object; every key is optional (absent or `null` = off / the default), and an unknown key
-is a config error. Each flag is independent. The startup log prints the flags in force; the status
-line adds `lean krej/sup/txr/txf` once one of those counters moves, and the pushgateway job gets
-`importer_lean_{kind_rejected,superseded_deleted,tx_retries,tx_fallbacks}_total`.
-
-Some flags need schema objects a classic cache DB lacks: the unique index on `event_stats(event_id)`
-(`lazy_counters`), `pubkey_events.kind` (`pubkey_events_kind`), `event_hooks.created_at` (`enabled`).
-Recommended with `enabled`: an index on `event_hooks(created_at)` (the hourly expiry otherwise scans the
-table) and one on `event_pubkey_action_refs(event_id, ref_pubkey, ref_kind)` (the score duplicate check).
+The importer writes the lean cache schema (infrastructure `docs/proposal-lean-schema-iteration2-20261026.md`,
+`primal_services/lean_schema/`), the only one since 2026-11: the classic write path, and the
+`lean` config object that switched between the two, are gone (a config still carrying `lean` fails
+its check). Four optional top-level keys remain (absent or `null` = the default):
 
 | Key | Type | Effect |
 |---|---|---|
-| `enabled` | bool | Refactors with the same results, listed below. |
-| `no_event_created_at` | bool | Stop writing `event_created_at` (`event` has the same data). |
-| `no_hashtags` | bool | Stop updating `hashtags` and scheduling its 4-h expiry hook (`event_hashtags` stays). |
-| `no_pubkey_ids` | bool | Stop reading/writing `pubkey_ids`. Without `lazy_counters` a new pubkey is told by `insert into pubkey_followers_cnt … on conflict do nothing returning`; with it nothing needs "new pubkey" (only `disable_trustrank`'s idempotent rank seed). |
-| `no_thread_parents` | bool | Stop writing `event_thread_parents`; reply-chain notifications walk the parents from the events' tags (`parse_parent_eid`, from the note-reply kinds, at most 16 deep) instead of `thread_view_parent_posts`. |
-| `no_cmr_legacy` | bool | Content-moderation rules stop writing `cmr_pubkeys_parent`, `cmr_words`, `cmr_hashtags` (read by nothing; the `_2` tables replaced them). |
-| `lazy_counters` | bool | No zero rows: `event_stats` (at note insert), `pubkey_followers_cnt` and `pubkey_zapped` (at a new pubkey). The first increment creates the row (upsert); a decrement never creates one. A missing row reads as zeros. Note: followed/zapped pubkeys that never posted here now get a row (the classic `UPDATE` found none). |
-| `pubkey_events_kind` | bool | Write `pubkey_events.kind`. |
-| `transaction_per_event` | bool | After the claim, the event's side effects run in one transaction (also a verified zap's). A deadlock/serialization failure retries the whole event (4 attempts, random pause); any other error rolls back and applies the event once more without a transaction (the classic partial semantics). Device pushes run after the commit. Content-moderation rules, live events, follow packs and the 10555 list join the event's transaction. The transaction stays open across the membership-DB lookups of the notification gates, humanness and content-moderation settings (with `enabled` most are cache hits), and the spam-hash filterlist write to the membership DB is not rolled back with it. Locks on hot rows (popular accounts' follower counts, `event_stats` of viral notes) are held until the commit, which can cost throughput. |
-| `delete_superseded` | bool | A replaceable/addressable version (kind 0, 3, 10000–19999, 30000–39999 with a `d` tag) moves its pointer only when newer by NIP-01 (greater `created_at`, or equal and the lower id); then the previous version's `event` row is deleted (derived rows stay), after the dispatch (kind 3 diffs against it first). An older incoming version changes nothing and its row is deleted again, before any derived row. A recently deleted id is dropped before the claim (in-memory, 1 h). |
-| `keep_versions_kinds` | int[] | Kinds never deleted by `delete_superseded` (default `[30023]`, whose versions back `reads_versions`). |
-| `kind_allowlist` | int[], nullable | When set, kinds 0, 3, 10000–19999 and 30000–39999 are imported only if listed (**list 0 and 3**, or profiles and follows stop); other kinds keep `accepted_kind`. Refusals count as rejected (and in `krej`). The syncer skips them without fetching. |
-| `hooks_expire_days` | int | With `enabled`: pending `event_hooks` older than this are deleted, hourly, in the hooks loop (default 30). |
-| `thread_parents_view` | bool | Stop writing `event_thread_parents`: it is a view over `event_replies` (unique on `reply_event_id`; a reply imported twice keeps its first row). Reply-chain notifications walk it as before (`no_thread_parents` changes that walk; this flag doesn't). |
-| `delete_derived` | bool | A deleted event (superseded, or by a kind-5 deletion) also loses its `basic_tags`, `a_tags`, `event_mentions`, `event_hashtags`, `pubkey_events`, `advsearch` rows and its `event_replies` link. |
-| `basic_tags_at_import` | bool | The event's `p`/`P`/`e` tags go to `basic_tags` when it is stored (before dispatch, in its transaction), not minutes later by the DAG (whose insert of the same rows then does nothing). Needed by `no_action_tables`. |
-| `no_action_tables` | bool | Stop writing `event_pubkey_actions` and `event_pubkey_action_refs`: they are views over `basic_tags`, `event_replies` and `og_zap_receipts` (likes by their content, replies to their direct parent). The score's duplicate check looks for the initiator's earlier action there. |
-| `pointer_views` | bool | Stop writing the pointer tables (`meta_data`, `contact_lists`, `replaceable_events`, `parametrized_replaceable_events`, the mute/allow lists, `relay_list_metadata`, `bookmarks`, `parameterized_replaceable_list`): with `delete_superseded` the current version is the newest event of its key, read from `event` (an index on `event_d_tag(tags)` for addressable kinds). Their plain-name views read `event`. |
-| `pubkey_stats` | bool | The follower and zap counters go to `pubkey_stats` (one row per pubkey); `pubkey_followers_cnt` and `pubkey_zapped` are views over it. |
-| `no_ln_address` | bool | Stop writing `pubkey_ln_address` (a view over the current kind-0 events). |
-| `zap_merge` | bool | Write `og_zap_receipts`' rows into `zap_receipts` (its `og_sender`, `og_amount_sats`, `og_event_id`; the DAG fills `target_eid`, `sender`, `satszapped` of the same row). `og_zap_receipts` is then a view of the rows with `og_amount_sats`, `zap_receipts` one of the rows with `sender`. |
-| `contact_list_versions` | int | > 0: kind 3 keeps the versions `membership_recovery_contact_lists` (Contact List Backup) shows, the list with most tags of each of the newest this-many days, plus the current one (and the one `contact_lists` names); the others are deleted like superseded versions when a new list arrives. 0 (default): kind 3 is like any replaceable kind. |
+| `kind_allowlist` | int[] | Kinds 0, 3, 10000–19999 and 30000–39999 are imported only if listed (keep 0 and 3, or profiles and follows stop); other kinds keep `accepted_kind`. Refusals count as rejected. The syncer skips them without fetching. Default: `[0, 3, 10000, 10002, 10003, 10063, 10555, 17000, 30000, 30004, 30023, 30311, 31234, 31990, 34235, 34236, 37001, 39089]`. |
+| `keep_versions_kinds` | int[] | Replaceable/addressable kinds whose superseded versions stay (default `[30023]`, whose versions back `reads_versions`). |
+| `hooks_expire_days` | int > 0 | Pending `event_hooks` older than this are deleted, hourly (default 30). |
+| `contact_list_versions` | int ≥ 0 | > 0: kind 3 keeps the versions `membership_recovery_contact_lists` (Contact List Backup) shows, the list with most tags of each of the newest this-many days, plus the current one; the others are deleted like superseded versions. 0: kind 3 is like any replaceable kind (default 30). |
 
-The last nine are the lean schema's iteration 2 (infrastructure `docs/proposal-lean-schema-iteration2-20261026.md`); they need its objects (`primal_services/lean_schema/sql/50-*`, `zap_merge` also `sql/57-*`).
+What the import does on that schema:
 
-What `enabled` changes (same rows written, fewer statements and reads):
+- **Current versions only.** A replaceable/addressable version (kind 0, 3, 10000–19999, 30000–39999 with
+  a `d` tag) is current when it is the newest of its key by NIP-01 (greater `created_at`, or equal and the
+  lower id); the older versions' rows are deleted with their derived rows, after the dispatch (kind 3
+  diffs against the previous list first). An older incoming version changes nothing and its row is
+  deleted again. A recently deleted id is dropped before the claim (in memory, 1 h). The pointer tables
+  (`meta_data`, `contact_lists`, `replaceable_events`, `parametrized_replaceable_events`, the
+  mute/allow lists, `relay_list_metadata`, `bookmarks`, `parameterized_replaceable_list`,
+  `reads_versions`, `pubkey_ln_address`) are views over `event`.
+- **Derived rows follow the event.** A deleted event (superseded, or by a kind-5 deletion) also loses its
+  `basic_tags`, `a_tags`, `event_mentions`, `event_hashtags`, `pubkey_events`, `advsearch` rows and its
+  `event_replies` link. The event's `p`/`P`/`e` tags go to `basic_tags` when it is stored (the DAG's
+  later insert of the same rows does nothing). `pubkey_events` has the event's `kind`.
+- **Views instead of copies.** `event_pubkey_actions(_refs)` are views over `basic_tags`, `event_replies`
+  and `og_zap_receipts`; `event_thread_parents` over `event_replies` (unique on `reply_event_id`: a reply
+  imported twice keeps its first row); `og_zap_receipts` over `zap_receipts`' rows with `og_*` columns.
+- **Lazy counters.** No zero rows: `event_stats` (a note's row is created by its first increment, a
+  decrement never creates one) and `pubkey_stats` (followers, zaps, media, content zaps; the
+  `pubkey_followers_cnt`, `pubkey_zapped`, … views leave out zero rows). A missing row reads as zeros.
+- **One transaction per event.** After the claim, the event's side effects run in one transaction (also
+  a verified zap's). A deadlock or serialization failure retries the whole event (4 attempts, random
+  pause); any other error rolls back and applies the event once more without a transaction. Device
+  pushes run after the commit. Content-moderation rules, live events, follow packs and the 10555 list
+  join the event's transaction. Locks on hot rows are held until the commit.
+- **A per-event scope.** Events read by id are memoized, seeded with the event in hand; parents and
+  addressable lookups once per event; all of an event's `event_stats` deltas on a row in one statement at
+  the end, rows in id order. Per-worker TTL caches: `ext_is_human`, `is_trusted_user`, `is_app_user`
+  (60 s), parsed app settings (60 s), notification settings and the filterlist probes (30 s).
+- Smaller things: `fetcher_relays` only learns new URLs; the user's relays and the previous contact list
+  are read once; deletion author checks read pubkey and kind only; DMs need no existence check (the claim
+  makes them once-only); `pubkey_bookmarks` is updated by diff; `event_hooks` are claimed with `delete …
+  returning`; kind and allowlist checks come before the `deleted_events` probe; reply chains are walked
+  once, only when the parent is present.
+- **Event syncer:** pulls `(id, imported_at, kind)`, skips kinds the import refuses, checks which ids exist
+  locally (`id = any($1)`), and fetches full rows only for the missing ones.
 
-- `fetcher_relays`: `on conflict do nothing` (the fetcher only learns new URLs; it never forgets one). The user's relays are read with one join each (the relay list's tags; else the contact list's content, not its tags).
-- A per-event scope: events read by id are memoized, seeded with the event in hand (hooks on the DM itself, the acting event in `notifications_cb`, kind 0's user search and lightning address don't re-read it; each hook target is read once per event, not once per hook); parents and addressable lookups once per event. `event_hook` is one read instead of exists + read.
-- Narrow reads where only pubkey/kind/created_at are used: deletion author checks (tags only for a repost), the replied-to parent.
-- Kind 3: one read of the previous contact list (created_at + tags) for both the "newer" check and the follow diff.
-- Reply chains: `thread_view_parent_posts` once per note (was twice) and only when the parent is present. Differs from the classic path only when the parent was deleted while its thread-parent row stayed: its ancestors are no longer notified.
-- `ext_is_human` for hashtags only when the note has one.
-- `event_stats`: all of an event's deltas on a row (likes/replies/reposts/zaps/satszapped + score + score24h) in one statement at the end of the event, rows in id order.
-- Per-worker TTL caches: `ext_is_human`, `is_trusted_user` and `is_app_user` (60 s), parsed app settings (60 s), notification settings and the filterlist probes (30 s).
-- DMs: no existence check before the insert (the claim makes it once-only).
-- `pubkey_bookmarks`: updated by diff, not delete-all + reinsert.
-- `event_hooks`: `delete … returning funcall` instead of select + delete; old pending hooks expire (`hooks_expire_days`).
-- Score duplicate check: the same count, stopped at the second matching ref (`limit 2`).
-- Kind and allowlist checks before the `deleted_events` probe.
-- Event syncer: pulls `(id, imported_at, kind)`, skips kinds the import refuses, checks which ids exist locally (`id = any($1)`), and fetches full rows only for the missing ones.
+The status line adds `lean krej/sup/txr/txf` once one of those counters moves, and the pushgateway job
+gets `importer_lean_{kind_rejected,superseded_deleted,tx_retries,tx_fallbacks}_total`.
 
 ## Layout
 
 - `bin/primal_importerd.ml`: the daemon (config, fibers, reconnects).
 - `tools/`: dev tools (below).
-- `lib/cache_storage.ml`: `import_event`, per-kind dispatch, event and scheduled hooks,
-  `expire_scores`. `lib/cache_storage_ext.ml`: what dispatch calls (humanness, mentions, hashtags,
+- `lib/cache_storage.ml`: `import_event`, per-kind dispatch, event hooks, `expire_scores`. `lib/cache_storage_ext.ml`: what dispatch calls (humanness, mentions, hashtags,
   media, zaps, scores, notifications and gates, reports, live events, lists, moderation rules).
 - `lib/config.ml`, `firehose_client.ml`, `dag_index.ml`, `import_listener.ml`, `event_syncer.ml`,
   `spam_detection.ml`, `zap_verifier.ml`, `lnurl.ml`, `push_notifications.ml`, `push_intake.ml`,
   `pushgateway_run.ml`: the parts named above. `lib/stats.ml`: counters, status line, watchdog.
-- `lib/lean.ml`: the `lean` settings and their pure helpers (kind allowlist, NIP-01 order, bookmark diff,
+- `lib/lean.ml`: the import rules and their pure helpers (kind allowlist, NIP-01 order, bookmark diff,
   TTL caches).
 - `test/events.jsonl`: sample events (`importcheck`'s default input). `test/test_importer.ml`: unit tests.
 
@@ -396,7 +391,7 @@ One dune workspace for the repo (`_build/` at its root), built from `common`'s f
 cd "$(git rev-parse --show-toplevel)"
 nix develop path:$PWD/nix -c dune build @all       # fails on any [%pgsql] mismatch
 nix develop path:$PWD/nix -c dune build importer/bin/primal_importerd.exe
-nix develop path:$PWD/nix -c dune test             # workspace tests; importer/test: lean mode's pure parts
+nix develop path:$PWD/nix -c dune test             # workspace tests; importer/test: the import rules' pure parts
 ```
 
 - **`[%pgsql]` checks** need a DB with the cache schema at `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`.

@@ -66,7 +66,7 @@ let viewer_rules ~clock (c : Db.cache Db.conn) (u : string) : viewer_rules =
   in
   if switched_off then Off else if Queries.user_has_cmr c ~pubkey:u then Compiled else Default
 
-(* [memo] (lean): the viewers' rules already read in this call, so one [filter] reads each viewer's
+(* [memo]: the viewers' rules already read in this call, so one [filter] reads each viewer's
    app settings (membership DB) and cmr rows once, not once per pubkey set *)
 let hidden_pubkeys ?memo ~clock (c : Db.cache Db.conn) ~(user_pubkey : string option) ~(scope : string) ~(hexes : string list)
     ~(author_exempt : string option) : SS.t =
@@ -139,7 +139,7 @@ let filter ~clock ~(funcall : string) ~(user_pubkey : string option) ~(author_ex
     else begin
       let hidden_ids, hidden_scope, hidden_trending, hidden_zap_user, hidden_zap_receiver, hidden_notif =
         Db.with_cache ~clock (fun c ->
-            let memo = if Lean.enabled () then Some (Hashtbl.create 4) else None in
+            let memo = Some (Hashtbl.create 4) in
             let q set scope user = hidden_pubkeys ?memo ~clock c ~user_pubkey:user ~scope ~hexes:(SS.elements set) ~author_exempt in
             let hidden_ids =
               if SS.is_empty !ids then SS.empty

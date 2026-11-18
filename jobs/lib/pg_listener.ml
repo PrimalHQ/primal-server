@@ -122,8 +122,7 @@ let handle ~(cfg : Config.t) (est : CS.est) (last : (string * string, float) Has
                 end
               in
               let fs = followers dbh ~pubkey:host in
-              if not cfg.lean then List.iter (fun follower -> if mark_created dbh ~kind ~pubkey ~identifier ~follower ~now:(Utils.current_time ()) then created follower) fs
-              else begin
+              begin
                 let en = Seen.entry seen dbh ~coord ~kind ~pubkey ~identifier ~now:(Unix.gettimeofday ()) in
                 List.iter
                   (fun follower ->

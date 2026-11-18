@@ -1,4 +1,4 @@
-(* primal-api runtime configuration: one JSON file, every key required except "ext", "lean" and "default_relays" (the
+(* primal-api runtime configuration: one JSON file, every key required except "ext" and "default_relays" (the
    README's table). Keys the parser does not know are ignored, so a config may still carry removed ones. *)
 
 exception Config_error of string
@@ -13,7 +13,6 @@ let media_path_label = function Local { label; _ } -> label | S3_path { label; _
 
 type t = {
   ext : Yojson.Safe.t; (* the "ext" object for the private extensions; `Null when absent *)
-  lean : Lean.t; (* the optional "lean" object (Lean); absent or null = Lean.off *)
   servername : string; (* answered by server_name over WebSocket *)
   public_ws_host : string;
   public_ws_port : int;
@@ -93,12 +92,12 @@ let conninfo_of_json (j : Yojson.Safe.t) : Postgres.conninfo =
 let default_default_relays = [ "wss://relay.primal.net"; "wss://relay.damus.io"; "wss://nos.lol"; "wss://relay.snort.social" ]
 
 let of_json (j : Yojson.Safe.t) : t =
+  (match j with
+  | `Assoc f when List.mem_assoc "lean" f ->
+      raise (Config_error "lean: the \"lean\" object is gone (the lean schema is the only one); drop it")
+  | _ -> ());
   {
     ext = (match j with `Assoc f -> Option.value (List.assoc_opt "ext" f) ~default:`Null | _ -> `Null);
-    lean =
-      (match j with
-      | `Assoc f -> ( try Lean.of_json (Option.value (List.assoc_opt "lean" f) ~default:`Null) with Lean.Error m -> raise (Config_error m))
-      | _ -> Lean.off);
     servername = rstr j "servername";
     public_ws_host = rstr j "public_ws_host";
     public_ws_port = rint j "public_ws_port";

@@ -53,44 +53,17 @@ let event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_ : Nostr.t =
    heap, so this bounds a cycle to ~250MB per remote; a backlog drains over successive cycles. *)
 let pull_limit = 200_000
 
-(* One pull from one remote: up to [pull_limit] events with imported_at >= since. Returns
-   (events, high_water, full) where high_water is the largest imported_at seen (>= since), so the
-   caller continues strictly forward next cycle, and [full] says the limit was hit (more is pending).
-   Rows sharing the high-water second are re-read next pull and count as duplicates. Events are
-   returned (not submitted) so the caller can merge all remotes and submit in created_at order. *)
-let pull_remote (dbh : Pg.dbh) ~(since : int) : Nostr.t list * int * bool =
-  let since64 = Int64.of_int since in
-  let limit64 = Int64.of_int pull_limit in
-  let rows =
-    [%pgsql dbh
-      "select id, pubkey, created_at, kind, tags, content, sig, imported_at from event \
-       where imported_at >= $since64 order by imported_at limit $limit64"]
-  in
-  let hw = ref since in
-  let evs =
-    List.map
-      (fun (id, pubkey, created_at, kind, tags, content, sig_, imported_at) ->
-        let ia = Int64.to_int imported_at in
-        if ia > !hw then hw := ia;
-        event_of_row ~id ~pubkey ~created_at ~kind ~tags ~content ~sig_)
-      rows
-  in
-  let full = List.length rows >= pull_limit in
-  (* A full pull that never left the [since] second would re-read the same rows forever; step past
-     it (dropping that second's unread rows). Needs > pull_limit imports in one second, so rare. *)
-  if full && !hw = since then begin
-    Printf.eprintf "event_syncer: >= %d events at imported_at %d; skipping ahead\n%!" pull_limit since;
-    hw := since + 1
-  end;
-  (evs, !hw, full)
+(* {1 One pull from one remote, ids first}
 
-(* {1 Lean: ids first} (lean.enabled)
-
-   Each event reaches a node about four times (firehose + three peers), so most pulled rows are
-   events we already hold. Pull only (id, imported_at, kind) from the remote, drop kinds the import
-   would refuse and ids recently deleted as superseded, ask the local DB which of the rest exist
-   (id = any($1)), and fetch full rows only for the missing ones. Same high-water / limit semantics
-   as [pull_remote]. *)
+   Up to [pull_limit] rows with imported_at >= since. Each event reaches a node about four times
+   (firehose + three peers), so most pulled rows are events we already hold. Pull only (id,
+   imported_at, kind) from the remote, drop kinds the import would refuse and ids recently deleted as
+   superseded, ask the local DB which of the rest exist (id = any($1)), and fetch full rows only for
+   the missing ones. Returns (events, high_water, full) where high_water is the largest imported_at
+   seen (>= since), so the caller continues strictly forward next cycle, and [full] says the limit
+   was hit (more is pending). Rows sharing the high-water second are re-read next pull and count as
+   duplicates. Events are returned (not submitted) so the caller can merge all remotes and submit in
+   created_at order. *)
 
 let bytea_array (ids : string list) : string =
   "{" ^ String.concat "," (List.map (fun s -> "\"\\\\x" ^ Hex_util.encode s ^ "\"") ids) ^ "}"
@@ -125,7 +98,7 @@ let pull_remote_ids_first ~(lean : Lean.t) ~(local : Pg.dbh) (dbh : Pg.dbh) ~(si
           if not (Lean.kind_allowed lean k) then Atomic.incr Lean.kind_rejected;
           None
         end
-        else if lean.Lean.delete_superseded && Lean.Superseded.mem id then None
+        else if Lean.Superseded.mem id then None
         else Some id)
       rows
   in
@@ -173,7 +146,7 @@ let pull_remote_ids_first ~(lean : Lean.t) ~(local : Pg.dbh) (dbh : Pg.dbh) ~(si
    high-water imported_at; both are kept across cycles, and the high-water survives a reconnect
    (only the connection slot is dropped on error). The whole cycle per remote is guarded so a
    transient DB failure just skips that remote rather than killing the fiber. *)
-let run ?(lean = Lean.off) ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.conninfo list)
+let run ?(lean = Lean.default) ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(remotes : Pg.conninfo list)
     ~(submit : Nostr.t -> unit) ~(interval : float) ~(overlap : int) () : unit =
   (* Compute the initial floor once from the local event table (guarded; falls back to now-overlap). *)
   let floor =
@@ -199,7 +172,7 @@ let run ?(lean = Lean.off) ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(
     (match !slot with Some dbh -> ( try Pg.close dbh with _ -> ()) | None -> ());
     slot := None
   in
-  (* lean: the local connection for the existence check (the syncer's own) *)
+  (* the local connection for the existence check (the syncer's own) *)
   let local_slot = ref None in
   Printf.printf "event_syncer: %d remotes, interval %.0fs, overlap %ds, start imported_at >= %d\n%!"
     (List.length remotes) interval overlap floor;
@@ -215,15 +188,12 @@ let run ?(lean = Lean.off) ~(clock : _ Eio.Time.clock) ~(local : Pg.conninfo) ~(
           let dbh = get_conn ci slot in
           let since = !last in
           let evs, hw, full =
-            if lean.Lean.enabled then begin
-              let ldbh = try get_conn local local_slot with ex -> (drop local_slot; raise ex) in
-              try pull_remote_ids_first ~lean ~local:ldbh dbh ~since with
-              | ex when Pg.is_connection_error ex && !local_slot <> None ->
-                  (* either side may have dropped: reconnect both next cycle *)
-                  drop local_slot;
-                  raise ex
-            end
-            else pull_remote dbh ~since
+            let ldbh = try get_conn local local_slot with ex -> (drop local_slot; raise ex) in
+            try pull_remote_ids_first ~lean ~local:ldbh dbh ~since with
+            | ex when Pg.is_connection_error ex && !local_slot <> None ->
+                (* either side may have dropped: reconnect both next cycle *)
+                drop local_slot;
+                raise ex
           in
           if hw > !last then last := hw;
           if full then backlog := true;

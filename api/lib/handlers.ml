@@ -1920,7 +1920,6 @@ module Rmfp = struct
         let stats = Queries.event_stats_rows c ~event_ids_json:live_json in
         let rstats = Queries.reads_stats_rows c ~event_ids_json:live_json in
         let extras = Queries.event_extras_rows c ~event_ids_json:live_json in
-        let relays = Queries.event_relays_rows c ~event_ids_json:live_json in
         let next = ref [] in
         List.iter
           (fun (e : ev) ->
@@ -1930,13 +1929,12 @@ module Rmfp = struct
              else match List.find_opt (fun (r : Queries.stats_row) -> r.st_eid = e.id) stats with
                | Some r -> push a (event_stats_msg r)
                | None ->
-                   (* lean: lazy counter rows, a note without a row has all zeros *)
-                   if Lean.enabled () && List.mem e.kind Lean.stats_kinds then
+                   (* lazy counter rows: a note without a row has all zeros *)
+                   if List.mem e.kind Lean.stats_kinds then
                      push a (event_stats_msg { Queries.st_eid = e.id; likes = 0L; replies = 0L; mentions = 0L; reposts = 0L; zaps = 0L; satszapped = 0L; score = 0L; score24h = 0L }));
             if user_pubkey <> None then Hashtbl.replace a.reids e.id ();
             Hashtbl.replace a.pks e.pubkey ();
             List.iter (fun (k, m) -> if k = e.id then push a m) extras;
-            (match List.assoc_opt e.id relays with Some r -> Hashtbl.replace a.relays e.id r | None -> ());
             if include_top_zaps then begin
               let zaps = Queries.og_zap_receipts_by_event c ~event_id:(Hex_util.decode_exn e.id) ~since:0 ~until:100_000_000_000 ~limit:5 ~offset:0 in
               List.iter (push a) (List.filter not_zap_target (zap_messages c zaps));
@@ -2571,21 +2569,8 @@ let get_directmsg_contacts (ctx : ctx) (kw : Kw.t) : outcome =
         let follows = List.map fst (Queries.follows_with_counts c ~pubkey:user) |> SS.of_list in
         let peers = List.map (fun (r : Queries.dm_contact) -> r.peer) rows |> List.sort_uniq compare in
         let csam = Hashtbl.create 16 in
-        if Lean.enabled () then begin
-          (* lean: the blocked peers in one query; no hidden_pubkeys_default, whose result was dropped *)
-          if peers <> [] then List.iter (fun pk -> Hashtbl.replace csam pk ()) (Queries.blocked_users c ~pubkeys_json:(hex_list_json peers))
-        end
-        else begin
-          let blocked =
-            if peers = [] then SS.empty
-            else
-              SS.of_list
-                (Queries.hidden_pubkeys_default c ~scope:"content" ~pubkeys_json:(hex_list_json peers) ~author_exempt:None
-                |> List.filter (fun _ -> false))
-          in
-          ignore blocked;
-          List.iter (fun pk -> if Queries.is_user_blocked c ~pubkey:(Hex_util.decode_exn pk) then Hashtbl.replace csam pk ()) peers
-        end;
+        (* the blocked peers in one query *)
+        if peers <> [] then List.iter (fun pk -> Hashtbl.replace csam pk ()) (Queries.blocked_users c ~pubkeys_json:(hex_list_json peers));
         let d : (string, int64 * int64 * string option) Hashtbl.t = Hashtbl.create 64 in
         let order = ref [] in
         List.iter
@@ -3477,13 +3462,9 @@ let trending_images_4h (ctx : ctx) (_ : Kw.t) : outcome =
 
 (* app.jl response_messages_for_dvm_feeds *)
 let dvm_responses (ctx : ctx) (c : Db.cache Db.conn) ~(eids : string list) ~(user_pubkey : string option) ~(primal_feeds : bool option) : string list =
-  let lean = Lean.enabled () in
-  (* lean: the feeds' events, likes and zap sums in one query each instead of one per feed (the
-     messages and their order are the same) *)
-  let lean_events = if lean && eids <> [] then Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) else [] in
-  let lean_feeds =
-    if not lean then []
-    else
+  (* the feeds' events, likes and zap sums in one query each instead of one per feed *)
+  let feed_events = if eids <> [] then Queries.events_by_ids c ~event_ids_json:(hex_list_json eids) else [] in
+  let feeds =
       List.filter_map
         (fun (eid, e) ->
           match Yojson.Safe.from_string e with
@@ -3495,25 +3476,24 @@ let dvm_responses (ctx : ctx) (c : Db.cache Db.conn) ~(eids : string list) ~(use
               | _ -> None)
           | _ -> None
           | exception _ -> None)
-        lean_events
+        feed_events
   in
-  let lean_likes =
-    if lean_feeds = [] then []
-    else Queries.dvm_likes_many c ~feeds_json:(Yojson.Safe.to_string (`List (List.map (fun (_, (pk, d)) -> `List [ `String pk; `String d ]) lean_feeds)))
+  let feed_likes =
+    if feeds = [] then []
+    else Queries.dvm_likes_many c ~feeds_json:(Yojson.Safe.to_string (`List (List.map (fun (_, (pk, d)) -> `List [ `String pk; `String d ]) feeds)))
   in
-  let lean_sats =
-    if lean_feeds = [] then [] else Queries.dvm_satszapped_many c ~pubkeys_json:(hex_list_json (List.map (fun (_, (pk, _)) -> pk) lean_feeds))
+  let feed_sats =
+    if feeds = [] then [] else Queries.dvm_satszapped_many c ~pubkeys_json:(hex_list_json (List.map (fun (_, (pk, _)) -> pk) feeds))
   in
   let likes_of pkb pk d =
-    if lean then match List.find_opt (fun (p, i, _) -> p = pk && i = d) lean_likes with Some (_, _, n) -> n | None -> Queries.dvm_likes c ~pubkey:pkb ~identifier:d
-    else Queries.dvm_likes c ~pubkey:pkb ~identifier:d
+    match List.find_opt (fun (p, i, _) -> p = pk && i = d) feed_likes with Some (_, _, n) -> n | None -> Queries.dvm_likes c ~pubkey:pkb ~identifier:d
   in
   let sats_of pkb pk =
-    if lean then match List.assoc_opt pk lean_sats with Some n -> n | None -> Queries.dvm_satszapped c ~pubkey:pkb else Queries.dvm_satszapped c ~pubkey:pkb
+    match List.assoc_opt pk feed_sats with Some n -> n | None -> Queries.dvm_satszapped c ~pubkey:pkb
   in
   List.concat_map
     (fun eid ->
-      match if lean then List.filter (fun (k, _) -> k = eid) lean_events else Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid ]) with
+      match List.filter (fun (k, _) -> k = eid) feed_events with
       | [] -> []
       | (_, e) :: _ -> (
           match Yojson.Safe.from_string e with
@@ -3540,8 +3520,7 @@ let dvm_responses (ctx : ctx) (c : Db.cache Db.conn) ~(eids : string list) ~(use
                       | Some u ->
                           (* get_dvm_feed_follows_actions *)
                           let pks =
-                            if lean then Queries.dvm_follows_actions_pks_lean c ~dvm_kind:kind ~dvm_pubkey:pkb ~dvm_id ~user_pubkey:u ~limit:5
-                            else Queries.dvm_follows_actions_pks c ~dvm_kind:kind ~dvm_pubkey:pkb ~dvm_id ~user_pubkey:u ~limit:5
+                            Queries.dvm_follows_actions_pks c ~dvm_kind:kind ~dvm_pubkey:pkb ~dvm_id ~user_pubkey:u ~limit:5
                           in
                           let found, cards = if pks = [] then ([], []) else user_cards c pks in
                           let users = List.filter (fun p -> List.mem p found) pks in
@@ -3606,7 +3585,7 @@ let cache_get_event (c : Db.cache Db.conn) (eid : string) : Nostr.t option =
   | [] -> None
 
 let compile_cmr (ctx : ctx) (c : Db.cache Db.conn) (m : Db.membership Db.conn) (pubkey : string) : Cmr.t =
-  Cmr.compile ~pointer_views:(Lean.pointer_views ()) ~dbh:(Db.raw c) ~mem_dbh:(Db.raw m) ~defaults:(Cmr.default_settings (Some (cm_file ctx "default-settings.json"))) ~get_event:(cache_get_event c) pubkey
+  Cmr.compile ~dbh:(Db.raw c) ~mem_dbh:(Db.raw m) ~defaults:(Cmr.default_settings (Some (cm_file ctx "default-settings.json"))) ~get_event:(cache_get_event c) pubkey
 
 (* app_ext.jl set_app_settings: keys of the stored settings missing from the new event are carried
    over; the event is stored; notification settings and the compiled moderation rules follow (Julia
@@ -3650,7 +3629,7 @@ let is_hidden_on_primal_nsfw (ctx : ctx) (c : Db.cache Db.conn) (cmr : Cmr.t) ~p
   match ctx.cfg.algos_user_pubkey with
   | None -> false
   | Some apk -> (
-      match Cmr.list_event_id ~pointer_views:(Lean.pointer_views ()) ~dbh:(Db.raw c) `Mute_list apk with
+      match Cmr.list_event_id ~dbh:(Db.raw c) `Mute_list apk with
       | None -> false
       | Some eid ->
           let pks = match cache_get_event c eid with Some e -> p_tag_pubkeys (Yojson.Safe.to_string (Nostr.to_json e)) | None -> [] in
@@ -3939,7 +3918,7 @@ let dvm_feed (ctx : ctx) (kw : Kw.t) : outcome =
         | None -> None
         | Some eid_hex -> (
             match Queries.events_by_ids c ~event_ids_json:(hex_list_json [ eid_hex ]) with
-            | (_, j) :: _ -> Some (j, Queries.event_relay_url_one c ~event_id:(Hex_util.decode_exn eid_hex))
+            | (_, j) :: _ -> Some (j, (None : string option)) (* no relay hint *)
             | [] -> None))
   in
   match info with

@@ -60,29 +60,13 @@ let () =
      workers enqueue onto the Zap_verifier pool (never blocking on third-party HTTP) and its
      dedicated domains fetch the endpoint and apply the zap effects (see lib/zap_verifier.ml). *)
   Primal_importer.Cache_storage_ext.register ();
-  (* lean.transaction_per_event: content-moderation rules written inside an event's transaction join
-     it (never true without that flag). *)
+  (* content-moderation rules written inside an event's transaction join it *)
   Primal_common.Cmr.already_in_transaction := CS.in_event_tx_on;
   let lean = cfg.cs.CS.lean in
-  if Primal_importer.Lean.active lean then
-    Printf.printf "primal-importer: lean mode: %s\n%!"
-      (String.concat ", "
-         (List.filter_map Fun.id
-            [ (if lean.enabled then Some "enabled" else None);
-              (if lean.no_event_created_at then Some "no_event_created_at" else None);
-              (if lean.no_hashtags then Some "no_hashtags" else None);
-              (if lean.no_pubkey_ids then Some "no_pubkey_ids" else None);
-              (if lean.no_thread_parents then Some "no_thread_parents" else None);
-              (if lean.no_cmr_legacy then Some "no_cmr_legacy" else None);
-              (if lean.lazy_counters then Some "lazy_counters" else None);
-              (if lean.pubkey_events_kind then Some "pubkey_events_kind" else None);
-              (if lean.transaction_per_event then Some "transaction_per_event" else None);
-              (if lean.delete_superseded then
-                 Some (Printf.sprintf "delete_superseded (keep %s)" (String.concat "/" (List.map string_of_int lean.keep_versions_kinds)))
-               else None);
-              (match lean.kind_allowlist with
-              | Some l -> Some (Printf.sprintf "kind_allowlist (%d kinds)" (Primal_importer.Lean.IS.cardinal l))
-              | None -> None) ]));
+  Printf.printf "primal-importer: import rules: kind_allowlist (%d kinds), keep_versions_kinds %s, hooks_expire_days %d, contact_list_versions %d\n%!"
+    (Primal_importer.Lean.IS.cardinal lean.kind_allowlist)
+    (String.concat "/" (List.map string_of_int lean.keep_versions_kinds))
+    lean.hooks_expire_days lean.contact_list_versions;
   let zap_pool = Primal_importer.Zap_verifier.create ~stats () in
   CS.set_zap_verifier_submit (Primal_importer.Zap_verifier.submit zap_pool);
 
@@ -221,12 +205,11 @@ let () =
   Printf.printf "primal-importer: push notifications %s\n%!"
     (if cfg.push_notifications_enabled then "ON (" ^ cfg.push_notification_sender_bin ^ ")" else "OFF");
 
-  (* Content moderation rules, scheduled hooks / expire_scores, import listener. *)
+  (* Content moderation rules, expire_scores, import listener. *)
   Primal_importer.Cache_storage_ext.default_settings_file := cfg.default_settings_file;
   Primal_importer.Cache_storage_ext.content_moderation_rules_enabled := cfg.content_moderation_rules_enabled;
   Printf.printf
-    "primal-importer: scheduled_hooks %s, expire_scores %s, content_moderation_rules %s, import listener %s\n%!"
-    (if cfg.scheduled_hooks_enabled then "ON" else "OFF")
+    "primal-importer: expire_scores %s, content_moderation_rules %s, import listener %s\n%!"
     (if cfg.expire_scores_enabled then "ON" else "OFF")
     (if cfg.content_moderation_rules_enabled then "ON" else "OFF")
     (if cfg.import_listener_enabled then
@@ -235,22 +218,13 @@ let () =
 
   (* Main-domain fibers share one domain, so each long-lived fiber owns an explicit Stats slot
      (the implicit per-domain [Stats.phase] is for worker domains only). *)
-  let hooks_slot = Primal_importer.Stats.new_slot "sched-hooks" in
+  let hooks_slot = Primal_importer.Stats.new_slot "periodic" in
   let last_hooks_expiry = ref 0.0 in
-  let run_scheduled_hooks_loop () =
+  let run_periodic_loop () =
     while true do
-      Primal_importer.Stats.set_slot hooks_slot "run";
-      let t0 = Unix.gettimeofday () in
       (try
-         if cfg.scheduled_hooks_enabled then begin
-           let n = CS.run_scheduled_hooks hooks_est in
-           (* Only worth a line when there was a real backlog; the steady state is a few hundred. *)
-           if n >= CS.scheduled_hooks_batch then
-             Printf.printf "scheduled_hooks: ran %d due hooks in %.1fs\n%!" n
-               (Unix.gettimeofday () -. t0)
-         end;
-         (* lean: pending event_hooks for events that never arrived, once an hour *)
-         if lean.enabled && Unix.gettimeofday () -. !last_hooks_expiry >= 3600. then begin
+         (* pending event_hooks for events that never arrived, once an hour *)
+         if Unix.gettimeofday () -. !last_hooks_expiry >= 3600. then begin
            Primal_importer.Stats.set_slot hooks_slot "expire-event-hooks";
            last_hooks_expiry := Unix.gettimeofday ();
            let n = CS.expire_event_hooks hooks_est ~days:lean.hooks_expire_days in
@@ -265,7 +239,7 @@ let () =
        with
       | Eio.Cancel.Cancelled _ as e -> raise e
       | exn ->
-          Printf.eprintf "scheduled_hooks: %s\n%!" (Printexc.to_string exn);
+          Printf.eprintf "periodic: %s\n%!" (Printexc.to_string exn);
           if Pg.is_connection_error exn then reconnect_est hooks_est);
       Primal_importer.Stats.set_slot hooks_slot "idle";
       Eio.Time.sleep clock 60.
@@ -291,7 +265,7 @@ let () =
   let syncer_slot = Primal_importer.Stats.new_slot "event-syncer" in
   let run_event_syncer () =
     (* The syncer owns its connections (a dedicated local conninfo + the remotes); it must not
-       reuse hooks_est.dbh, which the scheduled-hooks fiber drives concurrently. *)
+       reuse hooks_est.dbh, which the periodic fiber drives concurrently. *)
     if cfg.event_sync_enabled && sync_remotes <> [] then
       Primal_importer.Event_syncer.run ~lean ~clock ~local:cfg.cache_db ~remotes:sync_remotes
         ~submit:(fun e ->
@@ -332,7 +306,7 @@ let () =
         FC.run ~net ~clock ~host:cfg.firehose_host ~port:cfg.firehose_port ~on_message
           ~on_reconnect:(fun () -> Primal_importer.Stats.reconnects stats)
           ());
-      run_scheduled_hooks_loop;
+      run_periodic_loop;
       run_event_syncer;
       (fun () ->
         if cfg.import_listener_enabled then

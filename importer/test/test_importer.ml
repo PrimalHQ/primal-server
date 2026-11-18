@@ -1,10 +1,10 @@
-(* Pure-logic tests for the importer's lean mode (importer/lib/lean.ml and the pure parts around it). *)
+(* Pure-logic tests for the importer's import rules (importer/lib/lean.ml and the pure parts around it). *)
 
 module L = Primal_importer.Lean
 module Cfg = Primal_importer.Config
 module ES = Primal_importer.Event_syncer
 
-let parse s = L.of_json (Yojson.Safe.from_string s)
+let parse s = match Yojson.Safe.from_string s with `Assoc kv -> L.of_config kv | _ -> Error "not an object"
 
 let ok s =
   match parse s with Ok l -> l | Error e -> Alcotest.failf "unexpected error for %s: %s" s e
@@ -12,40 +12,33 @@ let ok s =
 let is_error s = match parse s with Ok _ -> false | Error _ -> true
 
 let test_lean_parse () =
-  Alcotest.(check bool) "null = off" true (ok "null" = L.off);
-  Alcotest.(check bool) "{} = off" true (ok "{}" = L.off);
-  Alcotest.(check bool) "off is inactive" false (L.active L.off);
-  let l = ok {|{"enabled": true, "lazy_counters": true, "kind_allowlist": [0, 3, 10002, 30023], "keep_versions_kinds": [30023, 30311], "hooks_expire_days": 7}|} in
-  Alcotest.(check bool) "enabled" true l.enabled;
-  Alcotest.(check bool) "lazy" true l.lazy_counters;
-  Alcotest.(check bool) "others off" false (l.no_hashtags || l.transaction_per_event || l.delete_superseded);
+  Alcotest.(check bool) "{} = default" true (ok "{}" = L.default);
+  Alcotest.(check bool) "nulls = default" true (ok {|{"kind_allowlist": null, "hooks_expire_days": null}|} = L.default);
+  Alcotest.(check int) "default allowlist" 18 (L.IS.cardinal L.default.kind_allowlist);
+  Alcotest.(check (list int)) "default keep" [ 30023 ] L.default.keep_versions_kinds;
+  let l = ok {|{"kind_allowlist": [0, 3, 10002, 30023], "keep_versions_kinds": [30023, 30311], "hooks_expire_days": 7, "other": 1}|} in
   Alcotest.(check (list int)) "keep" [ 30023; 30311 ] l.keep_versions_kinds;
   Alcotest.(check int) "expire days" 7 l.hooks_expire_days;
-  Alcotest.(check bool) "active" true (L.active l);
-  Alcotest.(check bool) "null values are defaults" true (ok {|{"enabled": null, "kind_allowlist": null}|} = L.off);
-  Alcotest.(check bool) "allowlist alone is active" true (L.active (ok {|{"kind_allowlist": []}|}));
-  Alcotest.(check bool) "unknown key" true (is_error {|{"enabeld": true}|});
-  Alcotest.(check bool) "wrong type" true (is_error {|{"enabled": 1}|});
+  Alcotest.(check int) "allowlist" 4 (L.IS.cardinal l.kind_allowlist);
+  Alcotest.(check bool) "the retired lean object" true (is_error {|{"lean": {"enabled": true}}|});
+  Alcotest.(check bool) "lean null too" true (is_error {|{"lean": null}|});
   Alcotest.(check bool) "list of non-ints" true (is_error {|{"kind_allowlist": ["0"]}|});
-  Alcotest.(check bool) "zero days" true (is_error {|{"hooks_expire_days": 0}|});
-  Alcotest.(check bool) "not an object" true (is_error {|[1]|})
+  Alcotest.(check bool) "zero days" true (is_error {|{"hooks_expire_days": 0}|})
 
 let test_media_url_limit () =
   Alcotest.(check bool) "2048 bytes pass" false (Primal_common.Media_url.too_long (String.make 2048 'a'));
   Alcotest.(check bool) "2049 bytes refused" true (Primal_common.Media_url.too_long (String.make 2049 'a'))
 
 let test_lean_contact_list_versions () =
-  let l = ok {|{"delete_superseded": true, "zap_merge": true, "contact_list_versions": 30}|} in
-  Alcotest.(check bool) "zap_merge" true l.zap_merge;
+  let l = ok {|{"contact_list_versions": 30}|} in
   Alcotest.(check int) "contact list versions" 30 l.contact_list_versions;
   Alcotest.(check bool) "kind 3 keeps versions" true (L.keeps_versions l 3);
   Alcotest.(check bool) "kind 0 doesn't" false (L.keeps_versions l 0);
-  Alcotest.(check bool) "off: kind 3 doesn't" false (L.keeps_versions L.off 3);
-  Alcotest.(check bool) "zap_merge alone is active" true (L.active (ok {|{"zap_merge": true}|}));
+  Alcotest.(check bool) "0: kind 3 doesn't" false (L.keeps_versions (ok {|{"contact_list_versions": 0}|}) 3);
   Alcotest.(check bool) "negative" true (is_error {|{"contact_list_versions": -1}|});
   Alcotest.(check bool) "not an int" true (is_error {|{"contact_list_versions": true}|})
 
-(* A complete importer config as the deploy writes it (no "lean" key): it must still parse. *)
+(* A complete importer config as the deploy writes it. *)
 let base_config =
   {|{"firehose_host": "127.0.0.1", "firehose_port": 9017, "num_workers": 4, "queue_capacity": 10000,
      "proxy": null, "event_sync_enabled": false, "event_sync_remotes": [], "event_sync_interval": 60,
@@ -60,7 +53,7 @@ let base_config =
      "cache_db": {"host": "h", "port": 5432, "user": "u", "database": "d"},
      "membership_db": {"host": "h", "port": 5432, "user": "u", "database": "m"},
      "humaness_threshold": null, "import_listener_enabled": false, "import_listener_host": "0.0.0.0",
-     "import_listener_port": 12018, "expire_scores_enabled": false, "scheduled_hooks_enabled": true,
+     "import_listener_port": 12018, "expire_scores_enabled": false,
      "content_moderation_rules_enabled": true, "default_settings_file": null,
      "relay_broadcast_timeout": 15, "poll_vote_import_enabled": true}|}
 
@@ -71,14 +64,11 @@ let with_key k v =
 
 let test_config () =
   let c = Cfg.of_json (Yojson.Safe.from_string base_config) in
-  Alcotest.(check bool) "no lean key = off" true (c.Cfg.cs.Primal_importer.Cache_storage.lean = L.off);
-  let c = Cfg.of_json (with_key "lean" "null") in
-  Alcotest.(check bool) "lean null = off" true (c.Cfg.cs.Primal_importer.Cache_storage.lean = L.off);
-  let c = Cfg.of_json (with_key "lean" {|{"enabled": true, "no_hashtags": true}|}) in
-  let l = c.Cfg.cs.Primal_importer.Cache_storage.lean in
-  Alcotest.(check bool) "lean parsed" true (l.L.enabled && l.L.no_hashtags && not l.L.lazy_counters);
-  Alcotest.(check bool) "typo is a config error" true
-    (match Cfg.of_json (with_key "lean" {|{"lazy_counter": true}|}) with
+  Alcotest.(check bool) "no rule keys = default" true (c.Cfg.cs.Primal_importer.Cache_storage.lean = L.default);
+  let c = Cfg.of_json (with_key "keep_versions_kinds" "[30023, 10003]") in
+  Alcotest.(check (list int)) "top-level key" [ 30023; 10003 ] c.Cfg.cs.Primal_importer.Cache_storage.lean.L.keep_versions_kinds;
+  Alcotest.(check bool) "the retired lean object is a config error" true
+    (match Cfg.of_json (with_key "lean" {|{"enabled": true}|}) with
     | _ -> false
     | exception Cfg.Config_error _ -> true)
 
@@ -88,7 +78,8 @@ let test_kind_allowlist () =
     (fun (k, want) -> Alcotest.(check bool) (Printf.sprintf "kind %d" k) want (L.kind_allowed l k))
     [ (0, true); (3, false); (1, true); (7, true); (9735, true); (10000, false); (10002, true);
       (30023, true); (30078, false); (39089, false); (20001, true) (* not governed: accepted_kind decides *) ];
-  Alcotest.(check bool) "no allowlist" true (List.for_all (L.kind_allowed L.off) [ 0; 3; 10000; 30078 ])
+  Alcotest.(check bool) "default allowlist" true
+    (List.for_all (fun (k, want) -> L.kind_allowed L.default k = want) [ (0, true); (3, true); (10002, true); (10001, false); (30078, false) ])
 
 let test_newer () =
   let a = String.make 32 '\001' and b = String.make 32 '\002' in
@@ -161,7 +152,7 @@ let test_syncer_helpers () =
   let l = ok {|{"kind_allowlist": [0, 3]}|} in
   Alcotest.(check bool) "wanted note" true (ES.wanted_kind l 1);
   Alcotest.(check bool) "unaccepted kind" false (ES.wanted_kind l 20001);
-  Alcotest.(check bool) "blocked kind" false (ES.wanted_kind L.off 29333);
+  Alcotest.(check bool) "blocked kind" false (ES.wanted_kind L.default 29333);
   Alcotest.(check bool) "not allowlisted" false (ES.wanted_kind l 30078)
 
 let () =

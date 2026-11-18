@@ -251,12 +251,10 @@ let poll_loop (t : t) ~clock ~(stats : Stats.t) : unit =
     let until = Utils.current_time () in
     (try
        let rows =
-         if Lean.enabled () then
-           (* lean: nothing to distribute without subscribers (the window still moves on, so a new
-              subscriber gets events from now, as before); with some, only the candidate events *)
-           if with_lock t (fun () -> Hashtbl.length t.live = 0 && Hashtbl.length t.follows = 0) then []
-           else Db.with_cache ~clock (fun c -> Queries.live_events_imported_between c ~since:!since ~until)
-         else Db.with_cache ~clock (fun c -> Queries.events_imported_between c ~since:!since ~until)
+         (* nothing to distribute without subscribers (the window still moves on, so a new
+            subscriber gets events from now); with some, only the candidate events *)
+         if with_lock t (fun () -> Hashtbl.length t.live = 0 && Hashtbl.length t.follows = 0) then []
+         else Db.with_cache ~clock (fun c -> Queries.live_events_imported_between c ~since:!since ~until)
        in
        List.iter
          (fun json ->

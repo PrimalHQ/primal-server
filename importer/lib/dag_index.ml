@@ -40,7 +40,7 @@ let import_basic_tags (est : CS.est) (e : Nostr.t) : unit =
        where ins.tag = 'e' and ins.kind in (1, 6, 7) and exists (select 1 from reads_versions rv where rv.eid = ins.arg1) \
        on conflict do nothing"]
 
-(* lean.basic_tags_at_import: the importer writes an event's basic_tags rows when it stores the
+(* The importer writes an event's basic_tags rows when it stores the
    event (the DAG's later insert of the same rows does nothing) *)
 let () = CS.basic_tags_hook := import_basic_tags
 
@@ -75,7 +75,7 @@ let import_zap_receipt (est : CS.est) (e : Nostr.t) : unit =
         match [%pgsql dbh "select imported_at from event where id = $id"] with
         | imported_at :: _ ->
             ignore
-              (* a row the importer's zap path made first (lean.zap_merge) gets the DAG's columns *)
+              (* a row the importer's zap path made first gets the DAG's columns *)
               [%pgsql dbh
                 "insert into zap_receipts_1_9fe40119b2 (eid, created_at, target_eid, sender, receiver, satszapped, imported_at) \
                  values ($id, $created_at, $target_eid, $sender, $receiver, $satszapped, $imported_at) \

@@ -1,136 +1,66 @@
-(* The importer's optional "lean" settings (config key [lean], a JSON object; absent or null = all
-   off = the classic write path, statement for statement) and the pure helpers its code paths use:
-   the kind allowlist, the NIP-01 "newer version" order, the bookmark diff, per-domain TTL caches
-   and the cross-domain set of recently superseded ids. No database access here, so it is unit
-   tested in importer/test. The flags are documented in importer/README.md ("Lean mode"). *)
+(* The importer's import rules for the lean cache schema (infrastructure
+   docs/proposal-lean-schema-iteration2-20261026.md) and the pure helpers its code paths use: the
+   kind allowlist, the NIP-01 "newer version" order, the bookmark diff, per-domain TTL caches and the
+   cross-domain set of recently superseded ids. No database access here, so it is unit tested in
+   importer/test. The config keys are documented in importer/README.md ("Import rules").
+
+   Until 2026-11 these were flags of an optional "lean" config object (absent = the classic schema's
+   write path); the classic path is gone, and only the four parameters below remain, as top-level
+   config keys. *)
 
 module IS = Set.Make (Int)
 
 type t = {
-  enabled : bool;
-      (* refactors with identical results: fewer statements, no repeated reads, merged counter
-         updates, TTL caches, ids-first event sync, event_hooks expiry *)
-  no_event_created_at : bool; (* stop writing event_created_at *)
-  no_hashtags : bool; (* stop writing hashtags (+ its scheduled_hooks expiry); event_hashtags stays *)
-  no_pubkey_ids : bool; (* stop reading/writing pubkey_ids *)
-  no_thread_parents : bool; (* stop writing event_thread_parents (reply chains walked from tags) *)
-  no_cmr_legacy : bool; (* stop writing cmr_pubkeys_parent, cmr_words, cmr_hashtags *)
-  lazy_counters : bool; (* no zero rows in event_stats / pubkey_followers_cnt / pubkey_zapped *)
-  pubkey_events_kind : bool; (* write pubkey_events.kind *)
-  transaction_per_event : bool; (* an event's side effects in one transaction *)
-  delete_superseded : bool; (* delete the previous version of a replaceable/addressable event *)
-  keep_versions_kinds : int list; (* ... except these kinds (default [30023]) *)
-  kind_allowlist : IS.t option; (* kinds 0, 3, 10000-19999, 30000-39999 imported only if listed *)
-  hooks_expire_days : int; (* pending event_hooks older than this are deleted (with [enabled]) *)
-  (* lean schema, iteration 2 (infrastructure docs/proposal-lean-schema-iteration2-20261026.md) *)
-  thread_parents_view : bool; (* stop writing event_thread_parents (a view over event_replies, unique per reply) *)
-  delete_derived : bool; (* a deleted event (superseded, kind 5) also loses its tag/mention/feed rows *)
-  basic_tags_at_import : bool; (* the event's p/P/e tags into basic_tags at import, not minutes later by the DAG *)
-  no_action_tables : bool; (* stop writing event_pubkey_actions(_refs): the actions are read from basic_tags *)
-  pointer_views : bool; (* stop writing the pointer tables; the current version is read from event *)
-  pubkey_stats : bool; (* the per-pubkey counters (followers, zaps) in one pubkey_stats row *)
-  no_ln_address : bool; (* stop writing pubkey_ln_address (a view over the kind-0 events) *)
-  zap_merge : bool; (* og_zap_receipts' rows go into zap_receipts (og_* columns); og_zap_receipts is a view *)
+  kind_allowlist : IS.t; (* kinds 0, 3, 10000-19999, 30000-39999 imported only if listed *)
+  keep_versions_kinds : int list; (* replaceable/addressable kinds whose superseded versions stay *)
+  hooks_expire_days : int; (* pending event_hooks older than this are deleted *)
   contact_list_versions : int;
       (* > 0: kind 3 keeps the versions membership_recovery_contact_lists shows (the longest list of
          each of the newest this-many days) and the current one, the rest deleted; 0 = like any kind *)
 }
 
-let off =
-  {
-    enabled = false;
-    no_event_created_at = false;
-    no_hashtags = false;
-    no_pubkey_ids = false;
-    no_thread_parents = false;
-    no_cmr_legacy = false;
-    lazy_counters = false;
-    pubkey_events_kind = false;
-    transaction_per_event = false;
-    delete_superseded = false;
-    keep_versions_kinds = [ 30023 ];
-    kind_allowlist = None;
-    hooks_expire_days = 30;
-    thread_parents_view = false;
-    delete_derived = false;
-    basic_tags_at_import = false;
-    no_action_tables = false;
-    pointer_views = false;
-    pubkey_stats = false;
-    no_ln_address = false;
-    zap_merge = false;
-    contact_list_versions = 0;
-  }
+(* The production values (2026-11). *)
+let default_kind_allowlist =
+  [ 0; 3; 10000; 10002; 10003; 10063; 10555; 17000; 30000; 30004; 30023; 30311; 31234; 31990; 34235; 34236; 37001; 39089 ]
 
-(* Any flag on: import_event takes the lean path (whose flag-off branches are the classic code). *)
-let active (l : t) : bool =
-  l.enabled || l.no_event_created_at || l.no_hashtags || l.no_pubkey_ids || l.no_thread_parents
-  || l.no_cmr_legacy || l.lazy_counters || l.pubkey_events_kind || l.transaction_per_event
-  || l.delete_superseded || l.kind_allowlist <> None || l.thread_parents_view || l.delete_derived || l.basic_tags_at_import
-  || l.no_action_tables || l.pointer_views || l.pubkey_stats || l.no_ln_address || l.zap_merge || l.contact_list_versions > 0
+let default =
+  { kind_allowlist = IS.of_list default_kind_allowlist; keep_versions_kinds = [ 30023 ]; hooks_expire_days = 30;
+    contact_list_versions = 30 }
 
-let keys =
-  [ "enabled"; "no_event_created_at"; "no_hashtags"; "no_pubkey_ids"; "no_thread_parents"; "no_cmr_legacy";
-    "lazy_counters"; "pubkey_events_kind"; "transaction_per_event"; "delete_superseded"; "keep_versions_kinds";
-    "kind_allowlist"; "hooks_expire_days"; "thread_parents_view"; "delete_derived"; "basic_tags_at_import"; "no_action_tables";
-    "pointer_views"; "pubkey_stats"; "no_ln_address"; "zap_merge"; "contact_list_versions" ]
+let keys = [ "kind_allowlist"; "keep_versions_kinds"; "hooks_expire_days"; "contact_list_versions" ]
 
-(* Parse the [lean] object. Every key is optional (absent or null = default); an unknown key or a
-   wrongly typed value is an error, so a typo can't silently leave a flag off. *)
-let of_json (j : Yojson.Safe.t) : (t, string) result =
-  match j with
-  | `Null -> Ok off
-  | `Assoc kv -> (
-      match List.find_opt (fun (k, _) -> not (List.mem k keys)) kv with
-      | Some (k, _) -> Error (Printf.sprintf "lean: unknown key %S" k)
-      | None -> (
-          let get k = match List.assoc_opt k kv with None | Some `Null -> None | Some v -> Some v in
-          let bool k d =
-            match get k with None -> d | Some (`Bool b) -> b | Some _ -> failwith (Printf.sprintf "lean.%s: expected a bool" k)
-          in
-          let int_list k =
-            match get k with
-            | None -> None
-            | Some (`List l) ->
-                Some (List.map (function `Int i -> i | _ -> failwith (Printf.sprintf "lean.%s: expected ints" k)) l)
-            | Some _ -> failwith (Printf.sprintf "lean.%s: expected a list of ints" k)
-          in
-          try
-            Ok
-              {
-                enabled = bool "enabled" false;
-                no_event_created_at = bool "no_event_created_at" false;
-                no_hashtags = bool "no_hashtags" false;
-                no_pubkey_ids = bool "no_pubkey_ids" false;
-                no_thread_parents = bool "no_thread_parents" false;
-                no_cmr_legacy = bool "no_cmr_legacy" false;
-                lazy_counters = bool "lazy_counters" false;
-                pubkey_events_kind = bool "pubkey_events_kind" false;
-                transaction_per_event = bool "transaction_per_event" false;
-                delete_superseded = bool "delete_superseded" false;
-                keep_versions_kinds = Option.value (int_list "keep_versions_kinds") ~default:off.keep_versions_kinds;
-                kind_allowlist = Option.map IS.of_list (int_list "kind_allowlist");
-                hooks_expire_days =
-                  (match get "hooks_expire_days" with
-                  | None -> off.hooks_expire_days
-                  | Some (`Int d) when d > 0 -> d
-                  | Some _ -> failwith "lean.hooks_expire_days: expected a positive int");
-                thread_parents_view = bool "thread_parents_view" false;
-                delete_derived = bool "delete_derived" false;
-                basic_tags_at_import = bool "basic_tags_at_import" false;
-                no_action_tables = bool "no_action_tables" false;
-                pointer_views = bool "pointer_views" false;
-                pubkey_stats = bool "pubkey_stats" false;
-                no_ln_address = bool "no_ln_address" false;
-                zap_merge = bool "zap_merge" false;
-                contact_list_versions =
-                  (match get "contact_list_versions" with
-                  | None -> 0
-                  | Some (`Int n) when n >= 0 -> n
-                  | Some _ -> failwith "lean.contact_list_versions: expected a non-negative int");
-              }
-          with Failure msg -> Error msg))
-  | _ -> Error "lean: expected an object or null"
+(* The four optional top-level keys of the importer config (absent or null = default). A wrongly
+   typed value is an error; so is the retired "lean" object. *)
+let of_config (kv : (string * Yojson.Safe.t) list) : (t, string) result =
+  let get k = match List.assoc_opt k kv with None | Some `Null -> None | Some v -> Some v in
+  let int_list k =
+    match get k with
+    | None -> None
+    | Some (`List l) -> Some (List.map (function `Int i -> i | _ -> failwith (Printf.sprintf "%s: expected ints" k)) l)
+    | Some _ -> failwith (Printf.sprintf "%s: expected a list of ints" k)
+  in
+  if List.mem_assoc "lean" kv then
+    Error
+      "lean: the \"lean\" object is gone (the lean schema is the only one); drop it and set kind_allowlist, \
+       keep_versions_kinds, hooks_expire_days, contact_list_versions at the top level if they differ from the defaults"
+  else
+    try
+      Ok
+        {
+          kind_allowlist = IS.of_list (Option.value (int_list "kind_allowlist") ~default:default_kind_allowlist);
+          keep_versions_kinds = Option.value (int_list "keep_versions_kinds") ~default:default.keep_versions_kinds;
+          hooks_expire_days =
+            (match get "hooks_expire_days" with
+            | None -> default.hooks_expire_days
+            | Some (`Int d) when d > 0 -> d
+            | Some _ -> failwith "hooks_expire_days: expected a positive int");
+          contact_list_versions =
+            (match get "contact_list_versions" with
+            | None -> default.contact_list_versions
+            | Some (`Int n) when n >= 0 -> n
+            | Some _ -> failwith "contact_list_versions: expected a non-negative int");
+        }
+    with Failure msg -> Error msg
 
 (* {1 Kinds} *)
 
@@ -138,8 +68,7 @@ let of_json (j : Yojson.Safe.t) : (t, string) result =
    Regular kinds keep the importer's accepted_kind. *)
 let allowlist_governs (k : int) : bool = k = 0 || k = 3 || (10000 <= k && k < 20000) || (30000 <= k && k < 40000)
 
-let kind_allowed (l : t) (k : int) : bool =
-  match l.kind_allowlist with None -> true | Some s -> (not (allowlist_governs k)) || IS.mem k s
+let kind_allowed (l : t) (k : int) : bool = (not (allowlist_governs k)) || IS.mem k l.kind_allowlist
 
 (* Kinds whose versions replace each other (one current version per pointer). *)
 let is_versioned_kind (k : int) : bool = k = 0 || k = 3 || (10000 <= k && k < 20000) || (30000 <= k && k < 40000)
@@ -153,8 +82,8 @@ let newer ~(created_at : int) ~(id : string) ~(old_created_at : int) ~(old_id : 
 
 (* {1 pubkey_bookmarks diff}
 
-   The classic path deletes all of a user's rows and inserts one (pubkey, ref_event_id, null, null,
-   null) row per e tag, duplicates included. [existing] is what the table holds now, as
+   pubkey_bookmarks holds one (pubkey, ref_event_id, null, null, null) row per e tag of the user's
+   bookmark list, duplicates included (what deleting all of a user's rows and re-inserting gave). [existing] is what the table holds now, as
    (ref_event_id, plain) with plain = the three other ref columns are null; [desired] the e-tag ids
    in order. The result turns [existing] into exactly that multiset: delete every non-plain row (and
    rows with a null ref_event_id) when there are any, delete all rows of an id whose count must
@@ -207,7 +136,7 @@ module Ttl = struct
   let clear (t : ('k, 'v) t) : unit = Hashtbl.reset (Domain.DLS.get t.tbl)
 end
 
-(* {1 Recently superseded ids} (with [delete_superseded])
+(* {1 Recently superseded ids}
 
    A version deleted as superseded is gone from [event], so the atomic claim would accept it again
    when a peer's syncer (or the firehose) delivers it once more, only for the pointer check to delete

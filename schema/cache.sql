@@ -1,23 +1,19 @@
--- Baseline schema of the cache DB (primal1), 2026-10-14: pg_dump --schema-only --no-owner --no-privileges
--- --no-subscriptions --no-publications -n public -n cache, with the extensions it uses first.
+-- Baseline schema of the cache DB (primal1): the lean cache schema of the production cache host,
+-- 2026-11-18, with migrations 1003 and 2008 applied: pg_dump --schema-only --no-owner --no-privileges
+-- --no-subscriptions --no-publications -n public, with the extensions it uses first.
 -- See README.md in this directory.
 
-CREATE SCHEMA IF NOT EXISTS hint_plan;
 CREATE EXTENSION IF NOT EXISTS amcheck WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS dblink WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public;
-CREATE EXTENSION IF NOT EXISTS http WITH SCHEMA public;
 CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
-CREATE EXTENSION IF NOT EXISTS pg_hint_plan WITH SCHEMA hint_plan;
-CREATE EXTENSION IF NOT EXISTS pg_relusage WITH SCHEMA public;
-CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
-CREATE EXTENSION IF NOT EXISTS plv8 WITH SCHEMA pg_catalog;
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 --
 -- PostgreSQL database dump
 --
 
+-- Dumped from database version 16.4
+-- Dumped by pg_dump version 16.4
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -29,13 +25,6 @@ SET check_function_bodies = false;
 SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
-
---
--- Name: cache; Type: SCHEMA; Schema: -; Owner: -
---
-
-CREATE SCHEMA cache;
-
 
 --
 -- Name: public; Type: SCHEMA; Schema: -; Owner: -
@@ -433,8 +422,6 @@ DECLARE
 	r RECORD;
 	max_created_at int8 := null;
 	min_created_at int8 := null;
-    relay_url varchar;
-    relays jsonb := '{}';
     user_scores jsonb := '{}';
     pubkeys bytea[] := '{}';
     identifier varchar;
@@ -490,7 +477,7 @@ BEGIN
                 IF t.is_referenced_event THEN
                     RETURN NEXT jsonb_build_object(
                             'pubkey', e->>'pubkey',
-                            'kind', c_REFERENCED_EVENT(), 
+                            'kind', c_REFERENCED_EVENT(),
                             'content', e::text);
                 ELSE
                     RETURN NEXT e;
@@ -501,44 +488,37 @@ BEGIN
                     RETURN QUERY SELECT * FROM poll_stats(e_id);
                 END IF;
 
-                -- IF e_kind = 1 OR e_kind = 30023 THEN
-                    /* IF NOT t.is_referenced_event THEN */
-                        RETURN QUERY SELECT * FROM event_zaps(e_id, a_user_pubkey);
-                    /* END IF; */
+                RETURN QUERY SELECT * FROM event_zaps(e_id, a_user_pubkey);
 
-                    FOR identifier IN SELECT pre.identifier FROM parametrized_replaceable_events pre WHERE event_id = e_id LOOP
-                        RETURN QUERY SELECT * FROM event_zaps(e_pubkey, identifier, a_user_pubkey);
-                    END LOOP;
+                FOR identifier IN SELECT pre.identifier FROM parametrized_replaceable_events pre WHERE event_id = e_id LOOP
+                    RETURN QUERY SELECT * FROM event_zaps(e_pubkey, identifier, a_user_pubkey);
+                END LOOP;
 
-                    -- IF    e_kind = 1     THEN RETURN QUERY SELECT * FROM event_stats(e_id);
-                    -- ELSIF e_kind = 30023 THEN RETURN QUERY SELECT * FROM event_stats_for_long_form_content(e_id);
-                    IF    e_kind != 30023 THEN RETURN QUERY SELECT * FROM event_stats(e_id);
-                    ELSIF e_kind =  30023 THEN RETURN QUERY SELECT * FROM event_stats_for_long_form_content(e_id);
+                IF    e_kind != 30023 THEN
+                    RETURN QUERY SELECT * FROM event_stats(e_id);
+                    -- lazy counter rows: a note-kind event without a row has all zeros (the row
+                    -- event_stats() would have printed for the importer's zero row)
+                    IF NOT FOUND AND e_kind IN (1, 1068, 6969, 20, 34235, 34236, 1111) THEN
+                        RETURN NEXT jsonb_build_object('kind', c_EVENT_STATS(), 'content', row_to_json(z)::text)
+                            FROM (SELECT ENCODE(e_id, 'hex') as event_id, 0::int8 AS likes, 0::int8 AS replies, 0::int8 AS mentions,
+                                         0::int8 AS reposts, 0::int8 AS zaps, 0::int8 AS satszapped, 0::int8 AS score, 0::int8 AS score24h,
+                                         0 as bookmarks) z;
                     END IF;
-
-                    RETURN QUERY SELECT * FROM event_action_cnt(e_id, a_user_pubkey);
-                -- END IF;
-
-                IF e_kind = 1 OR e_kind = 30023 OR e_kind = 0 THEN
-                    FOR r IN SELECT * FROM event_relay WHERE event_id = e_id LOOP
-                        relay_url := r.relay_url;
-                        FOR r IN SELECT dest FROM relay_url_map WHERE src = relay_url LIMIT 1 LOOP
-                            relay_url := r.dest;
-                        END LOOP;
-                        IF NOT (relay_url IS null) THEN
-                            relays := jsonb_set(relays, array[(e->>'id')::text], to_jsonb(relay_url));
-                        END IF;
-                    END LOOP;
+                ELSIF e_kind =  30023 THEN RETURN QUERY SELECT * FROM event_stats_for_long_form_content(e_id);
                 END IF;
+
+                RETURN QUERY SELECT * FROM event_action_cnt(e_id, a_user_pubkey);
+
+                -- (event_relay hints: not read)
 
                 IF e_kind = 0 OR e_kind = 1 OR e_kind = 6 THEN
                     RETURN QUERY SELECT * FROM event_media_response(e_id);
                     RETURN QUERY SELECT * FROM event_preview_response(e_id);
                 END IF;
                 IF e_kind = 30023 THEN
-                    FOR read_eid IN 
-                        SELECT rv.eid 
-                        FROM reads rs, reads_versions rv 
+                    FOR read_eid IN
+                        SELECT rv.eid
+                        FROM reads rs, reads_versions rv
                         WHERE rs.latest_eid = e_id AND rs.pubkey = rv.pubkey AND rs.identifier = rv.identifier
                     LOOP
                         RETURN QUERY SELECT * FROM event_media_response(read_eid);
@@ -554,7 +534,7 @@ BEGIN
                         WHERE rv.eid = e_id AND rv.pubkey = rs.pubkey AND rv.identifier = rs.identifier;
                         IF words IS NOT null THEN
                             RETURN NEXT jsonb_build_object(
-                                'kind', c_LONG_FORM_METADATA(), 
+                                'kind', c_LONG_FORM_METADATA(),
                                 'content', jsonb_build_object(
                                     'event_id', e->>'id',
                                     'words', words)::text);
@@ -563,11 +543,9 @@ BEGIN
                 END IF;
 
                 IF e_kind = 0 THEN
-                    FOR r IN SELECT value FROM pubkey_followers_cnt WHERE key = e_pubkey LIMIT 1 LOOP
-                        user_scores := jsonb_set(user_scores, array[e->>'pubkey'::text], to_jsonb(r.value));
-                    END LOOP;
-                    -- RETURN QUERY SELECT get_event_jsonb(value) FROM contact_lists WHERE key = e_pubkey LIMIT 1; -- bugs prod ios app
-                    -- RETURN QUERY SELECT get_event_jsonb(event_id) FROM relay_list_metadata WHERE pubkey = e_pubkey LIMIT 1;
+                    -- lazy counter rows: the author of a metadata event is a known pubkey, 0 without a row
+                    user_scores := jsonb_set(user_scores, array[e->>'pubkey'::text],
+                        to_jsonb(COALESCE((SELECT value FROM pubkey_followers_cnt WHERE key = e_pubkey LIMIT 1), 0)));
                     RETURN QUERY SELECT * FROM user_live_events(30311, e_pubkey);
                 END IF;
 
@@ -582,10 +560,6 @@ BEGIN
         RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', user_scores::text);
     END IF;
 
-    IF count_jsonb_keys(relays) > 0 THEN
-        RETURN NEXT jsonb_build_object('kind', c_EVENT_RELAYS(), 'content', relays::text);
-    END IF;
-
     IF pubkeys != '{}' THEN
         RETURN QUERY SELECT * FROM primal_verified_names(pubkeys);
         RETURN QUERY SELECT * FROM user_blossom_servers(pubkeys);
@@ -594,131 +568,10 @@ BEGIN
 	RETURN NEXT jsonb_build_object(
 		'kind', c_RANGE(),
 		'content', json_build_object(
-			'since', min_created_at, 
-			'until', max_created_at, 
+			'since', min_created_at,
+			'until', max_created_at,
 			'order_by', a_order_by,
             'elements', elements)::text);
-    
-	/* RETURN NEXT jsonb_build_object( */
-	/* 	'kind', c_COLLECTION_ORDER(), */
-	/* 	'content', json_build_object( */
-	/* 		'elements', elements, */ 
-	/* 		'order_by', a_order_by)::text); */
-END;
-$$;
-
-
---
--- Name: enrich_feed_events_(public.post[], bytea, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.enrich_feed_events_(a_posts public.post[], a_user_pubkey bytea, a_apply_humaness_check boolean) RETURNS SETOF jsonb
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-	t RECORD;
-	p RECORD;
-	r RECORD;
-	max_created_at int8 := null;
-	min_created_at int8 := null;
-    relay_url varchar;
-    relays jsonb := '{}';
-    user_scores jsonb := '{}';
-    identifier varchar;
-BEGIN
-	FOREACH p IN ARRAY a_posts LOOP
-        RAISE NOTICE '%', p;
-		max_created_at := GREATEST(max_created_at, p.created_at);
-		min_created_at := LEAST(min_created_at, p.created_at);
-        FOR t IN SELECT * FROM response_messages_for_post(p.event_id, a_user_pubkey, false, 3) LOOP
-            DECLARE
-                e jsonb := t.e;
-                e_id bytea := DECODE(e->>'id', 'hex');
-                e_kind int8 := e->>'kind';
-                e_pubkey bytea := DECODE(e->>'pubkey', 'hex');
-            BEGIN
-                IF a_apply_humaness_check AND NOT user_is_human(e_pubkey) THEN
-                    CONTINUE;
-                END IF;
-
-                IF t.is_referenced_event THEN
-                    RETURN NEXT jsonb_build_object(
-                            'pubkey', e->>'pubkey',
-                            'kind', c_REFERENCED_EVENT(), 
-                            'content', e::text);
-                ELSE
-                    RETURN NEXT e;
-                END IF;
-
-                IF e_kind = 1 OR e_kind = 30023 THEN
-                    IF NOT t.is_referenced_event THEN
-                        RETURN QUERY SELECT * FROM event_zaps(e_id, a_user_pubkey);
-                    END IF;
-
-                    FOR identifier IN SELECT pre.identifier FROM parametrized_replaceable_events pre WHERE event_id = e_id LOOP
-                        RETURN QUERY SELECT * FROM event_zaps(e_pubkey, identifier, a_user_pubkey);
-                    END LOOP;
-
-                    IF    e_kind = 1     THEN RETURN QUERY SELECT * FROM event_stats(e_id);
-                    ELSIF e_kind = 30023 THEN RETURN QUERY SELECT * FROM event_stats_for_long_form_content(e_id);
-                    END IF;
-
-                    RETURN QUERY SELECT * FROM event_action_cnt(e_id, a_user_pubkey);
-
-                    FOR r IN SELECT * FROM event_relay WHERE event_id = e_id LOOP
-                        relay_url := r.relay_url;
-                        SELECT dest INTO relay_url FROM relay_url_map WHERE src = relay_url LIMIT 1;
-                        IF NOT (relay_url IS null) THEN
-                            relays := jsonb_set(relays, array[(e->>'id')::text], to_jsonb(relay_url));
-                        END IF;
-                    END LOOP;
-                END IF;
-
-                IF e_kind = 0 OR e_kind = 1 OR e_kind = 6 THEN
-                    RETURN QUERY SELECT * FROM event_media_response(e_id);
-                    RETURN QUERY SELECT * FROM event_preview_response(e_id);
-                END IF;
-
-                IF e_kind = 30023 THEN
-                    DECLARE
-                        words int8;
-                    BEGIN
-                        SELECT rs.words INTO words FROM reads_versions rv, reads rs
-                        WHERE rv.eid = e_id AND rv.pubkey = rs.pubkey AND rv.identifier = rs.identifier;
-                        IF words IS NOT null THEN
-                            RETURN NEXT jsonb_build_object(
-                                'kind', c_LONG_FORM_METADATA(), 
-                                'content', jsonb_build_object(
-                                    'event_id', e->>'id',
-                                    'words', words)::text);
-                        END IF;
-                    END;
-                END IF;
-
-                IF e_kind = 0 THEN
-                    FOR r IN SELECT value FROM pubkey_followers_cnt WHERE key = e_pubkey LIMIT 1 LOOP
-                        user_scores := jsonb_set(user_scores, array[e_pubkey::text], to_jsonb(r.value));
-                    END LOOP;
-                END IF;
-            END;
-        END LOOP;
-	END LOOP;
-
-    IF count_jsonb_keys(user_scores) > 0 THEN
-        RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', user_scores::text);
-    END IF;
-
-    IF count_jsonb_keys(relays) > 0 THEN
-        RETURN NEXT jsonb_build_object('kind', c_EVENT_RELAYS(), 'content', relays::text);
-    END IF;
-
-	RETURN NEXT jsonb_build_object(
-		'kind', c_RANGE(),
-		'content', json_build_object(
-			'since', min_created_at, 
-			'until', max_created_at, 
-			'order_by', 'created_at')::text);
-
 END;
 $$;
 
@@ -734,16 +587,33 @@ CREATE FUNCTION public.event_action_cnt(a_event_id bytea, a_user_pubkey bytea) R
 	FROM (
 		SELECT
             ENCODE(a_event_id, 'hex') AS event_id,
-            COALESCE((SELECT replied::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS replied,
-            COALESCE((SELECT liked::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS liked,
-            COALESCE((SELECT reposted::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS reposted,
-            COALESCE((SELECT zapped::int4::bool FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1), false) AS zapped,
-            (SELECT pv.option_id FROM poll_user_votes pv
-             WHERE pv.poll_id = a_event_id AND pv.pubkey = a_user_pubkey
-             LIMIT 1) AS voted_for_option
+            COALESCE(epa.replied::int4::bool, false) AS replied,
+            COALESCE(epa.liked::int4::bool, false) AS liked,
+            COALESCE(epa.reposted::int4::bool, false) AS reposted,
+            COALESCE(epa.zapped::int4::bool, false) AS zapped,
+            pv.option_id AS voted_for_option
+        FROM (SELECT 1) one
+        LEFT JOIN LATERAL (
+            SELECT true AS found, replied, liked, reposted, zapped FROM event_pubkey_actions
+            WHERE event_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1) epa ON true
+        LEFT JOIN LATERAL (
+            SELECT true AS found, option_id FROM poll_user_votes
+            WHERE poll_id = a_event_id AND pubkey = a_user_pubkey LIMIT 1) pv ON true
+        WHERE epa.found OR pv.found
 	) a
-	WHERE EXISTS (SELECT 1 FROM event_pubkey_actions WHERE event_id = a_event_id AND pubkey = a_user_pubkey)
-	   OR EXISTS (SELECT 1 FROM poll_user_votes WHERE poll_id = a_event_id AND pubkey = a_user_pubkey)
+$$;
+
+
+--
+-- Name: event_d_tag(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.event_d_tag(tags jsonb) RETURNS character varying
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  select t->>1 from jsonb_array_elements(case jsonb_typeof(tags) when 'array' then tags else '[]'::jsonb end) with ordinality x(t, n)
+  where case when jsonb_typeof(t) = 'array' then t->>0 = 'd' and t->>1 is not null else false end
+  order by n limit 1
 $$;
 
 
@@ -771,6 +641,20 @@ CREATE FUNCTION public.event_is_deleted(a_event_id bytea) RETURNS boolean
     AS $$
 SELECT EXISTS (SELECT 1 FROM deleted_events WHERE event_id = a_event_id)
 $$;
+
+
+--
+-- Name: event_lud16(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.event_lud16(content text) RETURNS character varying
+    LANGUAGE plpgsql IMMUTABLE
+    AS $$
+begin
+  return nullif(case when jsonb_typeof(content::jsonb -> 'lud16') = 'string' then content::jsonb ->> 'lud16' end, '');
+exception when others then
+  return null;
+end $$;
 
 
 --
@@ -1112,14 +996,14 @@ BEGIN
     -- a_author_exempt) so non-followers still see their authored posts.
     RETURN QUERY SELECT * FROM enrich_feed_events(
         ARRAY (
-            select (e.id, pe.created_at)::post
+            select (pe.event_id, pe.created_at)::post
             from
                 pubkey_events pe
-                JOIN events e ON e.id = pe.event_id
             where
                 pe.pubkey = a_pubkey and pe.created_at >= a_since and pe.created_at <= a_until and
                 pe.is_reply = a_include_replies and
-                e.kind = ANY(a_kinds)
+                pe.kind = ANY(a_kinds) and
+                not exists (select 1 from deleted_events de where de.event_id = pe.event_id)
             order by pe.created_at desc limit a_limit offset a_offset
         ),
         a_user_pubkey, a_apply_humaness_check, a_author_exempt => a_pubkey);
@@ -1257,17 +1141,6 @@ $$;
 
 
 --
--- Name: get_allowlist(bytea); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.get_allowlist(a_pubkey bytea) RETURNS SETOF jsonb
-    LANGUAGE sql STABLE
-    AS $$
-  SELECT * FROM response_messages_for_list(ARRAY['allow_list'], a_pubkey, true)
-$$;
-
-
---
 -- Name: get_bookmarks(bytea); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1275,48 +1148,6 @@ CREATE FUNCTION public.get_bookmarks(a_pubkey bytea) RETURNS SETOF jsonb
     LANGUAGE sql STABLE
     AS $$
 SELECT get_event_jsonb(event_id) FROM bookmarks WHERE pubkey = a_pubkey;
-$$;
-
-
---
--- Name: get_default_relays(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.get_default_relays() RETURNS jsonb
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-  relays text[];
-  mined text[];
-  r text;
-  hardcoded text[];
-BEGIN
-  -- Get active relays
-  SELECT array_agg(relay) INTO mined FROM (
-    SELECT CASE WHEN rum.dest IS NOT NULL THEN rum.dest ELSE kr.relay_url END AS relay
-    FROM known_relays kr LEFT JOIN relay_url_map rum ON kr.relay_url = rum.src
-    WHERE kr.last_import_at >= now() - interval '2 hours'
-  ) t;
-
-  -- Start with primal relay
-  relays := ARRAY['wss://relay.primal.net'];
-
-  -- Add one random well-known relay
-  hardcoded := ARRAY['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band', 'wss://relayable.org'];
-  relays := relays || hardcoded[1 + floor(random() * array_length(hardcoded, 1))::int];
-
-  -- Add up to 4 random mined relays
-  IF mined IS NOT NULL AND array_length(mined, 1) > 0 THEN
-    FOR i IN 1..LEAST(4, array_length(mined, 1)) LOOP
-      r := mined[1 + floor(random() * array_length(mined, 1))::int];
-      IF NOT (r = ANY(relays)) THEN
-        relays := relays || r;
-      END IF;
-    END LOOP;
-  END IF;
-
-  RETURN to_jsonb(relays);
-END;
 $$;
 
 
@@ -1337,7 +1168,11 @@ CREATE TABLE public.event (
     content text NOT NULL,
     sig bytea NOT NULL,
     imported_at bigint NOT NULL
-);
+)
+WITH (autovacuum_vacuum_scale_factor='0.01', autovacuum_vacuum_insert_scale_factor='0.01', toast.autovacuum_vacuum_scale_factor='0.01', toast.autovacuum_vacuum_insert_scale_factor='0.01');
+ALTER TABLE ONLY public.event ALTER COLUMN pubkey SET (n_distinct=-0.091);
+ALTER TABLE ONLY public.event ALTER COLUMN tags SET COMPRESSION lz4;
+ALTER TABLE ONLY public.event ALTER COLUMN content SET COMPRESSION lz4;
 
 
 --
@@ -1451,17 +1286,6 @@ from (values ('small', 'medium'), ('medium', 'large'), ('large', 'large'), ('ori
 where m.url = a_url and m.size = sz.newsize and ms.media_block_id is null
   and not (m.mimetype like 'video/%' and m.animated = 0)
 order by m.animated desc, m.media_url, msp.priority
-$$;
-
-
---
--- Name: get_mutelist(bytea); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.get_mutelist(a_pubkey bytea) RETURNS SETOF jsonb
-    LANGUAGE sql STABLE
-    AS $$
-  SELECT * FROM response_messages_for_list(ARRAY['mute_list', 'mute_list_2'], a_pubkey, true)
 $$;
 
 
@@ -1624,6 +1448,50 @@ SELECT a_user_pubkey IS NOT NULL AND EXISTS (
               AND bt.arg1 = t.event_id
         )
     )
+)
+$$;
+
+
+--
+-- Name: is_event_hidden_except_author(bytea, public.cmr_scope, bytea); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.is_event_hidden_except_author(a_user_pubkey bytea, a_scope public.cmr_scope, a_event_id bytea) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+SELECT a_user_pubkey IS NOT NULL AND (
+        EXISTS (SELECT 1 FROM zap_receipts zr WHERE zr.eid = a_event_id AND public.is_pubkey_hidden(a_user_pubkey, a_scope, zr.sender))
+        OR EXISTS (
+            SELECT 1
+            FROM public.cmr_words_2 w, advsearch s
+            WHERE w.user_pubkey = a_user_pubkey
+              AND w.scope = a_scope
+              AND s.id = a_event_id
+              AND s.content_tsv @@ w.words
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM public.cmr_hashtags_2 h, advsearch s
+            WHERE h.user_pubkey = a_user_pubkey
+              AND h.scope = a_scope
+              AND s.id = a_event_id
+              AND s.hashtag_tsv @@ h.hashtags
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM public.cmr_threads t
+            WHERE t.user_pubkey = a_user_pubkey
+              AND t.scope = a_scope
+              AND t.event_id = a_event_id
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM public.basic_tags bt
+            INNER JOIN public.cmr_threads t ON t.user_pubkey = a_user_pubkey AND t.scope = a_scope
+            WHERE bt.id = a_event_id
+              AND bt.tag = 'e'
+              AND bt.arg1 = t.event_id
+        )
 )
 $$;
 
@@ -2315,6 +2183,39 @@ $$;
 
 
 --
+-- Name: notification_is_hidden(bigint, bytea, bytea); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.notification_is_hidden(type bigint, arg1 bytea, arg2 bytea) RETURNS boolean
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$
+SELECT 
+    CASE type
+    WHEN 1 THEN user_is_human(arg1)
+    WHEN 2 THEN user_is_human(arg1)
+
+    WHEN 3 THEN user_is_human(arg2)
+    WHEN 4 THEN user_is_human(arg2)
+    WHEN 5 THEN user_is_human(arg2)
+    WHEN 6 THEN user_is_human(arg2)
+
+    WHEN 7 THEN user_is_human(arg2)
+    /* WHEN 8 THEN user_is_human(arg3) */
+
+    WHEN 101 THEN user_is_human(arg2)
+    WHEN 102 THEN user_is_human(arg2)
+    WHEN 103 THEN user_is_human(arg2)
+    WHEN 104 THEN user_is_human(arg2)
+
+    /* WHEN 201 THEN user_is_human(arg3) */
+    /* WHEN 202 THEN user_is_human(arg3) */
+    /* WHEN 203 THEN user_is_human(arg3) */
+    /* WHEN 204 THEN user_is_human(arg3) */
+    END CASE
+$$;
+
+
+--
 -- Name: notification_is_visible(bigint, bytea, bytea, jsonb, bytea); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2591,47 +2492,6 @@ $$;
 
 
 --
--- Name: reads_interactions_backfill(integer); Type: PROCEDURE; Schema: public; Owner: -
---
-
-CREATE PROCEDURE public.reads_interactions_backfill(IN a_batch integer DEFAULT 2000)
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    n int;
-BEGIN
-    IF (SELECT ready FROM reads_interactions_state) THEN
-        RETURN;
-    END IF;
-    -- the article versions stored so far (the code above covers everything stored after the start); a
-    -- restarted backfill continues with what is left
-    IF NOT (SELECT listed FROM reads_interactions_state) THEN
-        INSERT INTO reads_interactions_todo (id) SELECT eid FROM reads_versions_12_b537d4df66 ON CONFLICT DO NOTHING;
-        UPDATE reads_interactions_state SET listed = true;
-        COMMIT;
-    END IF;
-    LOOP
-        WITH b AS (
-            DELETE FROM reads_interactions_todo
-            WHERE id IN (SELECT id FROM reads_interactions_todo LIMIT a_batch)
-            RETURNING id
-        ), ins AS (
-            INSERT INTO reads_interactions (pubkey, eid)
-            SELECT DISTINCT bt.pubkey, bt.arg1 FROM b, basic_tags_6_62c3d17c2f bt
-            WHERE bt.arg1 = b.id AND bt.tag = 'e' AND bt.kind IN (1, 6, 7)
-            ON CONFLICT DO NOTHING
-        )
-        SELECT count(*) INTO n FROM b;
-        COMMIT;
-        EXIT WHEN n = 0;
-    END LOOP;
-    UPDATE reads_interactions_state SET ready = true;
-    COMMIT;
-END
-$$;
-
-
---
 -- Name: record_trusted_pubkey_followers_cnt(); Type: PROCEDURE; Schema: public; Owner: -
 --
 
@@ -2685,57 +2545,19 @@ $$;
 CREATE FUNCTION public.replaceable_event(a_pubkey bytea, a_kind bigint) RETURNS SETOF jsonb
     LANGUAGE plpgsql STABLE
     AS $$
-DECLARE
+declare
   eid bytea;
   e jsonb;
-BEGIN
-  FOR eid IN SELECT event_id FROM replaceable_events WHERE pubkey = a_pubkey AND kind = a_kind LOOP
+begin
+  for eid in select id from event where pubkey = a_pubkey and kind = a_kind and a_kind between 10000 and 19999
+             order by created_at desc, id limit 1 loop
     e := get_event_jsonb(eid);
-    IF e IS NOT NULL THEN
-      RETURN NEXT e;
-    END IF;
-  END LOOP;
-END
+    if e is not null then
+      return next e;
+    end if;
+  end loop;
+end
 $$;
-
-
---
--- Name: response_messages_for_list(text[], bytea, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.response_messages_for_list(a_tables text[], a_pubkey bytea, a_extended_response boolean DEFAULT true) RETURNS SETOF jsonb
-    LANGUAGE plpgsql STABLE
-    AS $_$
-DECLARE
-  tbl text;
-  eid bytea;
-  e jsonb;
-  ptag_pubkeys bytea[] := '{}';
-  pk bytea;
-BEGIN
-  FOREACH tbl IN ARRAY a_tables LOOP
-    EXECUTE format('SELECT value FROM %I WHERE key = $1 LIMIT 1', tbl) INTO eid USING a_pubkey;
-    IF eid IS NOT NULL THEN
-      e := get_event_jsonb(eid);
-      IF e IS NOT NULL THEN
-        RETURN NEXT e;
-        IF a_extended_response THEN
-          -- Collect p-tag pubkeys
-          SELECT array_agg(decode(t->>1, 'hex')) INTO pk
-          FROM jsonb_array_elements(e->'tags') t
-          WHERE t->>0 = 'p' AND length(t->>1) = 64;
-          IF pk IS NOT NULL THEN
-            ptag_pubkeys := ptag_pubkeys || pk;
-          END IF;
-        END IF;
-      END IF;
-    END IF;
-  END LOOP;
-  IF a_extended_response AND array_length(ptag_pubkeys, 1) > 0 THEN
-    RETURN QUERY SELECT * FROM user_infos(ptag_pubkeys);
-  END IF;
-END
-$_$;
 
 
 --
@@ -2754,33 +2576,35 @@ BEGIN
         RETURN;
     END IF;
 
-	e := get_event(a_event_id);
+    -- the one read of the event row (before: get_event, get_event_jsonb, is_event_hidden's lookup)
+    SELECT * INTO e FROM events WHERE events.id = a_event_id LIMIT 1;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
 
     IF event_is_deleted(e.id) THEN
         RETURN;
     ELSIF is_pubkey_hidden(a_user_pubkey, 'content', e.pubkey, a_author_exempt) THEN
         RETURN;
-    ELSIF is_event_hidden(a_user_pubkey, 'content', a_event_id, a_author_exempt) THEN
+    -- is_event_hidden(a_user_pubkey, 'content', a_event_id, a_author_exempt) minus what is known
+    -- here: the event exists and its author is not hidden (the same is_pubkey_hidden call)
+    ELSIF is_event_hidden_except_author(a_user_pubkey, 'content', a_event_id) THEN
         RETURN;
-    ELSIF EXISTS (
-        SELECT 1 FROM pubkey_followers pf
-        WHERE pf.follower_pubkey = a_user_pubkey AND e.pubkey = pf.pubkey
-    ) THEN
-        -- user follows publisher
     END IF;
 
-    DECLARE
-        e_jsonb jsonb := get_event_jsonb(e.id);
-    BEGIN
-        IF e_jsonb IS null THEN
-            RETURN;
-        END IF;
-        RETURN NEXT (e_jsonb, a_is_referenced_event);
-    END;
+    -- get_event_jsonb(e.id), built from the row in hand
+    RETURN NEXT (jsonb_build_object(
+		'id', ENCODE(e.id, 'hex'),
+		'pubkey', ENCODE(e.pubkey, 'hex'),
+		'created_at', e.created_at,
+		'kind', e.kind,
+		'tags', e.tags,
+		'content', e.content::text,
+		'sig', ENCODE(e.sig, 'hex')), a_is_referenced_event);
 
 	RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE e.pubkey = meta_data.key;
 
-    FOR eid IN 
+    FOR eid IN
         (
             SELECT arg1 FROM basic_tags WHERE id = a_event_id AND tag = 'e'
         ) UNION (
@@ -2801,14 +2625,14 @@ BEGIN
         RETURN NEXT (get_event_jsonb(meta_data.value), false) FROM meta_data WHERE pk = meta_data.key;
     END LOOP;
 
-    FOR eid IN 
+    FOR eid IN
         (
-            SELECT pre.event_id 
-            FROM a_tags at, parametrized_replaceable_events pre 
+            SELECT pre.event_id
+            FROM a_tags at, parametrized_replaceable_events pre
             WHERE at.eid = a_event_id AND at.ref_kind = pre.kind AND at.ref_pubkey = pre.pubkey AND at.ref_identifier = pre.identifier
         ) UNION (
             SELECT pre.event_id
-            FROM event_mentions em, parametrized_replaceable_events pre 
+            FROM event_mentions em, parametrized_replaceable_events pre
             WHERE em.eid = a_event_id AND em.tag = 'a' AND em.argkind = pre.kind AND em.argpubkey = pre.pubkey AND em.argid = pre.identifier
         )
     LOOP
@@ -2848,15 +2672,6 @@ EXCEPTION
         RETURN NULL;
 END;
 $$;
-
-
---
--- Name: test_pubkeys(text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.test_pubkeys(a_name text) RETURNS bytea
-    LANGUAGE sql
-    AS $$ select pubkey from test_pubkeys where name = a_name $$;
 
 
 --
@@ -3017,36 +2832,20 @@ $$;
 
 
 --
--- Name: user_blossom_relays(bytea[]); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.user_blossom_relays(a_pubkeys bytea[]) RETURNS SETOF jsonb
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-    eid bytea;
-BEGIN
-    FOR eid IN SELECT event_id FROM replaceable_events WHERE pubkey = ANY(a_pubkeys) and kind = 10063 LOOP
-            RETURN NEXT get_event_jsonb(eid);
-        END LOOP;
-END
-$$;
-
-
---
 -- Name: user_blossom_servers(bytea[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.user_blossom_servers(a_pubkeys bytea[]) RETURNS SETOF jsonb
     LANGUAGE plpgsql STABLE
     AS $$
-DECLARE
+declare
     eid bytea;
-BEGIN
-    FOR eid IN SELECT event_id FROM replaceable_events WHERE pubkey = ANY(a_pubkeys) and kind = 10063 LOOP
-            RETURN NEXT get_event_jsonb(eid);
-        END LOOP;
-END
+begin
+    for eid in select distinct on (pubkey) id from event where pubkey = any(a_pubkeys) and kind = 10063
+               order by pubkey, created_at desc, id loop
+            return next get_event_jsonb(eid);
+        end loop;
+end
 $$;
 
 
@@ -3055,37 +2854,72 @@ $$;
 --
 
 CREATE FUNCTION public.user_follows_posts(a_pubkey bytea, a_since bigint, a_until bigint, a_include_replies bigint, a_limit bigint, a_offset bigint, a_kinds bigint[] DEFAULT '{1}'::bigint[]) RETURNS SETOF public.post
-    LANGUAGE sql STABLE
+    LANGUAGE plpgsql STABLE
     AS $$
-    SELECT
-        es.id,
-        es.created_at
-    FROM
-        pubkey_followers pf
-        JOIN LATERAL (
-            SELECT e.id, e.created_at
-            FROM event e
-            WHERE e.pubkey = pf.pubkey
-              AND e.kind = ANY(a_kinds)
-              AND e.created_at >= a_since - 30
-              AND e.created_at <= a_until - 30
-            ORDER BY e.created_at DESC
-            LIMIT a_limit
-        ) es ON true
-        LEFT JOIN pubkey_events pe ON pe.event_id = es.id
-    WHERE
-        pf.follower_pubkey = a_pubkey AND
-        (
-            pe.event_id IS NULL OR
-            pe.is_reply = 0 OR
-            pe.is_reply = a_include_replies
-        )
-    ORDER BY
-        es.created_at DESC
-    LIMIT
-        a_limit
-    OFFSET
-        a_offset
+BEGIN
+    IF a_kinds <@ '{1, 6, 20, 1068, 6969, 34235, 34236}'::bigint[] THEN
+        RETURN QUERY
+        SELECT
+            es.event_id,
+            es.created_at
+        FROM
+            pubkey_followers pf
+            JOIN LATERAL (
+                SELECT pe.event_id, pe.created_at, pe.is_reply
+                FROM pubkey_events pe
+                WHERE pe.pubkey = pf.pubkey
+                  AND pe.kind = ANY(a_kinds)
+                  AND pe.created_at >= a_since - 30
+                  AND pe.created_at <= a_until - 30
+                  AND NOT EXISTS (SELECT 1 FROM deleted_events de WHERE de.event_id = pe.event_id)
+                ORDER BY pe.created_at DESC
+                LIMIT a_limit
+            ) es ON true
+        WHERE
+            pf.follower_pubkey = a_pubkey AND
+            (
+                es.is_reply = 0 OR
+                es.is_reply = a_include_replies
+            )
+        ORDER BY
+            es.created_at DESC
+        LIMIT
+            a_limit
+        OFFSET
+            a_offset;
+    ELSE
+        RETURN QUERY
+        SELECT
+            es.id,
+            es.created_at
+        FROM
+            pubkey_followers pf
+            JOIN LATERAL (
+                SELECT e.id, e.created_at
+                FROM event e
+                WHERE e.pubkey = pf.pubkey
+                  AND e.kind = ANY(a_kinds)
+                  AND e.created_at >= a_since - 30
+                  AND e.created_at <= a_until - 30
+                ORDER BY e.created_at DESC
+                LIMIT a_limit
+            ) es ON true
+            LEFT JOIN pubkey_events pe ON pe.event_id = es.id
+        WHERE
+            pf.follower_pubkey = a_pubkey AND
+            (
+                pe.event_id IS NULL OR
+                pe.is_reply = 0 OR
+                pe.is_reply = a_include_replies
+            )
+        ORDER BY
+            es.created_at DESC
+        LIMIT
+            a_limit
+        OFFSET
+            a_offset;
+    END IF;
+END
 $$;
 
 
@@ -3156,7 +2990,10 @@ BEGIN
         RETURN QUERY SELECT * FROM event_preview_response(mdeid);
     END LOOP;
 
-    SELECT json_object_agg(ENCODE(key, 'hex'), value) INTO r FROM pubkey_followers_cnt WHERE key = ANY(a_pubkeys);
+    SELECT json_object_agg(ENCODE(x.k, 'hex'), COALESCE(pfc.value, 0)) INTO r
+    FROM (SELECT DISTINCT k FROM UNNEST(a_pubkeys) k WHERE k IS NOT NULL) x
+    LEFT JOIN pubkey_followers_cnt pfc ON pfc.key = x.k
+    WHERE pfc.key IS NOT NULL OR EXISTS (SELECT 1 FROM meta_data md WHERE md.key = x.k);
 	RETURN NEXT jsonb_build_object('kind', c_USER_SCORES(), 'content', r::text);
 	RETURN NEXT jsonb_build_object('kind', c_USER_FOLLOWER_COUNTS(), 'content', r::text);
 
@@ -3218,127 +3055,6 @@ FROM live_event_participants lep
 WHERE lep.participant_pubkey = a_pubkey
   AND lep.kind = a_kind
   AND lep.created_at >= EXTRACT(EPOCH FROM NOW() - INTERVAL '1 hour')::int8
-$$;
-
-
---
--- Name: user_profile(bytea, bytea); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.user_profile(a_pubkey bytea, a_user_pubkey bytea DEFAULT NULL::bytea) RETURNS SETOF jsonb
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-  e jsonb;
-  note_count bigint;
-  reply_count bigint;
-  long_form_note_count bigint;
-  follows_count bigint;
-  followers_count bigint;
-  time_joined bigint;
-  relay_count bigint;
-  media_count bigint;
-BEGIN
-  -- metadata event (kind 0)
-  e := (SELECT get_event_jsonb(re.event_id) FROM replaceable_events re WHERE re.pubkey = a_pubkey AND re.kind = 0 LIMIT 1);
-  IF e IS NOT NULL THEN
-    RETURN NEXT e;
-  END IF;
-
-  -- counts
-  SELECT count(1) INTO note_count FROM pubkey_events WHERE pubkey = a_pubkey AND is_reply = 0;
-  SELECT count(1) INTO reply_count FROM pubkey_events WHERE pubkey = a_pubkey AND is_reply = 1;
-  SELECT count(1) INTO long_form_note_count FROM parametrized_replaceable_events WHERE pubkey = a_pubkey AND kind = 30023;
-  SELECT count(1) INTO follows_count FROM pubkey_followers WHERE follower_pubkey = a_pubkey;
-  SELECT COALESCE(pfc.value, 0) INTO followers_count FROM pubkey_followers_cnt pfc WHERE pfc.key = a_pubkey;
-  IF followers_count IS NULL THEN followers_count := 0; END IF;
-  SELECT min(created_at) INTO time_joined FROM pubkey_events WHERE pubkey = a_pubkey;
-  SELECT count(distinct url) INTO media_count FROM (
-    SELECT em.media_url AS url FROM event_media em, events ev 
-    WHERE ev.pubkey = a_pubkey AND ev.id = em.event_id LIMIT 1000
-  ) sub;
-
-  -- relay count from relay_list_metadata or contact_lists
-  relay_count := 0;
-  BEGIN
-    SELECT count(distinct tag->>1) INTO relay_count
-    FROM (SELECT get_event_jsonb(rlm.event_id) as e FROM relay_list_metadata rlm WHERE rlm.pubkey = a_pubkey LIMIT 1) r,
-         jsonb_array_elements(r.e->'tags') tag
-    WHERE tag->>0 = 'r';
-    IF relay_count IS NULL OR relay_count = 0 THEN
-      SELECT count(distinct tag->>1) INTO relay_count
-      FROM (SELECT get_event_jsonb(cl.event_id) as e FROM contact_lists cl WHERE cl.pubkey = a_pubkey LIMIT 1) r,
-           jsonb_array_elements(r.e->'tags') tag
-      WHERE tag->>0 = 'r';
-    END IF;
-  EXCEPTION WHEN OTHERS THEN
-    relay_count := 0;
-  END;
-  IF relay_count IS NULL THEN relay_count := 0; END IF;
-
-  -- profile stats event
-  RETURN NEXT jsonb_build_object(
-    'kind', 10000105,
-    'content', jsonb_build_object(
-      'pubkey', encode(a_pubkey, 'hex'),
-      'follows_count', follows_count,
-      'followers_count', followers_count,
-      'note_count', note_count,
-      'long_form_note_count', long_form_note_count,
-      'reply_count', reply_count,
-      'time_joined', time_joined,
-      'relay_count', relay_count,
-      'media_count', media_count
-    )::text
-  );
-
-  -- verified names
-  RETURN QUERY SELECT * FROM primal_verified_names(ARRAY[a_pubkey]);
-
-  -- live streams
-  BEGIN
-    RETURN QUERY SELECT e2 FROM user_live_events(30311, a_pubkey) e2;
-  EXCEPTION WHEN OTHERS THEN
-    NULL;
-  END;
-END
-$$;
-
-
---
--- Name: user_profile_followed_by(bytea, bytea); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.user_profile_followed_by(a_pubkey bytea, a_user_pubkey bytea) RETURNS SETOF jsonb
-    LANGUAGE plpgsql STABLE
-    AS $$
-DECLARE
-  pk bytea;
-  e jsonb;
-  pubkeys bytea[] := '{}';
-BEGIN
-  FOR pk IN
-    SELECT pf1.pubkey
-    FROM pubkey_followers pf1, pubkey_followers pf2, pubkey_followers_cnt pfc
-    WHERE a_user_pubkey = pf1.follower_pubkey
-      AND pf1.pubkey = pf2.follower_pubkey
-      AND pf2.pubkey = a_pubkey
-      AND pf1.pubkey = pfc.key
-    GROUP BY pf1.pubkey
-    ORDER BY max(pfc.value) DESC
-    LIMIT 10
-  LOOP
-    e := (SELECT get_event_jsonb(re.event_id) FROM replaceable_events re WHERE re.pubkey = pk AND re.kind = 0 LIMIT 1);
-    IF e IS NOT NULL THEN
-      RETURN NEXT e;
-      pubkeys := pubkeys || pk;
-    END IF;
-  END LOOP;
-
-  IF array_length(pubkeys, 1) > 0 THEN
-    RETURN QUERY SELECT * FROM user_infos(pubkeys);
-  END IF;
-END
 $$;
 
 
@@ -3475,80 +3191,6 @@ END $$;
 
 
 --
--- Name: id_seq; Type: SEQUENCE; Schema: cache; Owner: -
---
-
-CREATE SEQUENCE cache.id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: edges; Type: TABLE; Schema: cache; Owner: -
---
-
-CREATE TABLE cache.edges (
-    id bigint DEFAULT nextval('cache.id_seq'::regclass) NOT NULL,
-    created_at timestamp without time zone DEFAULT now() NOT NULL,
-    input_id bigint NOT NULL,
-    output_id bigint NOT NULL,
-    etype bigint,
-    extra jsonb
-);
-
-
---
--- Name: edgetypes; Type: TABLE; Schema: cache; Owner: -
---
-
-CREATE TABLE cache.edgetypes (
-    id bigint DEFAULT nextval('cache.id_seq'::regclass) NOT NULL,
-    created_at timestamp without time zone DEFAULT now() NOT NULL,
-    name character varying NOT NULL,
-    extra jsonb
-);
-
-
---
--- Name: follow_lists; Type: TABLE; Schema: cache; Owner: -
---
-
-CREATE TABLE cache.follow_lists (
-    id bigint DEFAULT nextval('cache.id_seq'::regclass) NOT NULL,
-    pubkey bytea NOT NULL,
-    identifier character varying NOT NULL,
-    follow_pubkey bytea NOT NULL
-);
-
-
---
--- Name: id_table; Type: TABLE; Schema: cache; Owner: -
---
-
-CREATE TABLE cache.id_table (
-    id bigint NOT NULL,
-    table_name character varying NOT NULL,
-    extra jsonb,
-    created_at timestamp without time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: refs; Type: TABLE; Schema: cache; Owner: -
---
-
-CREATE TABLE cache.refs (
-    id bigint DEFAULT nextval('cache.id_seq'::regclass) NOT NULL,
-    created_at timestamp without time zone DEFAULT now() NOT NULL,
-    ref jsonb NOT NULL,
-    extra jsonb
-);
-
-
---
 -- Name: a_tags_1_7d98c5333f; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3562,569 +3204,6 @@ CREATE TABLE public.a_tags_1_7d98c5333f (
     ref_identifier character varying NOT NULL,
     ref_arg4 character varying NOT NULL,
     imported_at bigint NOT NULL
-);
-
-
---
--- Name: advsearch_5_d7da6f551e; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.advsearch_5_d7da6f551e (
-    i bigint NOT NULL,
-    id bytea,
-    pubkey bytea NOT NULL,
-    created_at bigint NOT NULL,
-    kind bigint NOT NULL,
-    content_tsv tsvector NOT NULL,
-    hashtag_tsv tsvector NOT NULL,
-    reply_tsv tsvector NOT NULL,
-    mention_tsv tsvector NOT NULL,
-    filter_tsv tsvector NOT NULL,
-    url_tsv tsvector NOT NULL
-);
-ALTER TABLE ONLY public.advsearch_5_d7da6f551e ALTER COLUMN content_tsv SET STATISTICS 10000;
-ALTER TABLE ONLY public.advsearch_5_d7da6f551e ALTER COLUMN hashtag_tsv SET STATISTICS 10000;
-
-
---
--- Name: allow_list_1_f1da08e9c8; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.allow_list_1_f1da08e9c8 (
-    key bytea NOT NULL,
-    value bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: basic_tags_6_62c3d17c2f; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.basic_tags_6_62c3d17c2f (
-    i bigint NOT NULL,
-    id bytea NOT NULL,
-    pubkey bytea NOT NULL,
-    created_at bigint NOT NULL,
-    kind bigint NOT NULL,
-    tag character(1) NOT NULL,
-    arg1 bytea NOT NULL,
-    arg3 character varying NOT NULL,
-    imported_at bigint NOT NULL
-);
-
-
---
--- Name: bookmarks_1_43f5248b56; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.bookmarks_1_43f5248b56 (
-    pubkey bytea NOT NULL,
-    event_id bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: contact_lists_1_1abdf474bd; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.contact_lists_1_1abdf474bd (
-    key bytea NOT NULL,
-    value bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: deleted_events_1_0249f47b16; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.deleted_events_1_0249f47b16 (
-    event_id bytea NOT NULL,
-    deletion_event_id bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_attributes_1_3196ca546f; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_attributes_1_3196ca546f (
-    event_id bytea NOT NULL,
-    key character varying NOT NULL,
-    value bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_created_at_1_7a51e16c5c; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_created_at_1_7a51e16c5c (
-    event_id bytea NOT NULL,
-    created_at bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_hashtags_1_295f217c0e; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_hashtags_1_295f217c0e (
-    event_id bytea NOT NULL,
-    hashtag character varying NOT NULL,
-    created_at bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_mentions_1_a056fb6737; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_mentions_1_a056fb6737 (
-    eid bytea NOT NULL,
-    tag character(1) NOT NULL,
-    argeid bytea,
-    argpubkey bytea,
-    argkind bigint,
-    argid character varying
-);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_pubkey_action_refs_1_f32e1ff589 (
-    event_id bytea NOT NULL,
-    ref_event_id bytea NOT NULL,
-    ref_pubkey bytea NOT NULL,
-    ref_created_at bigint NOT NULL,
-    ref_kind bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_pubkey_actions_1_d62afee35d; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_pubkey_actions_1_d62afee35d (
-    event_id bytea NOT NULL,
-    pubkey bytea NOT NULL,
-    created_at bigint NOT NULL,
-    updated_at bigint NOT NULL,
-    replied bigint NOT NULL,
-    liked bigint NOT NULL,
-    reposted bigint NOT NULL,
-    zapped bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_replies_1_9d033b5bb3; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_replies_1_9d033b5bb3 (
-    event_id bytea NOT NULL,
-    reply_event_id bytea NOT NULL,
-    reply_created_at bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_sentiment_1_d3d7a00a54; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_sentiment_1_d3d7a00a54 (
-    eid bytea NOT NULL,
-    model character varying NOT NULL,
-    topsentiment character(1) NOT NULL,
-    positive_prob double precision NOT NULL,
-    negative_prob double precision NOT NULL,
-    question_prob double precision NOT NULL,
-    neutral_prob double precision NOT NULL,
-    imported_at bigint NOT NULL
-);
-
-
---
--- Name: event_stats_1_1b380f4869; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_stats_1_1b380f4869 (
-    event_id bytea NOT NULL,
-    author_pubkey bytea NOT NULL,
-    created_at bigint NOT NULL,
-    likes bigint NOT NULL,
-    replies bigint NOT NULL,
-    mentions bigint NOT NULL,
-    reposts bigint NOT NULL,
-    zaps bigint NOT NULL,
-    satszapped bigint NOT NULL,
-    score bigint NOT NULL,
-    score24h bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_stats_by_pubkey_1_4ecc48a026 (
-    event_id bytea NOT NULL,
-    author_pubkey bytea NOT NULL,
-    created_at bigint NOT NULL,
-    likes bigint NOT NULL,
-    replies bigint NOT NULL,
-    mentions bigint NOT NULL,
-    reposts bigint NOT NULL,
-    zaps bigint NOT NULL,
-    satszapped bigint NOT NULL,
-    score bigint NOT NULL,
-    score24h bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_thread_parents_1_e17bf16c98; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_thread_parents_1_e17bf16c98 (
-    key bytea NOT NULL,
-    value bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: event_zapped_1_7ebdbebf92; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_zapped_1_7ebdbebf92 (
-    event_id bytea NOT NULL,
-    zap_sender bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: hashtags_1_1e5c72161a; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.hashtags_1_1e5c72161a (
-    hashtag character varying NOT NULL,
-    score bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: meta_data_1_323bc43167; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.meta_data_1_323bc43167 (
-    key bytea NOT NULL,
-    value bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: mute_list_1_f693a878b9; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.mute_list_1_f693a878b9 (
-    key bytea NOT NULL,
-    value bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: mute_list_2_1_949b3d746b; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.mute_list_2_1_949b3d746b (
-    key bytea NOT NULL,
-    value bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: mute_lists_1_d90e559628; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.mute_lists_1_d90e559628 (
-    key bytea NOT NULL,
-    value bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: note_length_1_15d66ffae6; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.note_length_1_15d66ffae6 (
-    eid bytea NOT NULL,
-    length bigint NOT NULL
-);
-
-
---
--- Name: note_stats_1_07d205f278; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.note_stats_1_07d205f278 (
-    eid bytea NOT NULL,
-    long_replies bigint NOT NULL
-);
-
-
---
--- Name: og_zap_receipts_1_dc85307383; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.og_zap_receipts_1_dc85307383 (
-    zap_receipt_id bytea NOT NULL,
-    created_at bigint NOT NULL,
-    sender bytea NOT NULL,
-    receiver bytea NOT NULL,
-    amount_sats bigint NOT NULL,
-    event_id bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: parameterized_replaceable_list_1_d02d7ecc62; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.parameterized_replaceable_list_1_d02d7ecc62 (
-    pubkey bytea NOT NULL,
-    identifier character varying NOT NULL,
-    created_at bigint NOT NULL,
-    event_id bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.parametrized_replaceable_events_1_cbe75c8d53 (
-    pubkey bytea NOT NULL,
-    kind bigint NOT NULL,
-    identifier character varying NOT NULL,
-    event_id bytea NOT NULL,
-    created_at bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_content_zap_cnt_1_236df2f369; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_content_zap_cnt_1_236df2f369 (
-    pubkey bytea NOT NULL,
-    cnt bigint NOT NULL
-);
-
-
---
--- Name: pubkey_directmsgs_1_c794110a2c; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_directmsgs_1_c794110a2c (
-    receiver bytea NOT NULL,
-    sender bytea NOT NULL,
-    created_at bigint NOT NULL,
-    event_id bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_events_1_1dcbfe1466; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_events_1_1dcbfe1466 (
-    pubkey bytea NOT NULL,
-    event_id bytea NOT NULL,
-    created_at bigint NOT NULL,
-    is_reply bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_followers_1_d52305fb47; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_followers_1_d52305fb47 (
-    pubkey bytea NOT NULL,
-    follower_pubkey bytea NOT NULL,
-    follower_contact_list_event_id bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_followers_cnt_1_a6f7e200e7; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_followers_cnt_1_a6f7e200e7 (
-    key bytea NOT NULL,
-    value bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_ids_1_54b55dd09c; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_ids_1_54b55dd09c (
-    key bytea NOT NULL,
-    value bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_ln_address_1_d3649b2898; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_ln_address_1_d3649b2898 (
-    pubkey bytea NOT NULL,
-    ln_address character varying NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_media_cnt_1_b5e2a488b1; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_media_cnt_1_b5e2a488b1 (
-    pubkey bytea NOT NULL,
-    cnt bigint NOT NULL
-);
-
-
---
--- Name: pubkey_notifications_1_e5459ab9dd; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_notifications_1_e5459ab9dd (
-    pubkey bytea NOT NULL,
-    created_at bigint NOT NULL,
-    type bigint NOT NULL,
-    arg1 bytea NOT NULL,
-    arg2 bytea,
-    arg3 jsonb,
-    arg4 jsonb,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: pubkey_zapped_1_17f1f622a9; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pubkey_zapped_1_17f1f622a9 (
-    pubkey bytea NOT NULL,
-    zaps bigint NOT NULL,
-    satszapped bigint NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: reads_12_68c6bbfccd; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.reads_12_68c6bbfccd (
-    pubkey bytea NOT NULL,
-    identifier character varying NOT NULL,
-    published_at bigint NOT NULL,
-    latest_eid bytea NOT NULL,
-    latest_created_at bigint NOT NULL,
-    likes bigint NOT NULL,
-    zaps bigint NOT NULL,
-    satszapped bigint NOT NULL,
-    replies bigint NOT NULL,
-    reposts bigint NOT NULL,
-    topics tsvector NOT NULL,
-    words bigint NOT NULL,
-    lang character varying NOT NULL,
-    lang_prob double precision NOT NULL,
-    image character varying NOT NULL,
-    summary character varying NOT NULL
-);
-
-
---
--- Name: reads_versions_12_b537d4df66; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.reads_versions_12_b537d4df66 (
-    pubkey bytea NOT NULL,
-    identifier character varying NOT NULL,
-    eid bytea NOT NULL
-);
-
-
---
--- Name: relay_list_metadata_1_801a17fc93; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.relay_list_metadata_1_801a17fc93 (
-    pubkey bytea NOT NULL,
-    event_id bytea NOT NULL,
-    rowid bigint DEFAULT 0
-);
-
-
---
--- Name: zap_receipts_1_9fe40119b2; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.zap_receipts_1_9fe40119b2 (
-    eid bytea NOT NULL,
-    created_at bigint NOT NULL,
-    target_eid bytea NOT NULL,
-    sender bytea NOT NULL,
-    receiver bytea NOT NULL,
-    satszapped bigint NOT NULL,
-    imported_at bigint NOT NULL
-);
-
-
---
--- Name: _sqlx_migrations; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public._sqlx_migrations (
-    version bigint NOT NULL,
-    description text NOT NULL,
-    installed_on timestamp with time zone DEFAULT now() NOT NULL,
-    success boolean NOT NULL,
-    checksum bytea NOT NULL,
-    execution_time bigint NOT NULL
 );
 
 
@@ -4162,6 +3241,28 @@ CREATE SEQUENCE public.a_tags_1_7d98c5333f_i_seq
 --
 
 ALTER SEQUENCE public.a_tags_1_7d98c5333f_i_seq OWNED BY public.a_tags_1_7d98c5333f.i;
+
+
+--
+-- Name: advsearch_5_d7da6f551e; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.advsearch_5_d7da6f551e (
+    i bigint NOT NULL,
+    id bytea,
+    pubkey bytea NOT NULL,
+    created_at bigint NOT NULL,
+    kind bigint NOT NULL,
+    content_tsv tsvector NOT NULL,
+    hashtag_tsv tsvector NOT NULL,
+    reply_tsv tsvector NOT NULL,
+    mention_tsv tsvector NOT NULL,
+    filter_tsv tsvector NOT NULL,
+    url_tsv tsvector NOT NULL
+)
+WITH (autovacuum_analyze_scale_factor='0.01');
+ALTER TABLE ONLY public.advsearch_5_d7da6f551e ALTER COLUMN content_tsv SET STATISTICS 10000;
+ALTER TABLE ONLY public.advsearch_5_d7da6f551e ALTER COLUMN hashtag_tsv SET STATISTICS 10000;
 
 
 --
@@ -4203,76 +3304,24 @@ ALTER SEQUENCE public.advsearch_5_d7da6f551e_i_seq OWNED BY public.advsearch_5_d
 
 
 --
--- Name: aievents1; Type: TABLE; Schema: public; Owner: -
+-- Name: parametrized_replaceable_events; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE TABLE public.aievents1 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint
-);
-
-
---
--- Name: aievents2; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.aievents2 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint,
-    url text,
-    sentimentlabel text
-);
-
-
---
--- Name: aievents3; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.aievents3 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint,
-    url text,
-    sentimentlabel text,
-    rank double precision,
-    lang character varying,
-    sent character varying,
-    topic character varying
-);
-
-
---
--- Name: aimetadata1; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.aimetadata1 (
-    id bytea,
-    pubkey bytea,
-    created_at bigint,
-    kind bigint,
-    tags jsonb,
-    content text,
-    sig bytea,
-    imported_at bigint,
-    contentjson jsonb
-);
+CREATE VIEW public.parametrized_replaceable_events AS
+ SELECT pubkey,
+    kind,
+    public.event_d_tag(tags) AS identifier,
+    id AS event_id,
+    created_at,
+    (0)::bigint AS rowid
+   FROM public.event e
+  WHERE ((kind >= 30000) AND (kind <= 39999) AND (public.event_d_tag(tags) IS NOT NULL) AND (id = ( SELECT n.id
+           FROM public.event n
+          WHERE ((n.kind >= 30000) AND (n.kind <= 39999) AND (n.kind = e.kind) AND (n.pubkey = e.pubkey) AND ((public.event_d_tag(n.tags))::text = (public.event_d_tag(e.tags))::text) AND (n.created_at = ( SELECT max(m.created_at) AS max
+                   FROM public.event m
+                  WHERE ((m.kind >= 30000) AND (m.kind <= 39999) AND (m.kind = e.kind) AND (m.pubkey = e.pubkey) AND ((public.event_d_tag(m.tags))::text = (public.event_d_tag(e.tags))::text)))))
+          ORDER BY n.id
+         LIMIT 1)));
 
 
 --
@@ -4280,10 +3329,28 @@ CREATE TABLE public.aimetadata1 (
 --
 
 CREATE VIEW public.allow_list AS
- SELECT key,
-    value,
-    rowid
-   FROM public.allow_list_1_f1da08e9c8;
+ SELECT pubkey AS key,
+    event_id AS value,
+    (0)::bigint AS rowid
+   FROM public.parametrized_replaceable_events
+  WHERE ((kind = 30000) AND ((identifier)::text = 'allowlist'::text));
+
+
+--
+-- Name: basic_tags_6_62c3d17c2f; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.basic_tags_6_62c3d17c2f (
+    i bigint NOT NULL,
+    id bytea NOT NULL,
+    pubkey bytea NOT NULL,
+    created_at bigint NOT NULL,
+    kind bigint NOT NULL,
+    tag character(1) NOT NULL,
+    arg1 bytea NOT NULL,
+    arg3 character varying NOT NULL,
+    imported_at bigint NOT NULL
+);
 
 
 --
@@ -4328,29 +3395,16 @@ ALTER SEQUENCE public.basic_tags_6_62c3d17c2f_i_seq OWNED BY public.basic_tags_6
 
 CREATE VIEW public.bookmarks AS
  SELECT pubkey,
-    event_id,
-    rowid
-   FROM public.bookmarks_1_43f5248b56;
-
-
---
--- Name: bunnylog; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.bunnylog (
-    cache_status character varying NOT NULL,
-    http_status integer NOT NULL,
-    t bigint NOT NULL,
-    size bigint NOT NULL,
-    account_id character varying NOT NULL,
-    ip_address character varying NOT NULL,
-    referer_url character varying,
-    requested_url character varying NOT NULL,
-    country character varying NOT NULL,
-    user_agent character varying NOT NULL,
-    session_id character varying NOT NULL,
-    region character varying
-);
+    id AS event_id,
+    (0)::bigint AS rowid
+   FROM public.event e
+  WHERE ((kind = 10003) AND (id = ( SELECT n.id
+           FROM public.event n
+          WHERE ((n.pubkey = e.pubkey) AND (n.kind = 10003) AND (n.created_at = ( SELECT max(m.created_at) AS max
+                   FROM public.event m
+                  WHERE ((m.pubkey = e.pubkey) AND (m.kind = 10003)))))
+          ORDER BY n.id
+         LIMIT 1)));
 
 
 --
@@ -4371,17 +3425,6 @@ CREATE UNLOGGED TABLE public.cache (
 CREATE TABLE public.cmr_groups (
     user_pubkey bytea,
     grp public.cmr_grp NOT NULL,
-    scope public.cmr_scope NOT NULL
-);
-
-
---
--- Name: cmr_hashtags; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.cmr_hashtags (
-    user_pubkey bytea NOT NULL,
-    hashtag character varying NOT NULL,
     scope public.cmr_scope NOT NULL
 );
 
@@ -4408,17 +3451,6 @@ CREATE TABLE public.cmr_pubkeys_allowed (
 
 
 --
--- Name: cmr_pubkeys_parent; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.cmr_pubkeys_parent (
-    user_pubkey bytea,
-    pubkey bytea NOT NULL,
-    parent bytea NOT NULL
-);
-
-
---
 -- Name: cmr_pubkeys_scopes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4441,17 +3473,6 @@ CREATE TABLE public.cmr_threads (
 
 
 --
--- Name: cmr_words; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.cmr_words (
-    user_pubkey bytea NOT NULL,
-    word character varying NOT NULL,
-    scope public.cmr_scope NOT NULL
-);
-
-
---
 -- Name: cmr_words_2; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4467,21 +3488,17 @@ CREATE TABLE public.cmr_words_2 (
 --
 
 CREATE VIEW public.contact_lists AS
- SELECT key,
-    value,
-    rowid
-   FROM public.contact_lists_1_1abdf474bd;
-
-
---
--- Name: counter_by_bytea; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.counter_by_bytea (
-    type character varying NOT NULL,
-    key bytea NOT NULL,
-    cnt bigint NOT NULL
-);
+ SELECT pubkey AS key,
+    id AS value,
+    (0)::bigint AS rowid
+   FROM public.event e
+  WHERE ((kind = 3) AND (id = ( SELECT n.id
+           FROM public.event n
+          WHERE ((n.pubkey = e.pubkey) AND (n.kind = 3) AND (n.created_at = ( SELECT max(m.created_at) AS max
+                   FROM public.event m
+                  WHERE ((m.pubkey = e.pubkey) AND (m.kind = 3)))))
+          ORDER BY n.id
+         LIMIT 1)));
 
 
 --
@@ -4492,17 +3509,8 @@ CREATE TABLE public.coverages_1_8656fc443b (
     name character varying NOT NULL,
     t bigint NOT NULL,
     t2 bigint NOT NULL
-);
-
-
---
--- Name: dag_1_4bd2aaff98; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.dag_1_4bd2aaff98 (
-    output character varying NOT NULL,
-    input character varying NOT NULL
-);
+)
+WITH (fillfactor='80');
 
 
 --
@@ -4514,6 +3522,17 @@ CREATE TABLE public.daily_followers_cnt_increases (
     cnt bigint NOT NULL,
     increase bigint NOT NULL,
     ratio real NOT NULL
+);
+
+
+--
+-- Name: deleted_events_1_0249f47b16; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.deleted_events_1_0249f47b16 (
+    event_id bytea NOT NULL,
+    deletion_event_id bytea NOT NULL,
+    rowid bigint DEFAULT 0
 );
 
 
@@ -4544,62 +3563,15 @@ CREATE TABLE public.dvm_feeds (
 
 
 --
--- Name: id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: event_hashtags_1_295f217c0e; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE SEQUENCE public.id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: edges; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.edges (
-    id bigint DEFAULT nextval('public.id_seq'::regclass) NOT NULL,
-    input_id bigint NOT NULL,
-    output_id bigint NOT NULL,
-    etype bigint,
-    extra jsonb
+CREATE TABLE public.event_hashtags_1_295f217c0e (
+    event_id bytea NOT NULL,
+    hashtag character varying NOT NULL,
+    created_at bigint NOT NULL,
+    rowid bigint DEFAULT 0
 );
-
-
---
--- Name: edgetypes; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.edgetypes (
-    id bigint DEFAULT nextval('public.id_seq'::regclass) NOT NULL,
-    name character varying NOT NULL,
-    extra jsonb
-);
-
-
---
--- Name: event_attributes; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.event_attributes AS
- SELECT event_id,
-    key,
-    value,
-    rowid
-   FROM public.event_attributes_1_3196ca546f;
-
-
---
--- Name: event_created_at; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.event_created_at AS
- SELECT event_id,
-    created_at,
-    rowid
-   FROM public.event_created_at_1_7a51e16c5c;
 
 
 --
@@ -4635,7 +3607,8 @@ CREATE TABLE public.event_hls_media (
 
 CREATE TABLE public.event_hooks (
     event_id bytea NOT NULL,
-    funcall text NOT NULL
+    funcall text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -4647,7 +3620,8 @@ CREATE TABLE public.event_media_1_30bf07e9cf (
     event_id bytea NOT NULL,
     url character varying NOT NULL,
     rowid bigint DEFAULT 0
-);
+)
+WITH (autovacuum_analyze_scale_factor='0.01');
 
 
 --
@@ -4662,6 +3636,20 @@ CREATE VIEW public.event_media AS
 
 
 --
+-- Name: event_mentions_1_a056fb6737; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_mentions_1_a056fb6737 (
+    eid bytea NOT NULL,
+    tag character(1) NOT NULL,
+    argeid bytea,
+    argpubkey bytea,
+    argkind bigint,
+    argid character varying
+);
+
+
+--
 -- Name: event_mentions; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -4673,34 +3661,6 @@ CREATE VIEW public.event_mentions AS
     argkind,
     argid
    FROM public.event_mentions_1_a056fb6737;
-
-
---
--- Name: event_mentions_1_0b730615c4; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_mentions_1_0b730615c4 (
-    eid bytea NOT NULL,
-    tag character(1) NOT NULL,
-    argeid bytea,
-    argpubkey bytea,
-    argkind bigint,
-    argid character varying
-);
-
-
---
--- Name: event_mentions_1_6738bfddaf; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_mentions_1_6738bfddaf (
-    eid bytea NOT NULL,
-    tag character(1) NOT NULL,
-    argeid bytea NOT NULL,
-    argpubkey bytea NOT NULL,
-    argkind bigint NOT NULL,
-    argid character varying NOT NULL
-);
 
 
 --
@@ -4726,17 +3686,93 @@ CREATE VIEW public.event_preview AS
 
 
 --
+-- Name: event_replies_1_9d033b5bb3; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_replies_1_9d033b5bb3 (
+    event_id bytea NOT NULL,
+    reply_event_id bytea NOT NULL,
+    reply_created_at bigint NOT NULL,
+    rowid bigint DEFAULT 0
+);
+
+
+--
+-- Name: zap_receipts_1_9fe40119b2; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.zap_receipts_1_9fe40119b2 (
+    eid bytea NOT NULL,
+    created_at bigint NOT NULL,
+    target_eid bytea,
+    sender bytea,
+    receiver bytea NOT NULL,
+    satszapped bigint,
+    imported_at bigint NOT NULL,
+    og_sender bytea,
+    og_amount_sats bigint,
+    og_event_id bytea
+);
+
+
+--
+-- Name: og_zap_receipts; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.og_zap_receipts AS
+ SELECT eid AS zap_receipt_id,
+    created_at,
+    og_sender AS sender,
+    receiver,
+    og_amount_sats AS amount_sats,
+    og_event_id AS event_id,
+    (0)::bigint AS rowid
+   FROM public.zap_receipts_1_9fe40119b2
+  WHERE (og_amount_sats IS NOT NULL);
+
+
+--
 -- Name: event_pubkey_action_refs; Type: VIEW; Schema: public; Owner: -
 --
 
 CREATE VIEW public.event_pubkey_action_refs AS
- SELECT event_id,
-    ref_event_id,
-    ref_pubkey,
-    ref_created_at,
-    ref_kind,
-    rowid
-   FROM public.event_pubkey_action_refs_1_f32e1ff589;
+ SELECT bt.arg1 AS event_id,
+    bt.id AS ref_event_id,
+    bt.pubkey AS ref_pubkey,
+    bt.created_at AS ref_created_at,
+    bt.kind AS ref_kind,
+    (0)::bigint AS rowid
+   FROM public.basic_tags_6_62c3d17c2f bt
+  WHERE ((bt.tag = 'e'::bpchar) AND (bt.kind = 6))
+UNION ALL
+ SELECT bt.arg1 AS event_id,
+    bt.id AS ref_event_id,
+    bt.pubkey AS ref_pubkey,
+    bt.created_at AS ref_created_at,
+    bt.kind AS ref_kind,
+    (0)::bigint AS rowid
+   FROM (public.basic_tags_6_62c3d17c2f bt
+     JOIN public.event ev ON ((ev.id = bt.id)))
+  WHERE ((bt.tag = 'e'::bpchar) AND (bt.kind = 7) AND ((ev.content = ''::text) OR ("left"(ev.content, 1) = ANY (ARRAY['+'::text, chr(129305), chr(10084), chr(65039)]))))
+UNION ALL
+ SELECT DISTINCT bt.arg1 AS event_id,
+    bt.id AS ref_event_id,
+    bt.pubkey AS ref_pubkey,
+    bt.created_at AS ref_created_at,
+    bt.kind AS ref_kind,
+    (0)::bigint AS rowid
+   FROM public.basic_tags_6_62c3d17c2f bt
+  WHERE ((bt.tag = 'e'::bpchar) AND (bt.kind = ANY (ARRAY[(1)::bigint, (20)::bigint, (1068)::bigint, (6969)::bigint, (1111)::bigint])) AND (EXISTS ( SELECT 1
+           FROM public.event_replies_1_9d033b5bb3 er
+          WHERE ((er.reply_event_id = bt.id) AND (er.event_id = bt.arg1)))))
+UNION ALL
+ SELECT z.event_id,
+    z.zap_receipt_id AS ref_event_id,
+    z.sender AS ref_pubkey,
+    z.created_at AS ref_created_at,
+    (9735)::bigint AS ref_kind,
+    (0)::bigint AS rowid
+   FROM public.og_zap_receipts z;
 
 
 --
@@ -4745,36 +3781,32 @@ CREATE VIEW public.event_pubkey_action_refs AS
 
 CREATE VIEW public.event_pubkey_actions AS
  SELECT event_id,
-    pubkey,
-    created_at,
-    updated_at,
-    replied,
-    liked,
-    reposted,
-    zapped,
-    rowid
-   FROM public.event_pubkey_actions_1_d62afee35d;
-
-
---
--- Name: event_relay; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_relay (
-    event_id bytea NOT NULL,
-    relay_url text
-);
-
-
---
--- Name: event_relays; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_relays (
-    event_id bytea NOT NULL,
-    relay_url character varying NOT NULL,
-    imported_at bigint NOT NULL
-);
+    ref_pubkey AS pubkey,
+    min(ref_created_at) AS created_at,
+    max(ref_created_at) AS updated_at,
+    (max(
+        CASE
+            WHEN (ref_kind = ANY (ARRAY[(1)::bigint, (20)::bigint, (1068)::bigint, (6969)::bigint, (1111)::bigint])) THEN 1
+            ELSE 0
+        END))::bigint AS replied,
+    (max(
+        CASE
+            WHEN (ref_kind = 7) THEN 1
+            ELSE 0
+        END))::bigint AS liked,
+    (max(
+        CASE
+            WHEN (ref_kind = 6) THEN 1
+            ELSE 0
+        END))::bigint AS reposted,
+    (max(
+        CASE
+            WHEN (ref_kind = 9735) THEN 1
+            ELSE 0
+        END))::bigint AS zapped,
+    (0)::bigint AS rowid
+   FROM public.event_pubkey_action_refs
+  GROUP BY event_id, ref_pubkey;
 
 
 --
@@ -4790,19 +3822,24 @@ CREATE VIEW public.event_replies AS
 
 
 --
--- Name: event_sentiment; Type: VIEW; Schema: public; Owner: -
+-- Name: event_stats_1_1b380f4869; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE VIEW public.event_sentiment AS
- SELECT eid,
-    model,
-    topsentiment,
-    positive_prob,
-    negative_prob,
-    question_prob,
-    neutral_prob,
-    imported_at
-   FROM public.event_sentiment_1_d3d7a00a54;
+CREATE TABLE public.event_stats_1_1b380f4869 (
+    event_id bytea NOT NULL,
+    author_pubkey bytea NOT NULL,
+    created_at bigint NOT NULL,
+    likes bigint NOT NULL,
+    replies bigint NOT NULL,
+    mentions bigint NOT NULL,
+    reposts bigint NOT NULL,
+    zaps bigint NOT NULL,
+    satszapped bigint NOT NULL,
+    score bigint NOT NULL,
+    score24h bigint NOT NULL,
+    rowid bigint DEFAULT 0
+)
+WITH (fillfactor='90', autovacuum_vacuum_scale_factor='0.01', autovacuum_vacuum_insert_scale_factor='0.01');
 
 
 --
@@ -4826,36 +3863,6 @@ CREATE VIEW public.event_stats AS
 
 
 --
--- Name: event_stats_2; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.event_stats_2 (
-    event_id bytea NOT NULL,
-    score2 bigint NOT NULL
-);
-
-
---
--- Name: event_stats_by_pubkey; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.event_stats_by_pubkey AS
- SELECT event_id,
-    author_pubkey,
-    created_at,
-    likes,
-    replies,
-    mentions,
-    reposts,
-    zaps,
-    satszapped,
-    score,
-    score24h,
-    rowid
-   FROM public.event_stats_by_pubkey_1_4ecc48a026;
-
-
---
 -- Name: event_tags; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -4874,21 +3881,10 @@ CREATE VIEW public.event_tags AS
 --
 
 CREATE VIEW public.event_thread_parents AS
- SELECT key,
-    value,
-    rowid
-   FROM public.event_thread_parents_1_e17bf16c98;
-
-
---
--- Name: event_zapped; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.event_zapped AS
- SELECT event_id,
-    zap_sender,
-    rowid
-   FROM public.event_zapped_1_7ebdbebf92;
+ SELECT reply_event_id AS key,
+    event_id AS value,
+    (0)::bigint AS rowid
+   FROM public.event_replies_1_9d033b5bb3;
 
 
 --
@@ -4933,14 +3929,15 @@ CREATE TABLE public.filterlist (
 
 
 --
--- Name: filterlist_pubkey; Type: TABLE; Schema: public; Owner: -
+-- Name: id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.filterlist_pubkey (
-    pubkey bytea NOT NULL,
-    blocked boolean NOT NULL,
-    grp public.filterlist_grp NOT NULL
-);
+CREATE SEQUENCE public.id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
 
 
 --
@@ -4956,17 +3953,6 @@ CREATE TABLE public.follow_lists (
 
 
 --
--- Name: hashtags; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.hashtags AS
- SELECT hashtag,
-    score,
-    rowid
-   FROM public.hashtags_1_1e5c72161a;
-
-
---
 -- Name: human_override; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4975,27 +3961,6 @@ CREATE TABLE public.human_override (
     is_human boolean,
     added_at timestamp without time zone DEFAULT now(),
     source character varying
-);
-
-
---
--- Name: id_table; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.id_table (
-    id bigint NOT NULL,
-    table_name character varying NOT NULL,
-    extra jsonb
-);
-
-
---
--- Name: known_relays; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.known_relays (
-    relay_url character varying NOT NULL,
-    last_import_at timestamp without time zone NOT NULL
 );
 
 
@@ -5050,19 +4015,6 @@ CREATE TABLE public.live_event_pubkey_filterlist (
 
 
 --
--- Name: logs_1_d241bdb71c; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.logs_1_d241bdb71c (
-    t timestamp without time zone NOT NULL,
-    module character varying NOT NULL,
-    func character varying NOT NULL,
-    type character varying NOT NULL,
-    d jsonb NOT NULL
-);
-
-
---
 -- Name: media_1_16fa35f2dc; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5081,7 +4033,8 @@ CREATE TABLE public.media_1_16fa35f2dc (
     duration double precision NOT NULL,
     rowid bigint DEFAULT 0,
     orig_sha256 bytea
-);
+)
+WITH (autovacuum_analyze_scale_factor='0.01');
 
 ALTER TABLE ONLY public.media_1_16fa35f2dc REPLICA IDENTITY FULL;
 
@@ -5136,7 +4089,8 @@ CREATE TABLE public.media_storage (
     size bigint NOT NULL,
     sha256 bytea,
     media_block_id uuid
-);
+)
+WITH (autovacuum_analyze_scale_factor='0.01');
 
 
 --
@@ -5196,10 +4150,17 @@ CREATE TABLE public.memberships (
 --
 
 CREATE VIEW public.meta_data AS
- SELECT key,
-    value,
-    rowid
-   FROM public.meta_data_1_323bc43167;
+ SELECT pubkey AS key,
+    id AS value,
+    (0)::bigint AS rowid
+   FROM public.event e
+  WHERE ((kind = 0) AND (id = ( SELECT n.id
+           FROM public.event n
+          WHERE ((n.pubkey = e.pubkey) AND (n.kind = 0) AND (n.created_at = ( SELECT max(m.created_at) AS max
+                   FROM public.event m
+                  WHERE ((m.pubkey = e.pubkey) AND (m.kind = 0)))))
+          ORDER BY n.id
+         LIMIT 1)));
 
 
 --
@@ -5207,10 +4168,17 @@ CREATE VIEW public.meta_data AS
 --
 
 CREATE VIEW public.mute_list AS
- SELECT key,
-    value,
-    rowid
-   FROM public.mute_list_1_f693a878b9;
+ SELECT pubkey AS key,
+    id AS value,
+    (0)::bigint AS rowid
+   FROM public.event e
+  WHERE ((kind = 10000) AND (id = ( SELECT n.id
+           FROM public.event n
+          WHERE ((n.pubkey = e.pubkey) AND (n.kind = 10000) AND (n.created_at = ( SELECT max(m.created_at) AS max
+                   FROM public.event m
+                  WHERE ((m.pubkey = e.pubkey) AND (m.kind = 10000)))))
+          ORDER BY n.id
+         LIMIT 1)));
 
 
 --
@@ -5218,10 +4186,11 @@ CREATE VIEW public.mute_list AS
 --
 
 CREATE VIEW public.mute_list_2 AS
- SELECT key,
-    value,
-    rowid
-   FROM public.mute_list_2_1_949b3d746b;
+ SELECT pubkey AS key,
+    event_id AS value,
+    (0)::bigint AS rowid
+   FROM public.parametrized_replaceable_events
+  WHERE ((kind = 30000) AND ((identifier)::text = 'mute'::text));
 
 
 --
@@ -5229,31 +4198,11 @@ CREATE VIEW public.mute_list_2 AS
 --
 
 CREATE VIEW public.mute_lists AS
- SELECT key,
-    value,
-    rowid
-   FROM public.mute_lists_1_d90e559628;
-
-
---
--- Name: muted_threads; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.muted_threads (
-    pubkey bytea NOT NULL,
-    root_eid bytea NOT NULL,
-    muted_at timestamp without time zone NOT NULL
-);
-
-
---
--- Name: node_outputs_1_cfe6037c9f; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.node_outputs_1_cfe6037c9f (
-    output character varying NOT NULL,
-    def jsonb NOT NULL
-);
+ SELECT pubkey AS key,
+    event_id AS value,
+    (0)::bigint AS rowid
+   FROM public.parametrized_replaceable_events
+  WHERE ((kind = 30000) AND ((identifier)::text = 'mutelists'::text));
 
 
 --
@@ -5261,9 +4210,20 @@ CREATE TABLE public.node_outputs_1_cfe6037c9f (
 --
 
 CREATE VIEW public.note_length AS
- SELECT eid,
-    length
-   FROM public.note_length_1_15d66ffae6;
+ SELECT id AS eid,
+    (length(content))::bigint AS length
+   FROM public.event e
+  WHERE (kind = ANY (ARRAY[(1)::bigint, (6)::bigint, (30023)::bigint]));
+
+
+--
+-- Name: note_stats_1_07d205f278; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.note_stats_1_07d205f278 (
+    eid bytea NOT NULL,
+    long_replies bigint NOT NULL
+);
 
 
 --
@@ -5287,21 +4247,6 @@ CREATE TABLE public.notification_types (
 
 
 --
--- Name: og_zap_receipts; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.og_zap_receipts AS
- SELECT zap_receipt_id,
-    created_at,
-    sender,
-    receiver,
-    amount_sats,
-    event_id,
-    rowid
-   FROM public.og_zap_receipts_1_dc85307383;
-
-
---
 -- Name: parameterized_replaceable_list; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -5310,22 +4255,9 @@ CREATE VIEW public.parameterized_replaceable_list AS
     identifier,
     created_at,
     event_id,
-    rowid
-   FROM public.parameterized_replaceable_list_1_d02d7ecc62;
-
-
---
--- Name: parametrized_replaceable_events; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.parametrized_replaceable_events AS
- SELECT pubkey,
-    kind,
-    identifier,
-    event_id,
-    created_at,
-    rowid
-   FROM public.parametrized_replaceable_events_1_cbe75c8d53;
+    (0)::bigint AS rowid
+   FROM public.parametrized_replaceable_events
+  WHERE ((kind = 30000) AND ((identifier)::text <> ALL (ARRAY[('mute'::character varying)::text, ('mutelists'::character varying)::text, ('allowlist'::character varying)::text])));
 
 
 --
@@ -5348,17 +4280,6 @@ CREATE VIEW public.poll_stats AS
     options,
     updated_at
    FROM public.poll_stats_1_d8de047040;
-
-
---
--- Name: poll_stats_cache_1_bf8765df25; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.poll_stats_cache_1_bf8765df25 (
-    event_id bytea NOT NULL,
-    options jsonb NOT NULL,
-    updated_at bigint NOT NULL
-);
 
 
 --
@@ -5439,13 +4360,42 @@ CREATE TABLE public.pubkey_bookmarks (
 
 
 --
+-- Name: pubkey_stats; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pubkey_stats (
+    pubkey bytea NOT NULL,
+    followers bigint DEFAULT 0 NOT NULL,
+    zaps bigint DEFAULT 0 NOT NULL,
+    satszapped bigint DEFAULT 0 NOT NULL,
+    media_cnt bigint DEFAULT 0 NOT NULL,
+    content_zap_cnt bigint DEFAULT 0 NOT NULL
+)
+WITH (fillfactor='80');
+
+
+--
 -- Name: pubkey_content_zap_cnt; Type: VIEW; Schema: public; Owner: -
 --
 
 CREATE VIEW public.pubkey_content_zap_cnt AS
  SELECT pubkey,
-    cnt
-   FROM public.pubkey_content_zap_cnt_1_236df2f369;
+    content_zap_cnt AS cnt
+   FROM public.pubkey_stats
+  WHERE (content_zap_cnt <> 0);
+
+
+--
+-- Name: pubkey_directmsgs_1_c794110a2c; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pubkey_directmsgs_1_c794110a2c (
+    receiver bytea NOT NULL,
+    sender bytea NOT NULL,
+    created_at bigint NOT NULL,
+    event_id bytea NOT NULL,
+    rowid bigint DEFAULT 0
+);
 
 
 --
@@ -5472,7 +4422,8 @@ CREATE TABLE public.pubkey_directmsgs_cnt_1_efdf9742a6 (
     latest_at bigint NOT NULL,
     latest_event_id bytea NOT NULL,
     rowid bigint DEFAULT 0
-);
+)
+WITH (fillfactor='80');
 
 
 --
@@ -5490,6 +4441,21 @@ CREATE VIEW public.pubkey_directmsgs_cnt AS
 
 
 --
+-- Name: pubkey_events_1_1dcbfe1466; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pubkey_events_1_1dcbfe1466 (
+    pubkey bytea NOT NULL,
+    event_id bytea NOT NULL,
+    created_at bigint NOT NULL,
+    is_reply bigint NOT NULL,
+    rowid bigint DEFAULT 0,
+    kind bigint
+)
+WITH (autovacuum_vacuum_scale_factor='0.01', autovacuum_vacuum_insert_scale_factor='0.01');
+
+
+--
 -- Name: pubkey_events; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -5498,8 +4464,21 @@ CREATE VIEW public.pubkey_events AS
     event_id,
     created_at,
     is_reply,
-    rowid
+    rowid,
+    kind
    FROM public.pubkey_events_1_1dcbfe1466;
+
+
+--
+-- Name: pubkey_followers_1_d52305fb47; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pubkey_followers_1_d52305fb47 (
+    pubkey bytea NOT NULL,
+    follower_pubkey bytea NOT NULL,
+    follower_contact_list_event_id bytea NOT NULL,
+    rowid bigint DEFAULT 0
+);
 
 
 --
@@ -5519,21 +4498,11 @@ CREATE VIEW public.pubkey_followers AS
 --
 
 CREATE VIEW public.pubkey_followers_cnt AS
- SELECT key,
-    value,
-    rowid
-   FROM public.pubkey_followers_cnt_1_a6f7e200e7;
-
-
---
--- Name: pubkey_ids; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.pubkey_ids AS
- SELECT key,
-    value,
-    rowid
-   FROM public.pubkey_ids_1_54b55dd09c;
+ SELECT pubkey AS key,
+    followers AS value,
+    (0)::bigint AS rowid
+   FROM public.pubkey_stats
+  WHERE (followers <> 0);
 
 
 --
@@ -5542,9 +4511,16 @@ CREATE VIEW public.pubkey_ids AS
 
 CREATE VIEW public.pubkey_ln_address AS
  SELECT pubkey,
-    ln_address,
-    rowid
-   FROM public.pubkey_ln_address_1_d3649b2898;
+    public.event_lud16(content) AS ln_address,
+    (0)::bigint AS rowid
+   FROM public.event e
+  WHERE ((kind = 0) AND (public.event_lud16(content) IS NOT NULL) AND (id = ( SELECT n.id
+           FROM public.event n
+          WHERE ((n.pubkey = e.pubkey) AND (n.kind = 0) AND (n.created_at = ( SELECT max(m.created_at) AS max
+                   FROM public.event m
+                  WHERE ((m.pubkey = e.pubkey) AND (m.kind = 0)))))
+          ORDER BY n.id
+         LIMIT 1)));
 
 
 --
@@ -5553,8 +4529,9 @@ CREATE VIEW public.pubkey_ln_address AS
 
 CREATE VIEW public.pubkey_media_cnt AS
  SELECT pubkey,
-    cnt
-   FROM public.pubkey_media_cnt_1_b5e2a488b1;
+    media_cnt AS cnt
+   FROM public.pubkey_stats
+  WHERE (media_cnt <> 0);
 
 
 --
@@ -5586,7 +4563,8 @@ CREATE TABLE public.pubkey_notification_cnts_1_d78f6fcade (
     type401 integer DEFAULT 0 NOT NULL,
     type501 integer DEFAULT 0 NOT NULL,
     type601 integer DEFAULT 0 NOT NULL
-);
+)
+WITH (fillfactor='80');
 
 
 --
@@ -5622,6 +4600,22 @@ CREATE VIEW public.pubkey_notification_cnts AS
 
 
 --
+-- Name: pubkey_notifications_1_e5459ab9dd; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pubkey_notifications_1_e5459ab9dd (
+    pubkey bytea NOT NULL,
+    created_at bigint NOT NULL,
+    type bigint NOT NULL,
+    arg1 bytea NOT NULL,
+    arg2 bytea,
+    arg3 jsonb,
+    arg4 jsonb,
+    rowid bigint DEFAULT 0
+);
+
+
+--
 -- Name: pubkey_notifications; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -5648,16 +4642,6 @@ CREATE UNLOGGED TABLE public.pubkey_trustrank (
 
 
 --
--- Name: pubkey_trustrank_ocaml_shadow; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE UNLOGGED TABLE public.pubkey_trustrank_ocaml_shadow (
-    pubkey bytea NOT NULL,
-    rank double precision NOT NULL
-);
-
-
---
 -- Name: pubkey_zapped; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -5665,8 +4649,33 @@ CREATE VIEW public.pubkey_zapped AS
  SELECT pubkey,
     zaps,
     satszapped,
-    rowid
-   FROM public.pubkey_zapped_1_17f1f622a9;
+    (0)::bigint AS rowid
+   FROM public.pubkey_stats
+  WHERE ((zaps <> 0) OR (satszapped <> 0));
+
+
+--
+-- Name: reads_12_68c6bbfccd; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.reads_12_68c6bbfccd (
+    pubkey bytea NOT NULL,
+    identifier character varying NOT NULL,
+    published_at bigint NOT NULL,
+    latest_eid bytea NOT NULL,
+    latest_created_at bigint NOT NULL,
+    likes bigint NOT NULL,
+    zaps bigint NOT NULL,
+    satszapped bigint NOT NULL,
+    replies bigint NOT NULL,
+    reposts bigint NOT NULL,
+    topics tsvector NOT NULL,
+    words bigint NOT NULL,
+    lang character varying NOT NULL,
+    lang_prob double precision NOT NULL,
+    image character varying NOT NULL,
+    summary character varying NOT NULL
+);
 
 
 --
@@ -5694,28 +4703,6 @@ CREATE VIEW public.reads AS
 
 
 --
--- Name: reads_11_2a4d2ce519; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.reads_11_2a4d2ce519 (
-    pubkey bytea NOT NULL,
-    identifier character varying NOT NULL,
-    published_at bigint NOT NULL,
-    latest_eid bytea NOT NULL,
-    latest_created_at bigint NOT NULL,
-    likes bigint NOT NULL,
-    zaps bigint NOT NULL,
-    satszapped bigint NOT NULL,
-    replies bigint NOT NULL,
-    reposts bigint NOT NULL,
-    topics tsvector NOT NULL,
-    words bigint NOT NULL,
-    lang character varying NOT NULL,
-    lang_prob double precision NOT NULL
-);
-
-
---
 -- Name: reads_interactions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5738,45 +4725,15 @@ CREATE TABLE public.reads_interactions_state (
 
 
 --
--- Name: reads_interactions_todo; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.reads_interactions_todo (
-    id bytea NOT NULL
-);
-
-
---
 -- Name: reads_versions; Type: VIEW; Schema: public; Owner: -
 --
 
 CREATE VIEW public.reads_versions AS
  SELECT pubkey,
-    identifier,
-    eid
-   FROM public.reads_versions_12_b537d4df66;
-
-
---
--- Name: reads_versions_11_fb53a8e0b4; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.reads_versions_11_fb53a8e0b4 (
-    pubkey bytea NOT NULL,
-    identifier character varying NOT NULL,
-    eid bytea NOT NULL
-);
-
-
---
--- Name: refs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.refs (
-    id bigint DEFAULT nextval('public.id_seq'::regclass) NOT NULL,
-    ref jsonb NOT NULL,
-    extra jsonb
-);
+    public.event_d_tag(tags) AS identifier,
+    id AS eid
+   FROM public.event e
+  WHERE ((kind >= 30000) AND (kind <= 39999) AND (kind = 30023) AND (public.event_d_tag(tags) IS NOT NULL));
 
 
 --
@@ -5785,9 +4742,16 @@ CREATE TABLE public.refs (
 
 CREATE VIEW public.relay_list_metadata AS
  SELECT pubkey,
-    event_id,
-    rowid
-   FROM public.relay_list_metadata_1_801a17fc93;
+    id AS event_id,
+    (0)::bigint AS rowid
+   FROM public.event e
+  WHERE ((kind = 10002) AND (id = ( SELECT n.id
+           FROM public.event n
+          WHERE ((n.pubkey = e.pubkey) AND (n.kind = 10002) AND (n.created_at = ( SELECT max(m.created_at) AS max
+                   FROM public.event m
+                  WHERE ((m.pubkey = e.pubkey) AND (m.kind = 10002)))))
+          ORDER BY n.id
+         LIMIT 1)));
 
 
 --
@@ -5797,37 +4761,6 @@ CREATE VIEW public.relay_list_metadata AS
 CREATE TABLE public.relay_url_map (
     src character varying NOT NULL,
     dest character varying NOT NULL
-);
-
-
---
--- Name: relays; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.relays (
-    url text NOT NULL,
-    times_referenced bigint NOT NULL
-);
-
-
---
--- Name: replaceable_events; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.replaceable_events (
-    pubkey bytea NOT NULL,
-    kind bigint NOT NULL,
-    event_id bytea NOT NULL
-);
-
-
---
--- Name: scheduled_hooks; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.scheduled_hooks (
-    execute_at bigint NOT NULL,
-    funcall text NOT NULL
 );
 
 
@@ -5867,26 +4800,6 @@ CREATE TABLE public.spam_note_content_hash (
 
 
 --
--- Name: stuff; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.stuff (
-    data text NOT NULL,
-    created_at bigint NOT NULL
-);
-
-
---
--- Name: test_pubkeys; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.test_pubkeys (
-    name character varying NOT NULL,
-    pubkey bytea NOT NULL
-);
-
-
---
 -- Name: text_metadata; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5901,46 +4814,6 @@ CREATE TABLE public.text_metadata (
 
 
 --
--- Name: trelays; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.trelays (
-    relay_url text,
-    cnt bigint
-);
-
-
---
--- Name: trusted_nostr_dau; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.trusted_nostr_dau (
-    t date,
-    cnt integer
-);
-
-
---
--- Name: trusted_nostr_mau; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.trusted_nostr_mau (
-    t date,
-    cnt integer
-);
-
-
---
--- Name: trusted_nostr_wau; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.trusted_nostr_wau (
-    t date,
-    cnt integer
-);
-
-
---
 -- Name: trusted_pubkey_followers_cnt; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5948,52 +4821,6 @@ CREATE TABLE public.trusted_pubkey_followers_cnt (
     t timestamp without time zone NOT NULL,
     pubkey bytea NOT NULL,
     cnt bigint NOT NULL
-);
-
-
---
--- Name: trusted_users_trusted_followers; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.trusted_users_trusted_followers AS
- SELECT pf.pubkey,
-    tr1.rank AS pubkey_rank,
-    pf.follower_pubkey,
-    tr2.rank AS follower_pubkey_rank
-   FROM public.pubkey_followers pf,
-    public.pubkey_trustrank tr1,
-    public.pubkey_trustrank tr2
-  WHERE ((pf.pubkey = tr1.pubkey) AND (pf.follower_pubkey = tr2.pubkey));
-
-
---
--- Name: tt2; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.tt2 (
-    eid bytea,
-    pubkey bytea
-);
-
-
---
--- Name: tviews; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.tviews (
-    tablename text
-);
-
-
---
--- Name: ui; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.ui (
-    key character varying NOT NULL,
-    value jsonb,
-    updated_at timestamp without time zone NOT NULL,
-    expires_at timestamp without time zone
 );
 
 
@@ -6061,52 +4888,6 @@ CREATE VIEW public.video_thumbnails AS
 
 
 --
--- Name: wsconnlog; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE UNLOGGED TABLE public.wsconnlog (
-    t timestamp without time zone NOT NULL,
-    run bigint NOT NULL,
-    task bigint NOT NULL,
-    tokio_task bigint NOT NULL,
-    info jsonb NOT NULL,
-    func character varying,
-    conn bigint
-);
-
-
---
--- Name: wsconnruns; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.wsconnruns (
-    run bigint NOT NULL,
-    tstart timestamp without time zone NOT NULL,
-    servername character varying NOT NULL,
-    port bigint NOT NULL
-);
-
-
---
--- Name: wsconnruns_run_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.wsconnruns_run_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: wsconnruns_run_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.wsconnruns_run_seq OWNED BY public.wsconnruns.run;
-
-
---
 -- Name: wsconnvars; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6138,7 +4919,8 @@ CREATE VIEW public.zap_receipts AS
     receiver,
     satszapped,
     imported_at
-   FROM public.zap_receipts_1_9fe40119b2;
+   FROM public.zap_receipts_1_9fe40119b2
+  WHERE (sender IS NOT NULL);
 
 
 --
@@ -6160,61 +4942,6 @@ ALTER TABLE ONLY public.advsearch_5_d7da6f551e ALTER COLUMN i SET DEFAULT nextva
 --
 
 ALTER TABLE ONLY public.basic_tags_6_62c3d17c2f ALTER COLUMN i SET DEFAULT nextval('public.basic_tags_6_62c3d17c2f_i_seq'::regclass);
-
-
---
--- Name: wsconnruns run; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.wsconnruns ALTER COLUMN run SET DEFAULT nextval('public.wsconnruns_run_seq'::regclass);
-
-
---
--- Name: edges edges_pkey; Type: CONSTRAINT; Schema: cache; Owner: -
---
-
-ALTER TABLE ONLY cache.edges
-    ADD CONSTRAINT edges_pkey PRIMARY KEY (id);
-
-
---
--- Name: edgetypes edgetypes_pkey; Type: CONSTRAINT; Schema: cache; Owner: -
---
-
-ALTER TABLE ONLY cache.edgetypes
-    ADD CONSTRAINT edgetypes_pkey PRIMARY KEY (name);
-
-
---
--- Name: follow_lists follow_lists_pkey; Type: CONSTRAINT; Schema: cache; Owner: -
---
-
-ALTER TABLE ONLY cache.follow_lists
-    ADD CONSTRAINT follow_lists_pkey PRIMARY KEY (pubkey, identifier, follow_pubkey);
-
-
---
--- Name: id_table id_table_pkey; Type: CONSTRAINT; Schema: cache; Owner: -
---
-
-ALTER TABLE ONLY cache.id_table
-    ADD CONSTRAINT id_table_pkey PRIMARY KEY (id);
-
-
---
--- Name: refs refs_pkey; Type: CONSTRAINT; Schema: cache; Owner: -
---
-
-ALTER TABLE ONLY cache.refs
-    ADD CONSTRAINT refs_pkey PRIMARY KEY (ref);
-
-
---
--- Name: _sqlx_migrations _sqlx_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public._sqlx_migrations
-    ADD CONSTRAINT _sqlx_migrations_pkey PRIMARY KEY (version);
 
 
 --
@@ -6250,38 +4977,6 @@ ALTER TABLE ONLY public.advsearch_5_d7da6f551e
 
 
 --
--- Name: allow_list_1_f1da08e9c8 allow_list_1_f1da08e9c8_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.allow_list_1_f1da08e9c8
-    ADD CONSTRAINT allow_list_1_f1da08e9c8_pkey PRIMARY KEY (key);
-
-
---
--- Name: basic_tags_6_62c3d17c2f basic_tags_6_62c3d17c2f_id_tag_arg1_arg3_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.basic_tags_6_62c3d17c2f
-    ADD CONSTRAINT basic_tags_6_62c3d17c2f_id_tag_arg1_arg3_key UNIQUE (id, tag, arg1, arg3);
-
-
---
--- Name: basic_tags_6_62c3d17c2f basic_tags_6_62c3d17c2f_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.basic_tags_6_62c3d17c2f
-    ADD CONSTRAINT basic_tags_6_62c3d17c2f_pkey PRIMARY KEY (i);
-
-
---
--- Name: bookmarks_1_43f5248b56 bookmarks_1_43f5248b56_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.bookmarks_1_43f5248b56
-    ADD CONSTRAINT bookmarks_1_43f5248b56_pkey PRIMARY KEY (pubkey);
-
-
---
 -- Name: cache cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6295,14 +4990,6 @@ ALTER TABLE ONLY public.cache
 
 ALTER TABLE ONLY public.cmr_hashtags_2
     ADD CONSTRAINT cmr_hashtags_2_pkey PRIMARY KEY (user_pubkey, scope);
-
-
---
--- Name: cmr_hashtags cmr_hashtags_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cmr_hashtags
-    ADD CONSTRAINT cmr_hashtags_pkey PRIMARY KEY (user_pubkey, hashtag, scope);
 
 
 --
@@ -6322,43 +5009,11 @@ ALTER TABLE ONLY public.cmr_words_2
 
 
 --
--- Name: cmr_words cmr_words_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.cmr_words
-    ADD CONSTRAINT cmr_words_pkey PRIMARY KEY (user_pubkey, word, scope);
-
-
---
--- Name: contact_lists_1_1abdf474bd contact_lists_1_1abdf474bd_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.contact_lists_1_1abdf474bd
-    ADD CONSTRAINT contact_lists_1_1abdf474bd_pkey PRIMARY KEY (key);
-
-
---
--- Name: counter_by_bytea counter_by_bytea_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.counter_by_bytea
-    ADD CONSTRAINT counter_by_bytea_pkey PRIMARY KEY (type, key);
-
-
---
 -- Name: coverages_1_8656fc443b coverages_1_8656fc443b_name_t_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.coverages_1_8656fc443b
     ADD CONSTRAINT coverages_1_8656fc443b_name_t_key UNIQUE (name, t);
-
-
---
--- Name: dag_1_4bd2aaff98 dag_1_4bd2aaff98_output_input_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.dag_1_4bd2aaff98
-    ADD CONSTRAINT dag_1_4bd2aaff98_output_input_key UNIQUE (output, input);
 
 
 --
@@ -6386,30 +5041,6 @@ ALTER TABLE ONLY public.dvm_feeds
 
 
 --
--- Name: edges edges_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.edges
-    ADD CONSTRAINT edges_pkey PRIMARY KEY (id);
-
-
---
--- Name: edgetypes edgetypes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.edgetypes
-    ADD CONSTRAINT edgetypes_pkey PRIMARY KEY (name);
-
-
---
--- Name: event_created_at_1_7a51e16c5c event_created_at_1_7a51e16c5c_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_created_at_1_7a51e16c5c
-    ADD CONSTRAINT event_created_at_1_7a51e16c5c_pkey PRIMARY KEY (event_id);
-
-
---
 -- Name: event_hls_media event_hls_media_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6426,22 +5057,6 @@ ALTER TABLE ONLY public.event_media_1_30bf07e9cf
 
 
 --
--- Name: event_mentions_1_0b730615c4 event_mentions_1_0b730615c4_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_mentions_1_0b730615c4
-    ADD CONSTRAINT event_mentions_1_0b730615c4_pkey PRIMARY KEY (eid);
-
-
---
--- Name: event_mentions_1_6738bfddaf event_mentions_1_6738bfddaf_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_mentions_1_6738bfddaf
-    ADD CONSTRAINT event_mentions_1_6738bfddaf_pkey PRIMARY KEY (eid, tag, argeid, argpubkey, argkind, argid);
-
-
---
 -- Name: event event_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6455,54 +5070,6 @@ ALTER TABLE ONLY public.event
 
 ALTER TABLE ONLY public.event_preview_1_310cef356e
     ADD CONSTRAINT event_preview_1_310cef356e_pkey PRIMARY KEY (event_id, url);
-
-
---
--- Name: event_pubkey_actions_1_d62afee35d event_pubkey_actions_1_d62afee35d_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_pubkey_actions_1_d62afee35d
-    ADD CONSTRAINT event_pubkey_actions_1_d62afee35d_pkey PRIMARY KEY (event_id, pubkey);
-
-
---
--- Name: event_relay event_relay_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_relay
-    ADD CONSTRAINT event_relay_pkey PRIMARY KEY (event_id);
-
-
---
--- Name: event_relays event_relays_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_relays
-    ADD CONSTRAINT event_relays_pkey PRIMARY KEY (event_id, relay_url);
-
-
---
--- Name: event_sentiment_1_d3d7a00a54 event_sentiment_1_d3d7a00a54_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_sentiment_1_d3d7a00a54
-    ADD CONSTRAINT event_sentiment_1_d3d7a00a54_pkey PRIMARY KEY (eid, model);
-
-
---
--- Name: event_stats_2 event_stats_2_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_stats_2
-    ADD CONSTRAINT event_stats_2_pkey PRIMARY KEY (event_id);
-
-
---
--- Name: event_thread_parents_1_e17bf16c98 event_thread_parents_1_e17bf16c98_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_thread_parents_1_e17bf16c98
-    ADD CONSTRAINT event_thread_parents_1_e17bf16c98_pkey PRIMARY KEY (key);
 
 
 --
@@ -6535,22 +5102,6 @@ ALTER TABLE ONLY public.follow_lists
 
 ALTER TABLE ONLY public.human_override
     ADD CONSTRAINT human_override_pkey PRIMARY KEY (pubkey);
-
-
---
--- Name: id_table id_table_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.id_table
-    ADD CONSTRAINT id_table_pkey PRIMARY KEY (id);
-
-
---
--- Name: known_relays known_relays_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.known_relays
-    ADD CONSTRAINT known_relays_pkey PRIMARY KEY (relay_url);
 
 
 --
@@ -6626,62 +5177,6 @@ ALTER TABLE ONLY public.memberships
 
 
 --
--- Name: meta_data_1_323bc43167 meta_data_1_323bc43167_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.meta_data_1_323bc43167
-    ADD CONSTRAINT meta_data_1_323bc43167_pkey PRIMARY KEY (key);
-
-
---
--- Name: mute_list_1_f693a878b9 mute_list_1_f693a878b9_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.mute_list_1_f693a878b9
-    ADD CONSTRAINT mute_list_1_f693a878b9_pkey PRIMARY KEY (key);
-
-
---
--- Name: mute_list_2_1_949b3d746b mute_list_2_1_949b3d746b_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.mute_list_2_1_949b3d746b
-    ADD CONSTRAINT mute_list_2_1_949b3d746b_pkey PRIMARY KEY (key);
-
-
---
--- Name: mute_lists_1_d90e559628 mute_lists_1_d90e559628_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.mute_lists_1_d90e559628
-    ADD CONSTRAINT mute_lists_1_d90e559628_pkey PRIMARY KEY (key);
-
-
---
--- Name: muted_threads muted_threads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.muted_threads
-    ADD CONSTRAINT muted_threads_pkey PRIMARY KEY (pubkey, root_eid);
-
-
---
--- Name: node_outputs_1_cfe6037c9f node_outputs_1_cfe6037c9f_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.node_outputs_1_cfe6037c9f
-    ADD CONSTRAINT node_outputs_1_cfe6037c9f_pkey PRIMARY KEY (output);
-
-
---
--- Name: note_length_1_15d66ffae6 note_length_1_15d66ffae6_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.note_length_1_15d66ffae6
-    ADD CONSTRAINT note_length_1_15d66ffae6_pkey PRIMARY KEY (eid);
-
-
---
 -- Name: note_stats_1_07d205f278 note_stats_1_07d205f278_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6706,14 +5201,6 @@ ALTER TABLE ONLY public.poll_stats_1_d8de047040
 
 
 --
--- Name: poll_stats_cache_1_bf8765df25 poll_stats_cache_1_bf8765df25_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.poll_stats_cache_1_bf8765df25
-    ADD CONSTRAINT poll_stats_cache_1_bf8765df25_pkey PRIMARY KEY (event_id);
-
-
---
 -- Name: poll_user_votes_1_5fa4d82e64 poll_user_votes_1_5fa4d82e64_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6730,46 +5217,6 @@ ALTER TABLE ONLY public.preview_1_44299731c7
 
 
 --
--- Name: pubkey_content_zap_cnt_1_236df2f369 pubkey_content_zap_cnt_1_236df2f369_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pubkey_content_zap_cnt_1_236df2f369
-    ADD CONSTRAINT pubkey_content_zap_cnt_1_236df2f369_pkey PRIMARY KEY (pubkey);
-
-
---
--- Name: pubkey_followers_cnt_1_a6f7e200e7 pubkey_followers_cnt_1_a6f7e200e7_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pubkey_followers_cnt_1_a6f7e200e7
-    ADD CONSTRAINT pubkey_followers_cnt_1_a6f7e200e7_pkey PRIMARY KEY (key);
-
-
---
--- Name: pubkey_ids_1_54b55dd09c pubkey_ids_1_54b55dd09c_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pubkey_ids_1_54b55dd09c
-    ADD CONSTRAINT pubkey_ids_1_54b55dd09c_pkey PRIMARY KEY (key);
-
-
---
--- Name: pubkey_ln_address_1_d3649b2898 pubkey_ln_address_1_d3649b2898_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pubkey_ln_address_1_d3649b2898
-    ADD CONSTRAINT pubkey_ln_address_1_d3649b2898_pkey PRIMARY KEY (pubkey);
-
-
---
--- Name: pubkey_media_cnt_1_b5e2a488b1 pubkey_media_cnt_1_b5e2a488b1_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pubkey_media_cnt_1_b5e2a488b1
-    ADD CONSTRAINT pubkey_media_cnt_1_b5e2a488b1_pkey PRIMARY KEY (pubkey);
-
-
---
 -- Name: pubkey_notification_cnts_1_d78f6fcade pubkey_notification_cnts_1_d78f6fcade_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6778,35 +5225,19 @@ ALTER TABLE ONLY public.pubkey_notification_cnts_1_d78f6fcade
 
 
 --
+-- Name: pubkey_stats pubkey_stats_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pubkey_stats
+    ADD CONSTRAINT pubkey_stats_pkey PRIMARY KEY (pubkey);
+
+
+--
 -- Name: pubkey_trustrank pubkey_trustrank_new_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.pubkey_trustrank
     ADD CONSTRAINT pubkey_trustrank_new_pkey PRIMARY KEY (pubkey);
-
-
---
--- Name: pubkey_trustrank_ocaml_shadow pubkey_trustrank_ocaml_shadow_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pubkey_trustrank_ocaml_shadow
-    ADD CONSTRAINT pubkey_trustrank_ocaml_shadow_pkey PRIMARY KEY (pubkey);
-
-
---
--- Name: pubkey_zapped_1_17f1f622a9 pubkey_zapped_1_17f1f622a9_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pubkey_zapped_1_17f1f622a9
-    ADD CONSTRAINT pubkey_zapped_1_17f1f622a9_pkey PRIMARY KEY (pubkey);
-
-
---
--- Name: reads_11_2a4d2ce519 reads_11_2a4d2ce519_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.reads_11_2a4d2ce519
-    ADD CONSTRAINT reads_11_2a4d2ce519_pkey PRIMARY KEY (pubkey, identifier);
 
 
 --
@@ -6834,67 +5265,11 @@ ALTER TABLE ONLY public.reads_interactions_state
 
 
 --
--- Name: reads_interactions_todo reads_interactions_todo_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.reads_interactions_todo
-    ADD CONSTRAINT reads_interactions_todo_pkey PRIMARY KEY (id);
-
-
---
--- Name: reads_versions_11_fb53a8e0b4 reads_versions_11_fb53a8e0b4_pubkey_identifier_eid_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.reads_versions_11_fb53a8e0b4
-    ADD CONSTRAINT reads_versions_11_fb53a8e0b4_pubkey_identifier_eid_key UNIQUE (pubkey, identifier, eid);
-
-
---
--- Name: reads_versions_12_b537d4df66 reads_versions_12_b537d4df66_pubkey_identifier_eid_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.reads_versions_12_b537d4df66
-    ADD CONSTRAINT reads_versions_12_b537d4df66_pubkey_identifier_eid_key UNIQUE (pubkey, identifier, eid);
-
-
---
--- Name: refs refs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.refs
-    ADD CONSTRAINT refs_pkey PRIMARY KEY (ref);
-
-
---
--- Name: relay_list_metadata_1_801a17fc93 relay_list_metadata_1_801a17fc93_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.relay_list_metadata_1_801a17fc93
-    ADD CONSTRAINT relay_list_metadata_1_801a17fc93_pkey PRIMARY KEY (pubkey);
-
-
---
 -- Name: relay_url_map relay_url_map_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.relay_url_map
     ADD CONSTRAINT relay_url_map_pkey PRIMARY KEY (src);
-
-
---
--- Name: relays relays_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.relays
-    ADD CONSTRAINT relays_pkey PRIMARY KEY (url);
-
-
---
--- Name: replaceable_events replaceable_events_pk; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.replaceable_events
-    ADD CONSTRAINT replaceable_events_pk PRIMARY KEY (pubkey, kind);
 
 
 --
@@ -6930,14 +5305,6 @@ ALTER TABLE ONLY public.trusted_pubkey_followers_cnt
 
 
 --
--- Name: ui ui_pk; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.ui
-    ADD CONSTRAINT ui_pk PRIMARY KEY (key);
-
-
---
 -- Name: user_search user_search_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6959,14 +5326,6 @@ ALTER TABLE ONLY public.vars
 
 ALTER TABLE ONLY public.video_thumbnails_1_107d5a46eb
     ADD CONSTRAINT video_thumbnails_1_107d5a46eb_pkey PRIMARY KEY (video_url);
-
-
---
--- Name: wsconnruns wsconnruns_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.wsconnruns
-    ADD CONSTRAINT wsconnruns_pkey PRIMARY KEY (run);
 
 
 --
@@ -6994,38 +5353,10 @@ ALTER TABLE ONLY public.zap_receipts_1_9fe40119b2
 
 
 --
--- Name: follow_lists_pubkey_identifier_idx; Type: INDEX; Schema: cache; Owner: -
---
-
-CREATE INDEX follow_lists_pubkey_identifier_idx ON cache.follow_lists USING btree (pubkey, identifier);
-
-
---
 -- Name: a_tags_1_7d98c5333f_created_at_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX a_tags_1_7d98c5333f_created_at_idx ON public.a_tags_1_7d98c5333f USING btree (created_at);
-
-
---
--- Name: a_tags_1_7d98c5333f_eid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX a_tags_1_7d98c5333f_eid_idx ON public.a_tags_1_7d98c5333f USING btree (eid);
-
-
---
--- Name: a_tags_1_7d98c5333f_imported_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX a_tags_1_7d98c5333f_imported_at_idx ON public.a_tags_1_7d98c5333f USING btree (imported_at);
-
-
---
--- Name: a_tags_1_7d98c5333f_ref_kind_ref_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX a_tags_1_7d98c5333f_ref_kind_ref_pubkey_idx ON public.a_tags_1_7d98c5333f USING btree (ref_kind, ref_pubkey);
 
 
 --
@@ -7064,24 +5395,10 @@ CREATE INDEX advsearch_5_d7da6f551e_hashtag_tsv_idx ON public.advsearch_5_d7da6f
 
 
 --
--- Name: advsearch_5_d7da6f551e_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX advsearch_5_d7da6f551e_id_idx ON public.advsearch_5_d7da6f551e USING btree (id);
-
-
---
 -- Name: advsearch_5_d7da6f551e_kind_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX advsearch_5_d7da6f551e_kind_idx ON public.advsearch_5_d7da6f551e USING btree (kind);
-
-
---
--- Name: advsearch_5_d7da6f551e_mention_tsv_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX advsearch_5_d7da6f551e_mention_tsv_idx ON public.advsearch_5_d7da6f551e USING gin (mention_tsv);
 
 
 --
@@ -7092,38 +5409,10 @@ CREATE INDEX advsearch_5_d7da6f551e_pubkey_created_at_desc_idx ON public.advsear
 
 
 --
--- Name: advsearch_5_d7da6f551e_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX advsearch_5_d7da6f551e_pubkey_idx ON public.advsearch_5_d7da6f551e USING btree (pubkey);
-
-
---
 -- Name: advsearch_5_d7da6f551e_reply_tsv_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX advsearch_5_d7da6f551e_reply_tsv_idx ON public.advsearch_5_d7da6f551e USING gin (reply_tsv);
-
-
---
--- Name: advsearch_5_d7da6f551e_url_tsv_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX advsearch_5_d7da6f551e_url_tsv_idx ON public.advsearch_5_d7da6f551e USING gin (url_tsv);
-
-
---
--- Name: allow_list_1_f1da08e9c8_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX allow_list_1_f1da08e9c8_key_idx ON public.allow_list_1_f1da08e9c8 USING btree (key);
-
-
---
--- Name: allow_list_1_f1da08e9c8_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX allow_list_1_f1da08e9c8_rowid_idx ON public.allow_list_1_f1da08e9c8 USING btree (rowid);
 
 
 --
@@ -7141,10 +5430,24 @@ CREATE INDEX basic_tags_6_62c3d17c2f_created_at_idx ON public.basic_tags_6_62c3d
 
 
 --
--- Name: basic_tags_6_62c3d17c2f_id_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: basic_tags_6_62c3d17c2f_e_actor_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX basic_tags_6_62c3d17c2f_id_idx ON public.basic_tags_6_62c3d17c2f USING btree (id);
+CREATE INDEX basic_tags_6_62c3d17c2f_e_actor_idx ON public.basic_tags_6_62c3d17c2f USING btree (arg1, pubkey, kind) WHERE ((tag = 'e'::bpchar) AND (kind = ANY (ARRAY[(1)::bigint, (6)::bigint, (7)::bigint, (20)::bigint, (1068)::bigint, (1111)::bigint, (6969)::bigint])));
+
+
+--
+-- Name: basic_tags_6_62c3d17c2f_e_kind_time_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX basic_tags_6_62c3d17c2f_e_kind_time_idx ON public.basic_tags_6_62c3d17c2f USING btree (arg1, kind, created_at DESC) WHERE ((tag = 'e'::bpchar) AND (kind = ANY (ARRAY[(1)::bigint, (6)::bigint, (7)::bigint, (20)::bigint, (1068)::bigint, (1111)::bigint, (6969)::bigint])));
+
+
+--
+-- Name: basic_tags_6_62c3d17c2f_id_tag_arg1_arg3_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX basic_tags_6_62c3d17c2f_id_tag_arg1_arg3_key ON public.basic_tags_6_62c3d17c2f USING btree (id, tag, arg1, arg3);
 
 
 --
@@ -7162,24 +5465,17 @@ CREATE INDEX basic_tags_6_62c3d17c2f_live_event_host_idx ON public.basic_tags_6_
 
 
 --
+-- Name: basic_tags_6_62c3d17c2f_pkey; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX basic_tags_6_62c3d17c2f_pkey ON public.basic_tags_6_62c3d17c2f USING btree (i);
+
+
+--
 -- Name: basic_tags_6_62c3d17c2f_pubkey_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX basic_tags_6_62c3d17c2f_pubkey_idx ON public.basic_tags_6_62c3d17c2f USING btree (pubkey);
-
-
---
--- Name: bookmarks_1_43f5248b56_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX bookmarks_1_43f5248b56_pubkey_idx ON public.bookmarks_1_43f5248b56 USING btree (pubkey);
-
-
---
--- Name: bookmarks_1_43f5248b56_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX bookmarks_1_43f5248b56_rowid_idx ON public.bookmarks_1_43f5248b56 USING btree (rowid);
 
 
 --
@@ -7190,31 +5486,10 @@ CREATE INDEX cmr_groups_user_pubkey_grp_scope_idx ON public.cmr_groups USING btr
 
 
 --
--- Name: cmr_hashtags_2_user_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX cmr_hashtags_2_user_pubkey_idx ON public.cmr_hashtags_2 USING btree (user_pubkey);
-
-
---
--- Name: cmr_hashtags_user_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX cmr_hashtags_user_pubkey_idx ON public.cmr_hashtags USING btree (user_pubkey);
-
-
---
 -- Name: cmr_pubkeys_allowed_user_pubkey_pubkey_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX cmr_pubkeys_allowed_user_pubkey_pubkey_idx ON public.cmr_pubkeys_allowed USING btree (user_pubkey, pubkey);
-
-
---
--- Name: cmr_pubkeys_parent_user_pubkey_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX cmr_pubkeys_parent_user_pubkey_pubkey_idx ON public.cmr_pubkeys_parent USING btree (user_pubkey, pubkey);
 
 
 --
@@ -7225,108 +5500,10 @@ CREATE INDEX cmr_pubkeys_scopes_user_pubkey_pubkey_scope_idx ON public.cmr_pubke
 
 
 --
--- Name: cmr_threads_user_pubkey_event_id_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: event_addressable_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX cmr_threads_user_pubkey_event_id_idx ON public.cmr_threads USING btree (user_pubkey, event_id);
-
-
---
--- Name: cmr_words_2_user_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX cmr_words_2_user_pubkey_idx ON public.cmr_words_2 USING btree (user_pubkey);
-
-
---
--- Name: cmr_words_user_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX cmr_words_user_pubkey_idx ON public.cmr_words USING btree (user_pubkey);
-
-
---
--- Name: contact_lists_1_1abdf474bd_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX contact_lists_1_1abdf474bd_key_idx ON public.contact_lists_1_1abdf474bd USING btree (key);
-
-
---
--- Name: contact_lists_1_1abdf474bd_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX contact_lists_1_1abdf474bd_rowid_idx ON public.contact_lists_1_1abdf474bd USING btree (rowid);
-
-
---
--- Name: coverages_1_8656fc443b_name_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX coverages_1_8656fc443b_name_idx ON public.coverages_1_8656fc443b USING btree (name);
-
-
---
--- Name: dag_1_4bd2aaff98_input_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX dag_1_4bd2aaff98_input_idx ON public.dag_1_4bd2aaff98 USING btree (input);
-
-
---
--- Name: dag_1_4bd2aaff98_output_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX dag_1_4bd2aaff98_output_idx ON public.dag_1_4bd2aaff98 USING btree (output);
-
-
---
--- Name: deleted_events_1_0249f47b16_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX deleted_events_1_0249f47b16_event_id_idx ON public.deleted_events_1_0249f47b16 USING btree (event_id);
-
-
---
--- Name: deleted_events_1_0249f47b16_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX deleted_events_1_0249f47b16_rowid_idx ON public.deleted_events_1_0249f47b16 USING btree (rowid);
-
-
---
--- Name: event_attributes_1_3196ca546f_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_attributes_1_3196ca546f_event_id_idx ON public.event_attributes_1_3196ca546f USING btree (event_id);
-
-
---
--- Name: event_attributes_1_3196ca546f_key_value_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_attributes_1_3196ca546f_key_value_idx ON public.event_attributes_1_3196ca546f USING btree (key, value);
-
-
---
--- Name: event_attributes_1_3196ca546f_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_attributes_1_3196ca546f_rowid_idx ON public.event_attributes_1_3196ca546f USING btree (rowid);
-
-
---
--- Name: event_created_at_1_7a51e16c5c_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_created_at_1_7a51e16c5c_created_at_idx ON public.event_created_at_1_7a51e16c5c USING btree (created_at);
-
-
---
--- Name: event_created_at_1_7a51e16c5c_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_created_at_1_7a51e16c5c_rowid_idx ON public.event_created_at_1_7a51e16c5c USING btree (rowid);
+CREATE INDEX event_addressable_idx ON public.event USING btree (kind, pubkey, public.event_d_tag(tags), created_at DESC) WHERE ((kind >= 30000) AND (kind <= 39999));
 
 
 --
@@ -7365,10 +5542,10 @@ CREATE INDEX event_hashtags_1_295f217c0e_hashtag_idx ON public.event_hashtags_1_
 
 
 --
--- Name: event_hashtags_1_295f217c0e_rowid_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: event_hooks_created_at_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX event_hashtags_1_295f217c0e_rowid_idx ON public.event_hashtags_1_295f217c0e USING btree (rowid);
+CREATE INDEX event_hooks_created_at_idx ON public.event_hooks USING btree (created_at);
 
 
 --
@@ -7376,20 +5553,6 @@ CREATE INDEX event_hashtags_1_295f217c0e_rowid_idx ON public.event_hashtags_1_29
 --
 
 CREATE INDEX event_hooks_event_id_idx ON public.event_hooks USING btree (event_id);
-
-
---
--- Name: event_imported_at; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_imported_at ON public.event USING btree (imported_at);
-
-
---
--- Name: event_imported_at_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_imported_at_id_idx ON public.event USING btree (imported_at, id);
 
 
 --
@@ -7407,17 +5570,10 @@ CREATE INDEX event_kind ON public.event USING btree (kind);
 
 
 --
--- Name: event_media_1_30bf07e9cf_event_id_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: event_lud16_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX event_media_1_30bf07e9cf_event_id_idx ON public.event_media_1_30bf07e9cf USING btree (event_id);
-
-
---
--- Name: event_media_1_30bf07e9cf_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_media_1_30bf07e9cf_rowid_idx ON public.event_media_1_30bf07e9cf USING btree (rowid);
+CREATE INDEX event_lud16_idx ON public.event USING btree (public.event_lud16(content)) WHERE (kind = 0);
 
 
 --
@@ -7428,13 +5584,6 @@ CREATE INDEX event_media_1_30bf07e9cf_url_idx ON public.event_media_1_30bf07e9cf
 
 
 --
--- Name: event_mentions_1_a056fb6737_eid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_mentions_1_a056fb6737_eid_idx ON public.event_mentions_1_a056fb6737 USING btree (eid);
-
-
---
 -- Name: event_mentions_1_a056fb6737_unique; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7442,143 +5591,10 @@ CREATE UNIQUE INDEX event_mentions_1_a056fb6737_unique ON public.event_mentions_
 
 
 --
--- Name: event_preview_1_310cef356e_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_preview_1_310cef356e_event_id_idx ON public.event_preview_1_310cef356e USING btree (event_id);
-
-
---
--- Name: event_preview_1_310cef356e_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_preview_1_310cef356e_rowid_idx ON public.event_preview_1_310cef356e USING btree (rowid);
-
-
---
--- Name: event_preview_1_310cef356e_url_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_preview_1_310cef356e_url_idx ON public.event_preview_1_310cef356e USING btree (url);
-
-
---
--- Name: event_pubkey; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey ON public.event USING btree (pubkey);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_event_id_idx ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (event_id);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_ref_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_ref_created_at_idx ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (ref_created_at);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_ref_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_ref_event_id_idx ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (ref_event_id);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_ref_event_id_ref_kind_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_ref_event_id_ref_kind_idx ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (ref_event_id, ref_kind);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_ref_event_id_ref_pubkey_i; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_ref_event_id_ref_pubkey_i ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (ref_event_id, ref_pubkey);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_ref_kind_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_ref_kind_idx ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (ref_kind);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_ref_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_ref_pubkey_idx ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (ref_pubkey);
-
-
---
--- Name: event_pubkey_action_refs_1_f32e1ff589_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_action_refs_1_f32e1ff589_rowid_idx ON public.event_pubkey_action_refs_1_f32e1ff589 USING btree (rowid);
-
-
---
--- Name: event_pubkey_actions_1_d62afee35d_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_actions_1_d62afee35d_created_at_idx ON public.event_pubkey_actions_1_d62afee35d USING btree (created_at);
-
-
---
--- Name: event_pubkey_actions_1_d62afee35d_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_actions_1_d62afee35d_event_id_idx ON public.event_pubkey_actions_1_d62afee35d USING btree (event_id);
-
-
---
--- Name: event_pubkey_actions_1_d62afee35d_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_actions_1_d62afee35d_pubkey_idx ON public.event_pubkey_actions_1_d62afee35d USING btree (pubkey);
-
-
---
--- Name: event_pubkey_actions_1_d62afee35d_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_actions_1_d62afee35d_rowid_idx ON public.event_pubkey_actions_1_d62afee35d USING btree (rowid);
-
-
---
--- Name: event_pubkey_actions_1_d62afee35d_updated_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_pubkey_actions_1_d62afee35d_updated_at_idx ON public.event_pubkey_actions_1_d62afee35d USING btree (updated_at);
-
-
---
 -- Name: event_pubkey_kind_created_at_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX event_pubkey_kind_created_at_idx ON public.event USING btree (pubkey, kind, created_at DESC);
-
-
---
--- Name: event_relays_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_relays_event_id_idx ON public.event_relays USING btree (event_id);
-
-
---
--- Name: event_relays_imported_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_relays_imported_at_idx ON public.event_relays USING btree (imported_at);
 
 
 --
@@ -7596,17 +5612,10 @@ CREATE INDEX event_replies_1_9d033b5bb3_reply_created_at_idx ON public.event_rep
 
 
 --
--- Name: event_replies_1_9d033b5bb3_rowid_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: event_replies_1_9d033b5bb3_reply_event_id_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX event_replies_1_9d033b5bb3_rowid_idx ON public.event_replies_1_9d033b5bb3 USING btree (rowid);
-
-
---
--- Name: event_sentiment_1_d3d7a00a54_topsentiment_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_sentiment_1_d3d7a00a54_topsentiment_idx ON public.event_sentiment_1_d3d7a00a54 USING btree (topsentiment);
+CREATE UNIQUE INDEX event_replies_1_9d033b5bb3_reply_event_id_key ON public.event_replies_1_9d033b5bb3 USING btree (reply_event_id);
 
 
 --
@@ -7617,13 +5626,6 @@ CREATE INDEX event_stats_1_1b380f4869_author_pubkey_created_at_idx ON public.eve
 
 
 --
--- Name: event_stats_1_1b380f4869_author_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_author_pubkey_idx ON public.event_stats_1_1b380f4869 USING btree (author_pubkey);
-
-
---
 -- Name: event_stats_1_1b380f4869_author_pubkey_satszapped_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7631,24 +5633,10 @@ CREATE INDEX event_stats_1_1b380f4869_author_pubkey_satszapped_idx ON public.eve
 
 
 --
--- Name: event_stats_1_1b380f4869_author_pubkey_score24h_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_author_pubkey_score24h_idx ON public.event_stats_1_1b380f4869 USING btree (author_pubkey, score24h);
-
-
---
 -- Name: event_stats_1_1b380f4869_author_pubkey_score_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX event_stats_1_1b380f4869_author_pubkey_score_idx ON public.event_stats_1_1b380f4869 USING btree (author_pubkey, score);
-
-
---
--- Name: event_stats_1_1b380f4869_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_created_at_idx ON public.event_stats_1_1b380f4869 USING btree (created_at);
 
 
 --
@@ -7666,59 +5654,10 @@ CREATE INDEX event_stats_1_1b380f4869_created_at_score24h_idx ON public.event_st
 
 
 --
--- Name: event_stats_1_1b380f4869_event_id_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: event_stats_1_1b380f4869_event_id_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX event_stats_1_1b380f4869_event_id_idx ON public.event_stats_1_1b380f4869 USING btree (event_id);
-
-
---
--- Name: event_stats_1_1b380f4869_likes_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_likes_idx ON public.event_stats_1_1b380f4869 USING btree (likes);
-
-
---
--- Name: event_stats_1_1b380f4869_mentions_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_mentions_idx ON public.event_stats_1_1b380f4869 USING btree (mentions);
-
-
---
--- Name: event_stats_1_1b380f4869_replies_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_replies_idx ON public.event_stats_1_1b380f4869 USING btree (replies);
-
-
---
--- Name: event_stats_1_1b380f4869_reposts_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_reposts_idx ON public.event_stats_1_1b380f4869 USING btree (reposts);
-
-
---
--- Name: event_stats_1_1b380f4869_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_rowid_idx ON public.event_stats_1_1b380f4869 USING btree (rowid);
-
-
---
--- Name: event_stats_1_1b380f4869_satszapped_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_satszapped_idx ON public.event_stats_1_1b380f4869 USING btree (satszapped);
-
-
---
--- Name: event_stats_1_1b380f4869_score24h_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_score24h_idx ON public.event_stats_1_1b380f4869 USING btree (score24h);
+CREATE UNIQUE INDEX event_stats_1_1b380f4869_event_id_key ON public.event_stats_1_1b380f4869 USING btree (event_id);
 
 
 --
@@ -7729,171 +5668,10 @@ CREATE INDEX event_stats_1_1b380f4869_score_created_at_idx ON public.event_stats
 
 
 --
--- Name: event_stats_1_1b380f4869_score_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_score_idx ON public.event_stats_1_1b380f4869 USING btree (score);
-
-
---
--- Name: event_stats_1_1b380f4869_zaps_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_1_1b380f4869_zaps_idx ON public.event_stats_1_1b380f4869 USING btree (zaps);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_author_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_author_pubkey_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (author_pubkey);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_created_at_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (created_at);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_created_at_satszapped_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_created_at_satszapped_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (created_at, satszapped);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_created_at_score24h_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_created_at_score24h_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (created_at, score24h);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_event_id_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (event_id);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_rowid_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (rowid);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_satszapped_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_satszapped_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (satszapped);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_score24h_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_score24h_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (score24h);
-
-
---
--- Name: event_stats_by_pubkey_1_4ecc48a026_score_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_stats_by_pubkey_1_4ecc48a026_score_idx ON public.event_stats_by_pubkey_1_4ecc48a026 USING btree (score);
-
-
---
--- Name: event_thread_parents_1_e17bf16c98_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_thread_parents_1_e17bf16c98_key_idx ON public.event_thread_parents_1_e17bf16c98 USING btree (key);
-
-
---
--- Name: event_thread_parents_1_e17bf16c98_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_thread_parents_1_e17bf16c98_rowid_idx ON public.event_thread_parents_1_e17bf16c98 USING btree (rowid);
-
-
---
--- Name: event_zapped_1_7ebdbebf92_event_id_zap_sender_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_zapped_1_7ebdbebf92_event_id_zap_sender_idx ON public.event_zapped_1_7ebdbebf92 USING btree (event_id, zap_sender);
-
-
---
--- Name: event_zapped_1_7ebdbebf92_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX event_zapped_1_7ebdbebf92_rowid_idx ON public.event_zapped_1_7ebdbebf92 USING btree (rowid);
-
-
---
 -- Name: fetcher_relays_updated_at_index; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX fetcher_relays_updated_at_index ON public.fetcher_relays USING btree (updated_at);
-
-
---
--- Name: filterlist_pubkey_pubkey_blocked_grp_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX filterlist_pubkey_pubkey_blocked_grp_idx ON public.filterlist_pubkey USING btree (pubkey, blocked, grp);
-
-
---
--- Name: follow_lists_pubkey_identifier_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX follow_lists_pubkey_identifier_idx ON public.follow_lists USING btree (pubkey, identifier);
-
-
---
--- Name: hashtags_1_1e5c72161a_hashtag_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX hashtags_1_1e5c72161a_hashtag_idx ON public.hashtags_1_1e5c72161a USING btree (hashtag);
-
-
---
--- Name: hashtags_1_1e5c72161a_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX hashtags_1_1e5c72161a_rowid_idx ON public.hashtags_1_1e5c72161a USING btree (rowid);
-
-
---
--- Name: hashtags_1_1e5c72161a_score_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX hashtags_1_1e5c72161a_score_idx ON public.hashtags_1_1e5c72161a USING btree (score);
-
-
---
--- Name: human_override_pubkey; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX human_override_pubkey ON public.human_override USING btree (pubkey);
-
-
---
--- Name: lists_added_at; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX lists_added_at ON public.lists USING btree (added_at DESC);
-
-
---
--- Name: lists_list; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX lists_list ON public.lists USING btree (list);
 
 
 --
@@ -7911,94 +5689,10 @@ CREATE INDEX live_event_participants_kind_participant_pubkey_idx ON public.live_
 
 
 --
--- Name: live_event_participants_kind_pubkey_identifier_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX live_event_participants_kind_pubkey_identifier_idx ON public.live_event_participants USING btree (kind, pubkey, identifier);
-
-
---
--- Name: logs_1_d241bdb71c_eid; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX logs_1_d241bdb71c_eid ON public.logs_1_d241bdb71c USING btree (((d ->> 'eid'::text)));
-
-
---
--- Name: logs_1_d241bdb71c_func_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX logs_1_d241bdb71c_func_idx ON public.logs_1_d241bdb71c USING btree (func);
-
-
---
--- Name: logs_1_d241bdb71c_module_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX logs_1_d241bdb71c_module_idx ON public.logs_1_d241bdb71c USING btree (module);
-
-
---
--- Name: logs_1_d241bdb71c_t_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX logs_1_d241bdb71c_t_idx ON public.logs_1_d241bdb71c USING btree (t);
-
-
---
--- Name: logs_1_d241bdb71c_type_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX logs_1_d241bdb71c_type_idx ON public.logs_1_d241bdb71c USING btree (type);
-
-
---
--- Name: media_1_16fa35f2dc_category_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_1_16fa35f2dc_category_idx ON public.media_1_16fa35f2dc USING btree (category);
-
-
---
--- Name: media_1_16fa35f2dc_imported_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_1_16fa35f2dc_imported_at_idx ON public.media_1_16fa35f2dc USING btree (imported_at);
-
-
---
--- Name: media_1_16fa35f2dc_media_url_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_1_16fa35f2dc_media_url_idx ON public.media_1_16fa35f2dc USING btree (media_url);
-
-
---
 -- Name: media_1_16fa35f2dc_orig_sha256_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX media_1_16fa35f2dc_orig_sha256_idx ON public.media_1_16fa35f2dc USING btree (orig_sha256);
-
-
---
--- Name: media_1_16fa35f2dc_orig_sha256_size_animated_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_1_16fa35f2dc_orig_sha256_size_animated_idx ON public.media_1_16fa35f2dc USING btree (orig_sha256, size, animated);
-
-
---
--- Name: media_1_16fa35f2dc_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_1_16fa35f2dc_rowid_idx ON public.media_1_16fa35f2dc USING btree (rowid);
-
-
---
--- Name: media_1_16fa35f2dc_size_animated_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_1_16fa35f2dc_size_animated_idx ON public.media_1_16fa35f2dc USING btree (size, animated);
 
 
 --
@@ -8009,241 +5703,10 @@ CREATE INDEX media_1_16fa35f2dc_url_idx ON public.media_1_16fa35f2dc USING btree
 
 
 --
--- Name: media_1_16fa35f2dc_url_size_animated_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_1_16fa35f2dc_url_size_animated_idx ON public.media_1_16fa35f2dc USING btree (url, size, animated);
-
-
---
--- Name: media_storage_added_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_storage_added_at_idx ON public.media_storage USING btree (added_at);
-
-
---
--- Name: media_storage_h_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_storage_h_idx ON public.media_storage USING btree (h);
-
-
---
--- Name: media_storage_key_sha256_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_storage_key_sha256_idx ON public.media_storage USING btree ((((key)::jsonb ->> 'sha256'::text)));
-
-
---
--- Name: media_storage_media_block_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX media_storage_media_block_id_idx ON public.media_storage USING btree (media_block_id);
-
-
---
 -- Name: media_storage_sha256_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX media_storage_sha256_idx ON public.media_storage USING btree (sha256);
-
-
---
--- Name: memberships_pubkey; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX memberships_pubkey ON public.memberships USING btree (pubkey);
-
-
---
--- Name: meta_data_1_323bc43167_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX meta_data_1_323bc43167_key_idx ON public.meta_data_1_323bc43167 USING btree (key);
-
-
---
--- Name: meta_data_1_323bc43167_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX meta_data_1_323bc43167_rowid_idx ON public.meta_data_1_323bc43167 USING btree (rowid);
-
-
---
--- Name: mute_list_1_f693a878b9_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX mute_list_1_f693a878b9_key_idx ON public.mute_list_1_f693a878b9 USING btree (key);
-
-
---
--- Name: mute_list_1_f693a878b9_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX mute_list_1_f693a878b9_rowid_idx ON public.mute_list_1_f693a878b9 USING btree (rowid);
-
-
---
--- Name: mute_list_2_1_949b3d746b_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX mute_list_2_1_949b3d746b_key_idx ON public.mute_list_2_1_949b3d746b USING btree (key);
-
-
---
--- Name: mute_list_2_1_949b3d746b_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX mute_list_2_1_949b3d746b_rowid_idx ON public.mute_list_2_1_949b3d746b USING btree (rowid);
-
-
---
--- Name: mute_lists_1_d90e559628_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX mute_lists_1_d90e559628_key_idx ON public.mute_lists_1_d90e559628 USING btree (key);
-
-
---
--- Name: mute_lists_1_d90e559628_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX mute_lists_1_d90e559628_rowid_idx ON public.mute_lists_1_d90e559628 USING btree (rowid);
-
-
---
--- Name: og_zap_receipts_1_dc85307383_amount_sats_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX og_zap_receipts_1_dc85307383_amount_sats_idx ON public.og_zap_receipts_1_dc85307383 USING btree (amount_sats);
-
-
---
--- Name: og_zap_receipts_1_dc85307383_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX og_zap_receipts_1_dc85307383_created_at_idx ON public.og_zap_receipts_1_dc85307383 USING btree (created_at);
-
-
---
--- Name: og_zap_receipts_1_dc85307383_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX og_zap_receipts_1_dc85307383_event_id_idx ON public.og_zap_receipts_1_dc85307383 USING btree (event_id);
-
-
---
--- Name: og_zap_receipts_1_dc85307383_receiver_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX og_zap_receipts_1_dc85307383_receiver_idx ON public.og_zap_receipts_1_dc85307383 USING btree (receiver);
-
-
---
--- Name: og_zap_receipts_1_dc85307383_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX og_zap_receipts_1_dc85307383_rowid_idx ON public.og_zap_receipts_1_dc85307383 USING btree (rowid);
-
-
---
--- Name: og_zap_receipts_1_dc85307383_sender_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX og_zap_receipts_1_dc85307383_sender_idx ON public.og_zap_receipts_1_dc85307383 USING btree (sender);
-
-
---
--- Name: og_zap_receipts_1_dc85307383_zap_receipt_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX og_zap_receipts_1_dc85307383_zap_receipt_id_idx ON public.og_zap_receipts_1_dc85307383 USING btree (zap_receipt_id);
-
-
---
--- Name: parameterized_replaceable_list_1_d02d7ecc62_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parameterized_replaceable_list_1_d02d7ecc62_created_at_idx ON public.parameterized_replaceable_list_1_d02d7ecc62 USING btree (created_at);
-
-
---
--- Name: parameterized_replaceable_list_1_d02d7ecc62_identifier_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parameterized_replaceable_list_1_d02d7ecc62_identifier_idx ON public.parameterized_replaceable_list_1_d02d7ecc62 USING btree (identifier);
-
-
---
--- Name: parameterized_replaceable_list_1_d02d7ecc62_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parameterized_replaceable_list_1_d02d7ecc62_pubkey_idx ON public.parameterized_replaceable_list_1_d02d7ecc62 USING btree (pubkey);
-
-
---
--- Name: parameterized_replaceable_list_1_d02d7ecc62_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parameterized_replaceable_list_1_d02d7ecc62_rowid_idx ON public.parameterized_replaceable_list_1_d02d7ecc62 USING btree (rowid);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parametrized_replaceable_events_1_cbe75c8d53_created_at_idx ON public.parametrized_replaceable_events_1_cbe75c8d53 USING btree (created_at);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parametrized_replaceable_events_1_cbe75c8d53_event_id_idx ON public.parametrized_replaceable_events_1_cbe75c8d53 USING btree (event_id);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53_identifier_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parametrized_replaceable_events_1_cbe75c8d53_identifier_idx ON public.parametrized_replaceable_events_1_cbe75c8d53 USING btree (identifier);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53_kind_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parametrized_replaceable_events_1_cbe75c8d53_kind_idx ON public.parametrized_replaceable_events_1_cbe75c8d53 USING btree (kind);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parametrized_replaceable_events_1_cbe75c8d53_pubkey_idx ON public.parametrized_replaceable_events_1_cbe75c8d53 USING btree (pubkey);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53_pubkey_kind_identi; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parametrized_replaceable_events_1_cbe75c8d53_pubkey_kind_identi ON public.parametrized_replaceable_events_1_cbe75c8d53 USING btree (pubkey, kind, identifier);
-
-
---
--- Name: parametrized_replaceable_events_1_cbe75c8d53_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX parametrized_replaceable_events_1_cbe75c8d53_rowid_idx ON public.parametrized_replaceable_events_1_cbe75c8d53 USING btree (rowid);
-
-
---
--- Name: poll_user_votes_1_5fa4d82e64_poll_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX poll_user_votes_1_5fa4d82e64_poll_id_idx ON public.poll_user_votes_1_5fa4d82e64 USING btree (poll_id);
 
 
 --
@@ -8254,52 +5717,10 @@ CREATE INDEX poll_user_votes_1_5fa4d82e64_pubkey_idx ON public.poll_user_votes_1
 
 
 --
--- Name: preview_1_44299731c7_category_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX preview_1_44299731c7_category_idx ON public.preview_1_44299731c7 USING btree (category);
-
-
---
--- Name: preview_1_44299731c7_imported_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX preview_1_44299731c7_imported_at_idx ON public.preview_1_44299731c7 USING btree (imported_at);
-
-
---
--- Name: preview_1_44299731c7_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX preview_1_44299731c7_rowid_idx ON public.preview_1_44299731c7 USING btree (rowid);
-
-
---
--- Name: preview_1_44299731c7_url_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX preview_1_44299731c7_url_idx ON public.preview_1_44299731c7 USING btree (url);
-
-
---
 -- Name: pubkey_bookmarks_pubkey_ref_event_id; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX pubkey_bookmarks_pubkey_ref_event_id ON public.pubkey_bookmarks USING btree (pubkey, ref_event_id);
-
-
---
--- Name: pubkey_bookmarks_ref_event_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_bookmarks_ref_event_id ON public.pubkey_bookmarks USING btree (ref_event_id);
-
-
---
--- Name: pubkey_content_zap_cnt_1_236df2f369_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_content_zap_cnt_1_236df2f369_pubkey_idx ON public.pubkey_content_zap_cnt_1_236df2f369 USING btree (pubkey);
 
 
 --
@@ -8317,38 +5738,10 @@ CREATE INDEX pubkey_directmsgs_1_c794110a2c_receiver_event_id_idx ON public.pubk
 
 
 --
--- Name: pubkey_directmsgs_1_c794110a2c_receiver_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_directmsgs_1_c794110a2c_receiver_idx ON public.pubkey_directmsgs_1_c794110a2c USING btree (receiver);
-
-
---
 -- Name: pubkey_directmsgs_1_c794110a2c_receiver_sender_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX pubkey_directmsgs_1_c794110a2c_receiver_sender_idx ON public.pubkey_directmsgs_1_c794110a2c USING btree (receiver, sender);
-
-
---
--- Name: pubkey_directmsgs_1_c794110a2c_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_directmsgs_1_c794110a2c_rowid_idx ON public.pubkey_directmsgs_1_c794110a2c USING btree (rowid);
-
-
---
--- Name: pubkey_directmsgs_1_c794110a2c_sender_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_directmsgs_1_c794110a2c_sender_idx ON public.pubkey_directmsgs_1_c794110a2c USING btree (sender);
-
-
---
--- Name: pubkey_directmsgs_cnt_1_efdf9742a6_receiver_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_directmsgs_cnt_1_efdf9742a6_receiver_idx ON public.pubkey_directmsgs_cnt_1_efdf9742a6 USING btree (receiver);
 
 
 --
@@ -8366,24 +5759,10 @@ CREATE UNIQUE INDEX pubkey_directmsgs_cnt_1_efdf9742a6_receiver_sender_uniq ON p
 
 
 --
--- Name: pubkey_directmsgs_cnt_1_efdf9742a6_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_directmsgs_cnt_1_efdf9742a6_rowid_idx ON public.pubkey_directmsgs_cnt_1_efdf9742a6 USING btree (rowid);
-
-
---
 -- Name: pubkey_directmsgs_cnt_1_efdf9742a6_sender_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX pubkey_directmsgs_cnt_1_efdf9742a6_sender_idx ON public.pubkey_directmsgs_cnt_1_efdf9742a6 USING btree (sender);
-
-
---
--- Name: pubkey_events_1_1dcbfe1466_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_events_1_1dcbfe1466_created_at_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (created_at);
 
 
 --
@@ -8397,21 +5776,14 @@ CREATE INDEX pubkey_events_1_1dcbfe1466_created_at_pubkey_idx ON public.pubkey_e
 -- Name: pubkey_events_1_1dcbfe1466_event_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX pubkey_events_1_1dcbfe1466_event_id_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (event_id);
+CREATE UNIQUE INDEX pubkey_events_1_1dcbfe1466_event_id_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (event_id);
 
 
 --
--- Name: pubkey_events_1_1dcbfe1466_pubkey_created_at_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: pubkey_events_1_1dcbfe1466_pubkey_created_at_incl_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX pubkey_events_1_1dcbfe1466_pubkey_created_at_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (pubkey, created_at);
-
-
---
--- Name: pubkey_events_1_1dcbfe1466_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_events_1_1dcbfe1466_pubkey_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (pubkey);
+CREATE INDEX pubkey_events_1_1dcbfe1466_pubkey_created_at_incl_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (pubkey, created_at DESC) INCLUDE (event_id, is_reply, kind);
 
 
 --
@@ -8419,27 +5791,6 @@ CREATE INDEX pubkey_events_1_1dcbfe1466_pubkey_idx ON public.pubkey_events_1_1dc
 --
 
 CREATE INDEX pubkey_events_1_1dcbfe1466_pubkey_is_reply_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (pubkey, is_reply);
-
-
---
--- Name: pubkey_events_1_1dcbfe1466_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_events_1_1dcbfe1466_rowid_idx ON public.pubkey_events_1_1dcbfe1466 USING btree (rowid);
-
-
---
--- Name: pubkey_followers_1_d52305fb47_follower_contact_list_event_id_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_followers_1_d52305fb47_follower_contact_list_event_id_id ON public.pubkey_followers_1_d52305fb47 USING btree (follower_contact_list_event_id);
-
-
---
--- Name: pubkey_followers_1_d52305fb47_follower_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_followers_1_d52305fb47_follower_pubkey_idx ON public.pubkey_followers_1_d52305fb47 USING btree (follower_pubkey);
 
 
 --
@@ -8457,101 +5808,10 @@ CREATE INDEX pubkey_followers_1_d52305fb47_pubkey_idx ON public.pubkey_followers
 
 
 --
--- Name: pubkey_followers_1_d52305fb47_rowid_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: pubkey_notifications_1_e5459ab9dd_arg1_type8_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX pubkey_followers_1_d52305fb47_rowid_idx ON public.pubkey_followers_1_d52305fb47 USING btree (rowid);
-
-
---
--- Name: pubkey_followers_cnt_1_a6f7e200e7_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_followers_cnt_1_a6f7e200e7_key_idx ON public.pubkey_followers_cnt_1_a6f7e200e7 USING btree (key);
-
-
---
--- Name: pubkey_followers_cnt_1_a6f7e200e7_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_followers_cnt_1_a6f7e200e7_rowid_idx ON public.pubkey_followers_cnt_1_a6f7e200e7 USING btree (rowid);
-
-
---
--- Name: pubkey_followers_cnt_1_a6f7e200e7_value_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_followers_cnt_1_a6f7e200e7_value_idx ON public.pubkey_followers_cnt_1_a6f7e200e7 USING btree (value);
-
-
---
--- Name: pubkey_ids_1_54b55dd09c_key_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_ids_1_54b55dd09c_key_idx ON public.pubkey_ids_1_54b55dd09c USING btree (key);
-
-
---
--- Name: pubkey_ids_1_54b55dd09c_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_ids_1_54b55dd09c_rowid_idx ON public.pubkey_ids_1_54b55dd09c USING btree (rowid);
-
-
---
--- Name: pubkey_ln_address_1_d3649b2898_ln_address_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_ln_address_1_d3649b2898_ln_address_idx ON public.pubkey_ln_address_1_d3649b2898 USING btree (ln_address);
-
-
---
--- Name: pubkey_ln_address_1_d3649b2898_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_ln_address_1_d3649b2898_pubkey_idx ON public.pubkey_ln_address_1_d3649b2898 USING btree (pubkey);
-
-
---
--- Name: pubkey_ln_address_1_d3649b2898_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_ln_address_1_d3649b2898_rowid_idx ON public.pubkey_ln_address_1_d3649b2898 USING btree (rowid);
-
-
---
--- Name: pubkey_media_cnt_1_b5e2a488b1_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_media_cnt_1_b5e2a488b1_pubkey_idx ON public.pubkey_media_cnt_1_b5e2a488b1 USING btree (pubkey);
-
-
---
--- Name: pubkey_notification_cnts_1_d78f6fcade_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notification_cnts_1_d78f6fcade_pubkey_idx ON public.pubkey_notification_cnts_1_d78f6fcade USING btree (pubkey);
-
-
---
--- Name: pubkey_notification_cnts_1_d78f6fcade_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notification_cnts_1_d78f6fcade_rowid_idx ON public.pubkey_notification_cnts_1_d78f6fcade USING btree (rowid);
-
-
---
--- Name: pubkey_notifications_1_e5459ab9dd_arg1_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notifications_1_e5459ab9dd_arg1_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (arg1);
-
-
---
--- Name: pubkey_notifications_1_e5459ab9dd_arg2_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notifications_1_e5459ab9dd_arg2_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (arg2);
+CREATE INDEX pubkey_notifications_1_e5459ab9dd_arg1_type8_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (arg1) WHERE (type = 8);
 
 
 --
@@ -8576,94 +5836,10 @@ CREATE INDEX pubkey_notifications_1_e5459ab9dd_pubkey_arg2_idx_ ON public.pubkey
 
 
 --
--- Name: pubkey_notifications_1_e5459ab9dd_pubkey_created_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notifications_1_e5459ab9dd_pubkey_created_at_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (pubkey, created_at);
-
-
---
 -- Name: pubkey_notifications_1_e5459ab9dd_pubkey_created_at_type_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX pubkey_notifications_1_e5459ab9dd_pubkey_created_at_type_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (pubkey, created_at, type);
-
-
---
--- Name: pubkey_notifications_1_e5459ab9dd_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notifications_1_e5459ab9dd_pubkey_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (pubkey);
-
-
---
--- Name: pubkey_notifications_1_e5459ab9dd_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notifications_1_e5459ab9dd_rowid_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (rowid);
-
-
---
--- Name: pubkey_notifications_1_e5459ab9dd_type_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_notifications_1_e5459ab9dd_type_idx ON public.pubkey_notifications_1_e5459ab9dd USING btree (type);
-
-
---
--- Name: pubkey_zapped_1_17f1f622a9_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_zapped_1_17f1f622a9_pubkey_idx ON public.pubkey_zapped_1_17f1f622a9 USING btree (pubkey);
-
-
---
--- Name: pubkey_zapped_1_17f1f622a9_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_zapped_1_17f1f622a9_rowid_idx ON public.pubkey_zapped_1_17f1f622a9 USING btree (rowid);
-
-
---
--- Name: pubkey_zapped_1_17f1f622a9_satszapped_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_zapped_1_17f1f622a9_satszapped_idx ON public.pubkey_zapped_1_17f1f622a9 USING btree (satszapped);
-
-
---
--- Name: pubkey_zapped_1_17f1f622a9_zaps_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pubkey_zapped_1_17f1f622a9_zaps_idx ON public.pubkey_zapped_1_17f1f622a9 USING btree (zaps);
-
-
---
--- Name: reads_11_2a4d2ce519_identifier_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_11_2a4d2ce519_identifier_idx ON public.reads_11_2a4d2ce519 USING btree (identifier);
-
-
---
--- Name: reads_11_2a4d2ce519_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_11_2a4d2ce519_pubkey_idx ON public.reads_11_2a4d2ce519 USING btree (pubkey);
-
-
---
--- Name: reads_11_2a4d2ce519_published_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_11_2a4d2ce519_published_at_idx ON public.reads_11_2a4d2ce519 USING btree (published_at);
-
-
---
--- Name: reads_11_2a4d2ce519_topics_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_11_2a4d2ce519_topics_idx ON public.reads_11_2a4d2ce519 USING gin (topics);
 
 
 --
@@ -8678,13 +5854,6 @@ CREATE INDEX reads_12_68c6bbfccd_feed_published_at_idx ON public.reads_12_68c6bb
 --
 
 CREATE INDEX reads_12_68c6bbfccd_identifier_idx ON public.reads_12_68c6bbfccd USING btree (identifier);
-
-
---
--- Name: reads_12_68c6bbfccd_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_12_68c6bbfccd_pubkey_idx ON public.reads_12_68c6bbfccd USING btree (pubkey);
 
 
 --
@@ -8709,94 +5878,10 @@ CREATE INDEX reads_latest_eid_idx ON public.reads_12_68c6bbfccd USING btree (lat
 
 
 --
--- Name: reads_versions_11_fb53a8e0b4_eid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_versions_11_fb53a8e0b4_eid_idx ON public.reads_versions_11_fb53a8e0b4 USING hash (eid);
-
-
---
--- Name: reads_versions_11_fb53a8e0b4_identifier_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_versions_11_fb53a8e0b4_identifier_idx ON public.reads_versions_11_fb53a8e0b4 USING btree (identifier);
-
-
---
--- Name: reads_versions_11_fb53a8e0b4_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_versions_11_fb53a8e0b4_pubkey_idx ON public.reads_versions_11_fb53a8e0b4 USING btree (pubkey);
-
-
---
--- Name: reads_versions_12_b537d4df66_eid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_versions_12_b537d4df66_eid_idx ON public.reads_versions_12_b537d4df66 USING hash (eid);
-
-
---
--- Name: reads_versions_12_b537d4df66_identifier_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_versions_12_b537d4df66_identifier_idx ON public.reads_versions_12_b537d4df66 USING btree (identifier);
-
-
---
--- Name: reads_versions_12_b537d4df66_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reads_versions_12_b537d4df66_pubkey_idx ON public.reads_versions_12_b537d4df66 USING btree (pubkey);
-
-
---
--- Name: relay_list_metadata_1_801a17fc93_pubkey_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX relay_list_metadata_1_801a17fc93_pubkey_idx ON public.relay_list_metadata_1_801a17fc93 USING btree (pubkey);
-
-
---
--- Name: relay_list_metadata_1_801a17fc93_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX relay_list_metadata_1_801a17fc93_rowid_idx ON public.relay_list_metadata_1_801a17fc93 USING btree (rowid);
-
-
---
--- Name: relays_times_referenced_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX relays_times_referenced_idx ON public.relays USING btree (times_referenced DESC);
-
-
---
--- Name: scheduled_hooks_execute_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX scheduled_hooks_execute_at_idx ON public.scheduled_hooks USING btree (execute_at);
-
-
---
--- Name: score_expiry_event_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX score_expiry_event_id_idx ON public.score_expiry USING btree (event_id);
-
-
---
 -- Name: score_expiry_expire_at_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX score_expiry_expire_at_idx ON public.score_expiry USING btree (expire_at);
-
-
---
--- Name: stuff_created_at; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX stuff_created_at ON public.stuff USING btree (created_at DESC);
 
 
 --
@@ -8863,34 +5948,6 @@ CREATE INDEX verified_users_pubkey ON public.verified_users USING btree (pubkey)
 
 
 --
--- Name: video_thumbnails_1_107d5a46eb_rowid_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX video_thumbnails_1_107d5a46eb_rowid_idx ON public.video_thumbnails_1_107d5a46eb USING btree (rowid);
-
-
---
--- Name: video_thumbnails_1_107d5a46eb_thumbnail_url_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX video_thumbnails_1_107d5a46eb_thumbnail_url_idx ON public.video_thumbnails_1_107d5a46eb USING btree (thumbnail_url);
-
-
---
--- Name: video_thumbnails_1_107d5a46eb_video_url_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX video_thumbnails_1_107d5a46eb_video_url_idx ON public.video_thumbnails_1_107d5a46eb USING btree (video_url);
-
-
---
--- Name: wsconnlog_t_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX wsconnlog_t_idx ON public.wsconnlog USING btree (t);
-
-
---
 -- Name: zap_receipt_invoices_invoice_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8902,6 +5959,34 @@ CREATE INDEX zap_receipt_invoices_invoice_idx ON public.zap_receipt_invoices USI
 --
 
 CREATE INDEX zap_receipts_1_9fe40119b2_imported_at_idx ON public.zap_receipts_1_9fe40119b2 USING btree (imported_at);
+
+
+--
+-- Name: zap_receipts_1_9fe40119b2_og_amount_sats_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX zap_receipts_1_9fe40119b2_og_amount_sats_idx ON public.zap_receipts_1_9fe40119b2 USING btree (og_amount_sats) WHERE (og_amount_sats IS NOT NULL);
+
+
+--
+-- Name: zap_receipts_1_9fe40119b2_og_created_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX zap_receipts_1_9fe40119b2_og_created_at_idx ON public.zap_receipts_1_9fe40119b2 USING btree (created_at) WHERE (og_amount_sats IS NOT NULL);
+
+
+--
+-- Name: zap_receipts_1_9fe40119b2_og_event_id_sender_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX zap_receipts_1_9fe40119b2_og_event_id_sender_idx ON public.zap_receipts_1_9fe40119b2 USING btree (og_event_id, og_sender) WHERE (og_amount_sats IS NOT NULL);
+
+
+--
+-- Name: zap_receipts_1_9fe40119b2_og_sender_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX zap_receipts_1_9fe40119b2_og_sender_idx ON public.zap_receipts_1_9fe40119b2 USING btree (og_sender) WHERE (og_amount_sats IS NOT NULL);
 
 
 --
@@ -8938,14 +6023,16 @@ CREATE TRIGGER update_cache_updated_at BEFORE UPDATE ON public.cache FOR EACH RO
 
 
 -- the migrations this schema includes (sql/migrate.sh skips them)
-INSERT INTO public.schema_migrations VALUES ('0002_julia_tables_for_the_ocaml_daemons', '2026-10-08 14:38:01.372578+00', 'baseline', '85adbe1e1a33efba', 31);
-INSERT INTO public.schema_migrations VALUES ('1001_pubkey_directmsgs_cnt_unique', '2026-10-08 11:46:43.94622+00', 'baseline', '2f3d007c8f7a1d65', NULL);
-INSERT INTO public.schema_migrations VALUES ('1002_parametrized_replaceable_events_pubkey_kind_identifier', '2026-10-08 11:46:43.953785+00', 'baseline', '35f034cb9b6967fb', NULL);
-INSERT INTO public.schema_migrations VALUES ('4001_processing_nodes_running_func_created_at', '2026-10-09 19:15:24.748336+00', 'baseline', '552ac9315ec67c29', 6);
-INSERT INTO public.schema_migrations VALUES ('2001_spam_softban_author_exempt', '2026-10-10 15:06:28.109014+00', 'baseline', 'f11a594ec23bfad4', 9);
-INSERT INTO public.schema_migrations VALUES ('2002_reads_feed_published_at', '2026-10-11 18:26:25.280149+00', 'baseline', '25fac995cb753f3b', 6);
-INSERT INTO public.schema_migrations VALUES ('2003_enrich_feed_events_once_per_event', '2026-10-11 18:39:31.091176+00', 'baseline', '3b93f06162dfdd76', 7);
-INSERT INTO public.schema_migrations VALUES ('2004_get_media_url_stable', '2026-10-11 18:39:31.105743+00', 'baseline', '751bf59cf18714f6', 4);
-INSERT INTO public.schema_migrations VALUES ('2005_live_feed_moderation_once', '2026-10-11 18:39:31.122759+00', 'baseline', '610d1aca7d0a23bc', 7);
-INSERT INTO public.schema_migrations VALUES ('2006_advsearch_tsv_statistics', '2026-10-11 18:49:27.2014+00', 'baseline', 'a88d17c7172217ef', 62918);
-INSERT INTO public.schema_migrations VALUES ('2007_reads_interactions', '2026-10-12 11:37:47.247419+00', 'baseline', 'ca8d25e9843d02d3', 14);
+INSERT INTO public.schema_migrations VALUES ('0002_julia_tables_for_the_ocaml_daemons', '2026-10-10 09:40:14.43902+00', 'baseline', '85adbe1e1a33efba', 22);
+INSERT INTO public.schema_migrations VALUES ('1001_pubkey_directmsgs_cnt_unique', '2026-10-10 10:10:29.380324+00', 'baseline', '2f3d007c8f7a1d65', NULL);
+INSERT INTO public.schema_migrations VALUES ('1002_parametrized_replaceable_events_pubkey_kind_identifier', '2026-10-10 10:11:32.877365+00', 'baseline', '35f034cb9b6967fb', 49087);
+INSERT INTO public.schema_migrations VALUES ('4001_processing_nodes_running_func_created_at', '2026-10-10 10:11:32.905687+00', 'baseline', '552ac9315ec67c29', 10);
+INSERT INTO public.schema_migrations VALUES ('2001_spam_softban_author_exempt', '2026-10-10 15:07:58.24036+00', 'baseline', 'f11a594ec23bfad4', 15);
+INSERT INTO public.schema_migrations VALUES ('2002_reads_feed_published_at', '2026-10-12 09:39:21.646826+00', 'baseline', '25fac995cb753f3b', 468);
+INSERT INTO public.schema_migrations VALUES ('2003_enrich_feed_events_once_per_event', '2026-10-12 09:39:21.677991+00', 'baseline', '3b93f06162dfdd76', 13);
+INSERT INTO public.schema_migrations VALUES ('2004_get_media_url_stable', '2026-10-12 09:39:21.705712+00', 'baseline', '751bf59cf18714f6', 10);
+INSERT INTO public.schema_migrations VALUES ('2005_live_feed_moderation_once', '2026-10-12 09:39:21.732057+00', 'baseline', '610d1aca7d0a23bc', 10);
+INSERT INTO public.schema_migrations VALUES ('2006_advsearch_tsv_statistics', '2026-10-12 09:40:23.517357+00', 'baseline', 'a88d17c7172217ef', 61766);
+INSERT INTO public.schema_migrations VALUES ('2007_reads_interactions', '2026-10-12 11:55:33.090409+00', 'baseline', 'ca8d25e9843d02d3', 19);
+INSERT INTO public.schema_migrations VALUES ('1003_lean_schema_drop_classic_tables', '2026-11-18 12:49:32.383796+00', 'baseline', 'b23714809c6806ae', 17);
+INSERT INTO public.schema_migrations VALUES ('2008_drop_classic_sql_functions', '2026-11-18 12:49:32.406008+00', 'baseline', '439b1b726fcd868a', 8);

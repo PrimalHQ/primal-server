@@ -268,7 +268,7 @@ type sql = { text : string; params : string option list; orderby_key : string }
 
 let hex_param (raw : string) = "\\x" ^ Hex_util.encode raw
 
-(* {2 The lean variants} ([lean], the API config's "lean": see Lean) *)
+(* {2 Query shape helpers} *)
 
 (* Ops that a kind:30023 query can answer from reads alone: the advsearch row of an article was
    joined only to check its kind (30023, which every reads row is) and for these columns, which
@@ -299,10 +299,10 @@ let stats_lateral =
 
 (* [interactions]: reads_interactions is complete (migration 2007 and its backfill), so the reads
    scope can test it before probing basic_tags.
-   [lean] (default off = the statements as before): the csam/impersonation author check on the row's
-   own pubkey column instead of the event row; kind:30023 queries made only of [reads_safe] ops
-   without the advsearch join; event_stats rows that may be missing ([stats_lateral]). *)
-let to_sql ?(interactions = false) ?(lean = false) ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list) : sql =
+   The csam/impersonation author check reads the row's own pubkey column; kind:30023 queries made
+   only of [reads_safe] ops skip the advsearch join; event_stats rows may be missing
+   ([stats_lateral]). *)
+let to_sql ?(interactions = false) ~(user_pubkey : string) (expr : op) ~since ~until ~(kinds : int list) : sql =
   let expr = match expr with Or _ | And _ -> expr | o -> And [ o ] in
   let params = ref [] and np = ref 0 in
   let p (v : string) = incr np; params := Some v :: !params; Printf.sprintf "$%d" !np in
@@ -323,8 +323,8 @@ let to_sql ?(interactions = false) ?(lean = false) ~(user_pubkey : string) (expr
   in
   let top = match expr with Or l | And l -> l | o -> [ o ] in
   let kind, explicit = match List.find_map (function Kind k -> Some k | _ -> None) top with Some k -> (k, true) | None -> (1, false) in
-  let reads_only = lean && explicit && kind = 30023 && (kinds = [] || kinds = [ 30023 ]) && List.for_all reads_safe (ops expr) in
-  let lazy_stats = lean && List.exists uses_stats (ops expr) && not (List.exists requires_positive_stat top) in
+  let reads_only = explicit && kind = 30023 && (kinds = [] || kinds = [ 30023 ]) && List.for_all reads_safe (ops expr) in
+  let lazy_stats = List.exists uses_stats (ops expr) && not (List.exists requires_positive_stat top) in
   let adv = if reads_only then (ignore (t "reads"); "advsearch") else t "advsearch" in
   (* the advsearch row's id and author, or the reads row's when reads stands alone *)
   let aid = if reads_only then "reads.latest_eid" else adv ^ ".id" and apk = if reads_only then "reads.pubkey" else adv ^ ".pubkey" in
@@ -376,18 +376,12 @@ let to_sql ?(interactions = false) ?(lean = false) ~(user_pubkey : string) (expr
   | Some f -> raise (Parse_error ("unsupported orderby " ^ f))
   | None -> ());
   cond (Printf.sprintf "NOT EXISTS (SELECT 1 FROM filterlist WHERE grp in ('csam', 'impersonation') AND target_type = 'event' AND target = %s AND blocked LIMIT 1)" id_col);
-  if lean then
-    (* the row's author column (advsearch.pubkey / reads.pubkey) is the event's pubkey: no event
-       heap fetch per candidate *)
-    cond
-      (Printf.sprintf
-         "NOT EXISTS (SELECT 1 FROM filterlist fl WHERE fl.target = %s AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)"
-         pk_col)
-  else
+  (* the row's author column (advsearch.pubkey / reads.pubkey) is the event's pubkey: no event heap
+     fetch per candidate *)
   cond
     (Printf.sprintf
-       "NOT EXISTS (SELECT 1 FROM events es, filterlist fl WHERE es.id = %s AND fl.target = es.pubkey AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)"
-       id_col);
+       "NOT EXISTS (SELECT 1 FROM filterlist fl WHERE fl.target = %s AND fl.target_type = 'pubkey' AND fl.grp in ('csam', 'impersonation') AND fl.blocked LIMIT 1)"
+       pk_col);
   List.iter
     (function
       | RepliesToKind k ->
@@ -604,7 +598,7 @@ let run ~(dbh : Postgres.dbh) ~(user_pubkey : string) ~(expr : op) ~(has_orderby
       try
         while List.length !res < want && since <= !t && Unix.gettimeofday () < deadline do
           let s, u = if has_orderby then (since, !t) else (!t - !dt, !t) in
-          let sql = to_sql ~interactions ~lean:(Lean.enabled ()) ~user_pubkey expr ~since:s ~until:u ~kinds in
+          let sql = to_sql ~interactions ~user_pubkey expr ~since:s ~until:u ~kinds in
           orderby_key := sql.orderby_key;
           let budget_ms = int_of_float ((deadline -. Unix.gettimeofday ()) *. 1000.) in
           if budget_ms <= 0 then raise Exit;
